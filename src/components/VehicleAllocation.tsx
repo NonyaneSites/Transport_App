@@ -1,19 +1,20 @@
 import { useState } from 'react';
 import { Bus, Car, Plus, Trash2, Users, ArrowRight, Undo2, X, UserCog, MoveRight, CheckCircle2, ChevronDown, ChevronRight, MapPin, MessageCircle, Check } from 'lucide-react';
 import type { Manifest, Passenger, Vehicle } from '@/lib/types';
-import { hubDisplayName, stopToHub } from '@/lib/types';
-import { passengersByStop, unassignedPassengers } from '@/lib/manifest';
+import { hubDisplayName } from '@/lib/types';
+import { passengersByStop, passengersByPoolGroup, unassignedPassengers } from '@/lib/manifest';
 import { parseManifestKey } from '@/lib/dates';
 
 interface Props {
   manifest: Manifest;
+  serviceLabel: string;
   onSave: (m: Manifest) => Promise<void>;
 }
 
-export function VehicleAllocation({ manifest, onSave }: Props) {
+export function VehicleAllocation({ manifest, serviceLabel, onSave }: Props) {
   const [newName, setNewName] = useState('');
   const [newType, setNewType] = useState<'Bus' | 'Taxi'>('Bus');
-  const [selectedStop, setSelectedStop] = useState('');
+  const [selectedPoolKey, setSelectedPoolKey] = useState('');
   const [assignQty, setAssignQty] = useState('');
   const [expandedVehicle, setExpandedVehicle] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -26,30 +27,46 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
   const [copied, setCopied] = useState(false);
 
   const unassigned = unassignedPassengers(manifest);
-  const stopsMap = passengersByStop(unassigned);
 
-  // Stops with remaining passengers, sorted by count descending, hiding 0s
+  // Overview pool — always shown at the raw sub-stop level, regardless of
+  // vehicle type, since this is a general dashboard summary.
+  const stopsMap = passengersByStop(unassigned);
   const stopNames = Object.keys(stopsMap)
     .filter((s) => stopsMap[s].length > 0)
     .sort((a, b) => stopsMap[b].length - stopsMap[a].length);
 
   const submittedVehicles = manifest.vehicles.filter((v) => v.submitted);
 
+  // Per-vehicle-type pool: Taxis see consolidated Master Hubs only, Buses
+  // see the explicit raw sub-stop breakdown. Hides a group once its
+  // remaining count hits 0.
+  function poolForVehicleType(vehicleType: 'Bus' | 'Taxi'): { key: string; count: number }[] {
+    const map = passengersByPoolGroup(unassigned, vehicleType);
+    return Object.keys(map)
+      .filter((k) => map[k].length > 0)
+      .sort((a, b) => map[b].length - map[a].length)
+      .map((k) => ({ key: k, count: map[k].length }));
+  }
+
+  // Groups a vehicle's current riders for display, honoring the exact
+  // chronological order in which the Admin assigned each stop/hub
+  // (vehicle.orderedStops) — never sorted alphabetically or by count.
   function ridersGroupedByHub(vehicle: Vehicle): { label: string; riders: Passenger[] }[] {
     const riders = riderPassengers(vehicle);
-    if (vehicle.type !== 'Taxi') {
-      return [{ label: 'All Stops', riders }];
-    }
     const groups: Record<string, Passenger[]> = {};
     for (const r of riders) {
-      const hub = stopToHub(r.stop);
-      const label = hub ?? r.stop;
+      const label = hubDisplayName(vehicle.type, r.stop);
       if (!groups[label]) groups[label] = [];
       groups[label].push(r);
     }
-    return Object.entries(groups)
-      .sort((a, b) => b[1].length - a[1].length)
-      .map(([label, list]) => ({ label, riders: list }));
+    const order = vehicle.orderedStops ?? [];
+    const orderedLabels = order.filter((l) => groups[l]);
+    // Any group not covered by orderedStops (legacy data) is appended after,
+    // sorted by count so nothing silently disappears.
+    const extraLabels = Object.keys(groups)
+      .filter((l) => !orderedLabels.includes(l))
+      .sort((a, b) => groups[b].length - groups[a].length);
+    return [...orderedLabels, ...extraLabels].map((label) => ({ label, riders: groups[label] }));
   }
 
   async function addVehicle() {
@@ -59,6 +76,7 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
       name: newName.trim(),
       type: newType,
       riders: [],
+      orderedStops: [],
     };
     await onSave({ ...manifest, vehicles: [...manifest.vehicles, vehicle] });
     setNewName('');
@@ -74,11 +92,22 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
     await onSave({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
   }
 
-  async function assignToVehicle(vehicleId: string, stop: string, qty: number | 'all') {
+  /**
+   * Assigns passengers to a vehicle by pool group key.
+   * - Taxi: `poolKey` is a Master Hub (or a standalone stop that isn't part
+   *   of any hub) — ALL matching passengers are assigned at once, since a
+   *   taxi physically gathers everyone from that hub together. `qty` is
+   *   ignored for hub groups.
+   * - Bus: `poolKey` is the raw stop — `qty` (or 'all') controls how many
+   *   are pulled from that specific stop, since a bus can partially fill
+   *   from a stop across multiple runs/vehicles.
+   */
+  async function assignToVehicle(vehicleId: string, poolKey: string, qty: number | 'all') {
     const vehicle = manifest.vehicles.find((v) => v.id === vehicleId);
-    if (!vehicle) return;
-    const pool = unassigned.filter((p) => p.stop === stop);
-    const toAssign = qty === 'all' ? pool : pool.slice(0, qty);
+    if (!vehicle || !poolKey) return;
+
+    const pool = unassigned.filter((p) => hubDisplayName(vehicle.type, p.stop) === poolKey);
+    const toAssign = vehicle.type === 'Taxi' ? pool : (qty === 'all' ? pool : pool.slice(0, qty));
     if (toAssign.length === 0) return;
 
     const updatedSignups = manifest.signups.map((p) => {
@@ -86,11 +115,14 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
       if (match) return { ...p, assignedTo: vehicleId };
       return p;
     });
-    const updatedVehicles = manifest.vehicles.map((v) =>
-      v.id === vehicleId ? { ...v, riders: [...v.riders, ...toAssign.map((p) => p.id)] } : v
-    );
+    const updatedVehicles = manifest.vehicles.map((v) => {
+      if (v.id !== vehicleId) return v;
+      const orderedStops = v.orderedStops ?? [];
+      const nextOrderedStops = orderedStops.includes(poolKey) ? orderedStops : [...orderedStops, poolKey];
+      return { ...v, riders: [...v.riders, ...toAssign.map((p) => p.id)], orderedStops: nextOrderedStops };
+    });
     await onSave({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
-    setSelectedStop('');
+    setSelectedPoolKey('');
     setAssignQty('');
   }
 
@@ -111,7 +143,7 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
       vehicle.riders.includes(p.id) ? { ...p, assignedTo: null } : p
     );
     const updatedVehicles = manifest.vehicles.map((v) =>
-      v.id === vehicleId ? { ...v, riders: [] } : v
+      v.id === vehicleId ? { ...v, riders: [], orderedStops: [] } : v
     );
     await onSave({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
   }
@@ -125,6 +157,10 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
 
   async function movePassenger(passengerId: string, fromVehicleId: string, toVehicleId: string) {
     if (!passengerId || !toVehicleId || fromVehicleId === toVehicleId) return;
+    const toVehicle = manifest.vehicles.find((v) => v.id === toVehicleId);
+    const passenger = manifest.signups.find((p) => p.id === passengerId);
+    if (!toVehicle || !passenger) return;
+    const poolKey = hubDisplayName(toVehicle.type, passenger.stop);
 
     const updatedSignups = manifest.signups.map((p) =>
       p.id === passengerId ? { ...p, assignedTo: toVehicleId } : p
@@ -134,7 +170,9 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
         return { ...v, riders: v.riders.filter((id) => id !== passengerId) };
       }
       if (v.id === toVehicleId) {
-        return { ...v, riders: [...v.riders, passengerId] };
+        const orderedStops = v.orderedStops ?? [];
+        const nextOrderedStops = orderedStops.includes(poolKey) ? orderedStops : [...orderedStops, poolKey];
+        return { ...v, riders: [...v.riders, passengerId], orderedStops: nextOrderedStops };
       }
       return v;
     });
@@ -162,7 +200,7 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
   function buildWhatsAppManifest(): string {
     const lines: string[] = [];
     const { date: sessionDate } = parseManifestKey(manifest.date);
-    lines.push('Am Serving Taxis');
+    lines.push(`${serviceLabel} Taxis`);
     lines.push(sessionDate);
 
     for (const vehicle of manifest.vehicles) {
@@ -177,10 +215,7 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
       let riderNumber = 1;
 
       for (const group of groups) {
-        if (vehicle.type === 'Taxi') {
-          const hubShort = group.label.replace(' Hub', '');
-          lines.push(`\u{1F6D1} ${hubShort} (${group.riders.length})`);
-        }
+        lines.push(`\u{1F6D1} ${group.label} (${group.riders.length})`);
 
         for (const rider of group.riders) {
           const isRep = vehicle.repName && rider.fullName === vehicle.repName;
@@ -314,7 +349,7 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
         </div>
       )}
 
-      {/* Unassigned pool — dynamic remaining counts, hide 0s */}
+      {/* Unassigned pool overview — raw sub-stop level, regardless of vehicle type */}
       {unassigned.length > 0 && (
         <div className="mb-5 rounded-xl border border-line bg-card-2/50 p-4">
           <div className="mb-2 flex items-center gap-2">
@@ -344,6 +379,7 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
             const riders = riderPassengers(vehicle);
             const isExpanded = expandedVehicle === vehicle.id;
             const Icon = vehicle.type === 'Bus' ? Bus : Car;
+            const pool = poolForVehicleType(vehicle.type);
             return (
               <div
                 key={vehicle.id}
@@ -353,7 +389,7 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
               >
                 <div className="flex items-center justify-between gap-3 p-4">
                   <button
-                    onClick={() => setExpandedVehicle(isExpanded ? null : vehicle.id)}
+                    onClick={() => { setExpandedVehicle(isExpanded ? null : vehicle.id); setSelectedPoolKey(''); setAssignQty(''); }}
                     className="flex flex-1 items-center gap-3 text-left"
                   >
                     <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${
@@ -412,41 +448,46 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
                       />
                     </div>
 
-                    {/* Assign controls */}
+                    {/* Assign controls — Taxis pick a consolidated Master Hub (assigns the
+                        whole hub at once); Buses pick an explicit sub-stop with an optional qty. */}
                     <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end">
                       <div className="flex-1">
-                        <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-muted">Stop Pool</label>
+                        <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-muted">
+                          {vehicle.type === 'Taxi' ? 'Hub Pool' : 'Stop Pool'}
+                        </label>
                         <select
-                          value={selectedStop}
-                          onChange={(e) => setSelectedStop(e.target.value)}
+                          value={selectedPoolKey}
+                          onChange={(e) => setSelectedPoolKey(e.target.value)}
                           className="input-field py-2 text-xs"
                         >
-                          <option value="" className="bg-card-2">Select stop...</option>
-                          {stopNames.map((s) => (
-                            <option key={s} value={s} className="bg-card-2">
-                              {s} ({stopsMap[s]?.length ?? 0} available)
+                          <option value="" className="bg-card-2">Select {vehicle.type === 'Taxi' ? 'hub' : 'stop'}...</option>
+                          {pool.map(({ key, count }) => (
+                            <option key={key} value={key} className="bg-card-2">
+                              {key} ({count} remaining)
                             </option>
                           ))}
                         </select>
                       </div>
-                      <div className="w-24">
-                        <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-muted">Qty</label>
-                        <input
-                          type="number"
-                          min="1"
-                          value={assignQty}
-                          onChange={(e) => setAssignQty(e.target.value)}
-                          placeholder="all"
-                          className="input-field py-2 text-xs"
-                        />
-                      </div>
+                      {vehicle.type === 'Bus' && (
+                        <div className="w-24">
+                          <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-muted">Qty</label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={assignQty}
+                            onChange={(e) => setAssignQty(e.target.value)}
+                            placeholder="all"
+                            className="input-field py-2 text-xs"
+                          />
+                        </div>
+                      )}
                       <button
                         onClick={() => wrap(() => assignToVehicle(
                           vehicle.id,
-                          selectedStop,
+                          selectedPoolKey,
                           assignQty ? Math.max(1, parseInt(assignQty, 10) || 1) : 'all'
                         ))}
-                        disabled={!selectedStop || saving}
+                        disabled={!selectedPoolKey || saving}
                         className="btn-success py-2 text-xs"
                       >
                         <ArrowRight className="h-3.5 w-3.5" />
@@ -454,20 +495,18 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
                       </button>
                     </div>
 
-                    {/* Rider list — grouped by hub for taxis */}
+                    {/* Rider list — grouped by stop/hub, in the exact order assigned */}
                     {riders.length === 0 ? (
                       <p className="py-3 text-center text-xs text-muted">No passengers assigned to this vehicle yet.</p>
                     ) : (
                       <div className="space-y-3">
                         {ridersGroupedByHub(vehicle).map((group) => (
                           <div key={group.label}>
-                            {vehicle.type === 'Taxi' && group.label !== 'All Stops' && (
-                              <div className="mb-1.5 flex items-center gap-1.5">
-                                <MapPin className="h-3 w-3 text-crimson-400" />
-                                <span className="text-[11px] font-semibold uppercase tracking-wide text-crimson-300">{group.label}</span>
-                                <span className="text-[10px] text-muted">({group.riders.length})</span>
-                              </div>
-                            )}
+                            <div className="mb-1.5 flex items-center gap-1.5">
+                              <MapPin className="h-3 w-3 text-crimson-400" />
+                              <span className="text-[11px] font-semibold uppercase tracking-wide text-crimson-300">{group.label}</span>
+                              <span className="text-[10px] text-muted">({group.riders.length})</span>
+                            </div>
                             <div className="space-y-1.5">
                               {group.riders.map((p) => {
                                 const isRepHighlight = highlightRep === p.fullName;
@@ -489,7 +528,7 @@ export function VehicleAllocation({ manifest, onSave }: Props) {
                                       {p.structure && (
                                         <span className="rounded bg-bg/60 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted">{p.structure}</span>
                                       )}
-                                      <span className="badge bg-bg/60 text-muted text-[10px]">{hubDisplayName(vehicle.type, p.stop)}</span>
+                                      <span className="badge bg-bg/60 text-muted text-[10px]">{p.stop}</span>
                                       {p.present && (
                                         <span className="badge bg-success/15 text-success-light text-[10px]">Present</span>
                                       )}
