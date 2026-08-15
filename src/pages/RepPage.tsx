@@ -1,135 +1,876 @@
-import { useMemo, useState } from 'react';
-import { Bus, Car, CheckCircle2, Loader2, Users, AlertTriangle, Smartphone, Wifi, ChevronDown, ChevronRight, Send, UserPlus, XCircle } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
+  Smartphone, Wifi, ChevronDown, ChevronRight, MapPin, Send, Cross,
+  HeartHandshake, StickyNote, UserPlus, Users2, X,
+} from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey } from '@/lib/dates';
-import { SERVICE_TYPES, type ServiceType, type Passenger } from '@/lib/types';
+import { SERVICE_TYPES, type ServiceType, type Passenger, type Vehicle } from '@/lib/types';
+import { hubDisplayName } from '@/lib/types';
+import { vehicleRiders, passengersByStop } from '@/lib/manifest';
 import { insertAbsentees } from '@/lib/ledger';
-import { masterHubForStop, sanitizeTransportValue } from './transportSanitization';
-
-function idsForVehicle(v: any): string[] { return Array.isArray(v?.passengerIds) ? v.passengerIds : Array.isArray(v?.riderIds) ? v.riderIds : Array.isArray(v?.passengers) ? v.passengers : []; }
-
-function vehicleRiders(manifest: any, vehicle: any): Passenger[] {
-  const ids = new Set(idsForVehicle(vehicle));
-  return (manifest?.signups ?? []).filter((p: Passenger) => ids.has(p.id));
-}
 
 export function RepPage() {
   const [date, setDate] = useState(upcomingSunday);
   const [service, setService] = useState<ServiceType>('PM_Normal');
   const key = manifestKey(date, service);
   const { manifest, loading, error, save } = useManifest(key);
-  const [selectedVehicleId, setSelectedVehicleId] = useState('');
+
+  const [selectedVehicleId, setSelectedVehicleId] = useState<string>('');
   const [repName, setRepName] = useState('');
-  const [coRep, setCoRep] = useState('');
+  const [coReps, setCoReps] = useState<string[]>([]);
   const [licensePlate, setLicensePlate] = useState('');
-  const [walkIn, setWalkIn] = useState('');
-  const [walkInMsg, setWalkInMsg] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitMsg, setSubmitMsg] = useState<string | null>(null);
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [sponsoredIds, setSponsoredIds] = useState<Set<string>>(new Set());
+  const [generalNotes, setGeneralNotes] = useState('');
+  const [touchedIds, setTouchedIds] = useState<Set<string>>(new Set());
+
+  // Walk-in
+  const [walkInOpen, setWalkInOpen] = useState(false);
+  const [walkInName, setWalkInName] = useState('');
+  const [transferPrompt, setTransferPrompt] = useState<{ passenger: Passenger; fromVehicle: Vehicle } | null>(null);
 
   const serviceLabel = SERVICE_TYPES.find((s) => s.value === service)?.label ?? service;
   const { date: parsedDate } = parseManifestKey(key);
-  const selectedVehicle = useMemo(() => manifest?.vehicles.find((v: any) => v.id === selectedVehicleId) ?? null, [manifest, selectedVehicleId]);
-  const riders = useMemo(() => selectedVehicle ? vehicleRiders(manifest, selectedVehicle) : [], [manifest, selectedVehicle]);
-  const grouped = useMemo(() => {
-    const map = new Map<string, Passenger[]>();
-    riders.forEach((p) => { const hub = masterHubForStop(p.stop); const list = map.get(hub) ?? []; list.push(p); map.set(hub, list); });
-    const order = new Map<string, number>((selectedVehicle?.orderedStops ?? []).map((s: string, i: number) => [s, i]));
-    return [...map.entries()].sort((a, b) => (order.get(a[0]) ?? 9999) - (order.get(b[0]) ?? 9999));
-  }, [riders, selectedVehicle]);
+
+  const selectedVehicle = useMemo(
+    () => manifest?.vehicles.find((v) => v.id === selectedVehicleId) ?? null,
+    [manifest, selectedVehicleId]
+  );
+
+  const riders = useMemo(
+    () => selectedVehicle ? vehicleRiders(manifest, selectedVehicle) : [],
+    [manifest, selectedVehicle]
+  );
+
+  // Reset per-session touch tracking whenever the rep switches vehicles.
+  useEffect(() => {
+    setTouchedIds(new Set());
+    setWalkInOpen(false);
+    setWalkInName('');
+    setTransferPrompt(null);
+  }, [selectedVehicleId]);
 
   const presentCount = riders.filter((r) => r.present).length;
   const absentCount = riders.length - presentCount;
-  const sponsoredMissingNotes = riders.some((r) => !r.present && sponsoredIds.has(r.id) && !(notes[r.id] ?? '').trim());
-  const canSubmit = !!repName.trim() && !!licensePlate.trim() && !sponsoredMissingNotes && !submitting;
-  const assignedRep = (selectedVehicle as any)?.repName || 'Unassigned Rep';
+  const allTouched = riders.length > 0 && riders.every((r) => touchedIds.has(r.id));
 
-  async function setAttendance(id: string, present: boolean) {
+  // Can only submit if rep name AND license plate are filled, and every
+  // passenger has been explicitly marked Present or Absent this session.
+  const sponsoredMissingNotes = riders.some(
+    (r) => !r.present && sponsoredIds.has(r.id) && !(notes[r.id] ?? '').trim()
+  );
+  const canSubmit =
+    repName.trim().length > 0 &&
+    licensePlate.trim().length > 0 &&
+    allTouched &&
+    !sponsoredMissingNotes &&
+    !submitting;
+
+  async function setPresent(passengerId: string, present: boolean) {
+    if (!manifest) return;
+    const updatedSignups = manifest.signups.map((p) =>
+      p.id === passengerId ? { ...p, present } : p
+    );
+    setTouchedIds((prev) => new Set(prev).add(passengerId));
+    await save({ ...manifest, signups: updatedSignups });
+  }
+
+  function toggleSponsored(passengerId: string) {
+    setSponsoredIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(passengerId)) next.delete(passengerId);
+      else next.add(passengerId);
+      return next;
+    });
+  }
+
+  function setNote(passengerId: string, text: string) {
+    setNotes((prev) => ({ ...prev, [passengerId]: text }));
+  }
+
+  function addCoRep() {
+    setCoReps((prev) => [...prev, '']);
+  }
+
+  function updateCoRep(index: number, value: string) {
+    setCoReps((prev) => prev.map((c, i) => (i === index ? value : c)));
+  }
+
+  function removeCoRep(index: number) {
+    setCoReps((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function findByName(name: string): Passenger | undefined {
+    const q = name.trim().toLowerCase();
+    if (!q || !manifest) return undefined;
+    return manifest.signups.find((p) => p.fullName.trim().toLowerCase() === q)
+      ?? manifest.signups.find((p) => p.fullName.trim().toLowerCase().includes(q));
+  }
+
+  function vehicleFor(vehicleId: string | null): Vehicle | undefined {
+    return manifest?.vehicles.find((v) => v.id === vehicleId) ?? undefined;
+  }
+
+  function orderedStopsWith(vehicle: Vehicle, poolKey: string): string[] {
+    const existing = vehicle.orderedStops ?? [];
+    return existing.includes(poolKey) ? existing : [...existing, poolKey];
+  }
+
+  async function handleAddWalkIn() {
+    if (!manifest || !selectedVehicle || !walkInName.trim()) return;
+    const existing = findByName(walkInName);
+
+    if (existing && existing.assignedTo && existing.assignedTo !== selectedVehicle.id) {
+      // Ask before pulling them out of their current vehicle.
+      const fromVehicle = vehicleFor(existing.assignedTo);
+      if (fromVehicle) {
+        setTransferPrompt({ passenger: existing, fromVehicle });
+        return;
+      }
+    }
+
+    if (existing) {
+      // Already unassigned, or already in this vehicle — just (re)assign here.
+      await assignWalkIn(existing, existing.assignedTo);
+    } else {
+      // Brand-new person, not from the Excel import.
+      const newPassenger: Passenger = {
+        id: `walkin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        fullName: walkInName.trim(),
+        stop: 'Walk-In',
+        structure: '',
+        assignedTo: selectedVehicle.id,
+        present: true,
+        cancellationFeeOwed: false,
+      };
+      const poolKey = hubDisplayName(selectedVehicle.type, newPassenger.stop);
+      const updatedVehicles = manifest.vehicles.map((v) =>
+        v.id === selectedVehicle.id
+          ? { ...v, riders: [...v.riders, newPassenger.id], orderedStops: orderedStopsWith(v, poolKey) }
+          : v
+      );
+      await save({ ...manifest, signups: [...manifest.signups, newPassenger], vehicles: updatedVehicles });
+      setTouchedIds((prev) => new Set(prev).add(newPassenger.id));
+    }
+    setWalkInName('');
+    setWalkInOpen(false);
+  }
+
+  async function assignWalkIn(passenger: Passenger, fromVehicleId: string | null) {
     if (!manifest || !selectedVehicle) return;
-    const signups = manifest.signups.map((p) => p.id === id ? { ...p, present } : p);
-    await save({ ...manifest, signups });
+    const poolKey = hubDisplayName(selectedVehicle.type, passenger.stop);
+    const updatedSignups = manifest.signups.map((p) =>
+      p.id === passenger.id ? { ...p, assignedTo: selectedVehicle.id, present: true } : p
+    );
+    const updatedVehicles = manifest.vehicles.map((v) => {
+      if (fromVehicleId && v.id === fromVehicleId) {
+        return { ...v, riders: v.riders.filter((id) => id !== passenger.id) };
+      }
+      if (v.id === selectedVehicle.id) {
+        if (v.riders.includes(passenger.id)) return v;
+        return { ...v, riders: [...v.riders, passenger.id], orderedStops: orderedStopsWith(v, poolKey) };
+      }
+      return v;
+    });
+    await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
+    setTouchedIds((prev) => new Set(prev).add(passenger.id));
   }
 
-  async function addCoRep() {
-    if (!manifest || !selectedVehicle || !coRep.trim()) return;
-    const next = [...(((selectedVehicle as any).coReps ?? []) as string[]), sanitizeTransportValue(coRep)];
-    await save({ ...manifest, vehicles: manifest.vehicles.map((v: any) => v.id === selectedVehicle.id ? { ...v, coReps: next } : v) as any });
-    setCoRep('');
-  }
-
-  async function handleWalkIn() {
-    if (!manifest || !selectedVehicle || !walkIn.trim()) return;
-    const typed = sanitizeTransportValue(walkIn);
-    const normalized = typed.toLowerCase();
-    setWalkInMsg(null);
-    const found = manifest.signups.find((p) => p.fullName?.toLowerCase() === normalized);
-    const owner = found && manifest.vehicles.find((v: any) => idsForVehicle(v).includes(found.id));
-    if (owner && owner.id !== selectedVehicle.id) {
-      const ok = window.confirm(`This person is assigned to ${owner.name}. Transfer to this taxi?`);
-      if (!ok) return;
-      const vehicles = manifest.vehicles.map((v: any) => {
-        if (v.id === owner.id) return { ...v, passengerIds: idsForVehicle(v).filter((id) => id !== found!.id) };
-        if (v.id === selectedVehicle.id) return { ...v, passengerIds: [...new Set([...idsForVehicle(v), found!.id])] };
-        return v;
-      });
-      const signups = manifest.signups.map((p) => p.id === found!.id ? { ...p, present: true } : p);
-      await save({ ...manifest, signups, vehicles: vehicles as any });
-      setWalkInMsg(`${found.fullName} transferred from ${owner.name} and marked Present.`);
-      setWalkIn('');
-      return;
-    }
-    if (found) {
-      const vehicles = manifest.vehicles.map((v: any) => v.id === selectedVehicle.id ? { ...v, passengerIds: [...new Set([...idsForVehicle(v), found.id])] } : v);
-      const signups = manifest.signups.map((p) => p.id === found.id ? { ...p, present: true } : p);
-      await save({ ...manifest, signups, vehicles: vehicles as any });
-      setWalkInMsg(`${found.fullName} added and marked Present.`);
-      setWalkIn('');
-      return;
-    }
-    const id = `walkin-${Date.now()}`;
-    const created = { id, fullName: typed, firstName: typed, surname: '', stop: 'Walk-In', structure: '', present: true, walkIn: true, walkInLabel: '[🚶 Unregistered Walk-In]' } as any as Passenger;
-    const vehicles = manifest.vehicles.map((v: any) => v.id === selectedVehicle.id ? { ...v, passengerIds: [...new Set([...idsForVehicle(v), id])] } : v);
-    await save({ ...manifest, signups: [...manifest.signups, created], vehicles: vehicles as any });
-    setWalkInMsg(`${typed} added as [🚶 Unregistered Walk-In].`);
-    setWalkIn('');
+  async function confirmTransfer() {
+    if (!transferPrompt) return;
+    await assignWalkIn(transferPrompt.passenger, transferPrompt.fromVehicle.id);
+    setTransferPrompt(null);
+    setWalkInName('');
+    setWalkInOpen(false);
   }
 
   async function handleSubmit() {
-    if (!manifest || !selectedVehicle || !canSubmit) return;
-    setSubmitting(true); setSubmitMsg(null);
+    if (!manifest || !selectedVehicle) return;
+    if (!repName.trim() || !licensePlate.trim()) return;
+    setSubmitting(true);
+    setSubmitMsg(null);
     try {
-      const absentees = riders.filter((r) => !r.present).map((r) => ({ ...r, sponsored: sponsoredIds.has(r.id), sponsorNote: notes[r.id] ?? '' }));
-      await insertAbsentees(key, parsedDate, serviceLabel, absentees, selectedVehicle.name, repName.trim(), licensePlate.trim(), repName.trim(), '');
-      const updatedVehicles = manifest.vehicles.map((v: any) => v.id === selectedVehicle.id ? { ...v, submitted: true, submittedAt: new Date().toISOString(), submittedBy: repName.trim(), licensePlate: licensePlate.trim(), repName: repName.trim() } : v);
-      await save({ ...manifest, vehicles: updatedVehicles as any });
-      setSubmitMsg(`Submitted! ${presentCount} present, ${absentCount} absent.`);
-    } catch (e) { setSubmitMsg(`Error: ${e instanceof Error ? e.message : String(e)}`); }
-    finally { setSubmitting(false); }
+      const absentees = riders
+        .filter((r) => !r.present)
+        .map((r) => ({
+          ...r,
+          sponsored: sponsoredIds.has(r.id),
+          sponsorNote: notes[r.id] ?? '',
+        }));
+
+      const repDisplayName = [repName.trim(), ...coReps.map((c) => c.trim()).filter(Boolean)].join(' & ');
+      const coRepNote = coReps.map((c) => c.trim()).filter(Boolean).length > 0
+        ? `Co-reps: ${coReps.map((c) => c.trim()).filter(Boolean).join(', ')}. `
+        : '';
+
+      // insertAbsentees deduplicates by deleting existing entries for this manifest+vehicle before inserting
+      await insertAbsentees(
+        key,
+        parsedDate,
+        serviceLabel,
+        absentees,
+        selectedVehicle.name,
+        repName.trim(),
+        licensePlate.trim(),
+        repDisplayName,
+        `${coRepNote}${generalNotes.trim()}`.trim()
+      );
+
+      const updatedVehicles = manifest.vehicles.map((v) =>
+        v.id === selectedVehicle.id
+          ? {
+              ...v,
+              submitted: true,
+              submittedAt: new Date().toISOString(),
+              submittedBy: repName.trim(),
+              licensePlate: licensePlate.trim(),
+              repName: repName.trim(),
+              coReps: coReps.map((c) => c.trim()).filter(Boolean),
+              generalNotes: generalNotes.trim(),
+            }
+          : v
+      );
+      await save({ ...manifest, vehicles: updatedVehicles });
+
+      setSubmitMsg(
+        `Submitted! ${presentCount} present, ${absentCount} absent. ` +
+        `${absentees.length > 0 ? `${absentees.length} absentees added to cancellation ledger. ` : ''}` +
+        `Thank you, ${repDisplayName}.`
+      );
+    } catch (e) {
+      setSubmitMsg(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSubmitting(false);
+    }
   }
 
-  return <div className="min-h-screen bg-bg">
-    <header className="sticky top-0 z-40 border-b border-line bg-bg/95 backdrop-blur-md"><div className="mx-auto flex max-w-lg items-center gap-3 px-4 py-3"><div className="flex h-9 w-9 items-center justify-center rounded-xl bg-success/15 border border-success/30"><Smartphone className="h-4 w-4 text-success-light"/></div><div className="flex-1 leading-tight"><div className="font-display text-sm font-bold text-ink">CRC <span className="text-crimson-400">Rep Portal</span></div><div className="flex items-center gap-1 text-[11px] text-muted"><Wifi className="h-3 w-3 text-success"/>Live transport check-in</div></div></div></header>
-    <main className="mx-auto max-w-lg px-4 py-5">
-      <div className="mb-5 rounded-2xl border border-line bg-card p-5"><span className="badge bg-success/15 text-success-light"><Smartphone className="h-3 w-3"/>Mobile Check-in</span><h1 className="mt-2 font-display text-xl font-bold text-ink">Transport Rep Portal</h1><p className="mt-1.5 text-sm text-muted">Attendance is explicit: every passenger gets separate Present and Absent controls.</p></div>
-      <ServiceDateSelector date={date} service={service} onDateChange={setDate} onServiceChange={setService}/>
-      {error && <div className="mt-4 rounded-lg border border-crimson-500/30 bg-crimson-900/20 p-3 text-sm text-crimson-300"><AlertTriangle className="mr-2 inline h-4 w-4"/>{error}</div>}
-      {loading ? <div className="mt-8 flex flex-col items-center gap-3 py-16"><Loader2 className="h-8 w-8 animate-spin text-crimson-400"/>Loading manifest…</div> : !manifest || !manifest.vehicles.length ? <div className="mt-6 rounded-xl border border-line bg-card py-14 text-center"><Bus className="mx-auto h-10 w-10 text-line"/><p className="mt-2 text-sm text-muted">No vehicles dispatched yet.</p></div> : <div className="mt-4 space-y-4">
-        <div className="card"><label className="text-xs font-semibold uppercase tracking-wide text-muted">Assigned vehicle</label><select value={selectedVehicleId} onChange={(e) => { setSelectedVehicleId(e.target.value); setSubmitMsg(null); }} className="input-field mt-1.5"><option value="">Choose vehicle…</option>{manifest.vehicles.map((v: any) => <option key={v.id} value={v.id}>{v.name} · {idsForVehicle(v).length} passengers</option>)}</select></div>
-        {selectedVehicle && <>
-          <div className="card"><div className="flex items-center justify-between gap-3"><div><div className="text-xs uppercase tracking-wide text-muted">Assigned Rep</div><div className="mt-1 font-display text-lg font-bold text-ink">{assignedRep}</div></div><button onClick={() => setCoRep(coRep ? '' : ' ')} className="btn-ghost"><UserPlus className="h-4 w-4"/>+ Add Co-Rep</button></div>{coRep !== '' && <div className="mt-3 flex gap-2"><input value={coRep.trim()} onChange={(e) => setCoRep(e.target.value)} placeholder="Co-Rep name" className="input-field flex-1"/><button onClick={addCoRep} className="btn-success">Add</button></div>}<div className="mt-3 flex flex-wrap gap-2">{(((selectedVehicle as any).coReps ?? []) as string[]).map((name) => <span key={name} className="badge bg-card-2 text-muted">Co-Rep: {name}</span>)}</div></div>
-          <div className="grid grid-cols-3 gap-2"><Stat label="Total" value={riders.length}/><Stat label="Present" value={presentCount} accent="success"/><Stat label="Absent" value={absentCount} accent="crimson"/></div>
-          <div className="card"><div className="flex gap-2"><input value={walkIn} onChange={(e) => setWalkIn(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void handleWalkIn()} placeholder="Walk-in name" className="input-field flex-1"/><button onClick={() => void handleWalkIn()} className="btn-crimson">+ Add Walk-In</button></div>{walkInMsg && <div className="mt-2 text-xs text-muted">{walkInMsg}</div>}</div>
-          {grouped.map(([hub, people]) => <div key={hub} className="overflow-hidden rounded-xl border border-line bg-card"><div className="flex items-center justify-between border-b border-line bg-card-2/50 px-3.5 py-3"><div className="flex items-center gap-2"><MapPinIcon/><span className="font-semibold text-ink">🛑 {hub}</span></div><span className="text-xs text-muted">{people.filter((p) => p.present).length}/{people.length}</span></div><div className="divide-y divide-line/60">{people.map((p) => <div key={p.id} className="p-3.5"><div className="flex items-center justify-between gap-3"><div className="min-w-0"><div className="text-sm font-medium text-ink">{p.fullName}</div>{(p as any).walkIn && <div className="mt-0.5 text-[10px] font-semibold text-warning">[🚶 Unregistered Walk-In]</div>}</div><div className="flex shrink-0 gap-2"><button onClick={() => void setAttendance(p.id, true)} className={`rounded-lg border px-3 py-2 text-xs font-semibold ${p.present ? 'border-success/40 bg-success/15 text-success-light' : 'border-line bg-card-2 text-muted'}`}>Present</button><button onClick={() => void setAttendance(p.id, false)} className={`rounded-lg border px-3 py-2 text-xs font-semibold ${!p.present ? 'border-crimson-500/40 bg-crimson-500/15 text-crimson-300' : 'border-line bg-card-2 text-muted'}`}>Absent</button></div></div></div>)}</div></div>)}
-          {!selectedVehicle.submitted && <><div className="card"><div className="grid gap-3"><input value={repName} onChange={(e) => setRepName(e.target.value)} placeholder="Your name" className="input-field"/><input value={licensePlate} onChange={(e) => setLicensePlate(e.target.value.toUpperCase())} placeholder="License plate" className="input-field"/></div></div>{sponsoredMissingNotes && <div className="text-xs text-warning">Sponsored absentees require a sponsor note before submission.</div>}<button onClick={() => void handleSubmit()} disabled={!canSubmit} className="btn-crimson w-full py-3.5"><Send className="h-5 w-5"/>{submitting ? 'Submitting…' : 'Submit Attendance'}</button></>}
-          {submitMsg && <div className="rounded-lg border border-line bg-card p-3 text-sm text-muted">{submitMsg}</div>}
-        </>}
-      </div>}
-    </main>
-  </div>;
+  const isSubmitted = selectedVehicle?.submitted ?? false;
+
+  return (
+    <div className="min-h-screen bg-bg">
+      <header className="sticky top-0 z-40 border-b border-line bg-bg/95 backdrop-blur-md">
+        <div className="mx-auto flex max-w-lg items-center gap-3 px-4 py-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-success/15 border border-success/30">
+            <Smartphone className="h-4 w-4 text-success-light" />
+          </div>
+          <div className="flex-1 leading-tight">
+            <div className="font-display text-sm font-bold tracking-tight text-ink">
+              CRC <span className="text-crimson-400">Rep Portal</span>
+            </div>
+            <div className="flex items-center gap-1 text-[11px] text-muted">
+              <Wifi className="h-3 w-3 text-success" />
+              <span>Live transport check-in</span>
+            </div>
+          </div>
+          <Cross className="h-5 w-5 text-muted" strokeWidth={2} />
+        </div>
+      </header>
+
+      <main className="mx-auto max-w-lg px-4 py-5">
+        <div className="mb-5 overflow-hidden rounded-2xl border border-line bg-gradient-to-br from-card to-bg p-5">
+          <span className="badge bg-success/15 text-success-light">
+            <Smartphone className="h-3 w-3" />
+            Mobile Check-in
+          </span>
+          <h1 className="mt-2 font-display text-xl font-bold tracking-tight text-ink">
+            Transport Rep Portal
+          </h1>
+          <p className="mt-1.5 text-sm text-muted">
+            Pick your allocated taxi or bus, mark every passenger Present or Absent, and submit attendance.
+            You must enter your name and the vehicle's license plate before submitting.
+          </p>
+        </div>
+
+        <ServiceDateSelector
+          date={date}
+          service={service}
+          onDateChange={setDate}
+          onServiceChange={setService}
+        />
+
+        {error && (
+          <div className="mt-4 flex items-center gap-2 rounded-lg border border-crimson-500/30 bg-crimson-900/20 p-3 text-sm text-crimson-300">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            {error}
+          </div>
+        )}
+
+        {loading ? (
+          <div className="mt-8 flex flex-col items-center gap-3 py-16">
+            <Loader2 className="h-8 w-8 animate-spin text-crimson-400" />
+            <p className="text-sm text-muted">Loading manifest…</p>
+          </div>
+        ) : !manifest || manifest.vehicles.length === 0 ? (
+          <div className="mt-6 flex flex-col items-center gap-3 rounded-xl border border-line bg-card py-14 text-center">
+            <Bus className="h-10 w-10 text-line" />
+            <p className="text-sm text-muted">No vehicles dispatched for this session yet.</p>
+            <p className="text-xs text-muted">{prettyDate(date)} · {serviceLabel}</p>
+            <p className="text-xs text-muted">
+              The admin will assign you a taxi or bus — check back once they've allocated.
+            </p>
+          </div>
+        ) : (
+          <div className="mt-4 space-y-4">
+            {/* Vehicle picker */}
+            <div className="card">
+              <div className="mb-3 flex items-center gap-2">
+                <div className="h-5 w-1 rounded-full bg-crimson-500" />
+                <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">
+                  Select Your Vehicle
+                </h2>
+              </div>
+              <p className="mb-3 text-xs text-muted">
+                Pick the taxi or bus the admin assigned you. Each rep handles their own vehicle.
+              </p>
+              <div className="relative">
+                <Car className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+                <select
+                  value={selectedVehicleId}
+                  onChange={(e) => {
+                    setSelectedVehicleId(e.target.value);
+                    setSubmitMsg(null);
+                  }}
+                  className="input-field pl-10"
+                >
+                  <option value="" className="bg-card-2">Choose your vehicle…</option>
+                  {manifest.vehicles.map((v) => {
+                    const vRiders = vehicleRiders(manifest, v);
+                    const vPresent = vRiders.filter((r) => r.present).length;
+                    return (
+                      <option key={v.id} value={v.id} className="bg-card-2">
+                        {v.name} ({v.type}) — {vRiders.length} passengers
+                        {v.submitted ? ' ✓ submitted' : ` (${vPresent}/${vRiders.length} checked)`}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+
+              {selectedVehicleId && (
+                <div className="mt-3 space-y-3">
+                  <div>
+                    <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
+                      Your Name <span className="text-crimson-400">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={repName}
+                      onChange={(e) => setRepName(e.target.value)}
+                      placeholder="Required — enter your name"
+                      className="input-field"
+                    />
+                  </div>
+
+                  {/* Co-Reps */}
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between">
+                      <label className="block text-xs font-semibold uppercase tracking-wide text-muted">
+                        Co-Reps (optional)
+                      </label>
+                      <button onClick={addCoRep} className="flex items-center gap-1 text-xs font-semibold text-crimson-400 hover:text-crimson-300">
+                        <Users2 className="h-3.5 w-3.5" />
+                        + Add Co-Rep
+                      </button>
+                    </div>
+                    {coReps.length > 0 && (
+                      <div className="space-y-1.5">
+                        {coReps.map((c, i) => (
+                          <div key={i} className="flex items-center gap-1.5">
+                            <input
+                              type="text"
+                              value={c}
+                              onChange={(e) => updateCoRep(i, e.target.value)}
+                              placeholder="Co-rep name"
+                              className="input-field py-1.5 text-xs"
+                            />
+                            <button onClick={() => removeCoRep(i)} className="rounded-md p-1.5 text-muted hover:bg-crimson-900/30 hover:text-crimson-300" title="Remove">
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
+                      License Plate <span className="text-crimson-400">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={licensePlate}
+                      onChange={(e) => setLicensePlate(e.target.value)}
+                      placeholder="Required — e.g. GP 123 ABC"
+                      className="input-field uppercase"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {selectedVehicle && riders.length > 0 && (
+              <>
+                {/* Stats bar */}
+                <div className="grid grid-cols-3 gap-2">
+                  <StatCard label="Total" value={riders.length} icon={<Users className="h-4 w-4" />} />
+                  <StatCard label="Present" value={presentCount} icon={<CheckCircle2 className="h-4 w-4" />} accent="success" />
+                  <StatCard label="Absent" value={absentCount} icon={<AlertTriangle className="h-4 w-4" />} accent="crimson" />
+                </div>
+
+                {isSubmitted && (
+                  <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-3 text-sm text-success-light">
+                    <CheckCircle2 className="h-4 w-4 shrink-0" />
+                    <div>
+                      <div className="font-semibold">Attendance submitted</div>
+                      <div className="text-xs text-muted">
+                        Submitted by {selectedVehicle.submittedBy || 'rep'}
+                        {selectedVehicle.licensePlate && ` · Plate: ${selectedVehicle.licensePlate}`}
+                        {selectedVehicle.submittedAt &&
+                          ` at ${new Date(selectedVehicle.submittedAt).toLocaleString('en-ZA', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })}`}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Walk-in */}
+                {!isSubmitted && (
+                  <div className="card">
+                    {!walkInOpen ? (
+                      <button
+                        onClick={() => setWalkInOpen(true)}
+                        className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-line py-2.5 text-xs font-semibold text-muted hover:border-crimson-500/40 hover:text-crimson-300"
+                      >
+                        <UserPlus className="h-4 w-4" />
+                        + Add Walk-In
+                      </button>
+                    ) : (
+                      <div className="space-y-2">
+                        <label className="block text-xs font-semibold uppercase tracking-wide text-muted">
+                          Walk-In Passenger Name
+                        </label>
+                        <div className="flex gap-1.5">
+                          <input
+                            type="text"
+                            value={walkInName}
+                            onChange={(e) => setWalkInName(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleAddWalkIn()}
+                            placeholder="Type the passenger's name"
+                            className="input-field text-xs"
+                            autoFocus
+                          />
+                          <button
+                            onClick={handleAddWalkIn}
+                            disabled={!walkInName.trim()}
+                            className="btn-crimson px-3 py-2 text-xs whitespace-nowrap"
+                          >
+                            Add
+                          </button>
+                          <button
+                            onClick={() => { setWalkInOpen(false); setWalkInName(''); }}
+                            className="btn-ghost px-3 py-2 text-xs"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                        <p className="text-[10px] text-muted">
+                          We'll check if they're already assigned elsewhere before adding them here.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <StopGroupedChecklist
+                  riders={riders}
+                  touchedIds={touchedIds}
+                  onSetPresent={setPresent}
+                  onToggleSponsored={toggleSponsored}
+                  onSetNote={setNote}
+                  sponsoredIds={sponsoredIds}
+                  notes={notes}
+                  disabled={isSubmitted || submitting}
+                />
+
+                {!isSubmitted && (
+                  <>
+                    {/* General notes for this vehicle submission */}
+                    <div className="card">
+                      <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
+                        General Notes (optional)
+                      </label>
+                      <textarea
+                        value={generalNotes}
+                        onChange={(e) => setGeneralNotes(e.target.value)}
+                        placeholder="Any notes for this vehicle's submission — e.g. 'Person A in Taxi 1 is paying for Person B in Taxi 2'"
+                        rows={2}
+                        className="input-field text-xs resize-none"
+                      />
+                    </div>
+
+                    {!allTouched && (
+                      <div className="flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
+                        <AlertTriangle className="h-4 w-4 shrink-0" />
+                        Every passenger must be marked Present or Absent before you can submit.
+                      </div>
+                    )}
+
+                    {sponsoredMissingNotes && (
+                      <div className="flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
+                        <AlertTriangle className="h-4 w-4 shrink-0" />
+                        All sponsored passengers must have a note saying who is paying for them.
+                      </div>
+                    )}
+
+                    <button
+                      onClick={handleSubmit}
+                      disabled={!canSubmit}
+                      className={`w-full py-3.5 text-base ${
+                        canSubmit ? 'btn-crimson' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted'
+                      }`}
+                    >
+                      {submitting ? (
+                        <span className="flex items-center gap-2">
+                          <Loader2 className="h-5 w-5 animate-spin" />
+                          Submitting…
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-2">
+                          <Send className="h-5 w-5" />
+                          Submit Attendance
+                        </span>
+                      )}
+                    </button>
+                    {!canSubmit && !sponsoredMissingNotes && allTouched && (
+                      <p className="text-center text-xs text-muted">
+                        Enter your name and license plate above to enable submission.
+                      </p>
+                    )}
+                  </>
+                )}
+
+                {submitMsg && (
+                  <div
+                    className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${
+                      submitMsg.startsWith('Error')
+                        ? 'border-crimson-500/30 bg-crimson-900/20 text-crimson-300'
+                        : 'border-success/30 bg-success/10 text-success-light'
+                    }`}
+                  >
+                    {submitMsg.startsWith('Error') ? (
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                    ) : (
+                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+                    )}
+                    <span>{submitMsg}</span>
+                  </div>
+                )}
+
+                {isSubmitted && (
+                  <button
+                    onClick={() => {
+                      setSubmitMsg(null);
+                      if (manifest && selectedVehicle) {
+                        const updatedVehicles = manifest.vehicles.map((v) =>
+                          v.id === selectedVehicle.id
+                            ? { ...v, submitted: false, submittedAt: undefined, submittedBy: undefined }
+                            : v
+                        );
+                        save({ ...manifest, vehicles: updatedVehicles });
+                      }
+                    }}
+                    className="btn-ghost w-full text-xs"
+                  >
+                    Re-open for editing
+                  </button>
+                )}
+              </>
+            )}
+
+            {selectedVehicle && riders.length === 0 && (
+              <div className="rounded-xl border border-line bg-card p-8 text-center">
+                <Users className="mx-auto h-8 w-8 text-line" />
+                <p className="mt-2 text-sm text-muted">No passengers assigned to this vehicle yet.</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        <footer className="mt-10 border-t border-line pt-4 text-center">
+          <p className="text-[11px] text-muted">
+            CRC Johannesburg · Transport Ministry · 2026 — The Year of Invasion
+          </p>
+        </footer>
+      </main>
+
+      {/* Walk-in transfer confirmation */}
+      {transferPrompt && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm animate-fade-in"
+          onClick={() => setTransferPrompt(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl border border-line bg-card p-6 shadow-crimson animate-slide-up"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-4 flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-warning/15 border border-warning/30">
+                <AlertTriangle className="h-5 w-5 text-warning" />
+              </div>
+              <div>
+                <h3 className="font-display text-base font-bold text-ink">Already Assigned</h3>
+                <p className="text-xs text-muted">
+                  This person is assigned to <span className="font-semibold text-ink">{transferPrompt.fromVehicle.name}</span>.
+                  Transfer them to this vehicle?
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => { setTransferPrompt(null); }} className="btn-ghost flex-1">
+                Cancel
+              </button>
+              <button onClick={confirmTransfer} className="btn-crimson flex-1">
+                Transfer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
-function Stat({ label, value, accent }: { label: string; value: number; accent?: 'success' | 'crimson' }) { return <div className={`rounded-xl border p-2.5 text-center ${accent === 'success' ? 'border-success/30 bg-success/10' : accent === 'crimson' ? 'border-crimson-500/30 bg-crimson-900/10' : 'border-line bg-card'}`}><div className={`font-display text-xl font-bold ${accent === 'success' ? 'text-success-light' : accent === 'crimson' ? 'text-crimson-400' : 'text-ink'}`}>{value}</div><div className="text-[10px] uppercase tracking-wide text-muted">{label}</div></div>; }
-function MapPinIcon() { return <span aria-hidden="true" className="text-crimson-400">🛑</span>; }
+function StatCard({
+  label, value, icon, accent,
+}: {
+  label: string;
+  value: number;
+  icon: React.ReactNode;
+  accent?: 'success' | 'crimson';
+}) {
+  const color = accent === 'success' ? 'text-success-light' : accent === 'crimson' ? 'text-crimson-400' : 'text-ink';
+  const border = accent === 'success' ? 'border-success/30 bg-success/10' : accent === 'crimson' ? 'border-crimson-500/30 bg-crimson-900/10' : 'border-line bg-card';
+  return (
+    <div className={`rounded-xl border p-2.5 text-center ${border}`}>
+      <div className={`flex items-center justify-center gap-1.5 ${color}`}>
+        {icon}
+        <span className="font-display text-xl font-bold">{value}</span>
+      </div>
+      <div className="mt-0.5 text-[10px] font-medium uppercase tracking-wide text-muted">{label}</div>
+    </div>
+  );
+}
+
+function StopGroupedChecklist({
+  riders, touchedIds, onSetPresent, onToggleSponsored, onSetNote, sponsoredIds, notes, disabled,
+}: {
+  riders: Passenger[];
+  touchedIds: Set<string>;
+  onSetPresent: (id: string, present: boolean) => void;
+  onToggleSponsored: (id: string) => void;
+  onSetNote: (id: string, text: string) => void;
+  sponsoredIds: Set<string>;
+  notes: Record<string, string>;
+  disabled: boolean;
+}) {
+  const byStop = useMemo(() => passengersByStop(riders), [riders]);
+  const stops = Object.keys(byStop).sort((a, b) => byStop[b].length - byStop[a].length);
+  const [expandedStops, setExpandedStops] = useState<Set<string>>(new Set(stops));
+
+  function toggleStop(stop: string) {
+    setExpandedStops((prev) => {
+      const next = new Set(prev);
+      if (next.has(stop)) next.delete(stop);
+      else next.add(stop);
+      return next;
+    });
+  }
+
+  function setAllExpanded(expand: boolean) {
+    setExpandedStops(expand ? new Set(stops) : new Set());
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between px-1">
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted">
+          {stops.length} stops · {riders.length} passengers
+        </span>
+        <div className="flex gap-2">
+          <button onClick={() => setAllExpanded(true)} className="text-xs text-muted hover:text-ink">Expand all</button>
+          <span className="text-muted">·</span>
+          <button onClick={() => setAllExpanded(false)} className="text-xs text-muted hover:text-ink">Collapse all</button>
+        </div>
+      </div>
+
+      {stops.map((stop) => {
+        const stopRiders = byStop[stop];
+        const stopPresent = stopRiders.filter((r) => r.present).length;
+        const stopTouched = stopRiders.filter((r) => touchedIds.has(r.id)).length;
+        const isExpanded = expandedStops.has(stop);
+        return (
+          <div key={stop} className="overflow-hidden rounded-xl border border-line bg-card">
+            <button
+              onClick={() => toggleStop(stop)}
+              className="flex w-full items-center justify-between gap-2 border-b border-line bg-card-2/50 p-3.5 text-left transition-colors hover:bg-card-2/80"
+            >
+              <div className="flex items-center gap-2">
+                {isExpanded ? <ChevronDown className="h-4 w-4 text-muted" /> : <ChevronRight className="h-4 w-4 text-muted" />}
+                <MapPin className="h-4 w-4 text-crimson-400" />
+                <span className="text-sm font-semibold text-ink">{stop}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted">{stopPresent}/{stopRiders.length} present · {stopTouched}/{stopRiders.length} checked</span>
+                <span className={`flex h-2 w-2 rounded-full ${stopTouched === stopRiders.length ? 'bg-success' : 'bg-crimson-500'}`} />
+              </div>
+            </button>
+
+            {isExpanded && (
+              <div className="divide-y divide-line/60 animate-fade-in">
+                {stopRiders.map((p) => (
+                  <PassengerRow
+                    key={p.id}
+                    passenger={p}
+                    touched={touchedIds.has(p.id)}
+                    onSetPresent={(present) => onSetPresent(p.id, present)}
+                    onToggleSponsored={() => onToggleSponsored(p.id)}
+                    onSetNote={(text) => onSetNote(p.id, text)}
+                    isSponsored={sponsoredIds.has(p.id)}
+                    noteText={notes[p.id] ?? ''}
+                    disabled={disabled}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function PassengerRow({
+  passenger, touched, onSetPresent, onToggleSponsored, onSetNote, isSponsored, noteText, disabled,
+}: {
+  passenger: Passenger;
+  touched: boolean;
+  onSetPresent: (present: boolean) => void;
+  onToggleSponsored: () => void;
+  onSetNote: (text: string) => void;
+  isSponsored: boolean;
+  noteText: string;
+  disabled: boolean;
+}) {
+  const [showNote, setShowNote] = useState(isSponsored);
+  const [note, setNote] = useState(noteText);
+
+  function handleSponsoredToggle() {
+    onToggleSponsored();
+    if (!isSponsored) setShowNote(true);
+  }
+
+  function handleNoteChange(text: string) {
+    setNote(text);
+    onSetNote(text);
+  }
+
+  return (
+    <div className={`p-3.5 transition-colors ${disabled ? 'opacity-60' : 'hover:bg-card-2/30'} ${!touched && !disabled ? 'bg-warning/5' : ''}`}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className={`text-sm font-medium ${passenger.present ? 'text-success-light' : touched ? 'text-crimson-300' : 'text-ink'}`}>
+            {passenger.fullName}
+            {passenger.structure && (
+              <span className="ml-2 inline-block rounded bg-bg/60 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-muted">
+                {passenger.structure}
+              </span>
+            )}
+            {!touched && !disabled && (
+              <span className="ml-2 inline-block rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold text-warning">
+                Needs check-in
+              </span>
+            )}
+          </div>
+        </div>
+        {/* Explicit, side-by-side Present / Absent toggle buttons */}
+        <div className="flex shrink-0 gap-1.5">
+          <button
+            onClick={() => onSetPresent(true)}
+            disabled={disabled}
+            className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all active:scale-95 ${
+              passenger.present && touched
+                ? 'bg-success/20 text-success-light border border-success/50'
+                : 'bg-card-2 text-muted border border-line hover:border-success/40 hover:text-success-light'
+            }`}
+          >
+            <span className="flex items-center gap-1.5">
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              Present
+            </span>
+          </button>
+          <button
+            onClick={() => onSetPresent(false)}
+            disabled={disabled}
+            className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all active:scale-95 ${
+              !passenger.present && touched
+                ? 'bg-crimson-500/20 text-crimson-300 border border-crimson-500/50'
+                : 'bg-card-2 text-muted border border-line hover:border-crimson-500/40 hover:text-crimson-300'
+            }`}
+          >
+            <span className="flex items-center gap-1.5">
+              <XCircle className="h-3.5 w-3.5" />
+              Absent
+            </span>
+          </button>
+        </div>
+      </div>
+
+      {/* Sponsored toggle */}
+      <div className="mt-2 flex items-center gap-3">
+        <button
+          onClick={handleSponsoredToggle}
+          disabled={disabled}
+          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all active:scale-95 ${
+            isSponsored
+              ? 'bg-warning/15 text-warning border border-warning/40'
+              : 'bg-card-2 text-muted border border-line'
+          }`}
+        >
+          <HeartHandshake className="h-3.5 w-3.5" />
+          {isSponsored ? 'Sponsored / Didn\'t Pay' : 'Mark Sponsored'}
+        </button>
+        {isSponsored && (
+          <button
+            onClick={() => setShowNote(!showNote)}
+            disabled={disabled}
+            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted border border-line bg-card-2 transition-all hover:text-ink"
+          >
+            <StickyNote className="h-3.5 w-3.5" />
+            {showNote ? 'Hide Note' : 'Add Note'}
+          </button>
+        )}
+      </div>
+
+      {/* Sponsor note — required when sponsored */}
+      {isSponsored && showNote && (
+        <div className="mt-2 animate-fade-in">
+          <input
+            type="text"
+            value={note}
+            onChange={(e) => handleNoteChange(e.target.value)}
+            disabled={disabled}
+            placeholder="Required: Who is paying for this person? (e.g. Person A in Taxi 1)"
+            className="input-field text-xs"
+          />
+          <p className="mt-1 text-[10px] text-muted">
+            This note is included in the stats and cancellation ledger so we know who covers the cost.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -8,12 +8,18 @@ export function sanitizeTransportValue(value: unknown): string {
     .trim();
 }
 
-const BRAAM = new Set([
-  '56 Jorissen', 'Amani', "Amic Deck - Men’s Res", "Amic Deck - Men's Res",
-  'Amic Deck - Jubilee', 'Amic Deck - Sunnyside', 'Apex', 'Student Digzz', 'YMCA',
+// Strict Master Hub sets — kept in lockstep with TAXI_HUBS in ./types.
+// Braam consolidates ONLY these five stops.
+const BRAAM = new Set(['56 Jorissen', 'Amani', 'Apex', 'Student Digzz', 'YMCA']);
+// Gate 7 consolidates ALL Amic Deck stops + Barnato.
+const GATE_7 = new Set([
+  "Amic Deck - Men's Res",
+  'Amic Deck - Jubilee',
+  'Amic Deck - Sunnyside',
+  'Amic Deck - David Webster',
+  'Barnato',
 ]);
-const GATE_7 = new Set(['Amic Deck - David Webster', 'Barnato']);
-const EOH = new Set(['EOH Campus Central', 'Campus Central on empire']);
+const EOH = new Set(['EOH', 'EOH Campus Central', 'Campus Central on empire']);
 
 export function masterHubForStop(value: unknown): string {
   const stop = sanitizeTransportValue(value);
@@ -27,7 +33,13 @@ export function sanitizePassengerRecord<T extends Record<string, any>>(passenger
   const fullName = sanitizeTransportValue(passenger.fullName);
   const firstName = sanitizeTransportValue(passenger.firstName);
   const surname = sanitizeTransportValue(passenger.surname);
-  const stop = masterHubForStop(passenger.stop);
+  // NOTE: `stop` here is intentionally kept as the RAW (sanitized) stop name,
+  // not the master-hub name. Master-hub consolidation is a display/allocation
+  // concern that differs between Buses and Taxis (see hubDisplayName in
+  // ./types) and must never be baked into the persisted passenger record —
+  // doing so would make it impossible to show Buses their explicit sub-stop
+  // breakdown.
+  const stop = sanitizeTransportValue(passenger.stop);
   return {
     ...passenger,
     fullName,
@@ -37,9 +49,4 @@ export function sanitizePassengerRecord<T extends Record<string, any>>(passenger
   };
 }
 
-export const MASTER_HUBS = [
-  'Braam', 'Gate 7', 'EOH', 'Yale', 'Stanley', 'UJ Bunting', 'Ghandi Square',
-  'Focus 1', 'Maboneng', 'Urban Circle', 'DFC Bus Stop', 'The Fields', 'Laborie',
-  'Richmond', 'Gate 2', 'Gate 4', "APK McDonald's", 'Westdene', 'Junction',
-  'Education Campus', 'Saratoga', 'Argyle', 'Arteria', 'Knockando',
-] as const;
+export const MASTER_HUBS = ['Braam', 'Gate 7', 'EOH'] as const;
