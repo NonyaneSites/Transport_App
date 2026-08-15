@@ -24,6 +24,14 @@ export function prettyDate(yyyyMmDd: string): string {
   return d.toLocaleDateString('en-ZA', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 }
 
+/** DD/MM/YYYY — used on the Cancellation Ledger, e.g. "08/02/2026" */
+export function shortDate(yyyyMmDd: string): string {
+  const d = parseDate(yyyyMmDd);
+  const day = String(d.getDate()).padStart(2, '0');
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  return `${day}/${month}/${d.getFullYear()}`;
+}
+
 export function manifestKey(date: string, service: string): string {
   return `${date}_${service}`;
 }

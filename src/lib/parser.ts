@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
 import type { Passenger, ServiceType } from './types';
 import { SERVICE_TYPES } from './types';
+import { sanitizeTransportValue } from './transportSanitization';
 
 interface ParseOptions {
   selectedDate: string;
@@ -27,14 +28,12 @@ interface RawRow {
   [key: string]: string;
 }
 
-// Strip unicode replacement chars (U+FFFD) and other non-printable noise
-// that Microsoft Forms exports contain.
+// Scrub non-ASCII / invisible characters ("É", "Â", U+FFFD, NBSP, etc.) that
+// Microsoft Forms exports contain. This is the single source of truth for
+// text sanitization at the parsing boundary — kept in lockstep with
+// ./transportSanitization so nothing dirty ever reaches persisted state.
 function clean(s: unknown): string {
-  if (s === null || s === undefined) return '';
-  return String(s)
-    .replace(/\uFFFD/g, '')
-    .replace(/\u00A0/g, ' ')
-    .trim();
+  return sanitizeTransportValue(s);
 }
 
 function lower(s: string): string {
@@ -42,7 +41,7 @@ function lower(s: string): string {
 }
 
 function findColumn(headers: string[], patterns: string[]): string | null {
-  // Clean + lowercased headers for matching (strips U+FFFD noise from Forms exports)
+  // Clean + lowercased headers for matching (strips non-ASCII noise from Forms exports)
   const normalizedHeaders = headers.map((h) => lower(clean(h)));
   for (const pattern of patterns) {
     const p = lower(clean(pattern));
@@ -298,6 +297,10 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
     }
     matchedService++;
 
+    // Stop is kept as the raw, sanitized sub-stop — hub consolidation for
+    // Taxis happens at display/allocation time (see hubDisplayName in
+    // ./types), never at parse time, so Buses can still show their explicit
+    // sub-stop breakdown.
     const stop = extractStop(row, headers);
     const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
     if (seen.has(id)) {
