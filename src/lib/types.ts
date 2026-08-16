@@ -59,17 +59,21 @@ export const CANCELLATION_FEE = 40;
 export const LARGE_BUS_THRESHOLD = 40;
 
 /**
- * Strict Master Hub mapping (taxi-only consolidation).
+ * Strict Master Hub mapping (TAXI-only route consolidation — a taxi
+ * physically gathers passengers from several distinct addresses at one
+ * pickup point).
  *
  * Braam        -> 56 Jorissen, Amani, Apex, Student Digzz, YMCA
- * Gate 7       -> ALL Amic Deck stops + Barnato
- * EOH          -> EOH, EOH Campus Central, Campus Central on empire
+ * Gate 7       -> Amic Deck - David Webster, Barnato, Amic Deck - Men's Res,
+ *                 Amic Deck - Sunnyside, Amic Deck - Jubilee (ALL Amic Deck
+ *                 stops + Barnato)
+ * EOH          -> Campus Central - EOH, EOH Campus Central, EOH
  *
  * Everything else (Yale, Stanley, UJ Bunting, Ghandi Square, Focus 1,
  * Maboneng, Urban Circle, DFC Bus Stop, The Fields, Laborie, Richmond,
  * Gate 2, Gate 4, APK McDonald's, Westdene, Junction, Education Campus,
  * Saratoga, Argyle, Arteria, Knockando) remains an individual stop and is
- * NEVER folded into a hub, for either Buses or Taxis.
+ * NEVER folded into a Taxi hub.
  */
 export const TAXI_HUBS: { hub: string; stops: string[] }[] = [
   {
@@ -85,22 +89,48 @@ export const TAXI_HUBS: { hub: string; stops: string[] }[] = [
   {
     hub: 'Gate 7',
     stops: [
-      "Amic Deck - Men's Res",
-      'Amic Deck - Jubilee',
-      'Amic Deck - Sunnyside',
       'Amic Deck - David Webster',
       'Barnato',
+      "Amic Deck - Men's Res",
+      'Amic Deck - Sunnyside',
+      'Amic Deck - Jubilee',
     ],
   },
   {
     hub: 'EOH',
     stops: [
-      'EOH',
+      'Campus Central - EOH',
       'EOH Campus Central',
-      'Campus Central on empire',
+      'EOH',
     ],
   },
 ];
+
+/**
+ * BUS-only spelling/name canonicalization. This is NOT route consolidation
+ * (a Bus still drives to one physical address per stop) — it exists purely
+ * because Microsoft Forms submissions have referred to the same EOH campus
+ * address inconsistently across intakes ("Campus Central on empire",
+ * "Campus Central - EOH", "Charlotte" / "Charlotte Maxeke"). All of these
+ * canonicalize to the single stop name "EOH" for Buses so the sub-stop
+ * breakdown doesn't fragment into duplicate rows for the same address.
+ * Every other Bus stop remains untouched and fully explicit.
+ */
+export const BUS_EOH_ALIASES = new Set([
+  'Campus Central on empire',
+  'Campus Central - EOH',
+  'Charlotte',
+  'Charlotte Maxeke',
+]);
+
+/** Returns 'EOH' if this stop is a known Bus spelling-variant of the EOH campus address, else null. */
+export function stopToBusHub(stop: string): string | null {
+  const norm = stop.trim().toLowerCase();
+  for (const alias of BUS_EOH_ALIASES) {
+    if (alias.toLowerCase() === norm) return 'EOH';
+  }
+  return null;
+}
 
 export const INDIVIDUAL_STOPS = [
   'Yale', 'Stanley', 'UJ Bunting', 'Ghandi Square',
@@ -125,13 +155,18 @@ export function stopToHub(stop: string): string | null {
  * Display grouping key for a passenger's stop, based on vehicle type.
  * - Taxi: consolidated Master Hub (falls back to the raw stop if it isn't
  *   part of any hub, e.g. "Yale").
- * - Bus: always the raw, explicit sub-stop — buses physically drive to each
- *   individual address and must never be hub-consolidated.
+ * - Bus: the raw, explicit sub-stop — buses physically drive to each
+ *   individual address and are never route-consolidated — EXCEPT the known
+ *   EOH spelling variants (see BUS_EOH_ALIASES), which canonicalize to a
+ *   single "EOH" stop since they're the same physical address.
  */
 export function hubDisplayName(vehicleType: 'Bus' | 'Taxi', stop: string): string {
   if (vehicleType === 'Taxi') {
     const hub = stopToHub(stop);
     if (hub) return hub;
+    return stop;
   }
+  const busHub = stopToBusHub(stop);
+  if (busHub) return busHub;
   return stop;
 }

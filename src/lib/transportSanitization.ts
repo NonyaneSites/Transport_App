@@ -8,19 +8,38 @@ export function sanitizeTransportValue(value: unknown): string {
     .trim();
 }
 
-// Strict Master Hub sets — kept in lockstep with TAXI_HUBS in ./types.
+// Strict Master Hub sets (TAXI route consolidation) — kept in lockstep with
+// TAXI_HUBS in ./types.
 // Braam consolidates ONLY these five stops.
 const BRAAM = new Set(['56 Jorissen', 'Amani', 'Apex', 'Student Digzz', 'YMCA']);
 // Gate 7 consolidates ALL Amic Deck stops + Barnato.
 const GATE_7 = new Set([
-  "Amic Deck - Men's Res",
-  'Amic Deck - Jubilee',
-  'Amic Deck - Sunnyside',
   'Amic Deck - David Webster',
   'Barnato',
+  "Amic Deck - Men's Res",
+  'Amic Deck - Sunnyside',
+  'Amic Deck - Jubilee',
 ]);
-const EOH = new Set(['EOH', 'EOH Campus Central', 'Campus Central on empire']);
+const EOH = new Set(['Campus Central - EOH', 'EOH Campus Central', 'EOH']);
 
+// BUS-only spelling canonicalization — same physical EOH address, various
+// spellings across Forms intakes. Kept in lockstep with BUS_EOH_ALIASES in
+// ./types. NOT route consolidation — see the note there.
+export const BUS_EOH_ALIASES = new Set([
+  'Campus Central on empire',
+  'Campus Central - EOH',
+  'Charlotte',
+  'Charlotte Maxeke',
+]);
+
+/**
+ * Taxi Master Hub for a raw stop value, or the raw (sanitized) stop itself
+ * if it isn't part of any hub. NOTE: this is exposed for callers that need
+ * the taxi-consolidated name directly; the app's own routing/display logic
+ * lives in hubDisplayName (./types), which additionally handles the
+ * Bus-only EOH spelling canonicalization — use that instead of this
+ * function wherever a vehicle-type-aware answer is needed.
+ */
 export function masterHubForStop(value: unknown): string {
   const stop = sanitizeTransportValue(value);
   if (BRAAM.has(stop)) return 'Braam';

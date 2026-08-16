@@ -2,6 +2,15 @@ import * as XLSX from 'xlsx';
 import { supabase } from './supabase';
 import type { Passenger, Vehicle } from './types';
 import { CANCELLATION_FEE } from './types';
+import { naturalCompare } from './sort';
+import { shortDate } from './dates';
+
+export const BANK_DETAILS = {
+  accountName: 'CRCY&SJHB',
+  bank: 'ABSA',
+  accountNumber: '4100565706',
+  branchCode: '632005',
+};
 
 export const LEDGER_TABLE = 'cancellation_ledger';
 
@@ -99,31 +108,124 @@ export async function updateLedgerEntry(id: string, updates: Partial<LedgerEntry
   if (error) throw error;
 }
 
-export function downloadLedgerExcel(entries: LedgerEntry[], fileName: string): void {
-  const rows = entries.map((e, i) => ({
-    '#': i + 1,
-    'Passenger Name': e.passenger_name,
-    'Structure': e.structure || '—',
-    'Stop': e.stop,
-    'Service': e.service,
-    'Date': e.date,
-    'Sponsored': e.sponsored ? 'Yes' : 'No',
-    'Sponsor Note': e.sponsor_note || '',
-    'Rep Name': e.rep_name || e.submitted_by || '',
-    'License Plate': e.license_plate || '',
-    'General Notes': e.general_notes || '',
-    'Structure Debt (R)': e.structure_debt,
-    'Submitted At': new Date(e.submitted_at).toLocaleString('en-ZA'),
-  }));
+export interface AggregatedLedgerRow {
+  key: string;
+  structure: string;
+  repName: string;
+  name: string;
+  service: string;
+  latestDate: string; // yyyy-mm-dd, most recent
+  amount: number;
+  entryIds: string[];
+}
 
-  const ws = XLSX.utils.json_to_sheet(rows);
-  ws['!cols'] = [
-    { wch: 4 }, { wch: 28 }, { wch: 10 }, { wch: 20 }, { wch: 25 },
-    { wch: 12 }, { wch: 9 }, { wch: 35 }, { wch: 18 }, { wch: 14 },
-    { wch: 35 }, { wch: 16 }, { wch: 22 },
+export interface AggregatedLedgerGroup {
+  structure: string;
+  /** Distinct rep names who submitted debts for this structure, in first-seen order. */
+  reps: string[];
+  rows: AggregatedLedgerRow[];
+  totalDebt: number;
+}
+
+/**
+ * Shared aggregation used by both the web Ledger page and the download:
+ * groups raw ledger entries by structure (strict alphanumeric order —
+ * S1, S2, S9, S13), then by passenger name within each structure so repeat
+ * cancellations collapse into one row with cumulative debt (e.g. R80).
+ */
+export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedgerGroup[] {
+  const byStructure = new Map<string, LedgerEntry[]>();
+  for (const e of entries) {
+    const key = e.structure || 'No Structure';
+    if (!byStructure.has(key)) byStructure.set(key, []);
+    byStructure.get(key)!.push(e);
+  }
+
+  const groups: AggregatedLedgerGroup[] = [];
+  for (const [structure, structEntries] of byStructure.entries()) {
+    const byName = new Map<string, LedgerEntry[]>();
+    for (const e of structEntries) {
+      const nameKey = e.passenger_name.trim().toLowerCase();
+      if (!byName.has(nameKey)) byName.set(nameKey, []);
+      byName.get(nameKey)!.push(e);
+    }
+
+    const rows: AggregatedLedgerRow[] = Array.from(byName.values()).map((group) => {
+      const sorted = [...group].sort((a, b) => (b.submitted_at || '').localeCompare(a.submitted_at || ''));
+      const latest = sorted[0];
+      const amount = group.reduce((sum, e) => sum + Number(e.structure_debt), 0);
+      return {
+        key: `${structure}-${latest.passenger_name}`,
+        structure,
+        repName: latest.rep_name || latest.submitted_by || '—',
+        name: latest.passenger_name,
+        service: latest.service,
+        latestDate: latest.date,
+        amount,
+        entryIds: group.map((e) => e.id),
+      };
+    }).sort((a, b) => a.name.localeCompare(b.name));
+
+    const reps: string[] = [];
+    for (const row of rows) {
+      if (row.repName && row.repName !== '—' && !reps.includes(row.repName)) reps.push(row.repName);
+    }
+
+    groups.push({
+      structure,
+      reps,
+      rows,
+      totalDebt: rows.reduce((sum, r) => sum + r.amount, 0),
+    });
+  }
+
+  return groups.sort((a, b) => naturalCompare(a.structure, b.structure));
+}
+
+/**
+ * Downloads the Cancellation Ledger as an Excel workbook laid out to match
+ * the official "2026 SZ Cancellation List": a cover section with the
+ * policy rules and ABSA banking details, followed by the strict 4-column
+ * table (Structure and rep / Cancellation date / Name / Amount owing).
+ */
+export function downloadLedgerExcel(entries: LedgerEntry[], fileName: string): void {
+  const groups = aggregateLedgerEntries(entries);
+  const grandTotal = groups.reduce((sum, g) => sum + g.totalDebt, 0);
+
+  const aoa: (string | number)[][] = [
+    ['CRC Johannesburg — 2026 SZ Cancellation List'],
+    [],
+    ['Policy'],
+    ['Outstanding cancellation fees must be settled within 3 weeks of the missed service.'],
+    ['Upload proof of payment (POP): <insert POP upload link here>'],
+    ['Each structure is collectively liable for the unpaid cancellation fees of its members.'],
+    [],
+    ['Banking Details'],
+    ['Account Name', BANK_DETAILS.accountName],
+    ['Bank', BANK_DETAILS.bank],
+    ['Account Number', BANK_DETAILS.accountNumber],
+    ['Branch Code', BANK_DETAILS.branchCode],
+    [],
+    [`Total Outstanding: R${grandTotal}`],
+    [],
+    ['Structure and rep', 'Cancellation date', 'Name', 'Amount owing'],
   ];
+
+  for (const group of groups) {
+    for (const row of group.rows) {
+      aoa.push([
+        `${row.structure} - ${row.repName}`,
+        shortDate(row.latestDate),
+        `${row.name} (${row.service.split(' ')[0]})`,
+        `R${row.amount}`,
+      ]);
+    }
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [{ wch: 30 }, { wch: 18 }, { wch: 30 }, { wch: 14 }];
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Cancellation Ledger');
+  XLSX.utils.book_append_sheet(wb, ws, 'SZ Cancellation List');
   XLSX.writeFile(wb, fileName);
 }
 
