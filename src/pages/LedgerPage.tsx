@@ -1,28 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BookOpen, Loader2, AlertTriangle, FileSpreadsheet, Search, Trash2, Filter, XCircle, ChevronDown, ChevronRight, Landmark } from 'lucide-react';
+import { BookOpen, Loader2, AlertTriangle, FileSpreadsheet, Search, Trash2, Filter, XCircle, ChevronDown, ChevronRight } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
-import { listLedgerEntries, deleteLedgerEntry, downloadLedgerExcel, type LedgerEntry } from '@/lib/ledger';
+import {
+  listLedgerEntries, deleteLedgerEntry, downloadLedgerExcel,
+  aggregateLedgerEntries, type LedgerEntry, type AggregatedLedgerRow,
+} from '@/lib/ledger';
 import { shortDate } from '@/lib/dates';
 import { naturalCompare } from '@/lib/sort';
-
-const BANK_DETAILS = {
-  accountName: 'CRCY&SJHB',
-  bank: 'ABSA',
-  accountNumber: '4100565706',
-  branchCode: '632005',
-};
-
-interface AggregatedRow {
-  key: string;
-  structure: string;
-  repName: string;
-  name: string;
-  service: string;
-  latestDate: string; // yyyy-mm-dd, most recent
-  amount: number;
-  entryIds: string[];
-}
 
 export function LedgerPage() {
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
@@ -69,49 +54,9 @@ export function LedgerPage() {
 
   const totalDebt = filtered.reduce((sum, e) => sum + Number(e.structure_debt), 0);
 
-  // Group by structure -> aggregate by passenger name (cumulative debt across
-  // repeat cancellations), strip everything except the four required fields.
-  const groupedByStructure = useMemo(() => {
-    const byStructure = new Map<string, LedgerEntry[]>();
-    for (const e of filtered) {
-      const key = e.structure || 'No Structure';
-      if (!byStructure.has(key)) byStructure.set(key, []);
-      byStructure.get(key)!.push(e);
-    }
-
-    const result: { structure: string; rows: AggregatedRow[]; totalDebt: number }[] = [];
-    for (const [structure, structEntries] of byStructure.entries()) {
-      const byName = new Map<string, LedgerEntry[]>();
-      for (const e of structEntries) {
-        const nameKey = e.passenger_name.trim().toLowerCase();
-        if (!byName.has(nameKey)) byName.set(nameKey, []);
-        byName.get(nameKey)!.push(e);
-      }
-      const rows: AggregatedRow[] = Array.from(byName.values()).map((group) => {
-        const sorted = [...group].sort((a, b) => (b.submitted_at || '').localeCompare(a.submitted_at || ''));
-        const latest = sorted[0];
-        const amount = group.reduce((sum, e) => sum + Number(e.structure_debt), 0);
-        return {
-          key: `${structure}-${latest.passenger_name}`,
-          structure,
-          repName: latest.rep_name || latest.submitted_by || '—',
-          name: latest.passenger_name,
-          service: latest.service,
-          latestDate: latest.date,
-          amount,
-          entryIds: group.map((e) => e.id),
-        };
-      }).sort((a, b) => a.name.localeCompare(b.name));
-
-      result.push({
-        structure,
-        rows,
-        totalDebt: rows.reduce((sum, r) => sum + r.amount, 0),
-      });
-    }
-
-    return result.sort((a, b) => naturalCompare(a.structure, b.structure));
-  }, [filtered]);
+  // Shared with the download (see aggregateLedgerEntries in lib/ledger) so
+  // the web view and the exported "SZ Cancellation List" never drift apart.
+  const groupedByStructure = useMemo(() => aggregateLedgerEntries(filtered), [filtered]);
 
   function toggleStructure(s: string) {
     setCollapsedStructures((prev) => {
@@ -122,7 +67,7 @@ export function LedgerPage() {
     });
   }
 
-  async function handleDeleteRow(row: AggregatedRow) {
+  async function handleDeleteRow(row: AggregatedLedgerRow) {
     try {
       await Promise.all(row.entryIds.map((id) => deleteLedgerEntry(id)));
       const idSet = new Set(row.entryIds);
@@ -147,22 +92,9 @@ export function LedgerPage() {
           </h1>
           <p className="mt-2 max-w-2xl text-sm text-muted">
             Structure and rep, cancellation date, name, and amount owing — the complete record of transport
-            cancellation debt across every session.
+            cancellation debt across every session. Banking details and payment policy are on the downloadable
+            SZ Cancellation List.
           </p>
-        </div>
-
-        {/* Official banking details header */}
-        <div className="mb-6 flex flex-col gap-2 rounded-xl border border-crimson-500/20 bg-crimson-900/10 p-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-2">
-            <Landmark className="h-4 w-4 text-crimson-400" />
-            <span className="text-xs font-semibold uppercase tracking-wide text-muted">Official Payment Details</span>
-          </div>
-          <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-ink">
-            <span><span className="text-muted">Account:</span> <span className="font-semibold">{BANK_DETAILS.accountName}</span></span>
-            <span><span className="text-muted">Bank:</span> <span className="font-semibold">{BANK_DETAILS.bank}</span></span>
-            <span><span className="text-muted">Acc No:</span> <span className="font-mono font-semibold">{BANK_DETAILS.accountNumber}</span></span>
-            <span><span className="text-muted">Branch:</span> <span className="font-mono font-semibold">{BANK_DETAILS.branchCode}</span></span>
-          </div>
         </div>
 
         {loading ? (
@@ -191,7 +123,7 @@ export function LedgerPage() {
                 <SummaryStat label="Total Debt" value={`R${totalDebt}`} accent="warning" />
               </div>
               <button
-                onClick={() => downloadLedgerExcel(filtered.length > 0 ? filtered : entries, `cancellation_ledger_${new Date().toISOString().slice(0,10)}.xlsx`)}
+                onClick={() => downloadLedgerExcel(filtered.length > 0 ? filtered : entries, `SZ_Cancellation_List_${new Date().toISOString().slice(0,10)}.xlsx`)}
                 className="btn-success"
               >
                 <FileSpreadsheet className="h-4 w-4" />
@@ -228,8 +160,10 @@ export function LedgerPage() {
 
             {/* Grouped by structure — strict alphanumeric order (S1, S2, S9, S13) */}
             <div className="space-y-3">
-              {groupedByStructure.map(({ structure, rows, totalDebt: structDebt }) => {
+              {groupedByStructure.map(({ structure, reps, rows, totalDebt: structDebt }) => {
                 const isCollapsed = collapsedStructures.has(structure);
+                // Rep name(s) moved to the end of the structure label, e.g. "S1 - Nthabiseng, Nthabeleng"
+                const structureLabel = reps.length > 0 ? `${structure} - ${reps.join(', ')}` : structure;
                 return (
                   <div key={structure} className="overflow-hidden rounded-2xl border border-line bg-card">
                     <button
@@ -238,7 +172,7 @@ export function LedgerPage() {
                     >
                       <div className="flex items-center gap-2">
                         {isCollapsed ? <ChevronRight className="h-4 w-4 text-muted" /> : <ChevronDown className="h-4 w-4 text-muted" />}
-                        <span className="font-display text-sm font-bold text-ink">{structure}</span>
+                        <span className="font-display text-sm font-bold text-ink">{structureLabel}</span>
                         <span className="badge bg-bg/60 text-muted text-[10px]">{rows.length}</span>
                       </div>
                       <span className="font-display text-sm font-bold text-crimson-400">R{structDebt}</span>
@@ -295,12 +229,6 @@ export function LedgerPage() {
             )}
           </>
         )}
-
-        {/* Official banking details footer */}
-        <div className="mt-8 rounded-xl border border-line bg-card-2/40 p-4 text-center text-xs text-muted">
-          <div className="font-semibold text-ink">{BANK_DETAILS.accountName}</div>
-          <div>{BANK_DETAILS.bank} · Account {BANK_DETAILS.accountNumber} · Branch {BANK_DETAILS.branchCode}</div>
-        </div>
       </main>
       <Footer />
     </div>

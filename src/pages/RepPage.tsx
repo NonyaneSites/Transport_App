@@ -2,15 +2,38 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
   Smartphone, Wifi, ChevronDown, ChevronRight, MapPin, Send, Cross,
-  HeartHandshake, StickyNote, UserPlus, Users2, X,
+  HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey } from '@/lib/dates';
-import { SERVICE_TYPES, type ServiceType, type Passenger, type Vehicle } from '@/lib/types';
+import { SERVICE_TYPES, CANCELLATION_FEE, type ServiceType, type Passenger, type Vehicle } from '@/lib/types';
 import { hubDisplayName } from '@/lib/types';
 import { vehicleRiders, passengersByStop } from '@/lib/manifest';
 import { insertAbsentees } from '@/lib/ledger';
+
+const DEFAULT_FARE = CANCELLATION_FEE; // R40 default passenger fare
+
+interface ExternalSponsee {
+  id: string;
+  sponseeName: string;
+  taxiName: string;
+  amount: number;
+}
+
+interface RepDraft {
+  touchedIds: string[];
+  sponsoredIds: string[];
+  notes: Record<string, string>;
+  generalNotes: string;
+  coReps: string[];
+  cashCollected: Record<string, number>;
+  externalSponsees: ExternalSponsee[];
+}
+
+function draftKey(manifestKeyStr: string, vehicleId: string): string {
+  return `rep_draft_${manifestKeyStr}_${vehicleId}`;
+}
 
 export function RepPage() {
   const [date, setDate] = useState(upcomingSunday);
@@ -28,6 +51,13 @@ export function RepPage() {
   const [sponsoredIds, setSponsoredIds] = useState<Set<string>>(new Set());
   const [generalNotes, setGeneralNotes] = useState('');
   const [touchedIds, setTouchedIds] = useState<Set<string>>(new Set());
+
+  // Cash & sponsorship calculator
+  const [cashCollected, setCashCollected] = useState<Record<string, number>>({});
+  const [externalSponsees, setExternalSponsees] = useState<ExternalSponsee[]>([]);
+
+  // Draft auto-save/restore
+  const [draftRestored, setDraftRestored] = useState(false);
 
   // Walk-in
   const [walkInOpen, setWalkInOpen] = useState(false);
@@ -47,13 +77,89 @@ export function RepPage() {
     [manifest, selectedVehicle]
   );
 
-  // Reset per-session touch tracking whenever the rep switches vehicles.
+  // Auto-match: as the Rep types their name, highlight/select the vehicle
+  // the Admin assigned them to (only while nothing is selected yet, so we
+  // never yank a vehicle they picked on purpose).
   useEffect(() => {
-    setTouchedIds(new Set());
+    if (!manifest || selectedVehicleId) return;
+    const q = repName.trim().toLowerCase();
+    if (q.length < 2) return;
+    const match = manifest.vehicles.find((v) => (v.repName ?? '').trim().toLowerCase() === q);
+    if (match) setSelectedVehicleId(match.id);
+  }, [repName, manifest, selectedVehicleId]);
+
+  // Reset per-session state whenever the rep switches vehicles, then try to
+  // restore a local draft for the new vehicle (attendance touches, notes,
+  // sponsorship, cash calculator) before anything is submitted.
+  useEffect(() => {
     setWalkInOpen(false);
     setWalkInName('');
     setTransferPrompt(null);
+
+    if (!selectedVehicleId) {
+      setTouchedIds(new Set());
+      setSponsoredIds(new Set());
+      setNotes({});
+      setGeneralNotes('');
+      setCoReps([]);
+      setCashCollected({});
+      setExternalSponsees([]);
+      setDraftRestored(false);
+      return;
+    }
+
+    const vehicle = manifest?.vehicles.find((v) => v.id === selectedVehicleId);
+    let restored = false;
+    if (vehicle && !vehicle.submitted) {
+      try {
+        const raw = localStorage.getItem(draftKey(key, selectedVehicleId));
+        if (raw) {
+          const draft: RepDraft = JSON.parse(raw);
+          setTouchedIds(new Set(draft.touchedIds ?? []));
+          setSponsoredIds(new Set(draft.sponsoredIds ?? []));
+          setNotes(draft.notes ?? {});
+          setGeneralNotes(draft.generalNotes ?? '');
+          setCoReps(draft.coReps ?? []);
+          setCashCollected(draft.cashCollected ?? {});
+          setExternalSponsees(draft.externalSponsees ?? []);
+          restored = true;
+        }
+      } catch { /* corrupt draft — ignore and start fresh */ }
+    }
+    if (!restored) {
+      setTouchedIds(new Set());
+      setSponsoredIds(new Set());
+      setNotes({});
+      setGeneralNotes('');
+      setCoReps([]);
+      setCashCollected({});
+      setExternalSponsees([]);
+    }
+    setDraftRestored(restored);
+    if (restored) {
+      const t = setTimeout(() => setDraftRestored(false), 6000);
+      return () => clearTimeout(t);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedVehicleId]);
+
+  // Instant local persistence — save on every relevant change so a rep who
+  // loses signal or closes the tab doesn't lose their in-progress checklist.
+  useEffect(() => {
+    if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted) return;
+    const draft: RepDraft = {
+      touchedIds: Array.from(touchedIds),
+      sponsoredIds: Array.from(sponsoredIds),
+      notes,
+      generalNotes,
+      coReps,
+      cashCollected,
+      externalSponsees,
+    };
+    try {
+      localStorage.setItem(draftKey(key, selectedVehicleId), JSON.stringify(draft));
+    } catch { /* storage unavailable — draft just won't persist */ }
+  }, [key, selectedVehicleId, selectedVehicle, touchedIds, sponsoredIds, notes, generalNotes, coReps, cashCollected, externalSponsees]);
 
   const presentCount = riders.filter((r) => r.present).length;
   const absentCount = riders.length - presentCount;
@@ -70,6 +176,13 @@ export function RepPage() {
     allTouched &&
     !sponsoredMissingNotes &&
     !submitting;
+
+  // Cash calculator totals
+  const baseCash = riders
+    .filter((r) => r.present)
+    .reduce((sum, r) => sum + (cashCollected[r.id] ?? DEFAULT_FARE), 0);
+  const externalCash = externalSponsees.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+  const totalCash = baseCash + externalCash;
 
   async function setPresent(passengerId: string, present: boolean) {
     if (!manifest) return;
@@ -103,6 +216,25 @@ export function RepPage() {
 
   function removeCoRep(index: number) {
     setCoReps((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function setCashForPassenger(passengerId: string, amount: number) {
+    setCashCollected((prev) => ({ ...prev, [passengerId]: amount }));
+  }
+
+  function addExternalSponsee() {
+    setExternalSponsees((prev) => [
+      ...prev,
+      { id: `sponsee-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, sponseeName: '', taxiName: '', amount: DEFAULT_FARE },
+    ]);
+  }
+
+  function updateExternalSponsee(id: string, patch: Partial<ExternalSponsee>) {
+    setExternalSponsees((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  }
+
+  function removeExternalSponsee(id: string) {
+    setExternalSponsees((prev) => prev.filter((s) => s.id !== id));
   }
 
   function findByName(name: string): Passenger | undefined {
@@ -207,6 +339,10 @@ export function RepPage() {
       const coRepNote = coReps.map((c) => c.trim()).filter(Boolean).length > 0
         ? `Co-reps: ${coReps.map((c) => c.trim()).filter(Boolean).join(', ')}. `
         : '';
+      const cashNote = `Cash collected: R${totalCash} (base R${baseCash}${externalCash > 0 ? ` + external R${externalCash}` : ''}). `;
+      const sponseeNote = externalSponsees.length > 0
+        ? `External sponsees: ${externalSponsees.map((s) => `${s.sponseeName || 'Unnamed'} in ${s.taxiName || 'another vehicle'} (R${s.amount})`).join('; ')}. `
+        : '';
 
       // insertAbsentees deduplicates by deleting existing entries for this manifest+vehicle before inserting
       await insertAbsentees(
@@ -218,7 +354,7 @@ export function RepPage() {
         repName.trim(),
         licensePlate.trim(),
         repDisplayName,
-        `${coRepNote}${generalNotes.trim()}`.trim()
+        `${coRepNote}${cashNote}${sponseeNote}${generalNotes.trim()}`.trim()
       );
 
       const updatedVehicles = manifest.vehicles.map((v) =>
@@ -236,6 +372,9 @@ export function RepPage() {
           : v
       );
       await save({ ...manifest, vehicles: updatedVehicles });
+
+      // Draft is only ever cleared on a successful submit to Supabase.
+      try { localStorage.removeItem(draftKey(key, selectedVehicle.id)); } catch { /* ignore */ }
 
       setSubmitMsg(
         `Submitted! ${presentCount} present, ${absentCount} absent. ` +
@@ -281,8 +420,8 @@ export function RepPage() {
             Transport Rep Portal
           </h1>
           <p className="mt-1.5 text-sm text-muted">
-            Pick your allocated taxi or bus, mark every passenger Present or Absent, and submit attendance.
-            You must enter your name and the vehicle's license plate before submitting.
+            Enter your name to find your assigned vehicle, mark every passenger Present or Absent, and submit
+            attendance. You must enter your name and the vehicle's license plate before submitting.
           </p>
         </div>
 
@@ -316,7 +455,7 @@ export function RepPage() {
           </div>
         ) : (
           <div className="mt-4 space-y-4">
-            {/* Vehicle picker */}
+            {/* Rep name + vehicle picker */}
             <div className="card">
               <div className="mb-3 flex items-center gap-2">
                 <div className="h-5 w-1 rounded-full bg-crimson-500" />
@@ -324,8 +463,26 @@ export function RepPage() {
                   Select Your Vehicle
                 </h2>
               </div>
+
+              <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
+                Your Name <span className="text-crimson-400">*</span>
+              </label>
+              <input
+                type="text"
+                value={repName}
+                onChange={(e) => setRepName(e.target.value)}
+                placeholder="Start typing your name…"
+                className="input-field mb-1.5"
+              />
+              {selectedVehicle && repName.trim() && (selectedVehicle.repName ?? '').trim().toLowerCase() === repName.trim().toLowerCase() && (
+                <p className="mb-3 flex items-center gap-1 text-xs text-success-light">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  Auto-selected {selectedVehicle.name} — you're the assigned rep.
+                </p>
+              )}
+
               <p className="mb-3 text-xs text-muted">
-                Pick the taxi or bus the admin assigned you. Each rep handles their own vehicle.
+                Or pick the taxi or bus the admin assigned you directly. Each rep handles their own vehicle.
               </p>
               <div className="relative">
                 <Car className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
@@ -343,7 +500,7 @@ export function RepPage() {
                     const vPresent = vRiders.filter((r) => r.present).length;
                     return (
                       <option key={v.id} value={v.id} className="bg-card-2">
-                        {v.name} ({v.type}) — {vRiders.length} passengers
+                        {v.name} — Assigned Rep: {v.repName || 'Unassigned'} ({v.type}) — {vRiders.length} passengers
                         {v.submitted ? ' ✓ submitted' : ` (${vPresent}/${vRiders.length} checked)`}
                       </option>
                     );
@@ -353,19 +510,6 @@ export function RepPage() {
 
               {selectedVehicleId && (
                 <div className="mt-3 space-y-3">
-                  <div>
-                    <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
-                      Your Name <span className="text-crimson-400">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      value={repName}
-                      onChange={(e) => setRepName(e.target.value)}
-                      placeholder="Required — enter your name"
-                      className="input-field"
-                    />
-                  </div>
-
                   {/* Co-Reps */}
                   <div>
                     <div className="mb-1.5 flex items-center justify-between">
@@ -412,6 +556,12 @@ export function RepPage() {
                 </div>
               )}
             </div>
+
+            {selectedVehicle && draftRestored && (
+              <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-2.5 text-xs text-success-light">
+                🟢 Draft auto-restored
+              </div>
+            )}
 
             {selectedVehicle && riders.length > 0 && (
               <>
@@ -483,6 +633,21 @@ export function RepPage() {
                       </div>
                     )}
                   </div>
+                )}
+
+                {!isSubmitted && (
+                  <CashCalculatorCard
+                    riders={riders}
+                    cashCollected={cashCollected}
+                    onSetCash={setCashForPassenger}
+                    externalSponsees={externalSponsees}
+                    onAddSponsee={addExternalSponsee}
+                    onUpdateSponsee={updateExternalSponsee}
+                    onRemoveSponsee={removeExternalSponsee}
+                    baseCash={baseCash}
+                    externalCash={externalCash}
+                    totalCash={totalCash}
+                  />
                 )}
 
                 <StopGroupedChecklist
@@ -661,6 +826,114 @@ function StatCard({
         <span className="font-display text-xl font-bold">{value}</span>
       </div>
       <div className="mt-0.5 text-[10px] font-medium uppercase tracking-wide text-muted">{label}</div>
+    </div>
+  );
+}
+
+function CashCalculatorCard({
+  riders, cashCollected, onSetCash, externalSponsees, onAddSponsee, onUpdateSponsee, onRemoveSponsee,
+  baseCash, externalCash, totalCash,
+}: {
+  riders: Passenger[];
+  cashCollected: Record<string, number>;
+  onSetCash: (id: string, amount: number) => void;
+  externalSponsees: ExternalSponsee[];
+  onAddSponsee: () => void;
+  onUpdateSponsee: (id: string, patch: Partial<ExternalSponsee>) => void;
+  onRemoveSponsee: (id: string) => void;
+  baseCash: number;
+  externalCash: number;
+  totalCash: number;
+}) {
+  const presentRiders = riders.filter((r) => r.present);
+
+  return (
+    <div className="card">
+      <div className="mb-3 flex items-center gap-2">
+        <Wallet className="h-4 w-4 text-crimson-400" />
+        <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">Physical Cash Calculator</h2>
+      </div>
+
+      {presentRiders.length === 0 ? (
+        <p className="text-xs text-muted">Mark passengers Present to start collecting cash.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {presentRiders.map((p) => (
+            <div key={p.id} className="flex items-center justify-between gap-2 rounded-lg bg-card-2/80 px-3 py-2">
+              <span className="min-w-0 truncate text-xs text-ink">{p.fullName}</span>
+              <div className="flex shrink-0 items-center gap-1 text-xs text-muted">
+                R
+                <input
+                  type="number"
+                  min="0"
+                  value={cashCollected[p.id] ?? DEFAULT_FARE}
+                  onChange={(e) => onSetCash(p.id, Math.max(0, parseInt(e.target.value, 10) || 0))}
+                  className="input-field w-16 py-1 text-center text-xs"
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* External sponsees — cash collected here for a passenger in another vehicle */}
+      <div className="mt-3">
+        <button onClick={onAddSponsee} className="flex items-center gap-1.5 text-xs font-semibold text-crimson-400 hover:text-crimson-300">
+          <Plus className="h-3.5 w-3.5" />
+          + Add External Sponsee Cash
+        </button>
+        {externalSponsees.length > 0 && (
+          <div className="mt-2 space-y-2">
+            {externalSponsees.map((s) => (
+              <div key={s.id} className="flex flex-col gap-1.5 rounded-lg border border-line bg-card-2/60 p-2.5 sm:flex-row sm:items-center">
+                <input
+                  type="text"
+                  value={s.sponseeName}
+                  onChange={(e) => onUpdateSponsee(s.id, { sponseeName: e.target.value })}
+                  placeholder="Sponsee name"
+                  className="input-field py-1.5 text-xs sm:flex-1"
+                />
+                <input
+                  type="text"
+                  value={s.taxiName}
+                  onChange={(e) => onUpdateSponsee(s.id, { taxiName: e.target.value })}
+                  placeholder="In which taxi? (e.g. Taxi 2)"
+                  className="input-field py-1.5 text-xs sm:flex-1"
+                />
+                <div className="flex items-center gap-1 text-xs text-muted">
+                  R
+                  <input
+                    type="number"
+                    min="0"
+                    value={s.amount}
+                    onChange={(e) => onUpdateSponsee(s.id, { amount: Math.max(0, parseInt(e.target.value, 10) || 0) })}
+                    className="input-field w-16 py-1 text-center text-xs"
+                  />
+                </div>
+                <button onClick={() => onRemoveSponsee(s.id)} className="rounded-md p-1.5 text-muted hover:bg-crimson-900/30 hover:text-crimson-300" title="Remove">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Live total */}
+      <div className="mt-3 space-y-1 rounded-lg border border-crimson-500/20 bg-crimson-900/10 p-3 text-xs">
+        <div className="flex items-center justify-between text-muted">
+          <span>Base Passenger Cash</span>
+          <span className="font-mono font-semibold text-ink">R{baseCash}</span>
+        </div>
+        <div className="flex items-center justify-between text-muted">
+          <span>+ External Sponsee Cash</span>
+          <span className="font-mono font-semibold text-ink">R{externalCash}</span>
+        </div>
+        <div className="mt-1 flex items-center justify-between border-t border-crimson-500/20 pt-1.5">
+          <span className="font-semibold text-ink">Total Physical Cash Expected in Vehicle</span>
+          <span className="font-display text-base font-bold text-crimson-400">R{totalCash}</span>
+        </div>
+      </div>
     </div>
   );
 }
