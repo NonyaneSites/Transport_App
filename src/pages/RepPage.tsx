@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
-import { upcomingSunday, manifestKey, prettyDate, parseManifestKey } from '@/lib/dates';
+import { upcomingSunday, manifestKey, prettyDate, parseManifestKey, shortDate } from '@/lib/dates';
 import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType, type Passenger, type Vehicle } from '@/lib/types';
 import { hubDisplayName } from '@/lib/types';
 import { sortVehiclesNatural } from '@/lib/sort';
@@ -61,7 +61,6 @@ export function RepPage() {
   const [pastCancellations, setPastCancellations] = useState<LedgerEntry[]>([]);
   const [loadingPastCancellations, setLoadingPastCancellations] = useState(false);
   const [collectedCancellationIds, setCollectedCancellationIds] = useState<Set<string>>(new Set());
-  const [cancellationPickerOpen, setCancellationPickerOpen] = useState(false);
   const [cancellationSearch, setCancellationSearch] = useState('');
 
   // Draft auto-save/restore
@@ -727,8 +726,6 @@ export function RepPage() {
                       collectedCancellationIds={collectedCancellationIds}
                       onToggleCancellation={toggleCollectedCancellation}
                       pastCancellationCash={pastCancellationCash}
-                      pickerOpen={cancellationPickerOpen}
-                      onTogglePicker={() => setCancellationPickerOpen((v) => !v)}
                       search={cancellationSearch}
                       onSearchChange={setCancellationSearch}
                       baseCash={baseCash}
@@ -888,11 +885,19 @@ function StatCard({
   );
 }
 
+/** Renders an entry's stored service label (e.g. "PM Service — Normal Only") as "PM Normal" / "AM Serving". */
+function formatServicePeriodMode(service: string): string {
+  const parts = service.split('—').map((s) => s.trim());
+  const period = (parts[0] ?? '').split(' ')[0] || '';
+  const mode = (parts[1] ?? '').replace(/only/i, '').trim();
+  return [period, mode].filter(Boolean).join(' ') || service;
+}
+
 function CashCalculatorCard({
   presentCount, presentSponsoredCount, fare, grossPresentCash, sponsoredDeduction,
   externalSponsees, onAddSponsee, onUpdateSponsee, onRemoveSponsee, externalCash,
   pastCancellations, loadingPastCancellations, collectedCancellationIds, onToggleCancellation,
-  pastCancellationCash, pickerOpen, onTogglePicker, search, onSearchChange,
+  pastCancellationCash, search, onSearchChange,
   baseCash, totalCash,
 }: {
   presentCount: number;
@@ -910,16 +915,17 @@ function CashCalculatorCard({
   collectedCancellationIds: Set<string>;
   onToggleCancellation: (id: string) => void;
   pastCancellationCash: number;
-  pickerOpen: boolean;
-  onTogglePicker: () => void;
   search: string;
   onSearchChange: (v: string) => void;
   baseCash: number;
   totalCash: number;
 }) {
   const q = search.trim().toLowerCase();
-  const filteredCancellations = pastCancellations.filter((e) => {
-    if (!q) return true;
+  // Selected debts are shown separately, so search results only ever
+  // surface still-outstanding ("active") records the Rep hasn't picked yet.
+  const selectedCancellations = pastCancellations.filter((e) => collectedCancellationIds.has(e.id));
+  const searchResults = q.length === 0 ? [] : pastCancellations.filter((e) => {
+    if (collectedCancellationIds.has(e.id)) return false;
     return e.passenger_name.toLowerCase().includes(q) || (e.structure || '').toLowerCase().includes(q);
   });
 
@@ -987,65 +993,82 @@ function CashCalculatorCard({
         )}
       </div>
 
-      {/* Past-cancellation cash collection */}
+      {/* Search-based past-cancellation cash settlement */}
       <div className="mt-3">
-        <button
-          onClick={onTogglePicker}
-          className="flex w-full items-center justify-between gap-2 rounded-lg border border-line bg-card-2/60 px-2.5 py-2 text-xs font-semibold text-crimson-400 hover:text-crimson-300"
-        >
-          <span className="flex items-center gap-1.5">
-            <Banknote className="h-3.5 w-3.5" />
-            + Collect Past Cancellation Fee (Cash)
-            {collectedCancellationIds.size > 0 && (
-              <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px]">{collectedCancellationIds.size} selected</span>
-            )}
-          </span>
-          {pickerOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-        </button>
+        <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-crimson-400">
+          <Banknote className="h-3.5 w-3.5" />
+          Settle a Past Cancellation (Cash)
+          {collectedCancellationIds.size > 0 && (
+            <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px]">{collectedCancellationIds.size} selected</span>
+          )}
+        </div>
 
-        {pickerOpen && (
-          <div className="mt-2 space-y-2 rounded-lg border border-line bg-card-2/40 p-2.5 animate-fade-in">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => onSearchChange(e.target.value)}
-                placeholder="Search by name or structure…"
-                className="input-field py-1.5 pl-8 text-xs"
-              />
-            </div>
-            {loadingPastCancellations ? (
-              <p className="py-2 text-center text-[11px] text-muted">Loading outstanding cancellations…</p>
-            ) : filteredCancellations.length === 0 ? (
-              <p className="py-2 text-center text-[11px] text-muted">No outstanding cancellations found.</p>
-            ) : (
-              <div className="max-h-48 space-y-1 overflow-y-auto">
-                {filteredCancellations.map((e) => {
-                  const checked = collectedCancellationIds.has(e.id);
-                  return (
-                    <label
-                      key={e.id}
-                      className={`flex cursor-pointer items-center justify-between gap-2 rounded-md px-2 py-1.5 text-xs transition-colors ${
-                        checked ? 'bg-crimson-500/10 text-crimson-200' : 'text-ink hover:bg-card-2/80'
-                      }`}
-                    >
-                      <span className="flex items-center gap-2 min-w-0">
-                        <input type="checkbox" checked={checked} onChange={() => onToggleCancellation(e.id)} className="shrink-0" />
-                        <span className="truncate">{e.passenger_name}</span>
-                        {e.structure && <span className="shrink-0 rounded bg-bg/60 px-1 py-0.5 font-mono text-[10px] text-muted">{e.structure}</span>}
-                      </span>
-                      <span className="shrink-0 font-mono text-[10px] text-muted">R{fare}</span>
-                    </label>
-                  );
-                })}
+        {/* Already-selected debts, with a way to deselect */}
+        {selectedCancellations.length > 0 && (
+          <div className="mb-2 space-y-1.5">
+            {selectedCancellations.map((e) => (
+              <div
+                key={e.id}
+                className="flex items-center justify-between gap-2 rounded-md border border-crimson-500/40 bg-crimson-500/10 px-2.5 py-1.5 text-xs"
+              >
+                <span className="min-w-0 truncate text-crimson-200">
+                  <span className="font-semibold">{e.passenger_name}</span>
+                  <span className="text-muted"> — {shortDate(e.date)} · {formatServicePeriodMode(e.service)}</span>
+                </span>
+                <button
+                  onClick={() => onToggleCancellation(e.id)}
+                  className="shrink-0 rounded p-1 text-muted hover:bg-crimson-900/30 hover:text-crimson-300"
+                  title="Remove"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
               </div>
-            )}
-            <p className="text-[10px] text-muted">
-              Selecting a name adds R{fare} to this vehicle's expected cash and clears that person's debt on submit.
-            </p>
+            ))}
           </div>
         )}
+
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder="Search by name or structure to settle a past cancellation…"
+            className="input-field py-1.5 pl-8 text-xs"
+          />
+        </div>
+
+        {search.trim().length > 0 && (
+          <div className="mt-2 max-h-56 space-y-1.5 overflow-y-auto rounded-lg border border-line bg-card-2/40 p-2 animate-fade-in">
+            {loadingPastCancellations ? (
+              <p className="py-2 text-center text-[11px] text-muted">Loading outstanding cancellations…</p>
+            ) : searchResults.length === 0 ? (
+              <p className="py-2 text-center text-[11px] text-muted">No outstanding cancellations match your search.</p>
+            ) : (
+              searchResults.map((e) => (
+                <button
+                  key={e.id}
+                  type="button"
+                  onClick={() => onToggleCancellation(e.id)}
+                  className="flex w-full items-center justify-between gap-2 rounded-md border border-line bg-card px-2.5 py-2 text-left text-xs transition-colors hover:border-crimson-500/40 hover:bg-card-2/60"
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate font-semibold text-ink">{e.passenger_name}</span>
+                    <span className="mt-0.5 block text-[10px] text-muted">
+                      {shortDate(e.date)} · {formatServicePeriodMode(e.service)}
+                      {e.structure && ` · ${e.structure}`}
+                    </span>
+                  </span>
+                  <span className="shrink-0 font-mono text-[10px] text-muted">R{fare}</span>
+                </button>
+              ))
+            )}
+          </div>
+        )}
+
+        <p className="mt-1.5 text-[10px] text-muted">
+          Selecting a match adds R{fare} to this vehicle's expected cash and clears that person's debt on submit.
+        </p>
       </div>
 
       {/* Live total */}

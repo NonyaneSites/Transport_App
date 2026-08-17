@@ -1,10 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
-import { BookOpen, Loader2, AlertTriangle, FileSpreadsheet, Search, Trash2, Filter, XCircle, ChevronDown, ChevronRight } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  BookOpen, Loader2, AlertTriangle, FileSpreadsheet, Search, Trash2, Filter, XCircle,
+  ChevronDown, ChevronRight, Upload, CheckCircle2,
+} from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
 import {
   listLedgerEntries, deleteLedgerEntry, downloadLedgerExcel,
-  aggregateLedgerEntries, type LedgerEntry, type AggregatedLedgerRow,
+  aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
+  type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
 } from '@/lib/ledger';
 import { shortDate } from '@/lib/dates';
 import { naturalCompare } from '@/lib/sort';
@@ -16,6 +20,13 @@ export function LedgerPage() {
   const [search, setSearch] = useState('');
   const [structureFilter, setStructureFilter] = useState('');
   const [collapsedStructures, setCollapsedStructures] = useState<Set<string>>(new Set());
+
+  // Historical Cancellation Import
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<HistoricalImportResult | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importFileName, setImportFileName] = useState<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -57,6 +68,33 @@ export function LedgerPage() {
   // Shared with the download (see aggregateLedgerEntries in lib/ledger) so
   // the web view and the exported "SZ Cancellation List" never drift apart.
   const groupedByStructure = useMemo(() => aggregateLedgerEntries(filtered), [filtered]);
+
+  async function handleImportFile(file: File) {
+    setImporting(true);
+    setImportError(null);
+    setImportResult(null);
+    setImportFileName(file.name);
+    try {
+      const buf = await file.arrayBuffer();
+      const result = parseHistoricalCancellationWorkbook(buf);
+      if (result.rows.length > 0) {
+        await importHistoricalCancellations(result.rows);
+        const refreshed = await listLedgerEntries();
+        setEntries(refreshed);
+      }
+      setImportResult(result);
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  function onImportInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) handleImportFile(file);
+    e.target.value = '';
+  }
 
   function toggleStructure(s: string) {
     setCollapsedStructures((prev) => {
@@ -122,14 +160,69 @@ export function LedgerPage() {
                 <SummaryStat label="Filtered" value={filtered.length} accent="crimson" />
                 <SummaryStat label="Total Debt" value={`R${totalDebt}`} accent="warning" />
               </div>
-              <button
-                onClick={() => downloadLedgerExcel(filtered.length > 0 ? filtered : entries, `SZ_Cancellation_List_${new Date().toISOString().slice(0,10)}.xlsx`)}
-                className="btn-success"
-              >
-                <FileSpreadsheet className="h-4 w-4" />
-                Download Ledger
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  onChange={onImportInputChange}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => importInputRef.current?.click()}
+                  disabled={importing}
+                  className="btn-ghost"
+                  title="Bulk-import historical cancellation records (Structure, Date, Service, Passenger Name, Amount)"
+                >
+                  {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+                  Import Cancellation History
+                </button>
+                <button
+                  onClick={() => downloadLedgerExcel(filtered.length > 0 ? filtered : entries, `SZ_Cancellation_List_${new Date().toISOString().slice(0,10)}.xlsx`)}
+                  className="btn-success"
+                >
+                  <FileSpreadsheet className="h-4 w-4" />
+                  Download Ledger
+                </button>
+              </div>
             </div>
+
+            {/* Historical import feedback */}
+            {importFileName && (importing || importResult || importError) && (
+              <div className="mb-4 space-y-2 rounded-xl border border-line bg-card p-4 animate-fade-in">
+                {importing ? (
+                  <div className="flex items-center gap-2 text-sm text-muted">
+                    <Loader2 className="h-4 w-4 animate-spin text-crimson-400" />
+                    Importing {importFileName}…
+                  </div>
+                ) : importError ? (
+                  <div className="flex items-start gap-2 text-sm text-crimson-300">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                    {importError}
+                  </div>
+                ) : importResult ? (
+                  <>
+                    <div className="flex items-center gap-2 text-sm font-semibold text-success-light">
+                      <CheckCircle2 className="h-4 w-4" />
+                      Imported {importResult.imported} of {importResult.totalRows} row(s) from {importFileName}
+                    </div>
+                    {importResult.skipped > 0 && (
+                      <p className="text-xs text-muted">{importResult.skipped} row(s) skipped — see details below.</p>
+                    )}
+                    {importResult.warnings.length > 0 && (
+                      <div className="max-h-32 space-y-1 overflow-y-auto text-xs text-warning">
+                        {importResult.warnings.map((w, i) => (
+                          <div key={i} className="flex items-start gap-1.5">
+                            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                            <span>{w}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                ) : null}
+              </div>
+            )}
 
             {/* Search + filter controls */}
             <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -160,10 +253,10 @@ export function LedgerPage() {
 
             {/* Grouped by structure — strict alphanumeric order (S1, S2, S9, S13) */}
             <div className="space-y-3">
-              {groupedByStructure.map(({ structure, reps, rows, totalDebt: structDebt }) => {
+              {groupedByStructure.map(({ structure, rows, totalDebt: structDebt }) => {
                 const isCollapsed = collapsedStructures.has(structure);
-                // Rep name(s) moved to the end of the structure label, e.g. "S1 - Nthabiseng, Nthabeleng"
-                const structureLabel = reps.length > 0 ? `${structure} - ${reps.join(', ')}` : structure;
+                // Structure-only heading — rep names are never shown as a header or primary title here.
+                const structureLabel = structure === 'No Structure' ? structure : `Structure ${structure}`;
                 return (
                   <div key={structure} className="overflow-hidden rounded-2xl border border-line bg-card">
                     <button
@@ -182,7 +275,7 @@ export function LedgerPage() {
                         <table className="w-full text-left text-sm">
                           <thead>
                             <tr className="border-b border-line bg-card-2/50">
-                              <th className="px-4 py-3 font-display text-xs font-bold uppercase tracking-wider text-muted">Structure and Rep</th>
+                              <th className="px-4 py-3 font-display text-xs font-bold uppercase tracking-wider text-muted">Structure</th>
                               <th className="px-4 py-3 font-display text-xs font-bold uppercase tracking-wider text-muted">Cancellation Date</th>
                               <th className="px-4 py-3 font-display text-xs font-bold uppercase tracking-wider text-muted">Name</th>
                               <th className="px-4 py-3 font-display text-xs font-bold uppercase tracking-wider text-muted">Amount Owing</th>
@@ -192,7 +285,7 @@ export function LedgerPage() {
                           <tbody className="divide-y divide-line/60">
                             {rows.map((row) => (
                               <tr key={row.key} className="transition-colors hover:bg-card-2/30">
-                                <td className="px-4 py-3 text-ink">{row.structure} - {row.repName}</td>
+                                <td className="px-4 py-3 text-ink">{row.structure}</td>
                                 <td className="px-4 py-3 text-muted">{shortDate(row.latestDate)}</td>
                                 <td className="px-4 py-3">
                                   <span className="font-semibold text-ink">{row.name}</span>
