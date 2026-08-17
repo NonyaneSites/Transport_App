@@ -2,17 +2,18 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
   Smartphone, Wifi, ChevronDown, ChevronRight, MapPin, Send, Cross,
-  HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus,
+  HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus, Search, Banknote,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey } from '@/lib/dates';
-import { SERVICE_TYPES, CANCELLATION_FEE, type ServiceType, type Passenger, type Vehicle } from '@/lib/types';
+import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType, type Passenger, type Vehicle } from '@/lib/types';
 import { hubDisplayName } from '@/lib/types';
+import { sortVehiclesNatural } from '@/lib/sort';
 import { vehicleRiders, passengersByStop } from '@/lib/manifest';
-import { insertAbsentees } from '@/lib/ledger';
+import { insertAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEntry } from '@/lib/ledger';
 
-const DEFAULT_FARE = CANCELLATION_FEE; // R40 default passenger fare
+const FARE = CANCELLATION_FEE; // R40 fixed passenger fare — never individually editable
 
 interface ExternalSponsee {
   id: string;
@@ -27,8 +28,9 @@ interface RepDraft {
   notes: Record<string, string>;
   generalNotes: string;
   coReps: string[];
-  cashCollected: Record<string, number>;
   externalSponsees: ExternalSponsee[];
+  /** IDs of `cancellation_ledger` rows this rep is collecting R40 cash for during this trip. */
+  collectedCancellationIds: string[];
 }
 
 function draftKey(manifestKeyStr: string, vehicleId: string): string {
@@ -53,8 +55,14 @@ export function RepPage() {
   const [touchedIds, setTouchedIds] = useState<Set<string>>(new Set());
 
   // Cash & sponsorship calculator
-  const [cashCollected, setCashCollected] = useState<Record<string, number>>({});
   const [externalSponsees, setExternalSponsees] = useState<ExternalSponsee[]>([]);
+
+  // Past-cancellation cash collection
+  const [pastCancellations, setPastCancellations] = useState<LedgerEntry[]>([]);
+  const [loadingPastCancellations, setLoadingPastCancellations] = useState(false);
+  const [collectedCancellationIds, setCollectedCancellationIds] = useState<Set<string>>(new Set());
+  const [cancellationPickerOpen, setCancellationPickerOpen] = useState(false);
+  const [cancellationSearch, setCancellationSearch] = useState('');
 
   // Draft auto-save/restore
   const [draftRestored, setDraftRestored] = useState(false);
@@ -102,8 +110,8 @@ export function RepPage() {
       setNotes({});
       setGeneralNotes('');
       setCoReps([]);
-      setCashCollected({});
       setExternalSponsees([]);
+      setCollectedCancellationIds(new Set());
       setDraftRestored(false);
       return;
     }
@@ -120,8 +128,8 @@ export function RepPage() {
           setNotes(draft.notes ?? {});
           setGeneralNotes(draft.generalNotes ?? '');
           setCoReps(draft.coReps ?? []);
-          setCashCollected(draft.cashCollected ?? {});
           setExternalSponsees(draft.externalSponsees ?? []);
+          setCollectedCancellationIds(new Set(draft.collectedCancellationIds ?? []));
           restored = true;
         }
       } catch { /* corrupt draft — ignore and start fresh */ }
@@ -132,8 +140,8 @@ export function RepPage() {
       setNotes({});
       setGeneralNotes('');
       setCoReps([]);
-      setCashCollected({});
       setExternalSponsees([]);
+      setCollectedCancellationIds(new Set());
     }
     setDraftRestored(restored);
     if (restored) {
@@ -153,13 +161,28 @@ export function RepPage() {
       notes,
       generalNotes,
       coReps,
-      cashCollected,
       externalSponsees,
+      collectedCancellationIds: Array.from(collectedCancellationIds),
     };
     try {
       localStorage.setItem(draftKey(key, selectedVehicleId), JSON.stringify(draft));
     } catch { /* storage unavailable — draft just won't persist */ }
-  }, [key, selectedVehicleId, selectedVehicle, touchedIds, sponsoredIds, notes, generalNotes, coReps, cashCollected, externalSponsees]);
+  }, [key, selectedVehicleId, selectedVehicle, touchedIds, sponsoredIds, notes, generalNotes, coReps, externalSponsees, collectedCancellationIds]);
+
+  // Load outstanding past-cancellation debts once, so any Rep can collect
+  // cash on behalf of someone in a different vehicle/structure.
+  useEffect(() => {
+    let mounted = true;
+    setLoadingPastCancellations(true);
+    (async () => {
+      try {
+        const entries = await listLedgerEntries();
+        if (mounted) setPastCancellations(entries);
+      } catch { /* non-critical — picker will just show empty */ }
+      finally { if (mounted) setLoadingPastCancellations(false); }
+    })();
+    return () => { mounted = false; };
+  }, []);
 
   const presentCount = riders.filter((r) => r.present).length;
   const absentCount = riders.length - presentCount;
@@ -177,12 +200,16 @@ export function RepPage() {
     !sponsoredMissingNotes &&
     !submitting;
 
-  // Cash calculator totals
-  const baseCash = riders
-    .filter((r) => r.present)
-    .reduce((sum, r) => sum + (cashCollected[r.id] ?? DEFAULT_FARE), 0);
+  // Cash calculator totals — base fare is fixed at R40/present passenger
+  // and is never individually editable.
+  // Total = (Present * 40) - (Sponsored Present * 40) + External Sponsee Cash + Past Cancellation Cash Collected
+  const presentSponsoredCount = riders.filter((r) => r.present && sponsoredIds.has(r.id)).length;
+  const grossPresentCash = presentCount * FARE;
+  const sponsoredDeduction = presentSponsoredCount * FARE;
+  const baseCash = grossPresentCash - sponsoredDeduction;
   const externalCash = externalSponsees.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
-  const totalCash = baseCash + externalCash;
+  const pastCancellationCash = collectedCancellationIds.size * FARE;
+  const totalCash = baseCash + externalCash + pastCancellationCash;
 
   async function setPresent(passengerId: string, present: boolean) {
     if (!manifest) return;
@@ -218,14 +245,19 @@ export function RepPage() {
     setCoReps((prev) => prev.filter((_, i) => i !== index));
   }
 
-  function setCashForPassenger(passengerId: string, amount: number) {
-    setCashCollected((prev) => ({ ...prev, [passengerId]: amount }));
+  function toggleCollectedCancellation(entryId: string) {
+    setCollectedCancellationIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(entryId)) next.delete(entryId);
+      else next.add(entryId);
+      return next;
+    });
   }
 
   function addExternalSponsee() {
     setExternalSponsees((prev) => [
       ...prev,
-      { id: `sponsee-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, sponseeName: '', taxiName: '', amount: DEFAULT_FARE },
+      { id: `sponsee-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, sponseeName: '', taxiName: '', amount: FARE },
     ]);
   }
 
@@ -339,9 +371,15 @@ export function RepPage() {
       const coRepNote = coReps.map((c) => c.trim()).filter(Boolean).length > 0
         ? `Co-reps: ${coReps.map((c) => c.trim()).filter(Boolean).join(', ')}. `
         : '';
-      const cashNote = `Cash collected: R${totalCash} (base R${baseCash}${externalCash > 0 ? ` + external R${externalCash}` : ''}). `;
+      const cashNote = `Cash collected: R${totalCash} (base R${baseCash}${externalCash > 0 ? ` + external R${externalCash}` : ''}${pastCancellationCash > 0 ? ` + past cancellations R${pastCancellationCash}` : ''}). `;
       const sponseeNote = externalSponsees.length > 0
         ? `External sponsees: ${externalSponsees.map((s) => `${s.sponseeName || 'Unnamed'} in ${s.taxiName || 'another vehicle'} (R${s.amount})`).join('; ')}. `
+        : '';
+      const settledNames = pastCancellations
+        .filter((e) => collectedCancellationIds.has(e.id))
+        .map((e) => e.passenger_name);
+      const settledNote = settledNames.length > 0
+        ? `Past cancellations collected in cash: ${settledNames.join(', ')}. `
         : '';
 
       // insertAbsentees deduplicates by deleting existing entries for this manifest+vehicle before inserting
@@ -354,8 +392,16 @@ export function RepPage() {
         repName.trim(),
         licensePlate.trim(),
         repDisplayName,
-        `${coRepNote}${cashNote}${sponseeNote}${generalNotes.trim()}`.trim()
+        `${coRepNote}${cashNote}${sponseeNote}${settledNote}${generalNotes.trim()}`.trim()
       );
+
+      // Resolve/settle the past-cancellation entries collected in cash on
+      // this trip so they drop off the active cancellation ledger.
+      if (collectedCancellationIds.size > 0) {
+        await settleLedgerEntries(Array.from(collectedCancellationIds));
+        setPastCancellations((prev) => prev.filter((e) => !collectedCancellationIds.has(e.id)));
+        setCollectedCancellationIds(new Set());
+      }
 
       const updatedVehicles = manifest.vehicles.map((v) =>
         v.id === selectedVehicle.id
@@ -495,7 +541,7 @@ export function RepPage() {
                   className="input-field pl-10"
                 >
                   <option value="" className="bg-card-2">Choose your vehicle…</option>
-                  {manifest.vehicles.map((v) => {
+                  {sortVehiclesNatural(manifest.vehicles).map((v) => {
                     const vRiders = vehicleRiders(manifest, v);
                     const vPresent = vRiders.filter((r) => r.present).length;
                     return (
@@ -635,21 +681,6 @@ export function RepPage() {
                   </div>
                 )}
 
-                {!isSubmitted && (
-                  <CashCalculatorCard
-                    riders={riders}
-                    cashCollected={cashCollected}
-                    onSetCash={setCashForPassenger}
-                    externalSponsees={externalSponsees}
-                    onAddSponsee={addExternalSponsee}
-                    onUpdateSponsee={updateExternalSponsee}
-                    onRemoveSponsee={removeExternalSponsee}
-                    baseCash={baseCash}
-                    externalCash={externalCash}
-                    totalCash={totalCash}
-                  />
-                )}
-
                 <StopGroupedChecklist
                   riders={riders}
                   touchedIds={touchedIds}
@@ -676,6 +707,33 @@ export function RepPage() {
                         className="input-field text-xs resize-none"
                       />
                     </div>
+
+                    {/* Read-only cash summary — sits directly above the submit
+                        button, per policy. Base fare is fixed at R40/present
+                        passenger and is never individually editable. */}
+                    <CashCalculatorCard
+                      presentCount={presentCount}
+                      presentSponsoredCount={presentSponsoredCount}
+                      fare={FARE}
+                      grossPresentCash={grossPresentCash}
+                      sponsoredDeduction={sponsoredDeduction}
+                      externalSponsees={externalSponsees}
+                      onAddSponsee={addExternalSponsee}
+                      onUpdateSponsee={updateExternalSponsee}
+                      onRemoveSponsee={removeExternalSponsee}
+                      externalCash={externalCash}
+                      pastCancellations={pastCancellations}
+                      loadingPastCancellations={loadingPastCancellations}
+                      collectedCancellationIds={collectedCancellationIds}
+                      onToggleCancellation={toggleCollectedCancellation}
+                      pastCancellationCash={pastCancellationCash}
+                      pickerOpen={cancellationPickerOpen}
+                      onTogglePicker={() => setCancellationPickerOpen((v) => !v)}
+                      search={cancellationSearch}
+                      onSearchChange={setCancellationSearch}
+                      baseCash={baseCash}
+                      totalCash={totalCash}
+                    />
 
                     {!allTouched && (
                       <div className="flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
@@ -831,21 +889,39 @@ function StatCard({
 }
 
 function CashCalculatorCard({
-  riders, cashCollected, onSetCash, externalSponsees, onAddSponsee, onUpdateSponsee, onRemoveSponsee,
-  baseCash, externalCash, totalCash,
+  presentCount, presentSponsoredCount, fare, grossPresentCash, sponsoredDeduction,
+  externalSponsees, onAddSponsee, onUpdateSponsee, onRemoveSponsee, externalCash,
+  pastCancellations, loadingPastCancellations, collectedCancellationIds, onToggleCancellation,
+  pastCancellationCash, pickerOpen, onTogglePicker, search, onSearchChange,
+  baseCash, totalCash,
 }: {
-  riders: Passenger[];
-  cashCollected: Record<string, number>;
-  onSetCash: (id: string, amount: number) => void;
+  presentCount: number;
+  presentSponsoredCount: number;
+  fare: number;
+  grossPresentCash: number;
+  sponsoredDeduction: number;
   externalSponsees: ExternalSponsee[];
   onAddSponsee: () => void;
   onUpdateSponsee: (id: string, patch: Partial<ExternalSponsee>) => void;
   onRemoveSponsee: (id: string) => void;
-  baseCash: number;
   externalCash: number;
+  pastCancellations: LedgerEntry[];
+  loadingPastCancellations: boolean;
+  collectedCancellationIds: Set<string>;
+  onToggleCancellation: (id: string) => void;
+  pastCancellationCash: number;
+  pickerOpen: boolean;
+  onTogglePicker: () => void;
+  search: string;
+  onSearchChange: (v: string) => void;
+  baseCash: number;
   totalCash: number;
 }) {
-  const presentRiders = riders.filter((r) => r.present);
+  const q = search.trim().toLowerCase();
+  const filteredCancellations = pastCancellations.filter((e) => {
+    if (!q) return true;
+    return e.passenger_name.toLowerCase().includes(q) || (e.structure || '').toLowerCase().includes(q);
+  });
 
   return (
     <div className="card">
@@ -854,27 +930,19 @@ function CashCalculatorCard({
         <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">Physical Cash Calculator</h2>
       </div>
 
-      {presentRiders.length === 0 ? (
-        <p className="text-xs text-muted">Mark passengers Present to start collecting cash.</p>
-      ) : (
-        <div className="space-y-1.5">
-          {presentRiders.map((p) => (
-            <div key={p.id} className="flex items-center justify-between gap-2 rounded-lg bg-card-2/80 px-3 py-2">
-              <span className="min-w-0 truncate text-xs text-ink">{p.fullName}</span>
-              <div className="flex shrink-0 items-center gap-1 text-xs text-muted">
-                R
-                <input
-                  type="number"
-                  min="0"
-                  value={cashCollected[p.id] ?? DEFAULT_FARE}
-                  onChange={(e) => onSetCash(p.id, Math.max(0, parseInt(e.target.value, 10) || 0))}
-                  className="input-field w-16 py-1 text-center text-xs"
-                />
-              </div>
-            </div>
-          ))}
+      {/* Read-only base fare summary — R40/present passenger is fixed and cannot be edited per-passenger. */}
+      <div className="space-y-1.5 rounded-lg bg-card-2/60 p-3 text-xs">
+        <div className="flex items-center justify-between text-muted">
+          <span>Present Passengers</span>
+          <span className="font-mono font-semibold text-ink">{presentCount} × R{fare} = R{grossPresentCash}</span>
         </div>
-      )}
+        {presentSponsoredCount > 0 && (
+          <div className="flex items-center justify-between text-muted">
+            <span>- Sponsored (Present, didn't pay)</span>
+            <span className="font-mono font-semibold text-warning">{presentSponsoredCount} × R{fare} = -R{sponsoredDeduction}</span>
+          </div>
+        )}
+      </div>
 
       {/* External sponsees — cash collected here for a passenger in another vehicle */}
       <div className="mt-3">
@@ -919,6 +987,67 @@ function CashCalculatorCard({
         )}
       </div>
 
+      {/* Past-cancellation cash collection */}
+      <div className="mt-3">
+        <button
+          onClick={onTogglePicker}
+          className="flex w-full items-center justify-between gap-2 rounded-lg border border-line bg-card-2/60 px-2.5 py-2 text-xs font-semibold text-crimson-400 hover:text-crimson-300"
+        >
+          <span className="flex items-center gap-1.5">
+            <Banknote className="h-3.5 w-3.5" />
+            + Collect Past Cancellation Fee (Cash)
+            {collectedCancellationIds.size > 0 && (
+              <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px]">{collectedCancellationIds.size} selected</span>
+            )}
+          </span>
+          {pickerOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        </button>
+
+        {pickerOpen && (
+          <div className="mt-2 space-y-2 rounded-lg border border-line bg-card-2/40 p-2.5 animate-fade-in">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => onSearchChange(e.target.value)}
+                placeholder="Search by name or structure…"
+                className="input-field py-1.5 pl-8 text-xs"
+              />
+            </div>
+            {loadingPastCancellations ? (
+              <p className="py-2 text-center text-[11px] text-muted">Loading outstanding cancellations…</p>
+            ) : filteredCancellations.length === 0 ? (
+              <p className="py-2 text-center text-[11px] text-muted">No outstanding cancellations found.</p>
+            ) : (
+              <div className="max-h-48 space-y-1 overflow-y-auto">
+                {filteredCancellations.map((e) => {
+                  const checked = collectedCancellationIds.has(e.id);
+                  return (
+                    <label
+                      key={e.id}
+                      className={`flex cursor-pointer items-center justify-between gap-2 rounded-md px-2 py-1.5 text-xs transition-colors ${
+                        checked ? 'bg-crimson-500/10 text-crimson-200' : 'text-ink hover:bg-card-2/80'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2 min-w-0">
+                        <input type="checkbox" checked={checked} onChange={() => onToggleCancellation(e.id)} className="shrink-0" />
+                        <span className="truncate">{e.passenger_name}</span>
+                        {e.structure && <span className="shrink-0 rounded bg-bg/60 px-1 py-0.5 font-mono text-[10px] text-muted">{e.structure}</span>}
+                      </span>
+                      <span className="shrink-0 font-mono text-[10px] text-muted">R{fare}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            <p className="text-[10px] text-muted">
+              Selecting a name adds R{fare} to this vehicle's expected cash and clears that person's debt on submit.
+            </p>
+          </div>
+        )}
+      </div>
+
       {/* Live total */}
       <div className="mt-3 space-y-1 rounded-lg border border-crimson-500/20 bg-crimson-900/10 p-3 text-xs">
         <div className="flex items-center justify-between text-muted">
@@ -928,6 +1057,10 @@ function CashCalculatorCard({
         <div className="flex items-center justify-between text-muted">
           <span>+ External Sponsee Cash</span>
           <span className="font-mono font-semibold text-ink">R{externalCash}</span>
+        </div>
+        <div className="flex items-center justify-between text-muted">
+          <span>+ Past Cancellation Cash Collected</span>
+          <span className="font-mono font-semibold text-ink">R{pastCancellationCash}</span>
         </div>
         <div className="mt-1 flex items-center justify-between border-t border-crimson-500/20 pt-1.5">
           <span className="font-semibold text-ink">Total Physical Cash Expected in Vehicle</span>
@@ -951,7 +1084,7 @@ function StopGroupedChecklist({
   disabled: boolean;
 }) {
   const byStop = useMemo(() => passengersByStop(riders), [riders]);
-  const stops = Object.keys(byStop).sort((a, b) => byStop[b].length - byStop[a].length);
+  const stops = sortByRouteSequence(Object.keys(byStop), (s) => s);
   const [expandedStops, setExpandedStops] = useState<Set<string>>(new Set(stops));
 
   function toggleStop(stop: string) {

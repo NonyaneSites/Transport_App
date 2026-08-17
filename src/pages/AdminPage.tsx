@@ -142,6 +142,7 @@ export function AdminPage() {
             <VehicleAllocation
               manifest={manifest ?? { date: key, signups: [], vehicles: [] }}
               serviceLabel={serviceLabel}
+              service={service}
               onSave={save}
             />
           </div>
