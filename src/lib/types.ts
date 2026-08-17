@@ -30,6 +30,13 @@ export interface Vehicle {
   coReps?: string[];
   generalNotes?: string;
   repCount?: number;
+  /**
+   * Manually-set pickup time (e.g. "15:00") per stop/hub label, keyed the
+   * same way as `orderedStops` entries. Used to render bold times in the
+   * WhatsApp export (e.g. "🛑 Braam - *15:00*"). A label with no entry here
+   * is exported without a time.
+   */
+  stopTimes?: Record<string, string>;
 }
 
 export interface Manifest {
@@ -74,6 +81,13 @@ export const LARGE_BUS_THRESHOLD = 40;
  * Gate 2, Gate 4, APK McDonald's, Westdene, Junction, Education Campus,
  * Saratoga, Argyle, Arteria, Knockando) remains an individual stop and is
  * NEVER folded into a Taxi hub.
+ *
+ * NOTE: hub membership is about which stops are consolidated under one
+ * label for display/allocation purposes — it does NOT mean a hub must be
+ * assigned to a vehicle all-or-nothing. The Admin can still assign a
+ * partial quantity out of a hub's (or a raw stop's) waiting pool to one
+ * vehicle and leave the remainder for another (see the quantity selector
+ * in VehicleAllocation).
  */
 export const TAXI_HUBS: { hub: string; stops: string[] }[] = [
   {
@@ -169,4 +183,41 @@ export function hubDisplayName(vehicleType: 'Bus' | 'Taxi', stop: string): strin
   const busHub = stopToBusHub(stop);
   if (busHub) return busHub;
   return stop;
+}
+
+/**
+ * Canonical physical route sequence, used to order any stop/hub pool that
+ * hasn't yet been locked into a vehicle's `orderedStops` (e.g. the Admin's
+ * unassigned-pool overview, or a per-vehicle-type pool dropdown). This is
+ * a fixed, defined order — it must NEVER be derived from signup counts.
+ * Once a stop/hub is actually assigned to a vehicle, `orderedStops` takes
+ * over as the source of truth for that vehicle's display order.
+ */
+export const ROUTE_SEQUENCE: string[] = [
+  'Braam',
+  '56 Jorissen', 'Amani', 'Apex', 'Student Digzz', 'YMCA',
+  'Gate 7',
+  'Amic Deck - David Webster', 'Barnato', "Amic Deck - Men's Res", 'Amic Deck - Sunnyside', 'Amic Deck - Jubilee',
+  'EOH',
+  'Campus Central - EOH', 'EOH Campus Central', 'Campus Central on empire', 'Charlotte', 'Charlotte Maxeke',
+  ...INDIVIDUAL_STOPS,
+];
+
+/** Index of a stop/hub label in the canonical route sequence (unknown labels sort last, in encounter order). */
+export function routeSequenceIndex(key: string): number {
+  const norm = key.trim().toLowerCase();
+  const idx = ROUTE_SEQUENCE.findIndex((s) => s.toLowerCase() === norm);
+  return idx === -1 ? ROUTE_SEQUENCE.length : idx;
+}
+
+/**
+ * Sorts items by the canonical route sequence order — never by signup
+ * count. Items not found in ROUTE_SEQUENCE are appended at the end,
+ * preserving their relative input order.
+ */
+export function sortByRouteSequence<T>(items: T[], getKey: (item: T) => string): T[] {
+  return items
+    .map((item, i) => ({ item, i, idx: routeSequenceIndex(getKey(item)) }))
+    .sort((a, b) => (a.idx - b.idx) || (a.i - b.i))
+    .map((x) => x.item);
 }

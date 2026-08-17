@@ -103,6 +103,18 @@ export async function deleteLedgerEntry(id: string): Promise<void> {
   if (error) throw error;
 }
 
+/**
+ * Settles (removes) a batch of past-cancellation ledger entries in one
+ * call — used when a Rep collects R40 cash on behalf of someone with an
+ * outstanding cancellation fee during a trip, so that entry no longer
+ * appears as owing. No-op if `ids` is empty.
+ */
+export async function settleLedgerEntries(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const { error } = await supabase.from(LEDGER_TABLE).delete().in('id', ids);
+  if (error) throw error;
+}
+
 export async function updateLedgerEntry(id: string, updates: Partial<LedgerEntry>): Promise<void> {
   const { error } = await supabase.from(LEDGER_TABLE).update(updates).eq('id', id);
   if (error) throw error;
@@ -197,8 +209,9 @@ export function downloadLedgerExcel(entries: LedgerEntry[], fileName: string): v
     [],
     ['Policy'],
     ['Outstanding cancellation fees must be settled within 3 weeks of the missed service.'],
-    ['Upload proof of payment (POP): <insert POP upload link here>'],
+    ['Upload proof of payment (POP): https://forms.gle/HDvmuZywzNitWFpU6'],
     ['Each structure is collectively liable for the unpaid cancellation fees of its members.'],
+    ['Cash may be handed directly to a transport rep on your next trip; EFT payments must reference your name and structure, with POP uploaded via the link above.'],
     [],
     ['Banking Details'],
     ['Account Name', BANK_DETAILS.accountName],

@@ -39,6 +39,11 @@ export const BUS_EOH_ALIASES = new Set([
  * lives in hubDisplayName (./types), which additionally handles the
  * Bus-only EOH spelling canonicalization — use that instead of this
  * function wherever a vehicle-type-aware answer is needed.
+ *
+ * Hub membership only determines the consolidated *label* passengers are
+ * grouped under — it does not force all-or-nothing assignment. The Admin
+ * may still assign a partial quantity out of a hub's waiting pool to one
+ * vehicle and leave the rest for another vehicle.
  */
 export function masterHubForStop(value: unknown): string {
   const stop = sanitizeTransportValue(value);

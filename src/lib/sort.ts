@@ -26,3 +26,13 @@ export function naturalCompare(a: string, b: string): number {
   }
   return 0;
 }
+
+/**
+ * Vehicle cards MUST always render in natural alphanumeric order by name
+ * (Taxi 1, Taxi 2, ..., Taxi 10, Bus 1, Bus 2, ...) — never by creation
+ * order, submission state, or any other incidental ordering. Use this
+ * everywhere a list of vehicles is rendered or offered in a dropdown.
+ */
+export function sortVehiclesNatural<T extends { name: string }>(vehicles: T[]): T[] {
+  return [...vehicles].sort((a, b) => naturalCompare(a.name, b.name));
+}
