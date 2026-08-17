@@ -381,12 +381,15 @@ export function RepPage() {
         ? `Past cancellations collected in cash: ${settledNames.join(', ')}. `
         : '';
 
-      // insertAbsentees deduplicates by deleting existing entries for this manifest+vehicle before inserting
+      // insertAbsentees deduplicates strictly by manifest_key + passenger_name
+      // (across this vehicle's full roster, present and absent) before
+      // inserting — so resubmitting never leaves a duplicate debt row.
       await insertAbsentees(
         key,
         parsedDate,
         serviceLabel,
         absentees,
+        riders.map((r) => r.fullName),
         selectedVehicle.name,
         repName.trim(),
         licensePlate.trim(),
