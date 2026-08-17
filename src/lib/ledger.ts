@@ -120,6 +120,176 @@ export async function updateLedgerEntry(id: string, updates: Partial<LedgerEntry
   if (error) throw error;
 }
 
+/** A single row parsed from a "Cancellation History" import workbook, ready to insert into cancellation_ledger. */
+export interface HistoricalCancellationRow {
+  structure: string;
+  date: string; // yyyy-mm-dd
+  service: string;
+  passenger_name: string;
+  structure_debt: number;
+}
+
+export interface HistoricalImportResult {
+  rows: HistoricalCancellationRow[];
+  totalRows: number;
+  imported: number;
+  skipped: number;
+  warnings: string[];
+}
+
+const HISTORICAL_HEADER_ALIASES: Record<'structure' | 'date' | 'service' | 'passenger_name' | 'structure_debt', string[]> = {
+  structure: ['structure', 'struct', 'structure and rep', 'structure/rep'],
+  date: ['date', 'cancellation date'],
+  service: ['service', 'service type', 'service period', 'session'],
+  passenger_name: ['passenger name', 'name', 'passenger', 'full name'],
+  structure_debt: ['amount', 'amount owing', 'structure debt', 'debt', 'fee', 'amount owed'],
+};
+
+function normalizeHeaderCell(h: unknown): string {
+  return String(h ?? '').trim().toLowerCase();
+}
+
+function findHistoricalColumn(headerRow: unknown[], aliases: string[]): number {
+  const normalized = headerRow.map(normalizeHeaderCell);
+  for (const alias of aliases) {
+    const idx = normalized.indexOf(alias);
+    if (idx !== -1) return idx;
+  }
+  return -1;
+}
+
+function formatYMD(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Parses a date cell that may be an Excel serial number, a JS Date (when
+ * the sheet was read with cellDates), "yyyy-mm-dd", or "dd/mm/yyyy" into
+ * a normalized "yyyy-mm-dd" string. Returns null if unparseable.
+ */
+function parseFlexibleHistoricalDate(value: unknown): string | null {
+  if (value == null || value === '') return null;
+  if (value instanceof Date && !isNaN(value.getTime())) return formatYMD(value);
+  if (typeof value === 'number') {
+    const parsed = XLSX.SSF?.parse_date_code?.(value);
+    if (parsed) return formatYMD(new Date(parsed.y, parsed.m - 1, parsed.d));
+    return null;
+  }
+  const s = String(value).trim();
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  return null;
+}
+
+/**
+ * Parses a bulk "Cancellation History" Excel/CSV export (columns:
+ * Structure, Date, Service, Passenger Name, Amount — header names are
+ * matched case-insensitively against common aliases) into rows ready for
+ * importHistoricalCancellations. Rows missing a structure, a parseable
+ * date, or a passenger name are skipped and reported in `warnings`.
+ * Amount defaults to CANCELLATION_FEE (R40) when blank or non-numeric.
+ */
+export function parseHistoricalCancellationWorkbook(buffer: ArrayBuffer): HistoricalImportResult {
+  const wb = XLSX.read(buffer, { type: 'array', cellDates: true });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const aoa = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: '' }) as unknown[][];
+
+  if (aoa.length === 0) {
+    return { rows: [], totalRows: 0, imported: 0, skipped: 0, warnings: ['File appears to be empty.'] };
+  }
+
+  const headerRow = aoa[0];
+  const structureCol = findHistoricalColumn(headerRow, HISTORICAL_HEADER_ALIASES.structure);
+  const dateCol = findHistoricalColumn(headerRow, HISTORICAL_HEADER_ALIASES.date);
+  const serviceCol = findHistoricalColumn(headerRow, HISTORICAL_HEADER_ALIASES.service);
+  const nameCol = findHistoricalColumn(headerRow, HISTORICAL_HEADER_ALIASES.passenger_name);
+  const debtCol = findHistoricalColumn(headerRow, HISTORICAL_HEADER_ALIASES.structure_debt);
+
+  const dataRows = aoa.slice(1);
+
+  if (structureCol === -1 || dateCol === -1 || nameCol === -1) {
+    return {
+      rows: [],
+      totalRows: dataRows.length,
+      imported: 0,
+      skipped: dataRows.length,
+      warnings: ['Could not find required columns (Structure, Date, Passenger Name). Check the header row and try again.'],
+    };
+  }
+
+  const warnings: string[] = [];
+  const rows: HistoricalCancellationRow[] = [];
+  let skipped = 0;
+
+  dataRows.forEach((raw, i) => {
+    const rowNum = i + 2; // account for 1-indexing + header row
+    const structure = String(raw[structureCol] ?? '').trim();
+    const dateVal = parseFlexibleHistoricalDate(raw[dateCol]);
+    const passengerName = String(raw[nameCol] ?? '').trim();
+    const service = serviceCol !== -1 ? String(raw[serviceCol] ?? '').trim() : '';
+    const debtRaw = debtCol !== -1 ? raw[debtCol] : undefined;
+    const debtNum = Number(debtRaw);
+    const structureDebt = Number.isFinite(debtNum) && debtNum > 0 ? debtNum : CANCELLATION_FEE;
+
+    if (!structure && !dateVal && !passengerName) return; // fully blank row — silently skip
+
+    if (!structure || !dateVal || !passengerName) {
+      const missing = [
+        !structure && 'structure',
+        !dateVal && 'a valid date',
+        !passengerName && 'passenger name',
+      ].filter(Boolean).join(', ');
+      warnings.push(`Row ${rowNum}: skipped — missing ${missing}.`);
+      skipped++;
+      return;
+    }
+
+    rows.push({
+      structure,
+      date: dateVal,
+      service: service || 'Unspecified',
+      passenger_name: passengerName,
+      structure_debt: structureDebt,
+    });
+  });
+
+  return { rows, totalRows: dataRows.length, imported: rows.length, skipped, warnings };
+}
+
+/**
+ * Inserts pre-parsed historical cancellation rows directly into the
+ * cancellation_ledger table. Unlike insertAbsentees (used for live
+ * session submissions), this never deletes existing rows first —
+ * historical backfills are purely additive. No rep is attached to these
+ * entries since they predate the digital ledger.
+ */
+export async function importHistoricalCancellations(rows: HistoricalCancellationRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  const payload = rows.map((r) => ({
+    manifest_key: `historical_${r.date}_${r.service}`.replace(/\s+/g, '_'),
+    date: r.date,
+    service: r.service,
+    passenger_name: r.passenger_name,
+    stop: '',
+    structure: r.structure,
+    vehicle_name: 'Historical Import',
+    submitted_by: 'Historical Import',
+    rep_name: '',
+    license_plate: '',
+    sponsored: false,
+    sponsor_note: '',
+    structure_debt: r.structure_debt,
+    general_notes: '',
+  }));
+  const { error } = await supabase.from(LEDGER_TABLE).insert(payload);
+  if (error) throw error;
+}
+
 export interface AggregatedLedgerRow {
   key: string;
   structure: string;
@@ -221,13 +391,13 @@ export function downloadLedgerExcel(entries: LedgerEntry[], fileName: string): v
     [],
     [`Total Outstanding: R${grandTotal}`],
     [],
-    ['Structure and rep', 'Cancellation date', 'Name', 'Amount owing'],
+    ['Structure', 'Cancellation date', 'Name', 'Amount owing'],
   ];
 
   for (const group of groups) {
     for (const row of group.rows) {
       aoa.push([
-        `${row.structure} - ${row.repName}`,
+        row.structure,
         shortDate(row.latestDate),
         `${row.name} (${row.service.split(' ')[0]})`,
         `R${row.amount}`,
