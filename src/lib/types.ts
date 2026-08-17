@@ -10,6 +10,27 @@ export interface Passenger {
   sponsorNote?: string;
 }
 
+export interface VehicleDraftState {
+  presentIds?: string[];
+  absentIds?: string[];
+  sponsoredIds?: string[];
+  notes?: Record<string, string>; // passengerId -> note string
+  repName?: string;
+  coReps?: string[];
+  licensePlate?: string;
+  generalNotes?: string;
+  cashCollected?: Record<string, number>;
+  settledLedgerIds?: string[]; // historical debt IDs selected for settlement
+  updatedAt?: string;
+  updatedBy?: string;
+  externalSponsees?: Array<{
+    id: string;
+    sponseeName: string;
+    taxiName: string;
+    amount: number;
+  }>;
+}
+
 export interface Vehicle {
   id: string;
   name: string;
@@ -37,6 +58,7 @@ export interface Vehicle {
    * is exported without a time.
    */
   stopTimes?: Record<string, string>;
+  draftState?: VehicleDraftState;
 }
 
 export interface Manifest {
