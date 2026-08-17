@@ -43,18 +43,27 @@ export async function insertAbsentees(
   date: string,
   serviceLabel: string,
   absentees: AbsenteeInput[],
+  allRiderNames: string[],
   vehicleName: string,
   submittedBy: string,
   licensePlate: string,
   repName: string,
   generalNotes: string
 ): Promise<void> {
-  const { error: delError } = await supabase
-    .from(LEDGER_TABLE)
-    .delete()
-    .eq('manifest_key', manifestKey)
-    .eq('vehicle_name', vehicleName);
-  if (delError) throw delError;
+  // Delete any existing cancellation_ledger rows for this session
+  // (manifest_key) belonging to any passenger currently on this vehicle's
+  // roster — present or absent. Scoping the delete to passenger_name
+  // rather than vehicle_name guarantees a passenger can never end up with
+  // two open debt rows for the same service session, even if a rep
+  // resubmits after the admin reassigns them to a different vehicle.
+  if (allRiderNames.length > 0) {
+    const { error: delError } = await supabase
+      .from(LEDGER_TABLE)
+      .delete()
+      .eq('manifest_key', manifestKey)
+      .in('passenger_name', allRiderNames);
+    if (delError) throw delError;
+  }
 
   if (absentees.length === 0) return;
 
