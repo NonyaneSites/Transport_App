@@ -10,6 +10,14 @@ export interface Passenger {
   sponsorNote?: string;
 }
 
+/**
+ * Live, cross-device attendance draft for a single vehicle's Rep Portal
+ * session — persisted directly on the manifest row (via `Vehicle.draftState`)
+ * instead of localStorage, so the same submission in progress stays in sync
+ * across every device/tab a Rep has open, and survives a refresh or a
+ * different device picking up where another left off. Cleared (set to
+ * undefined) once the vehicle's attendance is actually submitted.
+ */
 export interface VehicleDraftState {
   presentIds?: string[];
   absentIds?: string[];
@@ -21,14 +29,15 @@ export interface VehicleDraftState {
   generalNotes?: string;
   cashCollected?: Record<string, number>;
   settledLedgerIds?: string[]; // historical debt IDs selected for settlement
+  /**
+   * Cash-calculator sponsees paying for a passenger riding in a different
+   * vehicle. Not covered by `cashCollected` (which only holds numeric
+   * totals), so the full entries are kept here to round-trip the
+   * calculator's name/vehicle/amount fields across devices.
+   */
+  externalSponsees?: { id: string; sponseeName: string; taxiName: string; amount: number }[];
   updatedAt?: string;
   updatedBy?: string;
-  externalSponsees?: Array<{
-    id: string;
-    sponseeName: string;
-    taxiName: string;
-    amount: number;
-  }>;
 }
 
 export interface Vehicle {
@@ -58,6 +67,12 @@ export interface Vehicle {
    * is exported without a time.
    */
   stopTimes?: Record<string, string>;
+  /**
+   * In-progress, not-yet-submitted attendance for this vehicle, synced
+   * live via Supabase Realtime so any device editing this vehicle's Rep
+   * Portal session sees the same state. See VehicleDraftState. Undefined
+   * once there's no unsaved draft (e.g. after submission).
+   */
   draftState?: VehicleDraftState;
 }
 
