@@ -7,27 +7,27 @@ import {
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey, shortDate } from '@/lib/dates';
-import {
-  SERVICE_TYPES,
-  CANCELLATION_FEE,
-  sortByRouteSequence,
-  type ServiceType,
-  type Passenger,
-  type Vehicle,
-  type VehicleDraftState,
-} from '@/lib/types';
+import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType, type Passenger, type Vehicle, type VehicleDraftState } from '@/lib/types';
 import { hubDisplayName } from '@/lib/types';
 import { sortVehiclesNatural } from '@/lib/sort';
 import { vehicleRiders, passengersByStop } from '@/lib/manifest';
 import { insertAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEntry } from '@/lib/ledger';
 
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare — never individually editable
+const DRAFT_PUSH_DEBOUNCE_MS = 600;
 
 interface ExternalSponsee {
   id: string;
   sponseeName: string;
   taxiName: string;
   amount: number;
+}
+
+/** Stable per-tab id, so a device can recognize its own draft writes echoed
+ * back via Realtime and not treat them as an incoming change from another
+ * device. */
+function makeClientId(): string {
+  return `dev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function RepPage() {
@@ -56,9 +56,26 @@ export function RepPage() {
   const [collectedCancellationIds, setCollectedCancellationIds] = useState<Set<string>>(new Set());
   const [cancellationSearch, setCancellationSearch] = useState('');
 
-  // Draft auto-save/restore
+  // Draft auto-save/restore — now backed by Supabase (Vehicle.draftState)
+  // instead of localStorage, so it syncs live across devices.
   const [draftRestored, setDraftRestored] = useState(false);
-  const hydratingDraftRef = useRef(false);
+  const clientIdRef = useRef<string>(makeClientId());
+  const draftPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** updatedAt of the last draftState we applied locally, so we can tell a
+   * genuinely new remote change apart from our own write echoing back. */
+  const lastAppliedDraftAtRef = useRef<string | null>(null);
+  /** True for exactly one render right after we've programmatically applied
+   * a restored/remote draft, so the push effect that reacts to those same
+   * state changes doesn't immediately echo them straight back to Supabase
+   * (which would otherwise ping-pong forever between two open devices). */
+  const isApplyingDraftRef = useRef(false);
+  /** Mirrors `manifest` for the debounced push below, which reads from the
+   * ref instead of depending on `manifest` directly — the manifest object
+   * gets a new reference on every save (including the push's own), so
+   * depending on it directly would re-trigger the effect after every push
+   * and loop forever even once the Rep stops editing. */
+  const manifestRef = useRef(manifest);
+  useEffect(() => { manifestRef.current = manifest; }, [manifest]);
 
   // Walk-in
   const [walkInOpen, setWalkInOpen] = useState(false);
@@ -89,141 +106,77 @@ export function RepPage() {
     if (match) setSelectedVehicleId(match.id);
   }, [repName, manifest, selectedVehicleId]);
 
-  // Restore the selected vehicle's draft from the manifest row in Supabase.
-  // The manifest hook provides the live Realtime feed, so this state is shared
-  // across devices instead of being tied to one browser.
+  function resetLocalDraftState() {
+    isApplyingDraftRef.current = true;
+    setTouchedIds(new Set());
+    setSponsoredIds(new Set());
+    setNotes({});
+    setGeneralNotes('');
+    setCoReps([]);
+    setExternalSponsees([]);
+    setCollectedCancellationIds(new Set());
+  }
+
+  function applyDraftState(draft: VehicleDraftState) {
+    isApplyingDraftRef.current = true;
+    const presentIds = draft.presentIds ?? [];
+    const absentIds = draft.absentIds ?? [];
+    setTouchedIds(new Set([...presentIds, ...absentIds]));
+    setSponsoredIds(new Set(draft.sponsoredIds ?? []));
+    setNotes(draft.notes ?? {});
+    setGeneralNotes(draft.generalNotes ?? '');
+    setCoReps(draft.coReps ?? []);
+    setExternalSponsees(draft.externalSponsees ?? []);
+    setCollectedCancellationIds(new Set(draft.settledLedgerIds ?? []));
+    if (draft.repName) setRepName(draft.repName);
+    if (draft.licensePlate) setLicensePlate(draft.licensePlate);
+  }
+
+  // Reset per-session state whenever the rep switches vehicles, then try to
+  // restore this vehicle's live Supabase draft (attendance touches, notes,
+  // sponsorship, cash calculator) before anything is submitted.
   useEffect(() => {
-    hydratingDraftRef.current = true;
     setWalkInOpen(false);
     setWalkInName('');
     setTransferPrompt(null);
 
     if (!selectedVehicleId) {
-      setTouchedIds(new Set());
-      setSponsoredIds(new Set());
-      setNotes({});
-      setGeneralNotes('');
-      setRepName('');
-      setLicensePlate('');
-      setCoReps([]);
-      setExternalSponsees([]);
-      setCollectedCancellationIds(new Set());
+      resetLocalDraftState();
       setDraftRestored(false);
+      lastAppliedDraftAtRef.current = null;
       return;
     }
 
     const vehicle = manifest?.vehicles.find((v) => v.id === selectedVehicleId);
-    const draft = vehicle?.draftState;
-
-    if (vehicle && !vehicle.submitted && draft) {
-      const presentIds = new Set(draft.presentIds ?? []);
-      const absentIds = new Set(draft.absentIds ?? []);
-      setTouchedIds(new Set([...presentIds, ...absentIds]));
-      setSponsoredIds(new Set(draft.sponsoredIds ?? []));
-      setNotes(draft.notes ?? {});
-      setGeneralNotes(draft.generalNotes ?? '');
-      setRepName(draft.repName ?? vehicle.repName ?? '');
-      setLicensePlate(draft.licensePlate ?? vehicle.licensePlate ?? '');
-      setCoReps(draft.coReps ?? vehicle.coReps ?? []);
-      setExternalSponsees(draft.externalSponsees ?? []);
-      setCollectedCancellationIds(new Set(draft.settledLedgerIds ?? []));
+    const draft = vehicle && !vehicle.submitted ? vehicle.draftState : undefined;
+    if (draft) {
+      applyDraftState(draft);
+      lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
       setDraftRestored(true);
-
       const t = setTimeout(() => setDraftRestored(false), 6000);
       return () => clearTimeout(t);
     }
+    resetLocalDraftState();
+    lastAppliedDraftAtRef.current = null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedVehicleId]);
 
-    setTouchedIds(new Set());
-    setSponsoredIds(new Set());
-    setNotes({});
-    setGeneralNotes(vehicle?.generalNotes ?? '');
-    setRepName(vehicle?.repName ?? '');
-    setLicensePlate(vehicle?.licensePlate ?? '');
-    setCoReps(vehicle?.coReps ?? []);
-    setExternalSponsees([]);
-    setCollectedCancellationIds(new Set());
-    setDraftRestored(false);
-  }, [key, selectedVehicleId, manifest?.updated_at]);
-
-  // Persist the in-progress draft to the selected vehicle in Supabase.
-  // A short debounce keeps typing responsive while making the draft effectively live.
+  // Live cross-device sync — if another tab/device pushes a newer draft for
+  // the vehicle we currently have open (and it isn't just our own write
+  // echoing back through Realtime), pick it up so both stay in lockstep.
   useEffect(() => {
-    if (hydratingDraftRef.current) {
-      hydratingDraftRef.current = false;
-      return;
-    }
-
-    if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted) return;
-
-    const presentIds = riders.filter((r) => r.present && touchedIds.has(r.id)).map((r) => r.id);
-    const absentIds = riders.filter((r) => !r.present && touchedIds.has(r.id)).map((r) => r.id);
-
-    const draft: VehicleDraftState = {
-      presentIds,
-      absentIds,
-      sponsoredIds: Array.from(sponsoredIds),
-      notes,
-      repName,
-      coReps,
-      licensePlate,
-      generalNotes,
-      cashCollected: Object.fromEntries(
-        externalSponsees.map((s) => [s.id, Number(s.amount) || 0])
-      ),
-      settledLedgerIds: Array.from(collectedCancellationIds),
-      externalSponsees,
-      updatedAt: new Date().toISOString(),
-      updatedBy: repName.trim() || 'Rep Portal',
-    };
-
-    const comparable = (value: VehicleDraftState | undefined) => {
-      if (!value) return null;
-      return {
-        presentIds: [...(value.presentIds ?? [])].sort(),
-        absentIds: [...(value.absentIds ?? [])].sort(),
-        sponsoredIds: [...(value.sponsoredIds ?? [])].sort(),
-        notes: value.notes ?? {},
-        repName: value.repName ?? '',
-        coReps: value.coReps ?? [],
-        licensePlate: value.licensePlate ?? '',
-        generalNotes: value.generalNotes ?? '',
-        cashCollected: value.cashCollected ?? {},
-        settledLedgerIds: [...(value.settledLedgerIds ?? [])].sort(),
-        externalSponsees: value.externalSponsees ?? [],
-      };
-    };
-
-    if (JSON.stringify(comparable(draft)) === JSON.stringify(comparable(selectedVehicle.draftState))) {
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      const updatedVehicles = manifest!.vehicles.map((v) =>
-        v.id === selectedVehicleId ? { ...v, draftState: draft } : v
-      );
-      save({ ...manifest!, vehicles: updatedVehicles }).catch(() => {
-        // Preserve the in-memory draft if a transient Supabase write fails.
-      });
-    }, 250);
-
-    return () => clearTimeout(timer);
-  }, [
-    key,
-    selectedVehicleId,
-    selectedVehicle,
-    riders,
-    touchedIds,
-    sponsoredIds,
-    notes,
-    repName,
-    coReps,
-    licensePlate,
-    generalNotes,
-    externalSponsees,
-    collectedCancellationIds,
-    manifest,
-    save,
-  ]);
+    if (!selectedVehicle || selectedVehicle.submitted) return;
+    const draft = selectedVehicle.draftState;
+    if (!draft) return;
+    if (draft.updatedBy === clientIdRef.current) return;
+    if (draft.updatedAt && draft.updatedAt === lastAppliedDraftAtRef.current) return;
+    applyDraftState(draft);
+    lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
+    setDraftRestored(true);
+    const t = setTimeout(() => setDraftRestored(false), 6000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedVehicle?.draftState]);
 
   // Load outstanding past-cancellation debts once, so any Rep can collect
   // cash on behalf of someone in a different vehicle/structure.
@@ -266,6 +219,56 @@ export function RepPage() {
   const externalCash = externalSponsees.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
   const pastCancellationCash = collectedCancellationIds.size * FARE;
   const totalCash = baseCash + externalCash + pastCancellationCash;
+
+  // Debounced live persistence — pushes the in-progress checklist, notes,
+  // cash calculator, and rep details to Supabase (Vehicle.draftState) a
+  // moment after the Rep stops typing/tapping, so any other device open on
+  // this vehicle picks it up via Realtime and a lost connection or closed
+  // tab never loses the in-progress submission.
+  useEffect(() => {
+    if (isApplyingDraftRef.current) {
+      // This render's state changes came from applyDraftState/resetLocalDraftState
+      // (a restore or an incoming remote update), not a local edit — don't
+      // echo it straight back to Supabase.
+      isApplyingDraftRef.current = false;
+      return;
+    }
+    if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted || !manifest) return;
+
+    if (draftPushTimerRef.current) clearTimeout(draftPushTimerRef.current);
+    draftPushTimerRef.current = setTimeout(() => {
+      const presentIds = riders.filter((r) => touchedIds.has(r.id) && r.present).map((r) => r.id);
+      const absentIds = riders.filter((r) => touchedIds.has(r.id) && !r.present).map((r) => r.id);
+      const draft: VehicleDraftState = {
+        presentIds,
+        absentIds,
+        sponsoredIds: Array.from(sponsoredIds),
+        notes,
+        repName: repName.trim(),
+        coReps,
+        licensePlate: licensePlate.trim(),
+        generalNotes,
+        cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+        settledLedgerIds: Array.from(collectedCancellationIds),
+        externalSponsees,
+        updatedAt: new Date().toISOString(),
+        updatedBy: clientIdRef.current,
+      };
+      lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
+      const updatedVehicles = manifest.vehicles.map((v) =>
+        v.id === selectedVehicleId ? { ...v, draftState: draft } : v
+      );
+      save({ ...manifest, vehicles: updatedVehicles }).catch(() => { /* draft sync is best-effort */ });
+    }, DRAFT_PUSH_DEBOUNCE_MS);
+
+    return () => {
+      if (draftPushTimerRef.current) clearTimeout(draftPushTimerRef.current);
+    };
+  }, [
+    key, selectedVehicleId, selectedVehicle, manifest, riders,
+    touchedIds, sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
+    externalSponsees, collectedCancellationIds, baseCash, externalCash, pastCancellationCash,
+  ]);
 
   async function setPresent(passengerId: string, present: boolean) {
     if (!manifest) return;
@@ -479,7 +482,13 @@ export function RepPage() {
       );
       await save({ ...manifest, vehicles: updatedVehicles });
 
-      // Draft state is cleared atomically with the successful Supabase submission.
+      // Cancel any in-flight debounced draft push — the draft is now cleared
+      // server-side, so a stale timer firing afterwards would resurrect it.
+      if (draftPushTimerRef.current) {
+        clearTimeout(draftPushTimerRef.current);
+        draftPushTimerRef.current = null;
+      }
+      lastAppliedDraftAtRef.current = null;
 
       setSubmitMsg(
         `Submitted! ${presentCount} present, ${absentCount} absent. ` +
@@ -664,7 +673,7 @@ export function RepPage() {
 
             {selectedVehicle && draftRestored && (
               <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-2.5 text-xs text-success-light">
-                🟢 Live draft restored from cloud
+                🟢 Draft synced from another session
               </div>
             )}
 
