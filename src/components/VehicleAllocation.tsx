@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Bus, Car, Plus, Trash2, Users, ArrowRight, Undo2, X, UserCog, MoveRight,
   CheckCircle2, ChevronDown, ChevronRight, ChevronUp, MapPin, MessageCircle,
@@ -11,6 +11,60 @@ import { passengersByStop, passengersByPoolGroup, unassignedPassengers } from '@
 import { parseManifestKey, shortDate } from '@/lib/dates';
 import { allocateSubStopsIntact } from '@/lib/allocation';
 import { detectVehicleRep, getRepStructure } from '@/lib/officialReps';
+
+function DebouncedInput({
+  value,
+  onChange,
+  placeholder,
+  className,
+  title,
+  type = 'text',
+}: {
+  value: string;
+  onChange: (val: string) => void;
+  placeholder?: string;
+  className?: string;
+  title?: string;
+  type?: string;
+}) {
+  const [localVal, setLocalVal] = useState(value);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    setLocalVal(value);
+  }, [value]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = e.target.value;
+    setLocalVal(next);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      onChange(next);
+    }, 450);
+  };
+
+  const handleBlur = () => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    if (localVal !== value) {
+      onChange(localVal);
+    }
+  };
+
+  return (
+    <input
+      type={type}
+      value={localVal}
+      onChange={handleChange}
+      onBlur={handleBlur}
+      placeholder={placeholder}
+      className={className}
+      title={title}
+    />
+  );
+}
 
 interface Props {
   manifest: Manifest;
@@ -530,10 +584,9 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
                       <div className="flex items-center gap-2">
                         <UserCog className="h-4 w-4 text-muted" />
                         <label className="text-[10px] font-semibold uppercase tracking-wide text-muted">Transport Rep</label>
-                        <input
-                          type="text"
+                        <DebouncedInput
                           value={vehicle.repName ?? ''}
-                          onChange={(e) => setRepName(vehicle.id, e.target.value)}
+                          onChange={(val) => setRepName(vehicle.id, val)}
                           placeholder="Type rep name or use auto-assign"
                           className="input-field flex-1 py-1.5 text-xs"
                         />
@@ -560,10 +613,9 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
                     <div className="mb-4 flex items-center gap-2">
                       <StickyNote className="h-4 w-4 text-muted" />
                       <label className="text-[10px] font-semibold uppercase tracking-wide text-muted whitespace-nowrap">Redirect Note</label>
-                      <input
-                        type="text"
+                      <DebouncedInput
                         value={vehicle.generalNotes ?? ''}
-                        onChange={(e) => setVehicleNote(vehicle.id, e.target.value)}
+                        onChange={(val) => setVehicleNote(vehicle.id, val)}
                         placeholder="e.g. Student Digzz people please Go to YMCA"
                         className="input-field flex-1 py-1.5 text-xs"
                       />
@@ -662,10 +714,10 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
 
                                 <span className="ml-auto flex items-center gap-1">
                                   <Clock className="h-3 w-3 text-muted" />
-                                  <input
+                                  <DebouncedInput
                                     type="time"
                                     value={vehicle.stopTimes?.[group.label] ?? ''}
-                                    onChange={(e) => setStopTime(vehicle.id, group.label, e.target.value)}
+                                    onChange={(val) => setStopTime(vehicle.id, group.label, val)}
                                     className="input-field w-24 py-0.5 text-[11px]"
                                     title="Pickup time for the WhatsApp export"
                                   />

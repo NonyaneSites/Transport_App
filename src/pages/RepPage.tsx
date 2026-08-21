@@ -64,6 +64,7 @@ export function RepPage() {
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAppliedDraftAtRef = useRef<string | null>(null);
   const isApplyingDraftRef = useRef(false);
+  const activeVehicleIdRef = useRef<string>('');
 
   const manifestRef = useRef(manifest);
   useEffect(() => { manifestRef.current = manifest; }, [manifest]);
@@ -134,37 +135,46 @@ export function RepPage() {
     setCoReps(draft.coReps ?? []);
     setExternalSponsees(draft.externalSponsees ?? []);
     setCollectedCancellationIds(new Set(draft.settledLedgerIds ?? []));
-    if (draft.repName) setRepName(draft.repName);
-    if (draft.licensePlate) setLicensePlate(draft.licensePlate);
+    if (draft.repName !== undefined) setRepName(draft.repName);
+    if (draft.licensePlate !== undefined) setLicensePlate(draft.licensePlate);
   }, []);
 
-  // Initialize/restore state when switching vehicles
+  // Initialize/restore state ONLY when switching vehicles (NOT on background manifest saves)
   useEffect(() => {
     setWalkInOpen(false);
     setWalkInName('');
     setTransferPrompt(null);
 
     if (!selectedVehicleId) {
-      resetLocalDraftState();
-      setDraftRestored(false);
-      lastAppliedDraftAtRef.current = null;
+      if (activeVehicleIdRef.current !== '') {
+        resetLocalDraftState();
+        setDraftRestored(false);
+        lastAppliedDraftAtRef.current = null;
+        activeVehicleIdRef.current = '';
+      }
       return;
     }
 
-    const vehicle = manifest?.vehicles.find((v) => v.id === selectedVehicleId);
+    // Only run initialization if we switched to a different vehicle or initial mount
+    if (activeVehicleIdRef.current === selectedVehicleId) {
+      return;
+    }
+    activeVehicleIdRef.current = selectedVehicleId;
+
+    const vehicle = manifestRef.current?.vehicles.find((v) => v.id === selectedVehicleId);
     if (!vehicle) return;
 
-    const currentRiders = vehicleRiders(manifest, vehicle);
+    const currentRiders = vehicleRiders(manifestRef.current, vehicle);
     const draft = !vehicle.submitted ? vehicle.draftState : undefined;
 
     if (draft) {
       applyDraftState(draft, currentRiders);
       lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
       setDraftRestored(true);
-      const t = setTimeout(() => setDraftRestored(false), 5000);
+      const t = setTimeout(() => setDraftRestored(false), 4000);
       return () => clearTimeout(t);
     } else {
-      // Default initialization
+      // Default initialization for vehicle
       isApplyingDraftRef.current = true;
       const initialPresent = new Set<string>();
       currentRiders.forEach((r) => {
@@ -182,9 +192,9 @@ export function RepPage() {
       if (vehicle.licensePlate) setLicensePlate(vehicle.licensePlate);
       lastAppliedDraftAtRef.current = null;
     }
-  }, [selectedVehicleId, manifest, resetLocalDraftState, applyDraftState]);
+  }, [selectedVehicleId, resetLocalDraftState, applyDraftState]);
 
-  // Live cross-device sync
+  // Live cross-device sync (only applies updates from other devices)
   useEffect(() => {
     if (!selectedVehicle || selectedVehicle.submitted) return;
     const draft = selectedVehicle.draftState;
@@ -194,7 +204,7 @@ export function RepPage() {
     applyDraftState(draft, riders);
     lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
     setDraftRestored(true);
-    const t = setTimeout(() => setDraftRestored(false), 5000);
+    const t = setTimeout(() => setDraftRestored(false), 4000);
     return () => clearTimeout(t);
   }, [selectedVehicle?.draftState, selectedVehicle, riders, applyDraftState]);
 
@@ -324,17 +334,35 @@ export function RepPage() {
   ]);
 
   // Instant local toggle handlers (Zero lag, pure React state)
-  const handleSetPresent = useCallback((passengerId: string, isPresent: boolean) => {
-    if (isPresent) {
-      setPresentIds((prev) => new Set(prev).add(passengerId));
+  const handleSetPresent = useCallback((passengerId: string, wantPresent: boolean) => {
+    if (wantPresent) {
+      setPresentIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(passengerId)) {
+          next.delete(passengerId); // Toggle off if clicked again
+        } else {
+          next.add(passengerId);
+        }
+        return next;
+      });
       setAbsentIds((prev) => {
+        if (!prev.has(passengerId)) return prev;
         const next = new Set(prev);
         next.delete(passengerId);
         return next;
       });
     } else {
-      setAbsentIds((prev) => new Set(prev).add(passengerId));
+      setAbsentIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(passengerId)) {
+          next.delete(passengerId); // Toggle off if clicked again
+        } else {
+          next.add(passengerId);
+        }
+        return next;
+      });
       setPresentIds((prev) => {
+        if (!prev.has(passengerId)) return prev;
         const next = new Set(prev);
         next.delete(passengerId);
         return next;
