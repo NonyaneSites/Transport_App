@@ -11,9 +11,9 @@ import { upcomingSunday, manifestKey, prettyDate, parseManifestKey, shortDate } 
 import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType, type Passenger, type Vehicle, type VehicleDraftState } from '@/lib/types';
 import { hubDisplayName } from '@/lib/types';
 import { sortVehiclesNatural } from '@/lib/sort';
-import { vehicleRiders, passengersByStop } from '@/lib/manifest';
+import { vehicleRiders, passengersByPoolGroup } from '@/lib/manifest';
 import { insertAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEntry } from '@/lib/ledger';
-import { detectVehicleRep, getRepStructure } from '@/lib/officialReps';
+import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
 
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
 const SYNC_DEBOUNCE_MS = 300; // 300ms debounce for Supabase background sync
@@ -118,7 +118,31 @@ export function RepPage() {
     if (!manifest || selectedVehicleId) return;
     const q = repName.trim().toLowerCase();
     if (q.length < 2) return;
-    const match = manifest.vehicles.find((v) => (v.repName ?? '').trim().toLowerCase() === q);
+
+    const repMatch = matchRiderToOfficialRep({ fullName: repName });
+
+    const match = manifest.vehicles.find((v) => {
+      const vRep = (v.repName ?? '').trim().toLowerCase();
+      if (vRep) {
+        if (vRep === q || vRep.includes(q) || q.includes(vRep)) return true;
+        if (repMatch && (vRep === repMatch.fullName.toLowerCase() || repMatch.aliases.some((a) => a.toLowerCase() === vRep))) {
+          return true;
+        }
+      }
+
+      // Check if this typed name matches any passenger on board this vehicle
+      const vRiders = vehicleRiders(manifest, v);
+      for (const r of vRiders) {
+        const normRider = r.fullName.trim().toLowerCase();
+        if (normRider === q || normRider.includes(q) || q.includes(normRider)) return true;
+        if (repMatch) {
+          const rMatch = matchRiderToOfficialRep(r);
+          if (rMatch && rMatch.fullName === repMatch.fullName) return true;
+        }
+      }
+      return false;
+    });
+
     if (match) setSelectedVehicleId(match.id);
   }, [repName, manifest, selectedVehicleId]);
 
@@ -876,6 +900,8 @@ export function RepPage() {
 
                 <StopGroupedChecklist
                   riders={riders}
+                  vehicleType={selectedVehicle?.type ?? 'Taxi'}
+                  orderedStops={selectedVehicle?.orderedStops}
                   presentIds={presentIds}
                   absentIds={absentIds}
                   onSetPresent={handleSetPresent}
@@ -1283,9 +1309,11 @@ function CashCalculatorCard({
 }
 
 function StopGroupedChecklist({
-  riders, presentIds, absentIds, onSetPresent, onToggleSponsored, onSetNote, sponsoredIds, notes, disabled,
+  riders, vehicleType, orderedStops, presentIds, absentIds, onSetPresent, onToggleSponsored, onSetNote, sponsoredIds, notes, disabled,
 }: {
   riders: Passenger[];
+  vehicleType: 'Bus' | 'Taxi';
+  orderedStops?: string[];
   presentIds: Set<string>;
   absentIds: Set<string>;
   onSetPresent: (id: string, present: boolean) => void;
@@ -1295,8 +1323,16 @@ function StopGroupedChecklist({
   notes: Record<string, string>;
   disabled: boolean;
 }) {
-  const byStop = useMemo(() => passengersByStop(riders), [riders]);
-  const stops = sortByRouteSequence(Object.keys(byStop), (s) => s);
+  const byStop = useMemo(() => passengersByPoolGroup(riders, vehicleType), [riders, vehicleType]);
+  const stops = useMemo(() => {
+    const activeKeys = Object.keys(byStop);
+    if (!orderedStops || orderedStops.length === 0) {
+      return sortByRouteSequence(activeKeys, (s) => s);
+    }
+    const inOrder = orderedStops.filter((s) => activeKeys.includes(s));
+    const extras = activeKeys.filter((s) => !inOrder.includes(s));
+    return [...inOrder, ...extras];
+  }, [byStop, orderedStops]);
   const [expandedStops, setExpandedStops] = useState<Set<string>>(new Set(stops));
 
   function toggleStop(stop: string) {
@@ -1403,6 +1439,11 @@ const PassengerRow = React.memo(function PassengerRow({
             {passenger.structure && (
               <span className="ml-2 inline-block rounded bg-bg/60 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-muted">
                 {passenger.structure}
+              </span>
+            )}
+            {passenger.stop && (
+              <span className="ml-1.5 inline-block rounded bg-bg/60 px-1.5 py-0.5 text-[10px] text-muted">
+                {passenger.stop}
               </span>
             )}
             {!touched && !disabled && (

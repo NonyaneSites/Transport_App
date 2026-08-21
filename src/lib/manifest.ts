@@ -79,9 +79,7 @@ export function passengersByPoolGroup(
 ): Record<string, Passenger[]> {
   const map: Record<string, Passenger[]> = {};
   for (const p of passengers) {
-    const key = vehicleType === 'Taxi'
-      ? hubDisplayName('Taxi', p.stop)
-      : (p.stop || 'Unknown');
+    const key = hubDisplayName(vehicleType, p.stop || 'Unknown');
     if (!map[key]) map[key] = [];
     map[key].push(p);
   }

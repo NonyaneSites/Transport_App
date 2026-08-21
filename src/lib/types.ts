@@ -147,6 +147,7 @@ export const TAXI_HUBS: { hub: string; stops: string[] }[] = [
     stops: [
       'Amic Deck - David Webster',
       'Barnato',
+      'Amic Deck - David Webster, Barnato',
       "Amic Deck - Men's Res",
       'Amic Deck - Sunnyside',
       'Amic Deck - Jubilee',
@@ -156,7 +157,13 @@ export const TAXI_HUBS: { hub: string; stops: string[] }[] = [
     hub: 'EOH',
     stops: [
       'Campus Central - EOH',
+      'Campus Central -EOH',
+      'Campus Central (on Empire)',
+      'Campus Central (on empire)',
+      'Campus Central on empire',
       'EOH Campus Central',
+      'Charlotte',
+      'Charlotte Maxeke',
       'EOH',
     ],
   },
@@ -174,9 +181,14 @@ export const TAXI_HUBS: { hub: string; stops: string[] }[] = [
  */
 export const BUS_EOH_ALIASES = new Set([
   'Campus Central on empire',
+  'Campus Central (on empire)',
+  'Campus Central (on Empire)',
   'Campus Central - EOH',
+  'Campus Central -EOH',
+  'EOH Campus Central',
   'Charlotte',
   'Charlotte Maxeke',
+  'EOH',
 ]);
 
 /** Returns 'EOH' if this stop is a known Bus spelling-variant of the EOH campus address, else null. */
@@ -185,24 +197,41 @@ export function stopToBusHub(stop: string): string | null {
   for (const alias of BUS_EOH_ALIASES) {
     if (alias.toLowerCase() === norm) return 'EOH';
   }
+  if (norm.includes('campus central') || norm.includes('charlotte') || norm === 'eoh') {
+    return 'EOH';
+  }
   return null;
 }
 
 export const INDIVIDUAL_STOPS = [
-  'Yale', 'Stanley', 'UJ Bunting', 'Ghandi Square',
-  'Focus 1', 'Maboneng', 'Urban Circle', 'DFC Bus Stop', 'The Fields',
-  'Laborie', 'Richmond', 'Gate 2', 'Gate 4', "APK McDonald's", 'Westdene',
-  'Junction', 'Education Campus', 'Saratoga', 'Argyle', 'Arteria', 'Knockando',
+  'Yale', 'Stanley', 'Stanley Ave', 'UJ Bunting', 'Ghandi Square',
+  'Focus 1', 'Maboneng', 'Urban Circle', 'DFC Bus Stop', 'DFC bus stop', 'The Fields',
+  'Laborie', 'Richmond', 'Gate 2', 'Gate 4', "APK McDonald's", 'Westdene', 'Westdene Engen',
+  'Junction', 'Education Campus', 'Education campus', 'Saratoga', 'Argyle', 'Arteria', 'Knockando',
+  'Randburg Surrey Square',
 ] as const;
 
 export const MASTER_HUBS = ['Braam', 'Gate 7', 'EOH'] as const;
 
 /** Returns the Master Hub for a given stop, or null if the stop is not part of any hub (Buses always use the raw stop). */
 export function stopToHub(stop: string): string | null {
+  const norm = stop.trim().toLowerCase();
   for (const h of TAXI_HUBS) {
-    if (h.stops.some((s) => s.toLowerCase() === stop.toLowerCase())) {
+    if (h.stops.some((s) => s.toLowerCase() === norm)) {
       return h.hub;
     }
+  }
+  // Gate 7 combined stop options or Amic Deck variations
+  if (
+    norm.includes('david webster') ||
+    norm.includes('barnato') ||
+    (norm.includes('amic deck') && (norm.includes('jubilee') || norm.includes('sunnyside') || norm.includes("men's res") || norm.includes('mens res')))
+  ) {
+    return 'Gate 7';
+  }
+  // EOH variations
+  if (norm.includes('campus central') || norm.includes('charlotte') || norm === 'eoh') {
+    return 'EOH';
   }
   return null;
 }

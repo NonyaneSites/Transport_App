@@ -13,6 +13,7 @@ export function useManifest(key: string | null): {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const keyRef = useRef<string | null>(null);
+  const pendingSavesRef = useRef<number>(0);
 
   useEffect(() => {
     if (!key) {
@@ -53,6 +54,8 @@ export function useManifest(key: string | null): {
         { event: '*', schema: 'public', table: MANIFESTS_TABLE, filter: `date=eq.${key}` },
         (payload) => {
           if (keyRef.current !== key) return;
+          // If we have local saves in-flight, ignore realtime echoes to prevent UI stutter/reverts
+          if (pendingSavesRef.current > 0) return;
           const row = payload.new as Manifest | undefined;
           if (row) {
             setManifest({ date: row.date, signups: row.signups ?? [], vehicles: row.vehicles ?? [] });
@@ -68,11 +71,19 @@ export function useManifest(key: string | null): {
   }, [key]);
 
   async function save(m: Manifest): Promise<void> {
+    pendingSavesRef.current += 1;
     setManifest(m);
-    const { error: upsertError } = await supabase
-      .from(MANIFESTS_TABLE)
-      .upsert({ date: m.date, signups: m.signups, vehicles: m.vehicles }, { onConflict: 'date' });
-    if (upsertError) throw upsertError;
+    try {
+      const { error: upsertError } = await supabase
+        .from(MANIFESTS_TABLE)
+        .upsert({ date: m.date, signups: m.signups, vehicles: m.vehicles }, { onConflict: 'date' });
+      if (upsertError) throw upsertError;
+    } finally {
+      // Small cooldown before allowing realtime echoes to avoid stale broadcast race
+      setTimeout(() => {
+        pendingSavesRef.current = Math.max(0, pendingSavesRef.current - 1);
+      }, 500);
+    }
   }
 
   return { manifest, loading, error, save };

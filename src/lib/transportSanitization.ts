@@ -16,20 +16,36 @@ const BRAAM = new Set(['56 Jorissen', 'Amani', 'Apex', 'Student Digzz', 'YMCA'])
 const GATE_7 = new Set([
   'Amic Deck - David Webster',
   'Barnato',
+  'Amic Deck - David Webster, Barnato',
   "Amic Deck - Men's Res",
   'Amic Deck - Sunnyside',
   'Amic Deck - Jubilee',
 ]);
-const EOH = new Set(['Campus Central - EOH', 'EOH Campus Central', 'EOH']);
+const EOH = new Set([
+  'Campus Central - EOH',
+  'Campus Central -EOH',
+  'Campus Central (on Empire)',
+  'Campus Central (on empire)',
+  'Campus Central on empire',
+  'EOH Campus Central',
+  'Charlotte',
+  'Charlotte Maxeke',
+  'EOH',
+]);
 
 // BUS-only spelling canonicalization — same physical EOH address, various
 // spellings across Forms intakes. Kept in lockstep with BUS_EOH_ALIASES in
 // ./types. NOT route consolidation — see the note there.
 export const BUS_EOH_ALIASES = new Set([
   'Campus Central on empire',
+  'Campus Central (on empire)',
+  'Campus Central (on Empire)',
   'Campus Central - EOH',
+  'Campus Central -EOH',
+  'EOH Campus Central',
   'Charlotte',
   'Charlotte Maxeke',
+  'EOH',
 ]);
 
 /**
@@ -47,9 +63,22 @@ export const BUS_EOH_ALIASES = new Set([
  */
 export function masterHubForStop(value: unknown): string {
   const stop = sanitizeTransportValue(value);
-  if (BRAAM.has(stop)) return 'Braam';
-  if (GATE_7.has(stop)) return 'Gate 7';
-  if (EOH.has(stop)) return 'EOH';
+  const norm = stop.toLowerCase();
+  for (const s of BRAAM) {
+    if (s.toLowerCase() === norm) return 'Braam';
+  }
+  for (const s of GATE_7) {
+    if (s.toLowerCase() === norm) return 'Gate 7';
+  }
+  if (norm.includes('david webster') || norm.includes('barnato') || (norm.includes('amic deck') && (norm.includes('jubilee') || norm.includes('sunnyside') || norm.includes("men's res") || norm.includes('mens res')))) {
+    return 'Gate 7';
+  }
+  for (const s of EOH) {
+    if (s.toLowerCase() === norm) return 'EOH';
+  }
+  if (norm.includes('campus central') || norm.includes('charlotte') || norm === 'eoh') {
+    return 'EOH';
+  }
   return stop;
 }
 

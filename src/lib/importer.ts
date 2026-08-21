@@ -92,6 +92,16 @@ export function parseGoogleSheetSignups(
   rows: RawSheetRow[],
   defaultService: string = 'PM_Normal'
 ): Passenger[] {
+  const AREA_COLUMNS = [
+    { areaKeywords: ['braam stops', 'braam'], colPatterns: ['braam stops', 'braam stop', 'braam'] },
+    { areaKeywords: ['auckland park stops', 'auckland park', 'auckland'], colPatterns: ['auckland park', 'auckland'] },
+    { areaKeywords: ['cbd stops', 'cbd'], colPatterns: ['cbd stops', 'cbd'] },
+    { areaKeywords: ['parktown stops', 'parktown'], colPatterns: ['parktown stops', 'parktown'] },
+    { areaKeywords: ['midrand stops', 'midrand'], colPatterns: ['midrand stops', 'midrand'] },
+    { areaKeywords: ['soweto stops', 'soweto'], colPatterns: ['soweto stops', 'soweto'] },
+    { areaKeywords: ['jhb north & west', 'jhb north and west', 'jhb west & north', 'jhb west and north', 'jhb'], colPatterns: ['jhb north & west', 'jhb west & north', 'jhb north and west', 'jhb west and north', 'jhb'] },
+  ];
+
   return rows
     .map((row, index) => {
       // Find column values using flexible case-insensitive header matching
@@ -113,60 +123,103 @@ export function parseGoogleSheetSignups(
         return '';
       };
 
-      // Full Name extraction with first/last name fallback
-      let rawFullName = findValue([
-        'Full Name',
-        'First and Last Name',
-        'Name',
-        'Passenger Name',
-        'Name2',
-      ]);
-
-      if (!rawFullName) {
-        const firstName = findValue(['First Name', 'Firstname', 'Name1', 'Name 1', 'Name 2']);
-        const surname = findValue(['Last Name', 'Surname', 'Lastname', 'Family Name']);
-        if (firstName || surname) {
-          rawFullName = [firstName, surname].filter(Boolean).join(' ');
+      // Full Name extraction with name + surname merging
+      const surname = findValue(['Surname', 'Last Name', 'Lastname', 'Family Name']);
+      const name = findValue(['Name', 'First Name', 'Firstname', 'Name1', 'Name 1', 'Name2', 'Name 2', 'Passenger Name', 'Full Name']);
+      
+      let rawFullName = '';
+      if (name && surname) {
+        const normName = name.toLowerCase().trim();
+        const normSurname = surname.toLowerCase().trim();
+        if (normName === normSurname || normName.endsWith(normSurname) || normName.includes(normSurname)) {
+          rawFullName = name;
+        } else {
+          rawFullName = `${name} ${surname}`;
         }
+      } else {
+        rawFullName = name || surname;
       }
 
       const fullName = toTitleCase(rawFullName);
 
-      // Stop extraction
-      const rawStop = sanitizeTransportValue(
-        findValue([
+      // Stop extraction: check area stops and specific area stop columns
+      const areaValue = findValue(['Area Stops2', 'Area Stops 2', 'Area Stops', 'Area']).toLowerCase();
+      let rawStop = '';
+
+      if (areaValue) {
+        for (const mapping of AREA_COLUMNS) {
+          if (mapping.areaKeywords.some((ak) => areaValue.includes(ak) || ak.includes(areaValue))) {
+            const stopVal = findValue(mapping.colPatterns);
+            if (stopVal && !stopVal.toLowerCase().includes('area stops') && stopVal.toLowerCase() !== areaValue) {
+              rawStop = stopVal;
+              break;
+            }
+          }
+        }
+      }
+
+      if (!rawStop) {
+        for (const mapping of AREA_COLUMNS) {
+          const stopVal = findValue(mapping.colPatterns);
+          if (stopVal && !stopVal.toLowerCase().includes('area stops') && stopVal.toLowerCase() !== areaValue) {
+            rawStop = stopVal;
+            break;
+          }
+        }
+      }
+
+      if (!rawStop) {
+        const directStop = findValue([
           'Pickup Stop',
-          'Stop',
           'Boarding Location',
           'Sub-Stop',
           'Sub Stop',
           'Where will you join',
-          'Area Stops2',
-          'Area Stops',
           'Pickup Location',
+          'Specific Stop',
           'Station',
-        ])
-      );
+        ]);
+        if (directStop && !directStop.toLowerCase().includes('area stops')) {
+          rawStop = directStop;
+        }
+      }
 
-      // Structure extraction
-      const rawStructure = findValue([
-        'Structure',
-        'Zone / Structure',
-        'Zone',
+      if (!rawStop && areaValue) {
+        rawStop = findValue(['Area Stops2', 'Area Stops 2', 'Area Stops', 'Area']);
+      }
+
+      const effectiveStop = sanitizeTransportValue(rawStop) || 'Unspecified';
+
+      // Structure extraction (S20, S3, S7, S9, S2, etc.)
+      let rawStructure = findValue([
         'SZ1 Structures',
+        'SZ1 Structure',
         'SZ1',
         'SZ2 Structures',
+        'SZ2 Structure',
         'SZ2',
         'YZ Structures',
+        'YZ Structure',
         'YZ',
+        'Structure',
         'Assembly Structure',
         'Home Structure',
         'PCF Structure',
       ]);
+
+      if (rawStructure && rawStructure.toLowerCase().startsWith('zone ')) {
+        rawStructure = '';
+      }
+
+      if (!rawStructure) {
+        const zoneVal = findValue(['Zone / Structure', 'Zone']);
+        rawStructure = zoneVal;
+      }
+
       const structure = sanitizeTransportValue(rawStructure).toUpperCase();
 
       // Contact info
-      const rawPhone = findValue(['Phone Number', 'WhatsApp Number', 'Contact Number', 'Phone', 'WhatsApp', 'Contact', 'Cell', 'Mobile']);
+      const rawPhone = findValue(['Phone Number', 'WhatsApp Number', 'Contact Number', 'Phone', 'WhatsApp', 'Contact', 'Cell', 'Mobile', 'Cellphone']);
       const phone = sanitizePhone(rawPhone);
 
       const rawEmail = findValue(['Email Address', 'Email', 'User Email', 'Mail']);
@@ -189,7 +242,6 @@ export function parseGoogleSheetSignups(
 
       // Hub derivation
       const explicitHub = findValue(['Hub', 'Master Hub', 'Taxi Hub']);
-      const effectiveStop = rawStop || 'Unspecified';
       const hub = explicitHub
         ? sanitizeTransportValue(explicitHub)
         : hubDisplayName('Taxi', effectiveStop);

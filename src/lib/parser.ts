@@ -15,16 +15,16 @@ const SERVING_KEYWORDS = ['serving', 'usher', 'choir', 'band', 'altar', 'media',
 
 const TRANSPORT_QUESTION_PATTERNS = ['do you need transport', 'need transport', 'transport required', 'require transport'];
 
-// Mapping from area-name values (what appears in the Area Stops2 column)
-// to the column header that holds the specific stop for that area.
-const AREA_TO_COLUMN: { areaValue: string[]; columnPattern: string }[] = [
-  { areaValue: ['braam stops', 'braam'], columnPattern: 'braam stops' },
-  { areaValue: ['auckland park'], columnPattern: 'auckland park' },
-  { areaValue: ['cbd'], columnPattern: 'cbd' },
-  { areaValue: ['parktown'], columnPattern: 'parktown' },
-  { areaValue: ['midrand'], columnPattern: 'midrand' },
-  { areaValue: ['soweto'], columnPattern: 'soweto' },
-  { areaValue: ['jhb north & west', 'jhb north and west', 'jhb west & north', 'jhb west and north'], columnPattern: 'jhb' },
+// Mapping from area-name values (what appears in the Area Stops column)
+// to the column header pattern that holds the specific sub-stop for that area.
+const AREA_TO_COLUMN: { areaValue: string[]; columnPattern: string[] }[] = [
+  { areaValue: ['braam stops', 'braam'], columnPattern: ['braam stops', 'braam stop', 'braam'] },
+  { areaValue: ['auckland park stops', 'auckland park', 'auckland'], columnPattern: ['auckland park', 'auckland'] },
+  { areaValue: ['cbd stops', 'cbd'], columnPattern: ['cbd stops', 'cbd'] },
+  { areaValue: ['parktown stops', 'parktown'], columnPattern: ['parktown stops', 'parktown'] },
+  { areaValue: ['midrand stops', 'midrand'], columnPattern: ['midrand stops', 'midrand'] },
+  { areaValue: ['soweto stops', 'soweto'], columnPattern: ['soweto stops', 'soweto'] },
+  { areaValue: ['jhb north & west', 'jhb north and west', 'jhb west & north', 'jhb west and north', 'jhb'], columnPattern: ['jhb north & west', 'jhb west & north', 'jhb north and west', 'jhb west and north', 'jhb'] },
 ];
 
 interface RawRow {
@@ -59,29 +59,27 @@ function findColumn(headers: string[], patterns: string[]): string | null {
 }
 
 function extractFullName(row: RawRow, headers: string[]): string {
-  // Direct Full Name / Name columns
-  const fullNameCol = findColumn(headers, ['full name', 'first and last name', 'name', 'passenger name']);
-  if (fullNameCol && clean(row[fullNameCol])) {
-    return toTitleCase(clean(row[fullNameCol]));
-  }
-
-  // Name2 + Surname (standard Microsoft Forms template)
-  const name2Col = findColumn(headers, ['name2', 'name 2']);
   const surnameCol = findColumn(headers, ['surname', 'last name', 'lastname', 'family name']);
-  const name2 = name2Col ? clean(row[name2Col]) : '';
   const surname = surnameCol ? clean(row[surnameCol]) : '';
 
-  if (name2 && surname) return toTitleCase(`${name2} ${surname}`);
-  if (name2) return toTitleCase(name2);
+  // Look for first name / name columns (distinct from surname)
+  const nameCol = findColumn(headers, ['name', 'first name', 'firstname', 'name1', 'name 1', 'name2', 'name 2', 'passenger name', 'full name']);
+  const name = nameCol ? clean(row[nameCol]) : '';
+
+  if (name && surname) {
+    const normName = lower(name);
+    const normSurname = lower(surname);
+    // If the name field already contains or ends with the surname (e.g. "Lebugang Masango" and "Masango")
+    if (normName === normSurname || normName.endsWith(normSurname) || normName.includes(normSurname)) {
+      return toTitleCase(name);
+    }
+    return toTitleCase(`${name} ${surname}`);
+  }
+
+  if (name) return toTitleCase(name);
   if (surname) return toTitleCase(surname);
 
-  // Fallback: First Name + Surname
-  const firstNameCol = findColumn(headers, ['first name', 'firstname', 'name1', 'name 1']);
-  const first = firstNameCol ? clean(row[firstNameCol]) : '';
-  if (first && surname) return toTitleCase(`${first} ${surname}`);
-  if (first) return toTitleCase(first);
-
-  // Last resort: any column with "name" in it
+  // Fallback: any column with "name" in it that isn't surname
   for (const h of headers) {
     const lh = lower(h);
     if (lh.includes('name') && !lh.includes('surname') && clean(row[h])) {
@@ -92,7 +90,36 @@ function extractFullName(row: RawRow, headers: string[]): string {
 }
 
 function extractStop(row: RawRow, headers: string[]): string {
-  // Direct Pickup Stop columns (2026 Google Sheet / MS Form format)
+  // Step 1: Check the area column (e.g., 'Area Stops' or 'Area Stops2') to know which area the person chose
+  const areaCol = findColumn(headers, ['area stops2', 'area stops 2', 'area stops', 'area']);
+  const areaValue = areaCol ? lower(clean(row[areaCol])) : '';
+
+  if (areaValue) {
+    for (const mapping of AREA_TO_COLUMN) {
+      if (mapping.areaValue.some((av) => areaValue.includes(av) || av.includes(areaValue))) {
+        const stopCol = findColumn(headers, mapping.columnPattern);
+        if (stopCol && stopCol !== areaCol) {
+          const stop = clean(row[stopCol]);
+          if (stop && !lower(stop).includes('area stops') && lower(stop) !== areaValue) {
+            return stop;
+          }
+        }
+      }
+    }
+  }
+
+  // Step 2: Scan all specific sub-stop area columns for any non-empty sub-stop value
+  for (const mapping of AREA_TO_COLUMN) {
+    const stopCol = findColumn(headers, mapping.columnPattern);
+    if (stopCol && stopCol !== areaCol) {
+      const stop = clean(row[stopCol]);
+      if (stop && !lower(stop).includes('area stops') && lower(stop) !== areaValue) {
+        return stop;
+      }
+    }
+  }
+
+  // Step 3: Direct Pickup Stop columns (exact specific stop questions)
   const directStopCol = findColumn(headers, [
     'pickup stop',
     'boarding location',
@@ -100,41 +127,19 @@ function extractStop(row: RawRow, headers: string[]): string {
     'sub stop',
     'where will you join',
     'pickup location',
-    'stop',
+    'specific stop',
+    'station',
   ]);
-  if (directStopCol && clean(row[directStopCol])) {
+  if (directStopCol && directStopCol !== areaCol && clean(row[directStopCol])) {
     const directStop = clean(row[directStopCol]);
-    if (directStop && !directStop.toLowerCase().includes('area stops')) {
+    if (directStop && !lower(directStop).includes('area stops')) {
       return directStop;
     }
   }
 
-  // Step 1: find the area column (Area Stops2) to know which area the person selected
-  const areaCol = findColumn(headers, ['area stops2', 'area stops 2', 'area stops']);
-  const areaValue = areaCol ? lower(clean(row[areaCol])) : '';
-
-  // Step 2: based on the area, find the specific stop column and read the stop value
-  if (areaValue) {
-    for (const mapping of AREA_TO_COLUMN) {
-      if (mapping.areaValue.some((av) => areaValue.includes(av))) {
-        const stopCol = findColumn(headers, [mapping.columnPattern]);
-        if (stopCol) {
-          const stop = clean(row[stopCol]);
-          if (stop) return stop;
-        }
-      }
-    }
-    // If we found an area value but no specific stop, use the area value itself
-    if (areaValue) return clean(row[areaCol]);
-  }
-
-  // Step 3: fallback — scan all area columns for any non-empty value
-  for (const mapping of AREA_TO_COLUMN) {
-    const stopCol = findColumn(headers, [mapping.columnPattern]);
-    if (stopCol) {
-      const stop = clean(row[stopCol]);
-      if (stop) return stop;
-    }
+  // Step 4: Fallback to areaValue if no sub-stop was found
+  if (areaCol && clean(row[areaCol])) {
+    return clean(row[areaCol]);
   }
 
   return 'Unknown';
@@ -143,28 +148,39 @@ function extractStop(row: RawRow, headers: string[]): string {
 // The forms have three separate structure columns: SZ1 Structures, SZ2 Structures, YZ Structures.
 // Only one is populated per row depending on which zone the person belongs to.
 const STRUCTURE_COLUMN_PATTERNS = [
-  'structure', 'zone / structure', 'zone',
-  'sz1 structures', 'sz1', 'sz2 structures', 'sz2', 'yz structures', 'yz',
-  'assembly', 'assembly structure', 'home structure', 'home assembly',
-  'fellowship structure', 'pcf structure',
+  'sz1 structures', 'sz1 structure', 'sz1',
+  'sz2 structures', 'sz2 structure', 'sz2',
+  'yz structures', 'yz structure', 'yz',
+  'structure', 'assembly structure', 'home structure', 'home assembly',
+  'fellowship structure', 'pcf structure', 'assembly',
 ];
 
 function extractStructure(row: RawRow, headers: string[]): string {
-  // Try each known structure column in order — return the first non-empty value
+  // Try each specific structure column in priority order
   for (const pattern of STRUCTURE_COLUMN_PATTERNS) {
     const col = findColumn(headers, [pattern]);
     if (col) {
       const val = clean(row[col]);
-      if (val) return val.toUpperCase();
+      if (val && !lower(val).startsWith('zone ')) {
+        return val.toUpperCase();
+      }
     }
   }
-  // Fallback: scan all columns for one whose header contains "structure" or "assembly" or "zone"
+  // Fallback: scan columns for any non-zone structure column
   for (const h of headers) {
     const lh = lower(clean(h));
-    if ((lh.includes('structure') || lh.includes('assembly') || lh.includes('zone')) && !lh.includes('area')) {
+    if (lh.includes('structure') && !lh.includes('area') && !lh.includes('zone')) {
       const val = clean(row[h]);
-      if (val) return val.toUpperCase();
+      if (val && !lower(val).startsWith('zone ')) {
+        return val.toUpperCase();
+      }
     }
+  }
+  // Last resort: zone / structure column
+  const zoneCol = findColumn(headers, ['zone / structure', 'zone']);
+  if (zoneCol) {
+    const val = clean(row[zoneCol]);
+    if (val) return val.toUpperCase();
   }
   return '';
 }
