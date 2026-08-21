@@ -9,11 +9,6 @@ import { hubDisplayName, sortByRouteSequence, SERVICE_TYPES } from '@/lib/types'
 import { sortVehiclesNatural } from '@/lib/sort';
 import { passengersByStop, passengersByPoolGroup, unassignedPassengers } from '@/lib/manifest';
 import { parseManifestKey, shortDate } from '@/lib/dates';
-// Change from:
-// import { allocateSubStopsIntact } from '@/lib/allocation';
-// import { detectVehicleRep } from '@/lib/officialReps';
-
-// To:
 import { allocateSubStopsIntact, detectVehicleRep } from '@/lib/officialReps';
 
 interface Props {
