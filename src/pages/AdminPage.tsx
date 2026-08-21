@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Lock, Trash2, Loader2, AlertTriangle, Calendar, Users, Bus, ArrowUpRight, XCircle, Download, FileSpreadsheet, ChevronDown, ChevronRight, MessageCircle, Check, History } from 'lucide-react';
+import { Lock, Trash2, Loader2, AlertTriangle, Calendar, Users, Bus, ArrowUpRight, XCircle, FileSpreadsheet, ChevronDown, ChevronRight, History } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
@@ -8,10 +8,8 @@ import { VehicleAllocation } from '@/components/VehicleAllocation';
 import { useManifest } from '@/lib/useManifest';
 import { listAllManifests } from '@/lib/manifest';
 import { listLedgerEntries, downloadSessionStatsExcel } from '@/lib/ledger';
-import { upcomingSunday, manifestKey, prettyDate, parseManifestKey } from '@/lib/dates';
+import { upcomingSunday, manifestKey, prettyDate, parseManifestKey as parseKey } from '@/lib/dates';
 import { SERVICE_TYPES, RESET_PASSWORD, type ServiceType, type Passenger, type Manifest } from '@/lib/types';
-import { parseManifestKey as parseKey } from '@/lib/dates';
-import type { ParseResult } from '@/lib/parser';
 
 export function AdminPage() {
   const [date, setDate] = useState(upcomingSunday);
@@ -38,7 +36,7 @@ export function AdminPage() {
     })();
   }, [manifest?.updated_at]);
 
-  async function handleImport(passengers: Passenger[], _result: ParseResult) {
+  async function handleImport(passengers: Passenger[]) {
     if (!manifest) {
       await save({ date: key, signups: passengers, vehicles: [] });
       return;

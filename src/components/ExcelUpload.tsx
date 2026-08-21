@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { Upload, FileSpreadsheet, CheckCircle2, AlertTriangle, Loader2 } from 'lucide-react';
+import { Upload, CheckCircle2, AlertTriangle, Loader2 } from 'lucide-react';
 import { parseWorkbook, type ParseResult } from '@/lib/parser';
 import type { Passenger, ServiceType } from '@/lib/types';
 

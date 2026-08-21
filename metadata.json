@@ -1,0 +1,6 @@
+{
+  "name": "CRC Transport Ministry",
+  "description": "Transport manifest and vehicle allocation management system for CRC Transport Ministry.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

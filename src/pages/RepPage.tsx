@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
   Smartphone, Wifi, ChevronDown, ChevronRight, MapPin, Send, Cross,
   HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus, Search, Banknote,
+  Sparkles,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
@@ -12,9 +13,10 @@ import { hubDisplayName } from '@/lib/types';
 import { sortVehiclesNatural } from '@/lib/sort';
 import { vehicleRiders, passengersByStop } from '@/lib/manifest';
 import { insertAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEntry } from '@/lib/ledger';
+import { detectVehicleRep, getRepStructure } from '@/lib/officialReps';
 
-const FARE = CANCELLATION_FEE; // R40 fixed passenger fare — never individually editable
-const DRAFT_PUSH_DEBOUNCE_MS = 600;
+const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
+const SYNC_DEBOUNCE_MS = 400; // 400ms debounce for Supabase background sync
 
 interface ExternalSponsee {
   id: string;
@@ -23,9 +25,6 @@ interface ExternalSponsee {
   amount: number;
 }
 
-/** Stable per-tab id, so a device can recognize its own draft writes echoed
- * back via Realtime and not treat them as an incoming change from another
- * device. */
 function makeClientId(): string {
   return `dev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -42,10 +41,13 @@ export function RepPage() {
   const [licensePlate, setLicensePlate] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitMsg, setSubmitMsg] = useState<string | null>(null);
-  const [notes, setNotes] = useState<Record<string, string>>({});
+
+  // Optimistic local state for instantaneous attendance UI
+  const [presentIds, setPresentIds] = useState<Set<string>>(new Set());
+  const [absentIds, setAbsentIds] = useState<Set<string>>(new Set());
   const [sponsoredIds, setSponsoredIds] = useState<Set<string>>(new Set());
+  const [notes, setNotes] = useState<Record<string, string>>({});
   const [generalNotes, setGeneralNotes] = useState('');
-  const [touchedIds, setTouchedIds] = useState<Set<string>>(new Set());
 
   // Cash & sponsorship calculator
   const [externalSponsees, setExternalSponsees] = useState<ExternalSponsee[]>([]);
@@ -56,24 +58,13 @@ export function RepPage() {
   const [collectedCancellationIds, setCollectedCancellationIds] = useState<Set<string>>(new Set());
   const [cancellationSearch, setCancellationSearch] = useState('');
 
-  // Draft auto-save/restore — now backed by Supabase (Vehicle.draftState)
-  // instead of localStorage, so it syncs live across devices.
+  // Draft auto-save/restore
   const [draftRestored, setDraftRestored] = useState(false);
   const clientIdRef = useRef<string>(makeClientId());
-  const draftPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** updatedAt of the last draftState we applied locally, so we can tell a
-   * genuinely new remote change apart from our own write echoing back. */
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAppliedDraftAtRef = useRef<string | null>(null);
-  /** True for exactly one render right after we've programmatically applied
-   * a restored/remote draft, so the push effect that reacts to those same
-   * state changes doesn't immediately echo them straight back to Supabase
-   * (which would otherwise ping-pong forever between two open devices). */
   const isApplyingDraftRef = useRef(false);
-  /** Mirrors `manifest` for the debounced push below, which reads from the
-   * ref instead of depending on `manifest` directly — the manifest object
-   * gets a new reference on every save (including the push's own), so
-   * depending on it directly would re-trigger the effect after every push
-   * and loop forever even once the Rep stops editing. */
+
   const manifestRef = useRef(manifest);
   useEffect(() => { manifestRef.current = manifest; }, [manifest]);
 
@@ -95,9 +86,14 @@ export function RepPage() {
     [manifest, selectedVehicle]
   );
 
-  // Auto-match: as the Rep types their name, highlight/select the vehicle
-  // the Admin assigned them to (only while nothing is selected yet, so we
-  // never yank a vehicle they picked on purpose).
+  const detectedOfficialRep = useMemo(
+    () => riders.length > 0 ? detectVehicleRep(riders) : null,
+    [riders]
+  );
+
+  const repStructure = repName ? getRepStructure(repName) : null;
+
+  // Auto-match vehicle when typing rep name if not yet selected
   useEffect(() => {
     if (!manifest || selectedVehicleId) return;
     const q = repName.trim().toLowerCase();
@@ -106,22 +102,32 @@ export function RepPage() {
     if (match) setSelectedVehicleId(match.id);
   }, [repName, manifest, selectedVehicleId]);
 
-  function resetLocalDraftState() {
+  const resetLocalDraftState = useCallback(() => {
     isApplyingDraftRef.current = true;
-    setTouchedIds(new Set());
+    setPresentIds(new Set());
+    setAbsentIds(new Set());
     setSponsoredIds(new Set());
     setNotes({});
     setGeneralNotes('');
     setCoReps([]);
     setExternalSponsees([]);
     setCollectedCancellationIds(new Set());
-  }
+  }, []);
 
-  function applyDraftState(draft: VehicleDraftState) {
+  const applyDraftState = useCallback((draft: VehicleDraftState, vehicleRidersList: Passenger[]) => {
     isApplyingDraftRef.current = true;
-    const presentIds = draft.presentIds ?? [];
-    const absentIds = draft.absentIds ?? [];
-    setTouchedIds(new Set([...presentIds, ...absentIds]));
+    const pIds = new Set(draft.presentIds ?? []);
+    const aIds = new Set(draft.absentIds ?? []);
+
+    // Also populate from existing passenger present status if draft is empty
+    if (pIds.size === 0 && aIds.size === 0 && vehicleRidersList.length > 0) {
+      vehicleRidersList.forEach((r) => {
+        if (r.present) pIds.add(r.id);
+      });
+    }
+
+    setPresentIds(pIds);
+    setAbsentIds(aIds);
     setSponsoredIds(new Set(draft.sponsoredIds ?? []));
     setNotes(draft.notes ?? {});
     setGeneralNotes(draft.generalNotes ?? '');
@@ -130,11 +136,9 @@ export function RepPage() {
     setCollectedCancellationIds(new Set(draft.settledLedgerIds ?? []));
     if (draft.repName) setRepName(draft.repName);
     if (draft.licensePlate) setLicensePlate(draft.licensePlate);
-  }
+  }, []);
 
-  // Reset per-session state whenever the rep switches vehicles, then try to
-  // restore this vehicle's live Supabase draft (attendance touches, notes,
-  // sponsorship, cash calculator) before anything is submitted.
+  // Initialize/restore state when switching vehicles
   useEffect(() => {
     setWalkInOpen(false);
     setWalkInName('');
@@ -148,38 +152,53 @@ export function RepPage() {
     }
 
     const vehicle = manifest?.vehicles.find((v) => v.id === selectedVehicleId);
-    const draft = vehicle && !vehicle.submitted ? vehicle.draftState : undefined;
+    if (!vehicle) return;
+
+    const currentRiders = vehicleRiders(manifest, vehicle);
+    const draft = !vehicle.submitted ? vehicle.draftState : undefined;
+
     if (draft) {
-      applyDraftState(draft);
+      applyDraftState(draft, currentRiders);
       lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
       setDraftRestored(true);
-      const t = setTimeout(() => setDraftRestored(false), 6000);
+      const t = setTimeout(() => setDraftRestored(false), 5000);
       return () => clearTimeout(t);
+    } else {
+      // Default initialization
+      isApplyingDraftRef.current = true;
+      const initialPresent = new Set<string>();
+      currentRiders.forEach((r) => {
+        if (r.present) initialPresent.add(r.id);
+      });
+      setPresentIds(initialPresent);
+      setAbsentIds(new Set());
+      setSponsoredIds(new Set());
+      setNotes({});
+      setGeneralNotes(vehicle.generalNotes ?? '');
+      setCoReps(vehicle.coReps ?? []);
+      setExternalSponsees([]);
+      setCollectedCancellationIds(new Set());
+      if (vehicle.repName) setRepName(vehicle.repName);
+      if (vehicle.licensePlate) setLicensePlate(vehicle.licensePlate);
+      lastAppliedDraftAtRef.current = null;
     }
-    resetLocalDraftState();
-    lastAppliedDraftAtRef.current = null;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedVehicleId]);
+  }, [selectedVehicleId, manifest, resetLocalDraftState, applyDraftState]);
 
-  // Live cross-device sync — if another tab/device pushes a newer draft for
-  // the vehicle we currently have open (and it isn't just our own write
-  // echoing back through Realtime), pick it up so both stay in lockstep.
+  // Live cross-device sync
   useEffect(() => {
     if (!selectedVehicle || selectedVehicle.submitted) return;
     const draft = selectedVehicle.draftState;
     if (!draft) return;
     if (draft.updatedBy === clientIdRef.current) return;
     if (draft.updatedAt && draft.updatedAt === lastAppliedDraftAtRef.current) return;
-    applyDraftState(draft);
+    applyDraftState(draft, riders);
     lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
     setDraftRestored(true);
-    const t = setTimeout(() => setDraftRestored(false), 6000);
+    const t = setTimeout(() => setDraftRestored(false), 5000);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedVehicle?.draftState]);
+  }, [selectedVehicle?.draftState, selectedVehicle, riders, applyDraftState]);
 
-  // Load outstanding past-cancellation debts once, so any Rep can collect
-  // cash on behalf of someone in a different vehicle/structure.
+  // Load past cancellations
   useEffect(() => {
     let mounted = true;
     setLoadingPastCancellations(true);
@@ -187,21 +206,36 @@ export function RepPage() {
       try {
         const entries = await listLedgerEntries();
         if (mounted) setPastCancellations(entries);
-      } catch { /* non-critical — picker will just show empty */ }
-      finally { if (mounted) setLoadingPastCancellations(false); }
+      } catch {
+        /* Non-critical */
+      } finally {
+        if (mounted) setLoadingPastCancellations(false);
+      }
     })();
     return () => { mounted = false; };
   }, []);
 
-  const presentCount = riders.filter((r) => r.present).length;
-  const absentCount = riders.length - presentCount;
-  const allTouched = riders.length > 0 && riders.every((r) => touchedIds.has(r.id));
+  // Stats calculation
+  const presentCount = useMemo(() => {
+    return riders.filter((r) => presentIds.has(r.id)).length;
+  }, [riders, presentIds]);
 
-  // Can only submit if rep name AND license plate are filled, and every
-  // passenger has been explicitly marked Present or Absent this session.
-  const sponsoredMissingNotes = riders.some(
-    (r) => !r.present && sponsoredIds.has(r.id) && !(notes[r.id] ?? '').trim()
-  );
+  const absentCount = useMemo(() => {
+    return riders.filter((r) => absentIds.has(r.id)).length;
+  }, [riders, absentIds]);
+
+  const touchedCount = useMemo(() => {
+    return riders.filter((r) => presentIds.has(r.id) || absentIds.has(r.id)).length;
+  }, [riders, presentIds, absentIds]);
+
+  const allTouched = riders.length > 0 && touchedCount === riders.length;
+
+  const sponsoredMissingNotes = useMemo(() => {
+    return riders.some(
+      (r) => absentIds.has(r.id) && sponsoredIds.has(r.id) && !(notes[r.id] ?? '').trim()
+    );
+  }, [riders, absentIds, sponsoredIds, notes]);
+
   const canSubmit =
     repName.trim().length > 0 &&
     licensePlate.trim().length > 0 &&
@@ -209,10 +243,11 @@ export function RepPage() {
     !sponsoredMissingNotes &&
     !submitting;
 
-  // Cash calculator totals — base fare is fixed at R40/present passenger
-  // and is never individually editable.
-  // Total = (Present * 40) - (Sponsored Present * 40) + External Sponsee Cash + Past Cancellation Cash Collected
-  const presentSponsoredCount = riders.filter((r) => r.present && sponsoredIds.has(r.id)).length;
+  // Cash calculations
+  const presentSponsoredCount = useMemo(() => {
+    return riders.filter((r) => presentIds.has(r.id) && sponsoredIds.has(r.id)).length;
+  }, [riders, presentIds, sponsoredIds]);
+
   const grossPresentCash = presentCount * FARE;
   const sponsoredDeduction = presentSponsoredCount * FARE;
   const baseCash = grossPresentCash - sponsoredDeduction;
@@ -220,113 +255,135 @@ export function RepPage() {
   const pastCancellationCash = collectedCancellationIds.size * FARE;
   const totalCash = baseCash + externalCash + pastCancellationCash;
 
-  // Debounced live persistence — pushes the in-progress checklist, notes,
-  // cash calculator, and rep details to Supabase (Vehicle.draftState) a
-  // moment after the Rep stops typing/tapping, so any other device open on
-  // this vehicle picks it up via Realtime and a lost connection or closed
-  // tab never loses the in-progress submission.
+  // 400ms Debounced Supabase Sync
   useEffect(() => {
     if (isApplyingDraftRef.current) {
-      // This render's state changes came from applyDraftState/resetLocalDraftState
-      // (a restore or an incoming remote update), not a local edit — don't
-      // echo it straight back to Supabase.
       isApplyingDraftRef.current = false;
       return;
     }
-    if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted || !manifest) return;
+    if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted || !manifestRef.current) return;
 
-    if (draftPushTimerRef.current) clearTimeout(draftPushTimerRef.current);
-    draftPushTimerRef.current = setTimeout(() => {
-      const presentIds = riders.filter((r) => touchedIds.has(r.id) && r.present).map((r) => r.id);
-      const absentIds = riders.filter((r) => touchedIds.has(r.id) && !r.present).map((r) => r.id);
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+
+    debounceTimerRef.current = setTimeout(() => {
+      const currentManifest = manifestRef.current;
+      if (!currentManifest) return;
+
+      const pIdsArray = Array.from(presentIds);
+      const aIdsArray = Array.from(absentIds);
+
       const draft: VehicleDraftState = {
-        presentIds,
-        absentIds,
+        presentIds: pIdsArray,
+        absentIds: aIdsArray,
         sponsoredIds: Array.from(sponsoredIds),
         notes,
         repName: repName.trim(),
-        coReps,
+        coReps: coReps.filter(Boolean),
         licensePlate: licensePlate.trim(),
-        generalNotes,
+        generalNotes: generalNotes.trim(),
         cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
         settledLedgerIds: Array.from(collectedCancellationIds),
         externalSponsees,
         updatedAt: new Date().toISOString(),
         updatedBy: clientIdRef.current,
       };
+
       lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
-      const updatedVehicles = manifest.vehicles.map((v) =>
-        v.id === selectedVehicleId ? { ...v, draftState: draft } : v
+
+      // Update vehicle draft and passenger present status optimistically
+      const updatedSignups = currentManifest.signups.map((p) => {
+        if (presentIds.has(p.id)) return { ...p, present: true };
+        if (absentIds.has(p.id)) return { ...p, present: false };
+        return p;
+      });
+
+      const updatedVehicles = currentManifest.vehicles.map((v) =>
+        v.id === selectedVehicleId
+          ? {
+              ...v,
+              repName: repName.trim() || v.repName,
+              licensePlate: licensePlate.trim() || v.licensePlate,
+              draftState: draft,
+            }
+          : v
       );
-      save({ ...manifest, vehicles: updatedVehicles }).catch(() => { /* draft sync is best-effort */ });
-    }, DRAFT_PUSH_DEBOUNCE_MS);
+
+      save({ ...currentManifest, signups: updatedSignups, vehicles: updatedVehicles }).catch(() => {
+        /* background sync is best-effort */
+      });
+    }, SYNC_DEBOUNCE_MS);
 
     return () => {
-      if (draftPushTimerRef.current) clearTimeout(draftPushTimerRef.current);
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
     };
   }, [
-    key, selectedVehicleId, selectedVehicle, manifest, riders,
-    touchedIds, sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
+    selectedVehicleId, selectedVehicle, presentIds, absentIds,
+    sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
     externalSponsees, collectedCancellationIds, baseCash, externalCash, pastCancellationCash,
+    save
   ]);
 
-  async function setPresent(passengerId: string, present: boolean) {
-    if (!manifest) return;
-    const updatedSignups = manifest.signups.map((p) =>
-      p.id === passengerId ? { ...p, present } : p
-    );
-    setTouchedIds((prev) => new Set(prev).add(passengerId));
-    await save({ ...manifest, signups: updatedSignups });
-  }
+  // Instant local toggle handlers (Zero lag, pure React state)
+  const handleSetPresent = useCallback((passengerId: string, isPresent: boolean) => {
+    if (isPresent) {
+      setPresentIds((prev) => new Set(prev).add(passengerId));
+      setAbsentIds((prev) => {
+        const next = new Set(prev);
+        next.delete(passengerId);
+        return next;
+      });
+    } else {
+      setAbsentIds((prev) => new Set(prev).add(passengerId));
+      setPresentIds((prev) => {
+        const next = new Set(prev);
+        next.delete(passengerId);
+        return next;
+      });
+    }
+  }, []);
 
-  function toggleSponsored(passengerId: string) {
+  const handleToggleSponsored = useCallback((passengerId: string) => {
     setSponsoredIds((prev) => {
       const next = new Set(prev);
       if (next.has(passengerId)) next.delete(passengerId);
       else next.add(passengerId);
       return next;
     });
-  }
+  }, []);
 
-  function setNote(passengerId: string, text: string) {
+  const handleSetNote = useCallback((passengerId: string, text: string) => {
     setNotes((prev) => ({ ...prev, [passengerId]: text }));
-  }
+  }, []);
 
-  function addCoRep() {
-    setCoReps((prev) => [...prev, '']);
-  }
-
-  function updateCoRep(index: number, value: string) {
-    setCoReps((prev) => prev.map((c, i) => (i === index ? value : c)));
-  }
-
-  function removeCoRep(index: number) {
+  const addCoRep = () => setCoReps((prev) => [...prev, '']);
+  const updateCoRep = (index: number, val: string) =>
+    setCoReps((prev) => prev.map((c, i) => (i === index ? val : c)));
+  const removeCoRep = (index: number) =>
     setCoReps((prev) => prev.filter((_, i) => i !== index));
-  }
 
-  function toggleCollectedCancellation(entryId: string) {
+  const toggleCollectedCancellation = (entryId: string) => {
     setCollectedCancellationIds((prev) => {
       const next = new Set(prev);
       if (next.has(entryId)) next.delete(entryId);
       else next.add(entryId);
       return next;
     });
-  }
+  };
 
-  function addExternalSponsee() {
+  const addExternalSponsee = () => {
     setExternalSponsees((prev) => [
       ...prev,
       { id: `sponsee-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, sponseeName: '', taxiName: '', amount: FARE },
     ]);
-  }
+  };
 
-  function updateExternalSponsee(id: string, patch: Partial<ExternalSponsee>) {
+  const updateExternalSponsee = (id: string, patch: Partial<ExternalSponsee>) => {
     setExternalSponsees((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
-  }
+  };
 
-  function removeExternalSponsee(id: string) {
+  const removeExternalSponsee = (id: string) => {
     setExternalSponsees((prev) => prev.filter((s) => s.id !== id));
-  }
+  };
 
   function findByName(name: string): Passenger | undefined {
     const q = name.trim().toLowerCase();
@@ -349,7 +406,6 @@ export function RepPage() {
     const existing = findByName(walkInName);
 
     if (existing && existing.assignedTo && existing.assignedTo !== selectedVehicle.id) {
-      // Ask before pulling them out of their current vehicle.
       const fromVehicle = vehicleFor(existing.assignedTo);
       if (fromVehicle) {
         setTransferPrompt({ passenger: existing, fromVehicle });
@@ -358,10 +414,8 @@ export function RepPage() {
     }
 
     if (existing) {
-      // Already unassigned, or already in this vehicle — just (re)assign here.
       await assignWalkIn(existing, existing.assignedTo);
     } else {
-      // Brand-new person, not from the Excel import.
       const newPassenger: Passenger = {
         id: `walkin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         fullName: walkInName.trim(),
@@ -378,7 +432,7 @@ export function RepPage() {
           : v
       );
       await save({ ...manifest, signups: [...manifest.signups, newPassenger], vehicles: updatedVehicles });
-      setTouchedIds((prev) => new Set(prev).add(newPassenger.id));
+      setPresentIds((prev) => new Set(prev).add(newPassenger.id));
     }
     setWalkInName('');
     setWalkInOpen(false);
@@ -401,7 +455,7 @@ export function RepPage() {
       return v;
     });
     await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
-    setTouchedIds((prev) => new Set(prev).add(passenger.id));
+    setPresentIds((prev) => new Set(prev).add(passenger.id));
   }
 
   async function confirmTransfer() {
@@ -415,13 +469,21 @@ export function RepPage() {
   async function handleSubmit() {
     if (!manifest || !selectedVehicle) return;
     if (!repName.trim() || !licensePlate.trim()) return;
+
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+
     setSubmitting(true);
     setSubmitMsg(null);
+
     try {
       const absentees = riders
-        .filter((r) => !r.present)
+        .filter((r) => absentIds.has(r.id))
         .map((r) => ({
           ...r,
+          present: false,
           sponsored: sponsoredIds.has(r.id),
           sponsorNote: notes[r.id] ?? '',
         }));
@@ -441,9 +503,6 @@ export function RepPage() {
         ? `Past cancellations collected in cash: ${settledNames.join(', ')}. `
         : '';
 
-      // insertAbsentees deduplicates strictly by manifest_key + passenger_name
-      // (across this vehicle's full roster, present and absent) before
-      // inserting — so resubmitting never leaves a duplicate debt row.
       await insertAbsentees(
         key,
         parsedDate,
@@ -457,13 +516,17 @@ export function RepPage() {
         `${coRepNote}${cashNote}${sponseeNote}${settledNote}${generalNotes.trim()}`.trim()
       );
 
-      // Resolve/settle the past-cancellation entries collected in cash on
-      // this trip so they drop off the active cancellation ledger.
       if (collectedCancellationIds.size > 0) {
         await settleLedgerEntries(Array.from(collectedCancellationIds));
         setPastCancellations((prev) => prev.filter((e) => !collectedCancellationIds.has(e.id)));
         setCollectedCancellationIds(new Set());
       }
+
+      const updatedSignups = manifest.signups.map((p) => {
+        if (presentIds.has(p.id)) return { ...p, present: true };
+        if (absentIds.has(p.id)) return { ...p, present: false };
+        return p;
+      });
 
       const updatedVehicles = manifest.vehicles.map((v) =>
         v.id === selectedVehicle.id
@@ -480,15 +543,8 @@ export function RepPage() {
             }
           : v
       );
-      await save({ ...manifest, vehicles: updatedVehicles });
 
-      // Cancel any in-flight debounced draft push — the draft is now cleared
-      // server-side, so a stale timer firing afterwards would resurrect it.
-      if (draftPushTimerRef.current) {
-        clearTimeout(draftPushTimerRef.current);
-        draftPushTimerRef.current = null;
-      }
-      lastAppliedDraftAtRef.current = null;
+      await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
 
       setSubmitMsg(
         `Submitted! ${presentCount} present, ${absentCount} absent. ` +
@@ -534,8 +590,8 @@ export function RepPage() {
             Transport Rep Portal
           </h1>
           <p className="mt-1.5 text-sm text-muted">
-            Enter your name to find your assigned vehicle, mark every passenger Present or Absent, and submit
-            attendance. You must enter your name and the vehicle's license plate before submitting.
+            Enter your name to find your assigned vehicle, mark every passenger Present or Absent with instant feedback, and submit
+            attendance.
           </p>
         </div>
 
@@ -578,9 +634,17 @@ export function RepPage() {
                 </h2>
               </div>
 
-              <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
-                Your Name <span className="text-crimson-400">*</span>
-              </label>
+              <div className="mb-1.5 flex items-center justify-between">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-muted">
+                  Your Name <span className="text-crimson-400">*</span>
+                </label>
+                {repStructure && (
+                  <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px]">
+                    Official Structure Rep ({repStructure})
+                  </span>
+                )}
+              </div>
+
               <input
                 type="text"
                 value={repName}
@@ -588,6 +652,23 @@ export function RepPage() {
                 placeholder="Start typing your name…"
                 className="input-field mb-1.5"
               />
+
+              {detectedOfficialRep && !repName && (
+                <div className="mb-2 flex items-center justify-between gap-2 rounded-lg border border-crimson-500/30 bg-crimson-500/10 px-2.5 py-1.5 text-xs">
+                  <span className="flex items-center gap-1.5 text-crimson-300">
+                    <Sparkles className="h-3.5 w-3.5 text-crimson-400" />
+                    Detected official rep: <strong>{detectedOfficialRep}</strong>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setRepName(detectedOfficialRep)}
+                    className="text-xs font-bold text-crimson-400 underline hover:text-crimson-300"
+                  >
+                    Use Name
+                  </button>
+                </div>
+              )}
+
               {selectedVehicle && repName.trim() && (selectedVehicle.repName ?? '').trim().toLowerCase() === repName.trim().toLowerCase() && (
                 <p className="mb-3 flex items-center gap-1 text-xs text-success-light">
                   <CheckCircle2 className="h-3.5 w-3.5" />
@@ -596,7 +677,7 @@ export function RepPage() {
               )}
 
               <p className="mb-3 text-xs text-muted">
-                Or pick the taxi or bus the admin assigned you directly. Each rep handles their own vehicle.
+                Or pick the taxi or bus the admin assigned you directly:
               </p>
               <div className="relative">
                 <Car className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
@@ -611,11 +692,10 @@ export function RepPage() {
                   <option value="" className="bg-card-2">Choose your vehicle…</option>
                   {sortVehiclesNatural(manifest.vehicles).map((v) => {
                     const vRiders = vehicleRiders(manifest, v);
-                    const vPresent = vRiders.filter((r) => r.present).length;
                     return (
                       <option key={v.id} value={v.id} className="bg-card-2">
                         {v.name} — Assigned Rep: {v.repName || 'Unassigned'} ({v.type}) — {vRiders.length} passengers
-                        {v.submitted ? ' ✓ submitted' : ` (${vPresent}/${vRiders.length} checked)`}
+                        {v.submitted ? ' ✓ submitted' : ''}
                       </option>
                     );
                   })}
@@ -673,7 +753,7 @@ export function RepPage() {
 
             {selectedVehicle && draftRestored && (
               <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-2.5 text-xs text-success-light">
-                🟢 Draft synced from another session
+                🟢 Draft synced with cloud
               </div>
             )}
 
@@ -741,9 +821,6 @@ export function RepPage() {
                             Cancel
                           </button>
                         </div>
-                        <p className="text-[10px] text-muted">
-                          We'll check if they're already assigned elsewhere before adding them here.
-                        </p>
                       </div>
                     )}
                   </div>
@@ -751,10 +828,11 @@ export function RepPage() {
 
                 <StopGroupedChecklist
                   riders={riders}
-                  touchedIds={touchedIds}
-                  onSetPresent={setPresent}
-                  onToggleSponsored={toggleSponsored}
-                  onSetNote={setNote}
+                  presentIds={presentIds}
+                  absentIds={absentIds}
+                  onSetPresent={handleSetPresent}
+                  onToggleSponsored={handleToggleSponsored}
+                  onSetNote={handleSetNote}
                   sponsoredIds={sponsoredIds}
                   notes={notes}
                   disabled={isSubmitted || submitting}
@@ -762,7 +840,7 @@ export function RepPage() {
 
                 {!isSubmitted && (
                   <>
-                    {/* General notes for this vehicle submission */}
+                    {/* General notes */}
                     <div className="card">
                       <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
                         General Notes (optional)
@@ -776,9 +854,7 @@ export function RepPage() {
                       />
                     </div>
 
-                    {/* Read-only cash summary — sits directly above the submit
-                        button, per policy. Base fare is fixed at R40/present
-                        passenger and is never individually editable. */}
+                    {/* Cash summary */}
                     <CashCalculatorCard
                       presentCount={presentCount}
                       presentSponsoredCount={presentSponsoredCount}
@@ -804,7 +880,7 @@ export function RepPage() {
                     {!allTouched && (
                       <div className="flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
                         <AlertTriangle className="h-4 w-4 shrink-0" />
-                        Every passenger must be marked Present or Absent before you can submit.
+                        Every passenger must be marked Present or Absent before you can submit ({touchedCount}/{riders.length} checked).
                       </div>
                     )}
 
@@ -954,7 +1030,6 @@ function StatCard({
   );
 }
 
-/** Renders an entry's stored service label (e.g. "PM Service — Normal Only") as "PM Normal" / "AM Serving". */
 function formatServicePeriodMode(service: string): string {
   const parts = service.split('—').map((s) => s.trim());
   const period = (parts[0] ?? '').split(' ')[0] || '';
@@ -990,8 +1065,6 @@ function CashCalculatorCard({
   totalCash: number;
 }) {
   const q = search.trim().toLowerCase();
-  // Selected debts are shown separately, so search results only ever
-  // surface still-outstanding ("active") records the Rep hasn't picked yet.
   const selectedCancellations = pastCancellations.filter((e) => collectedCancellationIds.has(e.id));
   const searchResults = q.length === 0 ? [] : pastCancellations.filter((e) => {
     if (collectedCancellationIds.has(e.id)) return false;
@@ -1005,7 +1078,6 @@ function CashCalculatorCard({
         <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">Physical Cash Calculator</h2>
       </div>
 
-      {/* Read-only base fare summary — R40/present passenger is fixed and cannot be edited per-passenger. */}
       <div className="space-y-1.5 rounded-lg bg-card-2/60 p-3 text-xs">
         <div className="flex items-center justify-between text-muted">
           <span>Present Passengers</span>
@@ -1019,7 +1091,7 @@ function CashCalculatorCard({
         )}
       </div>
 
-      {/* External sponsees — cash collected here for a passenger in another vehicle */}
+      {/* External sponsees */}
       <div className="mt-3">
         <button onClick={onAddSponsee} className="flex items-center gap-1.5 text-xs font-semibold text-crimson-400 hover:text-crimson-300">
           <Plus className="h-3.5 w-3.5" />
@@ -1062,7 +1134,7 @@ function CashCalculatorCard({
         )}
       </div>
 
-      {/* Search-based past-cancellation cash settlement */}
+      {/* Settle past cancellation */}
       <div className="mt-3">
         <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-crimson-400">
           <Banknote className="h-3.5 w-3.5" />
@@ -1072,7 +1144,6 @@ function CashCalculatorCard({
           )}
         </div>
 
-        {/* Already-selected debts, with a way to deselect */}
         {selectedCancellations.length > 0 && (
           <div className="mb-2 space-y-1.5">
             {selectedCancellations.map((e) => (
@@ -1164,10 +1235,11 @@ function CashCalculatorCard({
 }
 
 function StopGroupedChecklist({
-  riders, touchedIds, onSetPresent, onToggleSponsored, onSetNote, sponsoredIds, notes, disabled,
+  riders, presentIds, absentIds, onSetPresent, onToggleSponsored, onSetNote, sponsoredIds, notes, disabled,
 }: {
   riders: Passenger[];
-  touchedIds: Set<string>;
+  presentIds: Set<string>;
+  absentIds: Set<string>;
   onSetPresent: (id: string, present: boolean) => void;
   onToggleSponsored: (id: string) => void;
   onSetNote: (id: string, text: string) => void;
@@ -1207,8 +1279,8 @@ function StopGroupedChecklist({
 
       {stops.map((stop) => {
         const stopRiders = byStop[stop];
-        const stopPresent = stopRiders.filter((r) => r.present).length;
-        const stopTouched = stopRiders.filter((r) => touchedIds.has(r.id)).length;
+        const stopPresent = stopRiders.filter((r) => presentIds.has(r.id)).length;
+        const stopTouched = stopRiders.filter((r) => presentIds.has(r.id) || absentIds.has(r.id)).length;
         const isExpanded = expandedStops.has(stop);
         return (
           <div key={stop} className="overflow-hidden rounded-xl border border-line bg-card">
@@ -1233,10 +1305,12 @@ function StopGroupedChecklist({
                   <PassengerRow
                     key={p.id}
                     passenger={p}
-                    touched={touchedIds.has(p.id)}
-                    onSetPresent={(present) => onSetPresent(p.id, present)}
-                    onToggleSponsored={() => onToggleSponsored(p.id)}
-                    onSetNote={(text) => onSetNote(p.id, text)}
+                    isPresent={presentIds.has(p.id)}
+                    isAbsent={absentIds.has(p.id)}
+                    touched={presentIds.has(p.id) || absentIds.has(p.id)}
+                    onSetPresent={onSetPresent}
+                    onToggleSponsored={onToggleSponsored}
+                    onSetNote={onSetNote}
                     isSponsored={sponsoredIds.has(p.id)}
                     noteText={notes[p.id] ?? ''}
                     disabled={disabled}
@@ -1251,36 +1325,32 @@ function StopGroupedChecklist({
   );
 }
 
-function PassengerRow({
-  passenger, touched, onSetPresent, onToggleSponsored, onSetNote, isSponsored, noteText, disabled,
+const PassengerRow = React.memo(function PassengerRow({
+  passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onSetNote, isSponsored, noteText, disabled,
 }: {
   passenger: Passenger;
+  isPresent: boolean;
+  isAbsent: boolean;
   touched: boolean;
-  onSetPresent: (present: boolean) => void;
-  onToggleSponsored: () => void;
-  onSetNote: (text: string) => void;
+  onSetPresent: (id: string, present: boolean) => void;
+  onToggleSponsored: (id: string) => void;
+  onSetNote: (id: string, text: string) => void;
   isSponsored: boolean;
   noteText: string;
   disabled: boolean;
 }) {
   const [showNote, setShowNote] = useState(isSponsored);
-  const [note, setNote] = useState(noteText);
 
   function handleSponsoredToggle() {
-    onToggleSponsored();
+    onToggleSponsored(passenger.id);
     if (!isSponsored) setShowNote(true);
-  }
-
-  function handleNoteChange(text: string) {
-    setNote(text);
-    onSetNote(text);
   }
 
   return (
     <div className={`p-3.5 transition-colors ${disabled ? 'opacity-60' : 'hover:bg-card-2/30'} ${!touched && !disabled ? 'bg-warning/5' : ''}`}>
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className={`text-sm font-medium ${passenger.present ? 'text-success-light' : touched ? 'text-crimson-300' : 'text-ink'}`}>
+          <div className={`text-sm font-medium ${isPresent ? 'text-success-light' : isAbsent ? 'text-crimson-300' : 'text-ink'}`}>
             {passenger.fullName}
             {passenger.structure && (
               <span className="ml-2 inline-block rounded bg-bg/60 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-muted">
@@ -1294,13 +1364,15 @@ function PassengerRow({
             )}
           </div>
         </div>
-        {/* Explicit, side-by-side Present / Absent toggle buttons */}
+
+        {/* Optimistic Instant Present / Absent Buttons */}
         <div className="flex shrink-0 gap-1.5">
           <button
-            onClick={() => onSetPresent(true)}
+            type="button"
+            onClick={() => onSetPresent(passenger.id, true)}
             disabled={disabled}
             className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all active:scale-95 ${
-              passenger.present && touched
+              isPresent
                 ? 'bg-success/20 text-success-light border border-success/50'
                 : 'bg-card-2 text-muted border border-line hover:border-success/40 hover:text-success-light'
             }`}
@@ -1311,10 +1383,11 @@ function PassengerRow({
             </span>
           </button>
           <button
-            onClick={() => onSetPresent(false)}
+            type="button"
+            onClick={() => onSetPresent(passenger.id, false)}
             disabled={disabled}
             className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all active:scale-95 ${
-              !passenger.present && touched
+              isAbsent
                 ? 'bg-crimson-500/20 text-crimson-300 border border-crimson-500/50'
                 : 'bg-card-2 text-muted border border-line hover:border-crimson-500/40 hover:text-crimson-300'
             }`}
@@ -1330,6 +1403,7 @@ function PassengerRow({
       {/* Sponsored toggle */}
       <div className="mt-2 flex items-center gap-3">
         <button
+          type="button"
           onClick={handleSponsoredToggle}
           disabled={disabled}
           className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all active:scale-95 ${
@@ -1343,6 +1417,7 @@ function PassengerRow({
         </button>
         {isSponsored && (
           <button
+            type="button"
             onClick={() => setShowNote(!showNote)}
             disabled={disabled}
             className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted border border-line bg-card-2 transition-all hover:text-ink"
@@ -1353,13 +1428,13 @@ function PassengerRow({
         )}
       </div>
 
-      {/* Sponsor note — required when sponsored */}
+      {/* Sponsor note input */}
       {isSponsored && showNote && (
         <div className="mt-2 animate-fade-in">
           <input
             type="text"
-            value={note}
-            onChange={(e) => handleNoteChange(e.target.value)}
+            value={noteText}
+            onChange={(e) => onSetNote(passenger.id, e.target.value)}
             disabled={disabled}
             placeholder="Required: Who is paying for this person? (e.g. Person A in Taxi 1)"
             className="input-field text-xs"
@@ -1371,4 +1446,4 @@ function PassengerRow({
       )}
     </div>
   );
-}
+});

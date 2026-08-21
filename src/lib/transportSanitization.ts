@@ -53,7 +53,7 @@ export function masterHubForStop(value: unknown): string {
   return stop;
 }
 
-export function sanitizePassengerRecord<T extends Record<string, any>>(passenger: T): T {
+export function sanitizePassengerRecord<T extends Record<string, unknown>>(passenger: T): T {
   const fullName = sanitizeTransportValue(passenger.fullName);
   const firstName = sanitizeTransportValue(passenger.firstName);
   const surname = sanitizeTransportValue(passenger.surname);
