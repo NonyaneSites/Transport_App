@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
   Smartphone, Wifi, ChevronDown, ChevronRight, MapPin, Send, Cross,
@@ -12,10 +12,9 @@ import { hubDisplayName } from '@/lib/types';
 import { sortVehiclesNatural } from '@/lib/sort';
 import { vehicleRiders, passengersByStop } from '@/lib/manifest';
 import { insertAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEntry } from '@/lib/ledger';
-import { detectVehicleRep } from '@/lib/officialReps';
 
-const FARE = CANCELLATION_FEE;
-const DRAFT_DEBOUNCE_MS = 400;
+const FARE = CANCELLATION_FEE; // R40 fixed passenger fare — never individually editable
+const DRAFT_PUSH_DEBOUNCE_MS = 600;
 
 interface ExternalSponsee {
   id: string;
@@ -24,6 +23,9 @@ interface ExternalSponsee {
   amount: number;
 }
 
+/** Stable per-tab id, so a device can recognize its own draft writes echoed
+ * back via Realtime and not treat them as an incoming change from another
+ * device. */
 function makeClientId(): string {
   return `dev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -40,26 +42,38 @@ export function RepPage() {
   const [licensePlate, setLicensePlate] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitMsg, setSubmitMsg] = useState<string | null>(null);
-
-  // Optimistic attendance state
-  const [presentIds, setPresentIds] = useState<Set<string>>(new Set());
-  const [absentIds, setAbsentIds] = useState<Set<string>>(new Set());
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [sponsoredIds, setSponsoredIds] = useState<Set<string>>(new Set());
   const [generalNotes, setGeneralNotes] = useState('');
+  const [touchedIds, setTouchedIds] = useState<Set<string>>(new Set());
 
-  // Cash calculator
+  // Cash & sponsorship calculator
   const [externalSponsees, setExternalSponsees] = useState<ExternalSponsee[]>([]);
+
+  // Past-cancellation cash collection
   const [pastCancellations, setPastCancellations] = useState<LedgerEntry[]>([]);
   const [loadingPastCancellations, setLoadingPastCancellations] = useState(false);
   const [collectedCancellationIds, setCollectedCancellationIds] = useState<Set<string>>(new Set());
   const [cancellationSearch, setCancellationSearch] = useState('');
 
+  // Draft auto-save/restore — now backed by Supabase (Vehicle.draftState)
+  // instead of localStorage, so it syncs live across devices.
   const [draftRestored, setDraftRestored] = useState(false);
   const clientIdRef = useRef<string>(makeClientId());
   const draftPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** updatedAt of the last draftState we applied locally, so we can tell a
+   * genuinely new remote change apart from our own write echoing back. */
   const lastAppliedDraftAtRef = useRef<string | null>(null);
+  /** True for exactly one render right after we've programmatically applied
+   * a restored/remote draft, so the push effect that reacts to those same
+   * state changes doesn't immediately echo them straight back to Supabase
+   * (which would otherwise ping-pong forever between two open devices). */
   const isApplyingDraftRef = useRef(false);
+  /** Mirrors `manifest` for the debounced push below, which reads from the
+   * ref instead of depending on `manifest` directly — the manifest object
+   * gets a new reference on every save (including the push's own), so
+   * depending on it directly would re-trigger the effect after every push
+   * and loop forever even once the Rep stops editing. */
   const manifestRef = useRef(manifest);
   useEffect(() => { manifestRef.current = manifest; }, [manifest]);
 
@@ -81,20 +95,9 @@ export function RepPage() {
     [manifest, selectedVehicle]
   );
 
-  // Smart Rep Auto-Detection on vehicle selection
-  useEffect(() => {
-    if (!selectedVehicle) return;
-    if (!repName.trim()) {
-      if (selectedVehicle.repName) {
-        setRepName(selectedVehicle.repName);
-      } else {
-        const detected = detectVehicleRep(riders);
-        if (detected) setRepName(detected);
-      }
-    }
-  }, [selectedVehicle, riders, repName]);
-
-  // Auto-match vehicle from typed rep name
+  // Auto-match: as the Rep types their name, highlight/select the vehicle
+  // the Admin assigned them to (only while nothing is selected yet, so we
+  // never yank a vehicle they picked on purpose).
   useEffect(() => {
     if (!manifest || selectedVehicleId) return;
     const q = repName.trim().toLowerCase();
@@ -103,32 +106,22 @@ export function RepPage() {
     if (match) setSelectedVehicleId(match.id);
   }, [repName, manifest, selectedVehicleId]);
 
-  const resetLocalDraftState = useCallback(() => {
+  function resetLocalDraftState() {
     isApplyingDraftRef.current = true;
-    setPresentIds(new Set());
-    setAbsentIds(new Set());
+    setTouchedIds(new Set());
     setSponsoredIds(new Set());
     setNotes({});
     setGeneralNotes('');
     setCoReps([]);
     setExternalSponsees([]);
     setCollectedCancellationIds(new Set());
-  }, []);
+  }
 
-  const applyDraftState = useCallback((draft: VehicleDraftState, vehicleRidersList: Passenger[]) => {
+  function applyDraftState(draft: VehicleDraftState) {
     isApplyingDraftRef.current = true;
-    const pIds = new Set(draft.presentIds ?? []);
-    const aIds = new Set(draft.absentIds ?? []);
-
-    // Also populate from manifest row defaults if not touched in draft
-    vehicleRidersList.forEach((r) => {
-      if (!pIds.has(r.id) && !aIds.has(r.id) && r.present) {
-        pIds.add(r.id);
-      }
-    });
-
-    setPresentIds(pIds);
-    setAbsentIds(aIds);
+    const presentIds = draft.presentIds ?? [];
+    const absentIds = draft.absentIds ?? [];
+    setTouchedIds(new Set([...presentIds, ...absentIds]));
     setSponsoredIds(new Set(draft.sponsoredIds ?? []));
     setNotes(draft.notes ?? {});
     setGeneralNotes(draft.generalNotes ?? '');
@@ -137,8 +130,11 @@ export function RepPage() {
     setCollectedCancellationIds(new Set(draft.settledLedgerIds ?? []));
     if (draft.repName) setRepName(draft.repName);
     if (draft.licensePlate) setLicensePlate(draft.licensePlate);
-  }, []);
+  }
 
+  // Reset per-session state whenever the rep switches vehicles, then try to
+  // restore this vehicle's live Supabase draft (attendance touches, notes,
+  // sponsorship, cash calculator) before anything is submitted.
   useEffect(() => {
     setWalkInOpen(false);
     setWalkInName('');
@@ -152,26 +148,38 @@ export function RepPage() {
     }
 
     const vehicle = manifest?.vehicles.find((v) => v.id === selectedVehicleId);
-    const vehicleRidersList = vehicle ? vehicleRiders(manifest, vehicle) : [];
     const draft = vehicle && !vehicle.submitted ? vehicle.draftState : undefined;
-
     if (draft) {
-      applyDraftState(draft, vehicleRidersList);
+      applyDraftState(draft);
       lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
       setDraftRestored(true);
-      const t = setTimeout(() => setDraftRestored(false), 5000);
+      const t = setTimeout(() => setDraftRestored(false), 6000);
       return () => clearTimeout(t);
-    } else {
-      resetLocalDraftState();
-      const initialPresent = new Set<string>();
-      vehicleRidersList.forEach((r) => {
-        if (r.present) initialPresent.add(r.id);
-      });
-      setPresentIds(initialPresent);
-      lastAppliedDraftAtRef.current = null;
     }
-  }, [selectedVehicleId, manifest, applyDraftState, resetLocalDraftState]);
+    resetLocalDraftState();
+    lastAppliedDraftAtRef.current = null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedVehicleId]);
 
+  // Live cross-device sync — if another tab/device pushes a newer draft for
+  // the vehicle we currently have open (and it isn't just our own write
+  // echoing back through Realtime), pick it up so both stay in lockstep.
+  useEffect(() => {
+    if (!selectedVehicle || selectedVehicle.submitted) return;
+    const draft = selectedVehicle.draftState;
+    if (!draft) return;
+    if (draft.updatedBy === clientIdRef.current) return;
+    if (draft.updatedAt && draft.updatedAt === lastAppliedDraftAtRef.current) return;
+    applyDraftState(draft);
+    lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
+    setDraftRestored(true);
+    const t = setTimeout(() => setDraftRestored(false), 6000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedVehicle?.draftState]);
+
+  // Load outstanding past-cancellation debts once, so any Rep can collect
+  // cash on behalf of someone in a different vehicle/structure.
   useEffect(() => {
     let mounted = true;
     setLoadingPastCancellations(true);
@@ -179,32 +187,21 @@ export function RepPage() {
       try {
         const entries = await listLedgerEntries();
         if (mounted) setPastCancellations(entries);
-      } catch { /* non-critical */ }
+      } catch { /* non-critical — picker will just show empty */ }
       finally { if (mounted) setLoadingPastCancellations(false); }
     })();
     return () => { mounted = false; };
   }, []);
 
-  // Attendance metrics
-  const presentCount = useMemo(() => {
-    return riders.filter((r) => presentIds.has(r.id)).length;
-  }, [riders, presentIds]);
+  const presentCount = riders.filter((r) => r.present).length;
+  const absentCount = riders.length - presentCount;
+  const allTouched = riders.length > 0 && riders.every((r) => touchedIds.has(r.id));
 
-  const absentCount = useMemo(() => {
-    return riders.filter((r) => absentIds.has(r.id) || (!presentIds.has(r.id) && !absentIds.has(r.id))).length;
-  }, [riders, presentIds, absentIds]);
-
-  const allTouched = useMemo(() => {
-    if (riders.length === 0) return false;
-    return riders.every((r) => presentIds.has(r.id) || absentIds.has(r.id));
-  }, [riders, presentIds, absentIds]);
-
-  const sponsoredMissingNotes = useMemo(() => {
-    return riders.some(
-      (r) => absentIds.has(r.id) && sponsoredIds.has(r.id) && !(notes[r.id] ?? '').trim()
-    );
-  }, [riders, absentIds, sponsoredIds, notes]);
-
+  // Can only submit if rep name AND license plate are filled, and every
+  // passenger has been explicitly marked Present or Absent this session.
+  const sponsoredMissingNotes = riders.some(
+    (r) => !r.present && sponsoredIds.has(r.id) && !(notes[r.id] ?? '').trim()
+  );
   const canSubmit =
     repName.trim().length > 0 &&
     licensePlate.trim().length > 0 &&
@@ -212,7 +209,10 @@ export function RepPage() {
     !sponsoredMissingNotes &&
     !submitting;
 
-  const presentSponsoredCount = riders.filter((r) => presentIds.has(r.id) && sponsoredIds.has(r.id)).length;
+  // Cash calculator totals — base fare is fixed at R40/present passenger
+  // and is never individually editable.
+  // Total = (Present * 40) - (Sponsored Present * 40) + External Sponsee Cash + Past Cancellation Cash Collected
+  const presentSponsoredCount = riders.filter((r) => r.present && sponsoredIds.has(r.id)).length;
   const grossPresentCash = presentCount * FARE;
   const sponsoredDeduction = presentSponsoredCount * FARE;
   const baseCash = grossPresentCash - sponsoredDeduction;
@@ -220,25 +220,28 @@ export function RepPage() {
   const pastCancellationCash = collectedCancellationIds.size * FARE;
   const totalCash = baseCash + externalCash + pastCancellationCash;
 
-  // Debounced Supabase sync (400ms)
+  // Debounced live persistence — pushes the in-progress checklist, notes,
+  // cash calculator, and rep details to Supabase (Vehicle.draftState) a
+  // moment after the Rep stops typing/tapping, so any other device open on
+  // this vehicle picks it up via Realtime and a lost connection or closed
+  // tab never loses the in-progress submission.
   useEffect(() => {
     if (isApplyingDraftRef.current) {
+      // This render's state changes came from applyDraftState/resetLocalDraftState
+      // (a restore or an incoming remote update), not a local edit — don't
+      // echo it straight back to Supabase.
       isApplyingDraftRef.current = false;
       return;
     }
-    if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted || !manifestRef.current) return;
+    if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted || !manifest) return;
 
     if (draftPushTimerRef.current) clearTimeout(draftPushTimerRef.current);
     draftPushTimerRef.current = setTimeout(() => {
-      const currentManifest = manifestRef.current;
-      if (!currentManifest) return;
-
-      const pArr = Array.from(presentIds);
-      const aArr = Array.from(absentIds);
-
+      const presentIds = riders.filter((r) => touchedIds.has(r.id) && r.present).map((r) => r.id);
+      const absentIds = riders.filter((r) => touchedIds.has(r.id) && !r.present).map((r) => r.id);
       const draft: VehicleDraftState = {
-        presentIds: pArr,
-        absentIds: aArr,
+        presentIds,
+        absentIds,
         sponsoredIds: Array.from(sponsoredIds),
         notes,
         repName: repName.trim(),
@@ -251,70 +254,55 @@ export function RepPage() {
         updatedAt: new Date().toISOString(),
         updatedBy: clientIdRef.current,
       };
-
       lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
-
-      // Update vehicle draft and passenger present flags in background
-      const updatedSignups = currentManifest.signups.map((p) => {
-        if (pArr.includes(p.id)) return { ...p, present: true };
-        if (aArr.includes(p.id)) return { ...p, present: false };
-        return p;
-      });
-
-      const updatedVehicles = currentManifest.vehicles.map((v) =>
+      const updatedVehicles = manifest.vehicles.map((v) =>
         v.id === selectedVehicleId ? { ...v, draftState: draft } : v
       );
-
-      save({ ...currentManifest, signups: updatedSignups, vehicles: updatedVehicles }).catch(() => {});
-    }, DRAFT_DEBOUNCE_MS);
+      save({ ...manifest, vehicles: updatedVehicles }).catch(() => { /* draft sync is best-effort */ });
+    }, DRAFT_PUSH_DEBOUNCE_MS);
 
     return () => {
       if (draftPushTimerRef.current) clearTimeout(draftPushTimerRef.current);
     };
   }, [
-    selectedVehicleId, selectedVehicle, presentIds, absentIds,
-    sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
-    externalSponsees, collectedCancellationIds, baseCash, externalCash,
-    pastCancellationCash, save,
+    key, selectedVehicleId, selectedVehicle, manifest, riders,
+    touchedIds, sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
+    externalSponsees, collectedCancellationIds, baseCash, externalCash, pastCancellationCash,
   ]);
 
-  // Instant optimistic actions
-  const handleTogglePresent = useCallback((passengerId: string, isPresent: boolean) => {
-    if (isPresent) {
-      setPresentIds((prev) => new Set(prev).add(passengerId));
-      setAbsentIds((prev) => {
-        const next = new Set(prev);
-        next.delete(passengerId);
-        return next;
-      });
-    } else {
-      setAbsentIds((prev) => new Set(prev).add(passengerId));
-      setPresentIds((prev) => {
-        const next = new Set(prev);
-        next.delete(passengerId);
-        return next;
-      });
-    }
-  }, []);
+  async function setPresent(passengerId: string, present: boolean) {
+    if (!manifest) return;
+    const updatedSignups = manifest.signups.map((p) =>
+      p.id === passengerId ? { ...p, present } : p
+    );
+    setTouchedIds((prev) => new Set(prev).add(passengerId));
+    await save({ ...manifest, signups: updatedSignups });
+  }
 
-  const handleToggleSponsored = useCallback((passengerId: string) => {
+  function toggleSponsored(passengerId: string) {
     setSponsoredIds((prev) => {
       const next = new Set(prev);
       if (next.has(passengerId)) next.delete(passengerId);
       else next.add(passengerId);
       return next;
     });
-  }, []);
+  }
 
-  const handleSetNote = useCallback((passengerId: string, text: string) => {
+  function setNote(passengerId: string, text: string) {
     setNotes((prev) => ({ ...prev, [passengerId]: text }));
-  }, []);
+  }
 
-  function addCoRep() { setCoReps((prev) => [...prev, '']); }
+  function addCoRep() {
+    setCoReps((prev) => [...prev, '']);
+  }
+
   function updateCoRep(index: number, value: string) {
     setCoReps((prev) => prev.map((c, i) => (i === index ? value : c)));
   }
-  function removeCoRep(index: number) { setCoReps((prev) => prev.filter((_, i) => i !== index)); }
+
+  function removeCoRep(index: number) {
+    setCoReps((prev) => prev.filter((_, i) => i !== index));
+  }
 
   function toggleCollectedCancellation(entryId: string) {
     setCollectedCancellationIds((prev) => {
@@ -361,6 +349,7 @@ export function RepPage() {
     const existing = findByName(walkInName);
 
     if (existing && existing.assignedTo && existing.assignedTo !== selectedVehicle.id) {
+      // Ask before pulling them out of their current vehicle.
       const fromVehicle = vehicleFor(existing.assignedTo);
       if (fromVehicle) {
         setTransferPrompt({ passenger: existing, fromVehicle });
@@ -369,8 +358,10 @@ export function RepPage() {
     }
 
     if (existing) {
+      // Already unassigned, or already in this vehicle — just (re)assign here.
       await assignWalkIn(existing, existing.assignedTo);
     } else {
+      // Brand-new person, not from the Excel import.
       const newPassenger: Passenger = {
         id: `walkin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         fullName: walkInName.trim(),
@@ -387,7 +378,7 @@ export function RepPage() {
           : v
       );
       await save({ ...manifest, signups: [...manifest.signups, newPassenger], vehicles: updatedVehicles });
-      setPresentIds((prev) => new Set(prev).add(newPassenger.id));
+      setTouchedIds((prev) => new Set(prev).add(newPassenger.id));
     }
     setWalkInName('');
     setWalkInOpen(false);
@@ -410,7 +401,7 @@ export function RepPage() {
       return v;
     });
     await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
-    setPresentIds((prev) => new Set(prev).add(passenger.id));
+    setTouchedIds((prev) => new Set(prev).add(passenger.id));
   }
 
   async function confirmTransfer() {
@@ -428,7 +419,7 @@ export function RepPage() {
     setSubmitMsg(null);
     try {
       const absentees = riders
-        .filter((r) => absentIds.has(r.id) || !presentIds.has(r.id))
+        .filter((r) => !r.present)
         .map((r) => ({
           ...r,
           sponsored: sponsoredIds.has(r.id),
@@ -450,6 +441,9 @@ export function RepPage() {
         ? `Past cancellations collected in cash: ${settledNames.join(', ')}. `
         : '';
 
+      // insertAbsentees deduplicates strictly by manifest_key + passenger_name
+      // (across this vehicle's full roster, present and absent) before
+      // inserting — so resubmitting never leaves a duplicate debt row.
       await insertAbsentees(
         key,
         parsedDate,
@@ -463,18 +457,13 @@ export function RepPage() {
         `${coRepNote}${cashNote}${sponseeNote}${settledNote}${generalNotes.trim()}`.trim()
       );
 
+      // Resolve/settle the past-cancellation entries collected in cash on
+      // this trip so they drop off the active cancellation ledger.
       if (collectedCancellationIds.size > 0) {
         await settleLedgerEntries(Array.from(collectedCancellationIds));
         setPastCancellations((prev) => prev.filter((e) => !collectedCancellationIds.has(e.id)));
         setCollectedCancellationIds(new Set());
       }
-
-      const pArr = Array.from(presentIds);
-      const updatedSignups = manifest.signups.map((p) => {
-        if (pArr.includes(p.id)) return { ...p, present: true };
-        if (absentIds.has(p.id)) return { ...p, present: false };
-        return p;
-      });
 
       const updatedVehicles = manifest.vehicles.map((v) =>
         v.id === selectedVehicle.id
@@ -491,8 +480,10 @@ export function RepPage() {
             }
           : v
       );
-      await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
+      await save({ ...manifest, vehicles: updatedVehicles });
 
+      // Cancel any in-flight debounced draft push — the draft is now cleared
+      // server-side, so a stale timer firing afterwards would resurrect it.
       if (draftPushTimerRef.current) {
         clearTimeout(draftPushTimerRef.current);
         draftPushTimerRef.current = null;
@@ -543,7 +534,8 @@ export function RepPage() {
             Transport Rep Portal
           </h1>
           <p className="mt-1.5 text-sm text-muted">
-            Mark every passenger Present or Absent, check sponsorship, and submit attendance instantly.
+            Enter your name to find your assigned vehicle, mark every passenger Present or Absent, and submit
+            attendance. You must enter your name and the vehicle's license plate before submitting.
           </p>
         </div>
 
@@ -571,10 +563,13 @@ export function RepPage() {
             <Bus className="h-10 w-10 text-line" />
             <p className="text-sm text-muted">No vehicles dispatched for this session yet.</p>
             <p className="text-xs text-muted">{prettyDate(date)} · {serviceLabel}</p>
+            <p className="text-xs text-muted">
+              The admin will assign you a taxi or bus — check back once they've allocated.
+            </p>
           </div>
         ) : (
           <div className="mt-4 space-y-4">
-            {/* Rep name & vehicle selector */}
+            {/* Rep name + vehicle picker */}
             <div className="card">
               <div className="mb-3 flex items-center gap-2">
                 <div className="h-5 w-1 rounded-full bg-crimson-500" />
@@ -591,9 +586,18 @@ export function RepPage() {
                 value={repName}
                 onChange={(e) => setRepName(e.target.value)}
                 placeholder="Start typing your name…"
-                className="input-field mb-3"
+                className="input-field mb-1.5"
               />
+              {selectedVehicle && repName.trim() && (selectedVehicle.repName ?? '').trim().toLowerCase() === repName.trim().toLowerCase() && (
+                <p className="mb-3 flex items-center gap-1 text-xs text-success-light">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  Auto-selected {selectedVehicle.name} — you're the assigned rep.
+                </p>
+              )}
 
+              <p className="mb-3 text-xs text-muted">
+                Or pick the taxi or bus the admin assigned you directly. Each rep handles their own vehicle.
+              </p>
               <div className="relative">
                 <Car className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
                 <select
@@ -610,7 +614,7 @@ export function RepPage() {
                     const vPresent = vRiders.filter((r) => r.present).length;
                     return (
                       <option key={v.id} value={v.id} className="bg-card-2">
-                        {v.name} — Rep: {v.repName || 'Unassigned'} ({v.type}) — {vRiders.length} riders
+                        {v.name} — Assigned Rep: {v.repName || 'Unassigned'} ({v.type}) — {vRiders.length} passengers
                         {v.submitted ? ' ✓ submitted' : ` (${vPresent}/${vRiders.length} checked)`}
                       </option>
                     );
@@ -620,6 +624,7 @@ export function RepPage() {
 
               {selectedVehicleId && (
                 <div className="mt-3 space-y-3">
+                  {/* Co-Reps */}
                   <div>
                     <div className="mb-1.5 flex items-center justify-between">
                       <label className="block text-xs font-semibold uppercase tracking-wide text-muted">
@@ -641,7 +646,7 @@ export function RepPage() {
                               placeholder="Co-rep name"
                               className="input-field py-1.5 text-xs"
                             />
-                            <button onClick={() => removeCoRep(i)} className="rounded-md p-1.5 text-muted hover:bg-crimson-900/30 hover:text-crimson-300">
+                            <button onClick={() => removeCoRep(i)} className="rounded-md p-1.5 text-muted hover:bg-crimson-900/30 hover:text-crimson-300" title="Remove">
                               <X className="h-3.5 w-3.5" />
                             </button>
                           </div>
@@ -668,12 +673,13 @@ export function RepPage() {
 
             {selectedVehicle && draftRestored && (
               <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-2.5 text-xs text-success-light">
-                🟢 Draft synced with cloud
+                🟢 Draft synced from another session
               </div>
             )}
 
             {selectedVehicle && riders.length > 0 && (
               <>
+                {/* Stats bar */}
                 <div className="grid grid-cols-3 gap-2">
                   <StatCard label="Total" value={riders.length} icon={<Users className="h-4 w-4" />} />
                   <StatCard label="Present" value={presentCount} icon={<CheckCircle2 className="h-4 w-4" />} accent="success" />
@@ -688,11 +694,14 @@ export function RepPage() {
                       <div className="text-xs text-muted">
                         Submitted by {selectedVehicle.submittedBy || 'rep'}
                         {selectedVehicle.licensePlate && ` · Plate: ${selectedVehicle.licensePlate}`}
+                        {selectedVehicle.submittedAt &&
+                          ` at ${new Date(selectedVehicle.submittedAt).toLocaleString('en-ZA', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })}`}
                       </div>
                     </div>
                   </div>
                 )}
 
+                {/* Walk-in */}
                 {!isSubmitted && (
                   <div className="card">
                     {!walkInOpen ? (
@@ -714,7 +723,7 @@ export function RepPage() {
                             value={walkInName}
                             onChange={(e) => setWalkInName(e.target.value)}
                             onKeyDown={(e) => e.key === 'Enter' && handleAddWalkIn()}
-                            placeholder="Type passenger name"
+                            placeholder="Type the passenger's name"
                             className="input-field text-xs"
                             autoFocus
                           />
@@ -732,6 +741,9 @@ export function RepPage() {
                             Cancel
                           </button>
                         </div>
+                        <p className="text-[10px] text-muted">
+                          We'll check if they're already assigned elsewhere before adding them here.
+                        </p>
                       </div>
                     )}
                   </div>
@@ -739,11 +751,10 @@ export function RepPage() {
 
                 <StopGroupedChecklist
                   riders={riders}
-                  presentIds={presentIds}
-                  absentIds={absentIds}
-                  onTogglePresent={handleTogglePresent}
-                  onToggleSponsored={handleToggleSponsored}
-                  onSetNote={handleSetNote}
+                  touchedIds={touchedIds}
+                  onSetPresent={setPresent}
+                  onToggleSponsored={toggleSponsored}
+                  onSetNote={setNote}
                   sponsoredIds={sponsoredIds}
                   notes={notes}
                   disabled={isSubmitted || submitting}
@@ -751,6 +762,7 @@ export function RepPage() {
 
                 {!isSubmitted && (
                   <>
+                    {/* General notes for this vehicle submission */}
                     <div className="card">
                       <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
                         General Notes (optional)
@@ -758,12 +770,15 @@ export function RepPage() {
                       <textarea
                         value={generalNotes}
                         onChange={(e) => setGeneralNotes(e.target.value)}
-                        placeholder="Any notes for this vehicle's trip"
+                        placeholder="Any notes for this vehicle's submission — e.g. 'Person A in Taxi 1 is paying for Person B in Taxi 2'"
                         rows={2}
                         className="input-field text-xs resize-none"
                       />
                     </div>
 
+                    {/* Read-only cash summary — sits directly above the submit
+                        button, per policy. Base fare is fixed at R40/present
+                        passenger and is never individually editable. */}
                     <CashCalculatorCard
                       presentCount={presentCount}
                       presentSponsoredCount={presentSponsoredCount}
@@ -789,14 +804,14 @@ export function RepPage() {
                     {!allTouched && (
                       <div className="flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
                         <AlertTriangle className="h-4 w-4 shrink-0" />
-                        Every passenger must be marked Present or Absent before submitting.
+                        Every passenger must be marked Present or Absent before you can submit.
                       </div>
                     )}
 
                     {sponsoredMissingNotes && (
                       <div className="flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
                         <AlertTriangle className="h-4 w-4 shrink-0" />
-                        All absent sponsored passengers must have a note stating who covers them.
+                        All sponsored passengers must have a note saying who is paying for them.
                       </div>
                     )}
 
@@ -819,6 +834,11 @@ export function RepPage() {
                         </span>
                       )}
                     </button>
+                    {!canSubmit && !sponsoredMissingNotes && allTouched && (
+                      <p className="text-center text-xs text-muted">
+                        Enter your name and license plate above to enable submission.
+                      </p>
+                    )}
                   </>
                 )}
 
@@ -838,18 +858,45 @@ export function RepPage() {
                     <span>{submitMsg}</span>
                   </div>
                 )}
+
+                {isSubmitted && (
+                  <button
+                    onClick={() => {
+                      setSubmitMsg(null);
+                      if (manifest && selectedVehicle) {
+                        const updatedVehicles = manifest.vehicles.map((v) =>
+                          v.id === selectedVehicle.id
+                            ? { ...v, submitted: false, submittedAt: undefined, submittedBy: undefined }
+                            : v
+                        );
+                        save({ ...manifest, vehicles: updatedVehicles });
+                      }
+                    }}
+                    className="btn-ghost w-full text-xs"
+                  >
+                    Re-open for editing
+                  </button>
+                )}
               </>
+            )}
+
+            {selectedVehicle && riders.length === 0 && (
+              <div className="rounded-xl border border-line bg-card p-8 text-center">
+                <Users className="mx-auto h-8 w-8 text-line" />
+                <p className="mt-2 text-sm text-muted">No passengers assigned to this vehicle yet.</p>
+              </div>
             )}
           </div>
         )}
 
         <footer className="mt-10 border-t border-line pt-4 text-center">
           <p className="text-[11px] text-muted">
-            CRC Johannesburg · Transport Ministry · 2026
+            CRC Johannesburg · Transport Ministry · 2026 — The Year of Invasion
           </p>
         </footer>
       </main>
 
+      {/* Walk-in transfer confirmation */}
       {transferPrompt && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm animate-fade-in"
@@ -866,13 +913,18 @@ export function RepPage() {
               <div>
                 <h3 className="font-display text-base font-bold text-ink">Already Assigned</h3>
                 <p className="text-xs text-muted">
-                  This person is assigned to <span className="font-semibold text-ink">{transferPrompt.fromVehicle.name}</span>. Transfer them here?
+                  This person is assigned to <span className="font-semibold text-ink">{transferPrompt.fromVehicle.name}</span>.
+                  Transfer them to this vehicle?
                 </p>
               </div>
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setTransferPrompt(null)} className="btn-ghost flex-1">Cancel</button>
-              <button onClick={confirmTransfer} className="btn-crimson flex-1">Transfer</button>
+              <button onClick={() => { setTransferPrompt(null); }} className="btn-ghost flex-1">
+                Cancel
+              </button>
+              <button onClick={confirmTransfer} className="btn-crimson flex-1">
+                Transfer
+              </button>
             </div>
           </div>
         </div>
@@ -902,145 +954,12 @@ function StatCard({
   );
 }
 
-function StopGroupedChecklist({
-  riders, presentIds, absentIds, onTogglePresent, onToggleSponsored, onSetNote, sponsoredIds, notes, disabled,
-}: {
-  riders: Passenger[];
-  presentIds: Set<string>;
-  absentIds: Set<string>;
-  onTogglePresent: (id: string, present: boolean) => void;
-  onToggleSponsored: (id: string) => void;
-  onSetNote: (id: string, text: string) => void;
-  sponsoredIds: Set<string>;
-  notes: Record<string, string>;
-  disabled: boolean;
-}) {
-  const byStop = useMemo(() => passengersByStop(riders), [riders]);
-  const stops = sortByRouteSequence(Object.keys(byStop), (s) => s);
-  const [expandedStops, setExpandedStops] = useState<Set<string>>(new Set(stops));
-
-  function toggleStop(stop: string) {
-    setExpandedStops((prev) => {
-      const next = new Set(prev);
-      if (next.has(stop)) next.delete(stop);
-      else next.add(stop);
-      return next;
-    });
-  }
-
-  return (
-    <div className="space-y-3">
-      {stops.map((stop) => {
-        const stopRiders = byStop[stop];
-        const stopPresent = stopRiders.filter((r) => presentIds.has(r.id)).length;
-        const isExpanded = expandedStops.has(stop);
-
-        return (
-          <div key={stop} className="overflow-hidden rounded-xl border border-line bg-card">
-            <button
-              onClick={() => toggleStop(stop)}
-              className="flex w-full items-center justify-between gap-2 border-b border-line bg-card-2/50 p-3.5 text-left transition-colors hover:bg-card-2/80"
-            >
-              <div className="flex items-center gap-2">
-                {isExpanded ? <ChevronDown className="h-4 w-4 text-muted" /> : <ChevronRight className="h-4 w-4 text-muted" />}
-                <MapPin className="h-4 w-4 text-crimson-400" />
-                <span className="text-sm font-semibold text-ink">{stop}</span>
-              </div>
-              <span className="text-xs text-muted">{stopPresent}/{stopRiders.length} present</span>
-            </button>
-
-            {isExpanded && (
-              <div className="divide-y divide-line/60 animate-fade-in">
-                {stopRiders.map((p) => {
-                  const isPresent = presentIds.has(p.id);
-                  const isAbsent = absentIds.has(p.id);
-                  const isSponsored = sponsoredIds.has(p.id);
-
-                  return (
-                    <div key={p.id} className={`p-3.5 transition-colors ${disabled ? 'opacity-60' : 'hover:bg-card-2/30'}`}>
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <div className={`text-sm font-medium ${isPresent ? 'text-success-light' : isAbsent ? 'text-crimson-300' : 'text-ink'}`}>
-                            {p.fullName}
-                            {p.structure && (
-                              <span className="ml-2 inline-block rounded bg-bg/60 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-muted">
-                                {p.structure}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex shrink-0 gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => onTogglePresent(p.id, true)}
-                            disabled={disabled}
-                            className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all active:scale-95 ${
-                              isPresent
-                                ? 'bg-success/20 text-success-light border border-success/50'
-                                : 'bg-card-2 text-muted border border-line hover:border-success/40 hover:text-success-light'
-                            }`}
-                          >
-                            <span className="flex items-center gap-1.5">
-                              <CheckCircle2 className="h-3.5 w-3.5" />
-                              Present
-                            </span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onTogglePresent(p.id, false)}
-                            disabled={disabled}
-                            className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all active:scale-95 ${
-                              isAbsent
-                                ? 'bg-crimson-500/20 text-crimson-300 border border-crimson-500/50'
-                                : 'bg-card-2 text-muted border border-line hover:border-crimson-500/40 hover:text-crimson-300'
-                            }`}
-                          >
-                            <span className="flex items-center gap-1.5">
-                              <XCircle className="h-3.5 w-3.5" />
-                              Absent
-                            </span>
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="mt-2 flex items-center gap-3">
-                        <button
-                          type="button"
-                          onClick={() => onToggleSponsored(p.id)}
-                          disabled={disabled}
-                          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all active:scale-95 ${
-                            isSponsored
-                              ? 'bg-warning/15 text-warning border border-warning/40'
-                              : 'bg-card-2 text-muted border border-line'
-                          }`}
-                        >
-                          <HeartHandshake className="h-3.5 w-3.5" />
-                          {isSponsored ? 'Sponsored / Didn\'t Pay' : 'Mark Sponsored'}
-                        </button>
-                      </div>
-
-                      {isSponsored && (
-                        <div className="mt-2 animate-fade-in">
-                          <input
-                            type="text"
-                            value={notes[p.id] ?? ''}
-                            onChange={(e) => onSetNote(p.id, e.target.value)}
-                            disabled={disabled}
-                            placeholder="Who is covering this fare?"
-                            className="input-field text-xs"
-                          />
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
+/** Renders an entry's stored service label (e.g. "PM Service — Normal Only") as "PM Normal" / "AM Serving". */
+function formatServicePeriodMode(service: string): string {
+  const parts = service.split('—').map((s) => s.trim());
+  const period = (parts[0] ?? '').split(' ')[0] || '';
+  const mode = (parts[1] ?? '').replace(/only/i, '').trim();
+  return [period, mode].filter(Boolean).join(' ') || service;
 }
 
 function CashCalculatorCard({
@@ -1071,6 +990,8 @@ function CashCalculatorCard({
   totalCash: number;
 }) {
   const q = search.trim().toLowerCase();
+  // Selected debts are shown separately, so search results only ever
+  // surface still-outstanding ("active") records the Rep hasn't picked yet.
   const selectedCancellations = pastCancellations.filter((e) => collectedCancellationIds.has(e.id));
   const searchResults = q.length === 0 ? [] : pastCancellations.filter((e) => {
     if (collectedCancellationIds.has(e.id)) return false;
@@ -1084,6 +1005,7 @@ function CashCalculatorCard({
         <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">Physical Cash Calculator</h2>
       </div>
 
+      {/* Read-only base fare summary — R40/present passenger is fixed and cannot be edited per-passenger. */}
       <div className="space-y-1.5 rounded-lg bg-card-2/60 p-3 text-xs">
         <div className="flex items-center justify-between text-muted">
           <span>Present Passengers</span>
@@ -1091,12 +1013,13 @@ function CashCalculatorCard({
         </div>
         {presentSponsoredCount > 0 && (
           <div className="flex items-center justify-between text-muted">
-            <span>- Sponsored (Present)</span>
+            <span>- Sponsored (Present, didn't pay)</span>
             <span className="font-mono font-semibold text-warning">{presentSponsoredCount} × R{fare} = -R{sponsoredDeduction}</span>
           </div>
         )}
       </div>
 
+      {/* External sponsees — cash collected here for a passenger in another vehicle */}
       <div className="mt-3">
         <button onClick={onAddSponsee} className="flex items-center gap-1.5 text-xs font-semibold text-crimson-400 hover:text-crimson-300">
           <Plus className="h-3.5 w-3.5" />
@@ -1117,7 +1040,7 @@ function CashCalculatorCard({
                   type="text"
                   value={s.taxiName}
                   onChange={(e) => onUpdateSponsee(s.id, { taxiName: e.target.value })}
-                  placeholder="In which taxi?"
+                  placeholder="In which taxi? (e.g. Taxi 2)"
                   className="input-field py-1.5 text-xs sm:flex-1"
                 />
                 <div className="flex items-center gap-1 text-xs text-muted">
@@ -1130,7 +1053,7 @@ function CashCalculatorCard({
                     className="input-field w-16 py-1 text-center text-xs"
                   />
                 </div>
-                <button onClick={() => onRemoveSponsee(s.id)} className="rounded-md p-1.5 text-muted hover:bg-crimson-900/30 hover:text-crimson-300">
+                <button onClick={() => onRemoveSponsee(s.id)} className="rounded-md p-1.5 text-muted hover:bg-crimson-900/30 hover:text-crimson-300" title="Remove">
                   <X className="h-3.5 w-3.5" />
                 </button>
               </div>
@@ -1139,12 +1062,17 @@ function CashCalculatorCard({
         )}
       </div>
 
+      {/* Search-based past-cancellation cash settlement */}
       <div className="mt-3">
         <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-crimson-400">
           <Banknote className="h-3.5 w-3.5" />
           Settle a Past Cancellation (Cash)
+          {collectedCancellationIds.size > 0 && (
+            <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px]">{collectedCancellationIds.size} selected</span>
+          )}
         </div>
 
+        {/* Already-selected debts, with a way to deselect */}
         {selectedCancellations.length > 0 && (
           <div className="mb-2 space-y-1.5">
             {selectedCancellations.map((e) => (
@@ -1154,9 +1082,13 @@ function CashCalculatorCard({
               >
                 <span className="min-w-0 truncate text-crimson-200">
                   <span className="font-semibold">{e.passenger_name}</span>
-                  <span className="text-muted"> — {shortDate(e.date)}</span>
+                  <span className="text-muted"> — {shortDate(e.date)} · {formatServicePeriodMode(e.service)}</span>
                 </span>
-                <button onClick={() => onToggleCancellation(e.id)} className="p-1 text-muted hover:text-crimson-300">
+                <button
+                  onClick={() => onToggleCancellation(e.id)}
+                  className="shrink-0 rounded p-1 text-muted hover:bg-crimson-900/30 hover:text-crimson-300"
+                  title="Remove"
+                >
                   <X className="h-3.5 w-3.5" />
                 </button>
               </div>
@@ -1170,37 +1102,45 @@ function CashCalculatorCard({
             type="text"
             value={search}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search by name or structure to settle a past fee…"
+            placeholder="Search by name or structure to settle a past cancellation…"
             className="input-field py-1.5 pl-8 text-xs"
           />
         </div>
 
         {search.trim().length > 0 && (
-          <div className="mt-2 max-h-48 space-y-1 overflow-y-auto rounded-lg border border-line bg-card-2/40 p-2 animate-fade-in">
+          <div className="mt-2 max-h-56 space-y-1.5 overflow-y-auto rounded-lg border border-line bg-card-2/40 p-2 animate-fade-in">
             {loadingPastCancellations ? (
-              <p className="py-2 text-center text-[11px] text-muted">Loading...</p>
+              <p className="py-2 text-center text-[11px] text-muted">Loading outstanding cancellations…</p>
             ) : searchResults.length === 0 ? (
-              <p className="py-2 text-center text-[11px] text-muted">No matches found.</p>
+              <p className="py-2 text-center text-[11px] text-muted">No outstanding cancellations match your search.</p>
             ) : (
               searchResults.map((e) => (
                 <button
                   key={e.id}
                   type="button"
                   onClick={() => onToggleCancellation(e.id)}
-                  className="flex w-full items-center justify-between gap-2 rounded-md border border-line bg-card px-2.5 py-2 text-left text-xs hover:border-crimson-500/40"
+                  className="flex w-full items-center justify-between gap-2 rounded-md border border-line bg-card px-2.5 py-2 text-left text-xs transition-colors hover:border-crimson-500/40 hover:bg-card-2/60"
                 >
-                  <div>
-                    <div className="font-semibold text-ink">{e.passenger_name}</div>
-                    <div className="text-[10px] text-muted">{shortDate(e.date)} · {e.structure || '—'}</div>
-                  </div>
-                  <span className="font-mono text-xs">R{fare}</span>
+                  <span className="min-w-0">
+                    <span className="block truncate font-semibold text-ink">{e.passenger_name}</span>
+                    <span className="mt-0.5 block text-[10px] text-muted">
+                      {shortDate(e.date)} · {formatServicePeriodMode(e.service)}
+                      {e.structure && ` · ${e.structure}`}
+                    </span>
+                  </span>
+                  <span className="shrink-0 font-mono text-[10px] text-muted">R{fare}</span>
                 </button>
               ))
             )}
           </div>
         )}
+
+        <p className="mt-1.5 text-[10px] text-muted">
+          Selecting a match adds R{fare} to this vehicle's expected cash and clears that person's debt on submit.
+        </p>
       </div>
 
+      {/* Live total */}
       <div className="mt-3 space-y-1 rounded-lg border border-crimson-500/20 bg-crimson-900/10 p-3 text-xs">
         <div className="flex items-center justify-between text-muted">
           <span>Base Passenger Cash</span>
@@ -1211,14 +1151,224 @@ function CashCalculatorCard({
           <span className="font-mono font-semibold text-ink">R{externalCash}</span>
         </div>
         <div className="flex items-center justify-between text-muted">
-          <span>+ Past Cancellation Cash</span>
+          <span>+ Past Cancellation Cash Collected</span>
           <span className="font-mono font-semibold text-ink">R{pastCancellationCash}</span>
         </div>
         <div className="mt-1 flex items-center justify-between border-t border-crimson-500/20 pt-1.5">
-          <span className="font-semibold text-ink">Total Cash Expected</span>
+          <span className="font-semibold text-ink">Total Physical Cash Expected in Vehicle</span>
           <span className="font-display text-base font-bold text-crimson-400">R{totalCash}</span>
         </div>
       </div>
+    </div>
+  );
+}
+
+function StopGroupedChecklist({
+  riders, touchedIds, onSetPresent, onToggleSponsored, onSetNote, sponsoredIds, notes, disabled,
+}: {
+  riders: Passenger[];
+  touchedIds: Set<string>;
+  onSetPresent: (id: string, present: boolean) => void;
+  onToggleSponsored: (id: string) => void;
+  onSetNote: (id: string, text: string) => void;
+  sponsoredIds: Set<string>;
+  notes: Record<string, string>;
+  disabled: boolean;
+}) {
+  const byStop = useMemo(() => passengersByStop(riders), [riders]);
+  const stops = sortByRouteSequence(Object.keys(byStop), (s) => s);
+  const [expandedStops, setExpandedStops] = useState<Set<string>>(new Set(stops));
+
+  function toggleStop(stop: string) {
+    setExpandedStops((prev) => {
+      const next = new Set(prev);
+      if (next.has(stop)) next.delete(stop);
+      else next.add(stop);
+      return next;
+    });
+  }
+
+  function setAllExpanded(expand: boolean) {
+    setExpandedStops(expand ? new Set(stops) : new Set());
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between px-1">
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted">
+          {stops.length} stops · {riders.length} passengers
+        </span>
+        <div className="flex gap-2">
+          <button onClick={() => setAllExpanded(true)} className="text-xs text-muted hover:text-ink">Expand all</button>
+          <span className="text-muted">·</span>
+          <button onClick={() => setAllExpanded(false)} className="text-xs text-muted hover:text-ink">Collapse all</button>
+        </div>
+      </div>
+
+      {stops.map((stop) => {
+        const stopRiders = byStop[stop];
+        const stopPresent = stopRiders.filter((r) => r.present).length;
+        const stopTouched = stopRiders.filter((r) => touchedIds.has(r.id)).length;
+        const isExpanded = expandedStops.has(stop);
+        return (
+          <div key={stop} className="overflow-hidden rounded-xl border border-line bg-card">
+            <button
+              onClick={() => toggleStop(stop)}
+              className="flex w-full items-center justify-between gap-2 border-b border-line bg-card-2/50 p-3.5 text-left transition-colors hover:bg-card-2/80"
+            >
+              <div className="flex items-center gap-2">
+                {isExpanded ? <ChevronDown className="h-4 w-4 text-muted" /> : <ChevronRight className="h-4 w-4 text-muted" />}
+                <MapPin className="h-4 w-4 text-crimson-400" />
+                <span className="text-sm font-semibold text-ink">{stop}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted">{stopPresent}/{stopRiders.length} present · {stopTouched}/{stopRiders.length} checked</span>
+                <span className={`flex h-2 w-2 rounded-full ${stopTouched === stopRiders.length ? 'bg-success' : 'bg-crimson-500'}`} />
+              </div>
+            </button>
+
+            {isExpanded && (
+              <div className="divide-y divide-line/60 animate-fade-in">
+                {stopRiders.map((p) => (
+                  <PassengerRow
+                    key={p.id}
+                    passenger={p}
+                    touched={touchedIds.has(p.id)}
+                    onSetPresent={(present) => onSetPresent(p.id, present)}
+                    onToggleSponsored={() => onToggleSponsored(p.id)}
+                    onSetNote={(text) => onSetNote(p.id, text)}
+                    isSponsored={sponsoredIds.has(p.id)}
+                    noteText={notes[p.id] ?? ''}
+                    disabled={disabled}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function PassengerRow({
+  passenger, touched, onSetPresent, onToggleSponsored, onSetNote, isSponsored, noteText, disabled,
+}: {
+  passenger: Passenger;
+  touched: boolean;
+  onSetPresent: (present: boolean) => void;
+  onToggleSponsored: () => void;
+  onSetNote: (text: string) => void;
+  isSponsored: boolean;
+  noteText: string;
+  disabled: boolean;
+}) {
+  const [showNote, setShowNote] = useState(isSponsored);
+  const [note, setNote] = useState(noteText);
+
+  function handleSponsoredToggle() {
+    onToggleSponsored();
+    if (!isSponsored) setShowNote(true);
+  }
+
+  function handleNoteChange(text: string) {
+    setNote(text);
+    onSetNote(text);
+  }
+
+  return (
+    <div className={`p-3.5 transition-colors ${disabled ? 'opacity-60' : 'hover:bg-card-2/30'} ${!touched && !disabled ? 'bg-warning/5' : ''}`}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className={`text-sm font-medium ${passenger.present ? 'text-success-light' : touched ? 'text-crimson-300' : 'text-ink'}`}>
+            {passenger.fullName}
+            {passenger.structure && (
+              <span className="ml-2 inline-block rounded bg-bg/60 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-muted">
+                {passenger.structure}
+              </span>
+            )}
+            {!touched && !disabled && (
+              <span className="ml-2 inline-block rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold text-warning">
+                Needs check-in
+              </span>
+            )}
+          </div>
+        </div>
+        {/* Explicit, side-by-side Present / Absent toggle buttons */}
+        <div className="flex shrink-0 gap-1.5">
+          <button
+            onClick={() => onSetPresent(true)}
+            disabled={disabled}
+            className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all active:scale-95 ${
+              passenger.present && touched
+                ? 'bg-success/20 text-success-light border border-success/50'
+                : 'bg-card-2 text-muted border border-line hover:border-success/40 hover:text-success-light'
+            }`}
+          >
+            <span className="flex items-center gap-1.5">
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              Present
+            </span>
+          </button>
+          <button
+            onClick={() => onSetPresent(false)}
+            disabled={disabled}
+            className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all active:scale-95 ${
+              !passenger.present && touched
+                ? 'bg-crimson-500/20 text-crimson-300 border border-crimson-500/50'
+                : 'bg-card-2 text-muted border border-line hover:border-crimson-500/40 hover:text-crimson-300'
+            }`}
+          >
+            <span className="flex items-center gap-1.5">
+              <XCircle className="h-3.5 w-3.5" />
+              Absent
+            </span>
+          </button>
+        </div>
+      </div>
+
+      {/* Sponsored toggle */}
+      <div className="mt-2 flex items-center gap-3">
+        <button
+          onClick={handleSponsoredToggle}
+          disabled={disabled}
+          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all active:scale-95 ${
+            isSponsored
+              ? 'bg-warning/15 text-warning border border-warning/40'
+              : 'bg-card-2 text-muted border border-line'
+          }`}
+        >
+          <HeartHandshake className="h-3.5 w-3.5" />
+          {isSponsored ? 'Sponsored / Didn\'t Pay' : 'Mark Sponsored'}
+        </button>
+        {isSponsored && (
+          <button
+            onClick={() => setShowNote(!showNote)}
+            disabled={disabled}
+            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted border border-line bg-card-2 transition-all hover:text-ink"
+          >
+            <StickyNote className="h-3.5 w-3.5" />
+            {showNote ? 'Hide Note' : 'Add Note'}
+          </button>
+        )}
+      </div>
+
+      {/* Sponsor note — required when sponsored */}
+      {isSponsored && showNote && (
+        <div className="mt-2 animate-fade-in">
+          <input
+            type="text"
+            value={note}
+            onChange={(e) => handleNoteChange(e.target.value)}
+            disabled={disabled}
+            placeholder="Required: Who is paying for this person? (e.g. Person A in Taxi 1)"
+            className="input-field text-xs"
+          />
+          <p className="mt-1 text-[10px] text-muted">
+            This note is included in the stats and cancellation ledger so we know who covers the cost.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
