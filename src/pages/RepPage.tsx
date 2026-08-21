@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
   Smartphone, Wifi, ChevronDown, ChevronRight, MapPin, Send, Cross,
@@ -7,14 +7,24 @@ import {
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey, shortDate } from '@/lib/dates';
-import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType, type Passenger, type Vehicle, type VehicleDraftState } from '@/lib/types';
+import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType, type Passenger, type Vehicle, type VehicleDraftState, type Manifest } from '@/lib/types';
 import { hubDisplayName } from '@/lib/types';
 import { sortVehiclesNatural } from '@/lib/sort';
 import { vehicleRiders, passengersByStop } from '@/lib/manifest';
 import { insertAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEntry } from '@/lib/ledger';
+import { detectVehicleRep } from '@/lib/officialReps';
 
-const FARE = CANCELLATION_FEE; // R40 fixed passenger fare — never individually editable
+const FARE = CANCELLATION_FEE;
 const DRAFT_PUSH_DEBOUNCE_MS = 600;
+
+// Utility for debouncing manifest writes directly
+function useDebouncingCallback<T extends (...args: any[]) => void>(callback: T, delay: number) {
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  return useCallback((...args: Parameters<T>) => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => callback(...args), delay);
+  }, [callback, delay]);
+}
 
 interface ExternalSponsee {
   id: string;
@@ -23,9 +33,6 @@ interface ExternalSponsee {
   amount: number;
 }
 
-/** Stable per-tab id, so a device can recognize its own draft writes echoed
- * back via Realtime and not treat them as an incoming change from another
- * device. */
 function makeClientId(): string {
   return `dev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -42,10 +49,18 @@ export function RepPage() {
   const [licensePlate, setLicensePlate] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitMsg, setSubmitMsg] = useState<string | null>(null);
-  const [notes, setNotes] = useState<Record<string, string>>({});
+
+  // Optimistic UI Local State
+  const [presentIds, setPresentIds] = useState<Set<string>>(new Set());
+  const [absentIds, setAbsentIds] = useState<Set<string>>(new Set());
   const [sponsoredIds, setSponsoredIds] = useState<Set<string>>(new Set());
+  const [notes, setNotes] = useState<Record<string, string>>({});
   const [generalNotes, setGeneralNotes] = useState('');
-  const [touchedIds, setTouchedIds] = useState<Set<string>>(new Set());
+
+  // Debounced Manifest Sync
+  const debouncedSaveManifest = useDebouncingCallback((updatedManifest: Manifest) => {
+    save(updatedManifest).catch(() => {});
+  }, 400);
 
   // Cash & sponsorship calculator
   const [externalSponsees, setExternalSponsees] = useState<ExternalSponsee[]>([]);
@@ -56,26 +71,11 @@ export function RepPage() {
   const [collectedCancellationIds, setCollectedCancellationIds] = useState<Set<string>>(new Set());
   const [cancellationSearch, setCancellationSearch] = useState('');
 
-  // Draft auto-save/restore — now backed by Supabase (Vehicle.draftState)
-  // instead of localStorage, so it syncs live across devices.
   const [draftRestored, setDraftRestored] = useState(false);
   const clientIdRef = useRef<string>(makeClientId());
   const draftPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** updatedAt of the last draftState we applied locally, so we can tell a
-   * genuinely new remote change apart from our own write echoing back. */
   const lastAppliedDraftAtRef = useRef<string | null>(null);
-  /** True for exactly one render right after we've programmatically applied
-   * a restored/remote draft, so the push effect that reacts to those same
-   * state changes doesn't immediately echo them straight back to Supabase
-   * (which would otherwise ping-pong forever between two open devices). */
   const isApplyingDraftRef = useRef(false);
-  /** Mirrors `manifest` for the debounced push below, which reads from the
-   * ref instead of depending on `manifest` directly — the manifest object
-   * gets a new reference on every save (including the push's own), so
-   * depending on it directly would re-trigger the effect after every push
-   * and loop forever even once the Rep stops editing. */
-  const manifestRef = useRef(manifest);
-  useEffect(() => { manifestRef.current = manifest; }, [manifest]);
 
   // Walk-in
   const [walkInOpen, setWalkInOpen] = useState(false);
@@ -95,20 +95,18 @@ export function RepPage() {
     [manifest, selectedVehicle]
   );
 
-  // Auto-match: as the Rep types their name, highlight/select the vehicle
-  // the Admin assigned them to (only while nothing is selected yet, so we
-  // never yank a vehicle they picked on purpose).
+  // Smart Rep Auto-Detection when vehicle changes
   useEffect(() => {
-    if (!manifest || selectedVehicleId) return;
-    const q = repName.trim().toLowerCase();
-    if (q.length < 2) return;
-    const match = manifest.vehicles.find((v) => (v.repName ?? '').trim().toLowerCase() === q);
-    if (match) setSelectedVehicleId(match.id);
-  }, [repName, manifest, selectedVehicleId]);
+    if (selectedVehicle && !repName) {
+      const autoRep = detectVehicleRep(riders);
+      if (autoRep) setRepName(autoRep);
+    }
+  }, [selectedVehicleId, riders.length]);
 
   function resetLocalDraftState() {
     isApplyingDraftRef.current = true;
-    setTouchedIds(new Set());
+    setPresentIds(new Set());
+    setAbsentIds(new Set());
     setSponsoredIds(new Set());
     setNotes({});
     setGeneralNotes('');
@@ -119,9 +117,8 @@ export function RepPage() {
 
   function applyDraftState(draft: VehicleDraftState) {
     isApplyingDraftRef.current = true;
-    const presentIds = draft.presentIds ?? [];
-    const absentIds = draft.absentIds ?? [];
-    setTouchedIds(new Set([...presentIds, ...absentIds]));
+    setPresentIds(new Set(draft.presentIds ?? []));
+    setAbsentIds(new Set(draft.absentIds ?? []));
     setSponsoredIds(new Set(draft.sponsoredIds ?? []));
     setNotes(draft.notes ?? {});
     setGeneralNotes(draft.generalNotes ?? '');
@@ -132,9 +129,6 @@ export function RepPage() {
     if (draft.licensePlate) setLicensePlate(draft.licensePlate);
   }
 
-  // Reset per-session state whenever the rep switches vehicles, then try to
-  // restore this vehicle's live Supabase draft (attendance touches, notes,
-  // sponsorship, cash calculator) before anything is submitted.
   useEffect(() => {
     setWalkInOpen(false);
     setWalkInName('');
@@ -161,9 +155,6 @@ export function RepPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedVehicleId]);
 
-  // Live cross-device sync — if another tab/device pushes a newer draft for
-  // the vehicle we currently have open (and it isn't just our own write
-  // echoing back through Realtime), pick it up so both stay in lockstep.
   useEffect(() => {
     if (!selectedVehicle || selectedVehicle.submitted) return;
     const draft = selectedVehicle.draftState;
@@ -178,8 +169,6 @@ export function RepPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedVehicle?.draftState]);
 
-  // Load outstanding past-cancellation debts once, so any Rep can collect
-  // cash on behalf of someone in a different vehicle/structure.
   useEffect(() => {
     let mounted = true;
     setLoadingPastCancellations(true);
@@ -187,20 +176,18 @@ export function RepPage() {
       try {
         const entries = await listLedgerEntries();
         if (mounted) setPastCancellations(entries);
-      } catch { /* non-critical — picker will just show empty */ }
+      } catch { /* non-critical */ }
       finally { if (mounted) setLoadingPastCancellations(false); }
     })();
     return () => { mounted = false; };
   }, []);
 
-  const presentCount = riders.filter((r) => r.present).length;
-  const absentCount = riders.length - presentCount;
-  const allTouched = riders.length > 0 && riders.every((r) => touchedIds.has(r.id));
+  const presentCount = presentIds.size;
+  const absentCount = absentIds.size;
+  const allTouched = riders.length > 0 && riders.every((r) => presentIds.has(r.id) || absentIds.has(r.id));
 
-  // Can only submit if rep name AND license plate are filled, and every
-  // passenger has been explicitly marked Present or Absent this session.
   const sponsoredMissingNotes = riders.some(
-    (r) => !r.present && sponsoredIds.has(r.id) && !(notes[r.id] ?? '').trim()
+    (r) => absentIds.has(r.id) && sponsoredIds.has(r.id) && !(notes[r.id] ?? '').trim()
   );
   const canSubmit =
     repName.trim().length > 0 &&
@@ -209,10 +196,7 @@ export function RepPage() {
     !sponsoredMissingNotes &&
     !submitting;
 
-  // Cash calculator totals — base fare is fixed at R40/present passenger
-  // and is never individually editable.
-  // Total = (Present * 40) - (Sponsored Present * 40) + External Sponsee Cash + Past Cancellation Cash Collected
-  const presentSponsoredCount = riders.filter((r) => r.present && sponsoredIds.has(r.id)).length;
+  const presentSponsoredCount = riders.filter((r) => presentIds.has(r.id) && sponsoredIds.has(r.id)).length;
   const grossPresentCash = presentCount * FARE;
   const sponsoredDeduction = presentSponsoredCount * FARE;
   const baseCash = grossPresentCash - sponsoredDeduction;
@@ -220,16 +204,8 @@ export function RepPage() {
   const pastCancellationCash = collectedCancellationIds.size * FARE;
   const totalCash = baseCash + externalCash + pastCancellationCash;
 
-  // Debounced live persistence — pushes the in-progress checklist, notes,
-  // cash calculator, and rep details to Supabase (Vehicle.draftState) a
-  // moment after the Rep stops typing/tapping, so any other device open on
-  // this vehicle picks it up via Realtime and a lost connection or closed
-  // tab never loses the in-progress submission.
   useEffect(() => {
     if (isApplyingDraftRef.current) {
-      // This render's state changes came from applyDraftState/resetLocalDraftState
-      // (a restore or an incoming remote update), not a local edit — don't
-      // echo it straight back to Supabase.
       isApplyingDraftRef.current = false;
       return;
     }
@@ -237,11 +213,9 @@ export function RepPage() {
 
     if (draftPushTimerRef.current) clearTimeout(draftPushTimerRef.current);
     draftPushTimerRef.current = setTimeout(() => {
-      const presentIds = riders.filter((r) => touchedIds.has(r.id) && r.present).map((r) => r.id);
-      const absentIds = riders.filter((r) => touchedIds.has(r.id) && !r.present).map((r) => r.id);
       const draft: VehicleDraftState = {
-        presentIds,
-        absentIds,
+        presentIds: Array.from(presentIds),
+        absentIds: Array.from(absentIds),
         sponsoredIds: Array.from(sponsoredIds),
         notes,
         repName: repName.trim(),
@@ -258,7 +232,7 @@ export function RepPage() {
       const updatedVehicles = manifest.vehicles.map((v) =>
         v.id === selectedVehicleId ? { ...v, draftState: draft } : v
       );
-      save({ ...manifest, vehicles: updatedVehicles }).catch(() => { /* draft sync is best-effort */ });
+      save({ ...manifest, vehicles: updatedVehicles }).catch(() => { /* best-effort */ });
     }, DRAFT_PUSH_DEBOUNCE_MS);
 
     return () => {
@@ -266,18 +240,32 @@ export function RepPage() {
     };
   }, [
     key, selectedVehicleId, selectedVehicle, manifest, riders,
-    touchedIds, sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
+    presentIds, absentIds, sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
     externalSponsees, collectedCancellationIds, baseCash, externalCash, pastCancellationCash,
   ]);
 
-  async function setPresent(passengerId: string, present: boolean) {
+  // Optimistic Toggling implementation
+  const handleTogglePresent = (passengerId: string, isPresent: boolean) => {
+    setPresentIds((prev) => {
+      const next = new Set(prev);
+      if (isPresent) next.add(passengerId);
+      else next.delete(passengerId);
+      return next;
+    });
+
+    setAbsentIds((prev) => {
+      const next = new Set(prev);
+      if (!isPresent) next.add(passengerId);
+      else next.delete(passengerId);
+      return next;
+    });
+
     if (!manifest) return;
     const updatedSignups = manifest.signups.map((p) =>
-      p.id === passengerId ? { ...p, present } : p
+      p.id === passengerId ? { ...p, present: isPresent } : p
     );
-    setTouchedIds((prev) => new Set(prev).add(passengerId));
-    await save({ ...manifest, signups: updatedSignups });
-  }
+    debouncedSaveManifest({ ...manifest, signups: updatedSignups });
+  };
 
   function toggleSponsored(passengerId: string) {
     setSponsoredIds((prev) => {
@@ -349,7 +337,6 @@ export function RepPage() {
     const existing = findByName(walkInName);
 
     if (existing && existing.assignedTo && existing.assignedTo !== selectedVehicle.id) {
-      // Ask before pulling them out of their current vehicle.
       const fromVehicle = vehicleFor(existing.assignedTo);
       if (fromVehicle) {
         setTransferPrompt({ passenger: existing, fromVehicle });
@@ -358,10 +345,8 @@ export function RepPage() {
     }
 
     if (existing) {
-      // Already unassigned, or already in this vehicle — just (re)assign here.
       await assignWalkIn(existing, existing.assignedTo);
     } else {
-      // Brand-new person, not from the Excel import.
       const newPassenger: Passenger = {
         id: `walkin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         fullName: walkInName.trim(),
@@ -377,8 +362,9 @@ export function RepPage() {
           ? { ...v, riders: [...v.riders, newPassenger.id], orderedStops: orderedStopsWith(v, poolKey) }
           : v
       );
+      
+      setPresentIds((prev) => new Set(prev).add(newPassenger.id));
       await save({ ...manifest, signups: [...manifest.signups, newPassenger], vehicles: updatedVehicles });
-      setTouchedIds((prev) => new Set(prev).add(newPassenger.id));
     }
     setWalkInName('');
     setWalkInOpen(false);
@@ -400,8 +386,10 @@ export function RepPage() {
       }
       return v;
     });
+    
+    setPresentIds((prev) => new Set(prev).add(passenger.id));
+    setAbsentIds((prev) => { const n = new Set(prev); n.delete(passenger.id); return n; });
     await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
-    setTouchedIds((prev) => new Set(prev).add(passenger.id));
   }
 
   async function confirmTransfer() {
@@ -419,7 +407,7 @@ export function RepPage() {
     setSubmitMsg(null);
     try {
       const absentees = riders
-        .filter((r) => !r.present)
+        .filter((r) => absentIds.has(r.id))
         .map((r) => ({
           ...r,
           sponsored: sponsoredIds.has(r.id),
@@ -441,9 +429,6 @@ export function RepPage() {
         ? `Past cancellations collected in cash: ${settledNames.join(', ')}. `
         : '';
 
-      // insertAbsentees deduplicates strictly by manifest_key + passenger_name
-      // (across this vehicle's full roster, present and absent) before
-      // inserting — so resubmitting never leaves a duplicate debt row.
       await insertAbsentees(
         key,
         parsedDate,
@@ -457,13 +442,18 @@ export function RepPage() {
         `${coRepNote}${cashNote}${sponseeNote}${settledNote}${generalNotes.trim()}`.trim()
       );
 
-      // Resolve/settle the past-cancellation entries collected in cash on
-      // this trip so they drop off the active cancellation ledger.
       if (collectedCancellationIds.size > 0) {
         await settleLedgerEntries(Array.from(collectedCancellationIds));
         setPastCancellations((prev) => prev.filter((e) => !collectedCancellationIds.has(e.id)));
         setCollectedCancellationIds(new Set());
       }
+
+      // Compute final exact signups to flush to DB ensuring consistency
+      const latestSignups = manifest.signups.map((p) => {
+        if (presentIds.has(p.id)) return { ...p, present: true };
+        if (absentIds.has(p.id)) return { ...p, present: false };
+        return p;
+      });
 
       const updatedVehicles = manifest.vehicles.map((v) =>
         v.id === selectedVehicle.id
@@ -480,10 +470,8 @@ export function RepPage() {
             }
           : v
       );
-      await save({ ...manifest, vehicles: updatedVehicles });
+      await save({ ...manifest, signups: latestSignups, vehicles: updatedVehicles });
 
-      // Cancel any in-flight debounced draft push — the draft is now cleared
-      // server-side, so a stale timer firing afterwards would resurrect it.
       if (draftPushTimerRef.current) {
         clearTimeout(draftPushTimerRef.current);
         draftPushTimerRef.current = null;
@@ -569,7 +557,6 @@ export function RepPage() {
           </div>
         ) : (
           <div className="mt-4 space-y-4">
-            {/* Rep name + vehicle picker */}
             <div className="card">
               <div className="mb-3 flex items-center gap-2">
                 <div className="h-5 w-1 rounded-full bg-crimson-500" />
@@ -624,7 +611,6 @@ export function RepPage() {
 
               {selectedVehicleId && (
                 <div className="mt-3 space-y-3">
-                  {/* Co-Reps */}
                   <div>
                     <div className="mb-1.5 flex items-center justify-between">
                       <label className="block text-xs font-semibold uppercase tracking-wide text-muted">
@@ -679,7 +665,6 @@ export function RepPage() {
 
             {selectedVehicle && riders.length > 0 && (
               <>
-                {/* Stats bar */}
                 <div className="grid grid-cols-3 gap-2">
                   <StatCard label="Total" value={riders.length} icon={<Users className="h-4 w-4" />} />
                   <StatCard label="Present" value={presentCount} icon={<CheckCircle2 className="h-4 w-4" />} accent="success" />
@@ -701,7 +686,6 @@ export function RepPage() {
                   </div>
                 )}
 
-                {/* Walk-in */}
                 {!isSubmitted && (
                   <div className="card">
                     {!walkInOpen ? (
@@ -751,8 +735,9 @@ export function RepPage() {
 
                 <StopGroupedChecklist
                   riders={riders}
-                  touchedIds={touchedIds}
-                  onSetPresent={setPresent}
+                  presentIds={presentIds}
+                  absentIds={absentIds}
+                  onTogglePresent={handleTogglePresent}
                   onToggleSponsored={toggleSponsored}
                   onSetNote={setNote}
                   sponsoredIds={sponsoredIds}
@@ -762,7 +747,6 @@ export function RepPage() {
 
                 {!isSubmitted && (
                   <>
-                    {/* General notes for this vehicle submission */}
                     <div className="card">
                       <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
                         General Notes (optional)
@@ -776,9 +760,6 @@ export function RepPage() {
                       />
                     </div>
 
-                    {/* Read-only cash summary — sits directly above the submit
-                        button, per policy. Base fare is fixed at R40/present
-                        passenger and is never individually editable. */}
                     <CashCalculatorCard
                       presentCount={presentCount}
                       presentSponsoredCount={presentSponsoredCount}
@@ -896,7 +877,6 @@ export function RepPage() {
         </footer>
       </main>
 
-      {/* Walk-in transfer confirmation */}
       {transferPrompt && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm animate-fade-in"
@@ -933,14 +913,7 @@ export function RepPage() {
   );
 }
 
-function StatCard({
-  label, value, icon, accent,
-}: {
-  label: string;
-  value: number;
-  icon: React.ReactNode;
-  accent?: 'success' | 'crimson';
-}) {
+function StatCard({ label, value, icon, accent }: { label: string; value: number; icon: React.ReactNode; accent?: 'success' | 'crimson'; }) {
   const color = accent === 'success' ? 'text-success-light' : accent === 'crimson' ? 'text-crimson-400' : 'text-ink';
   const border = accent === 'success' ? 'border-success/30 bg-success/10' : accent === 'crimson' ? 'border-crimson-500/30 bg-crimson-900/10' : 'border-line bg-card';
   return (
@@ -954,7 +927,6 @@ function StatCard({
   );
 }
 
-/** Renders an entry's stored service label (e.g. "PM Service — Normal Only") as "PM Normal" / "AM Serving". */
 function formatServicePeriodMode(service: string): string {
   const parts = service.split('—').map((s) => s.trim());
   const period = (parts[0] ?? '').split(' ')[0] || '';
@@ -966,34 +938,11 @@ function CashCalculatorCard({
   presentCount, presentSponsoredCount, fare, grossPresentCash, sponsoredDeduction,
   externalSponsees, onAddSponsee, onUpdateSponsee, onRemoveSponsee, externalCash,
   pastCancellations, loadingPastCancellations, collectedCancellationIds, onToggleCancellation,
-  pastCancellationCash, search, onSearchChange,
-  baseCash, totalCash,
-}: {
-  presentCount: number;
-  presentSponsoredCount: number;
-  fare: number;
-  grossPresentCash: number;
-  sponsoredDeduction: number;
-  externalSponsees: ExternalSponsee[];
-  onAddSponsee: () => void;
-  onUpdateSponsee: (id: string, patch: Partial<ExternalSponsee>) => void;
-  onRemoveSponsee: (id: string) => void;
-  externalCash: number;
-  pastCancellations: LedgerEntry[];
-  loadingPastCancellations: boolean;
-  collectedCancellationIds: Set<string>;
-  onToggleCancellation: (id: string) => void;
-  pastCancellationCash: number;
-  search: string;
-  onSearchChange: (v: string) => void;
-  baseCash: number;
-  totalCash: number;
-}) {
+  pastCancellationCash, search, onSearchChange, baseCash, totalCash,
+}: any) {
   const q = search.trim().toLowerCase();
-  // Selected debts are shown separately, so search results only ever
-  // surface still-outstanding ("active") records the Rep hasn't picked yet.
-  const selectedCancellations = pastCancellations.filter((e) => collectedCancellationIds.has(e.id));
-  const searchResults = q.length === 0 ? [] : pastCancellations.filter((e) => {
+  const selectedCancellations = pastCancellations.filter((e: any) => collectedCancellationIds.has(e.id));
+  const searchResults = q.length === 0 ? [] : pastCancellations.filter((e: any) => {
     if (collectedCancellationIds.has(e.id)) return false;
     return e.passenger_name.toLowerCase().includes(q) || (e.structure || '').toLowerCase().includes(q);
   });
@@ -1005,7 +954,6 @@ function CashCalculatorCard({
         <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">Physical Cash Calculator</h2>
       </div>
 
-      {/* Read-only base fare summary — R40/present passenger is fixed and cannot be edited per-passenger. */}
       <div className="space-y-1.5 rounded-lg bg-card-2/60 p-3 text-xs">
         <div className="flex items-center justify-between text-muted">
           <span>Present Passengers</span>
@@ -1019,7 +967,6 @@ function CashCalculatorCard({
         )}
       </div>
 
-      {/* External sponsees — cash collected here for a passenger in another vehicle */}
       <div className="mt-3">
         <button onClick={onAddSponsee} className="flex items-center gap-1.5 text-xs font-semibold text-crimson-400 hover:text-crimson-300">
           <Plus className="h-3.5 w-3.5" />
@@ -1027,7 +974,7 @@ function CashCalculatorCard({
         </button>
         {externalSponsees.length > 0 && (
           <div className="mt-2 space-y-2">
-            {externalSponsees.map((s) => (
+            {externalSponsees.map((s: any) => (
               <div key={s.id} className="flex flex-col gap-1.5 rounded-lg border border-line bg-card-2/60 p-2.5 sm:flex-row sm:items-center">
                 <input
                   type="text"
@@ -1062,7 +1009,6 @@ function CashCalculatorCard({
         )}
       </div>
 
-      {/* Search-based past-cancellation cash settlement */}
       <div className="mt-3">
         <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-crimson-400">
           <Banknote className="h-3.5 w-3.5" />
@@ -1072,23 +1018,15 @@ function CashCalculatorCard({
           )}
         </div>
 
-        {/* Already-selected debts, with a way to deselect */}
         {selectedCancellations.length > 0 && (
           <div className="mb-2 space-y-1.5">
-            {selectedCancellations.map((e) => (
-              <div
-                key={e.id}
-                className="flex items-center justify-between gap-2 rounded-md border border-crimson-500/40 bg-crimson-500/10 px-2.5 py-1.5 text-xs"
-              >
+            {selectedCancellations.map((e: any) => (
+              <div key={e.id} className="flex items-center justify-between gap-2 rounded-md border border-crimson-500/40 bg-crimson-500/10 px-2.5 py-1.5 text-xs">
                 <span className="min-w-0 truncate text-crimson-200">
                   <span className="font-semibold">{e.passenger_name}</span>
                   <span className="text-muted"> — {shortDate(e.date)} · {formatServicePeriodMode(e.service)}</span>
                 </span>
-                <button
-                  onClick={() => onToggleCancellation(e.id)}
-                  className="shrink-0 rounded p-1 text-muted hover:bg-crimson-900/30 hover:text-crimson-300"
-                  title="Remove"
-                >
+                <button onClick={() => onToggleCancellation(e.id)} className="shrink-0 rounded p-1 text-muted hover:bg-crimson-900/30 hover:text-crimson-300" title="Remove">
                   <X className="h-3.5 w-3.5" />
                 </button>
               </div>
@@ -1114,13 +1052,8 @@ function CashCalculatorCard({
             ) : searchResults.length === 0 ? (
               <p className="py-2 text-center text-[11px] text-muted">No outstanding cancellations match your search.</p>
             ) : (
-              searchResults.map((e) => (
-                <button
-                  key={e.id}
-                  type="button"
-                  onClick={() => onToggleCancellation(e.id)}
-                  className="flex w-full items-center justify-between gap-2 rounded-md border border-line bg-card px-2.5 py-2 text-left text-xs transition-colors hover:border-crimson-500/40 hover:bg-card-2/60"
-                >
+              searchResults.map((e: any) => (
+                <button key={e.id} type="button" onClick={() => onToggleCancellation(e.id)} className="flex w-full items-center justify-between gap-2 rounded-md border border-line bg-card px-2.5 py-2 text-left text-xs transition-colors hover:border-crimson-500/40 hover:bg-card-2/60">
                   <span className="min-w-0">
                     <span className="block truncate font-semibold text-ink">{e.passenger_name}</span>
                     <span className="mt-0.5 block text-[10px] text-muted">
@@ -1134,13 +1067,11 @@ function CashCalculatorCard({
             )}
           </div>
         )}
-
         <p className="mt-1.5 text-[10px] text-muted">
           Selecting a match adds R{fare} to this vehicle's expected cash and clears that person's debt on submit.
         </p>
       </div>
 
-      {/* Live total */}
       <div className="mt-3 space-y-1 rounded-lg border border-crimson-500/20 bg-crimson-900/10 p-3 text-xs">
         <div className="flex items-center justify-between text-muted">
           <span>Base Passenger Cash</span>
@@ -1164,11 +1095,12 @@ function CashCalculatorCard({
 }
 
 function StopGroupedChecklist({
-  riders, touchedIds, onSetPresent, onToggleSponsored, onSetNote, sponsoredIds, notes, disabled,
+  riders, presentIds, absentIds, onTogglePresent, onToggleSponsored, onSetNote, sponsoredIds, notes, disabled,
 }: {
   riders: Passenger[];
-  touchedIds: Set<string>;
-  onSetPresent: (id: string, present: boolean) => void;
+  presentIds: Set<string>;
+  absentIds: Set<string>;
+  onTogglePresent: (id: string, present: boolean) => void;
   onToggleSponsored: (id: string) => void;
   onSetNote: (id: string, text: string) => void;
   sponsoredIds: Set<string>;
@@ -1207,9 +1139,10 @@ function StopGroupedChecklist({
 
       {stops.map((stop) => {
         const stopRiders = byStop[stop];
-        const stopPresent = stopRiders.filter((r) => r.present).length;
-        const stopTouched = stopRiders.filter((r) => touchedIds.has(r.id)).length;
+        const stopPresent = stopRiders.filter((r) => presentIds.has(r.id)).length;
+        const stopTouched = stopRiders.filter((r) => presentIds.has(r.id) || absentIds.has(r.id)).length;
         const isExpanded = expandedStops.has(stop);
+        
         return (
           <div key={stop} className="overflow-hidden rounded-xl border border-line bg-card">
             <button
@@ -1233,8 +1166,9 @@ function StopGroupedChecklist({
                   <PassengerRow
                     key={p.id}
                     passenger={p}
-                    touched={touchedIds.has(p.id)}
-                    onSetPresent={(present) => onSetPresent(p.id, present)}
+                    isPresent={presentIds.has(p.id)}
+                    isTouched={presentIds.has(p.id) || absentIds.has(p.id)}
+                    onSetPresent={(present) => onTogglePresent(p.id, present)}
                     onToggleSponsored={() => onToggleSponsored(p.id)}
                     onSetNote={(text) => onSetNote(p.id, text)}
                     isSponsored={sponsoredIds.has(p.id)}
@@ -1252,10 +1186,11 @@ function StopGroupedChecklist({
 }
 
 function PassengerRow({
-  passenger, touched, onSetPresent, onToggleSponsored, onSetNote, isSponsored, noteText, disabled,
+  passenger, isPresent, isTouched, onSetPresent, onToggleSponsored, onSetNote, isSponsored, noteText, disabled,
 }: {
   passenger: Passenger;
-  touched: boolean;
+  isPresent: boolean;
+  isTouched: boolean;
   onSetPresent: (present: boolean) => void;
   onToggleSponsored: () => void;
   onSetNote: (text: string) => void;
@@ -1277,30 +1212,29 @@ function PassengerRow({
   }
 
   return (
-    <div className={`p-3.5 transition-colors ${disabled ? 'opacity-60' : 'hover:bg-card-2/30'} ${!touched && !disabled ? 'bg-warning/5' : ''}`}>
+    <div className={`p-3.5 transition-colors ${disabled ? 'opacity-60' : 'hover:bg-card-2/30'} ${!isTouched && !disabled ? 'bg-warning/5' : ''}`}>
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className={`text-sm font-medium ${passenger.present ? 'text-success-light' : touched ? 'text-crimson-300' : 'text-ink'}`}>
+          <div className={`text-sm font-medium ${isPresent ? 'text-success-light' : isTouched ? 'text-crimson-300' : 'text-ink'}`}>
             {passenger.fullName}
             {passenger.structure && (
               <span className="ml-2 inline-block rounded bg-bg/60 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-muted">
                 {passenger.structure}
               </span>
             )}
-            {!touched && !disabled && (
+            {!isTouched && !disabled && (
               <span className="ml-2 inline-block rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold text-warning">
                 Needs check-in
               </span>
             )}
           </div>
         </div>
-        {/* Explicit, side-by-side Present / Absent toggle buttons */}
         <div className="flex shrink-0 gap-1.5">
           <button
             onClick={() => onSetPresent(true)}
             disabled={disabled}
             className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all active:scale-95 ${
-              passenger.present && touched
+              isPresent && isTouched
                 ? 'bg-success/20 text-success-light border border-success/50'
                 : 'bg-card-2 text-muted border border-line hover:border-success/40 hover:text-success-light'
             }`}
@@ -1314,7 +1248,7 @@ function PassengerRow({
             onClick={() => onSetPresent(false)}
             disabled={disabled}
             className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all active:scale-95 ${
-              !passenger.present && touched
+              !isPresent && isTouched
                 ? 'bg-crimson-500/20 text-crimson-300 border border-crimson-500/50'
                 : 'bg-card-2 text-muted border border-line hover:border-crimson-500/40 hover:text-crimson-300'
             }`}
@@ -1327,7 +1261,6 @@ function PassengerRow({
         </div>
       </div>
 
-      {/* Sponsored toggle */}
       <div className="mt-2 flex items-center gap-3">
         <button
           onClick={handleSponsoredToggle}
@@ -1353,7 +1286,6 @@ function PassengerRow({
         )}
       </div>
 
-      {/* Sponsor note — required when sponsored */}
       {isSponsored && showNote && (
         <div className="mt-2 animate-fade-in">
           <input
