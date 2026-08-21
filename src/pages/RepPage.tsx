@@ -16,7 +16,7 @@ import { insertAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEnt
 import { detectVehicleRep, getRepStructure } from '@/lib/officialReps';
 
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
-const SYNC_DEBOUNCE_MS = 400; // 400ms debounce for Supabase background sync
+const SYNC_DEBOUNCE_MS = 300; // 300ms debounce for Supabase background sync
 
 interface ExternalSponsee {
   id: string;
@@ -35,7 +35,14 @@ export function RepPage() {
   const key = manifestKey(date, service);
   const { manifest, loading, error, save } = useManifest(key);
 
-  const [selectedVehicleId, setSelectedVehicleId] = useState<string>('');
+  const [selectedVehicleId, setSelectedVehicleId] = useState<string>(() => {
+    try {
+      return sessionStorage.getItem(`rep_vehicle_${key}`) || '';
+    } catch {
+      return '';
+    }
+  });
+
   const [repName, setRepName] = useState('');
   const [coReps, setCoReps] = useState<string[]>([]);
   const [licensePlate, setLicensePlate] = useState('');
@@ -58,16 +65,28 @@ export function RepPage() {
   const [collectedCancellationIds, setCollectedCancellationIds] = useState<Set<string>>(new Set());
   const [cancellationSearch, setCancellationSearch] = useState('');
 
-  // Draft auto-save/restore
+  // Draft auto-save/restore & sync locks
   const [draftRestored, setDraftRestored] = useState(false);
   const clientIdRef = useRef<string>(makeClientId());
-  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAppliedDraftAtRef = useRef<string | null>(null);
   const isApplyingDraftRef = useRef(false);
-  const activeVehicleIdRef = useRef<string>('');
+  const lastLocalEditTimeRef = useRef<number>(0);
+  const initializedKeyRef = useRef<string>('');
 
   const manifestRef = useRef(manifest);
   useEffect(() => { manifestRef.current = manifest; }, [manifest]);
+
+  // Persist selectedVehicleId across refreshes for current manifest key
+  useEffect(() => {
+    if (selectedVehicleId) {
+      try {
+        sessionStorage.setItem(`rep_vehicle_${key}`, selectedVehicleId);
+      } catch {
+        /* storage unavailable */
+      }
+    }
+  }, [key, selectedVehicleId]);
 
   // Walk-in
   const [walkInOpen, setWalkInOpen] = useState(false);
@@ -139,39 +158,41 @@ export function RepPage() {
     if (draft.licensePlate !== undefined) setLicensePlate(draft.licensePlate);
   }, []);
 
-  // Initialize/restore state ONLY when switching vehicles (NOT on background manifest saves)
+  // Initialize/restore state when manifest loads or vehicle is selected
   useEffect(() => {
     setWalkInOpen(false);
     setWalkInName('');
     setTransferPrompt(null);
 
     if (!selectedVehicleId) {
-      if (activeVehicleIdRef.current !== '') {
+      if (initializedKeyRef.current !== '') {
         resetLocalDraftState();
         setDraftRestored(false);
         lastAppliedDraftAtRef.current = null;
-        activeVehicleIdRef.current = '';
+        initializedKeyRef.current = '';
       }
       return;
     }
 
-    // Only run initialization if we switched to a different vehicle or initial mount
-    if (activeVehicleIdRef.current === selectedVehicleId) {
+    if (!manifest) return;
+
+    const currentKey = `${key}:${selectedVehicleId}`;
+    if (initializedKeyRef.current === currentKey) {
       return;
     }
-    activeVehicleIdRef.current = selectedVehicleId;
 
-    const vehicle = manifestRef.current?.vehicles.find((v) => v.id === selectedVehicleId);
+    const vehicle = manifest.vehicles.find((v) => v.id === selectedVehicleId);
     if (!vehicle) return;
 
-    const currentRiders = vehicleRiders(manifestRef.current, vehicle);
+    initializedKeyRef.current = currentKey;
+    const currentRiders = vehicleRiders(manifest, vehicle);
     const draft = !vehicle.submitted ? vehicle.draftState : undefined;
 
     if (draft) {
       applyDraftState(draft, currentRiders);
       lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
       setDraftRestored(true);
-      const t = setTimeout(() => setDraftRestored(false), 4000);
+      const t = setTimeout(() => setDraftRestored(false), 3000);
       return () => clearTimeout(t);
     } else {
       // Default initialization for vehicle
@@ -192,19 +213,24 @@ export function RepPage() {
       if (vehicle.licensePlate) setLicensePlate(vehicle.licensePlate);
       lastAppliedDraftAtRef.current = null;
     }
-  }, [selectedVehicleId, resetLocalDraftState, applyDraftState]);
+  }, [key, manifest, selectedVehicleId, resetLocalDraftState, applyDraftState]);
 
-  // Live cross-device sync (only applies updates from other devices)
+  // Live cross-device sync (only applies genuine new updates from other devices)
   useEffect(() => {
     if (!selectedVehicle || selectedVehicle.submitted) return;
     const draft = selectedVehicle.draftState;
     if (!draft) return;
+    // Ignore updates saved by our own client ID
     if (draft.updatedBy === clientIdRef.current) return;
+    // Ignore if we recently made local user edits (within last 2.5 seconds)
+    if (Date.now() - lastLocalEditTimeRef.current < 2500) return;
+    // Ignore if already applied this exact draft timestamp
     if (draft.updatedAt && draft.updatedAt === lastAppliedDraftAtRef.current) return;
+
     applyDraftState(draft, riders);
     lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
     setDraftRestored(true);
-    const t = setTimeout(() => setDraftRestored(false), 4000);
+    const t = setTimeout(() => setDraftRestored(false), 3000);
     return () => clearTimeout(t);
   }, [selectedVehicle?.draftState, selectedVehicle, riders, applyDraftState]);
 
@@ -265,7 +291,7 @@ export function RepPage() {
   const pastCancellationCash = collectedCancellationIds.size * FARE;
   const totalCash = baseCash + externalCash + pastCancellationCash;
 
-  // 400ms Debounced Supabase Sync
+  // 300ms Debounced Supabase Sync
   useEffect(() => {
     if (isApplyingDraftRef.current) {
       isApplyingDraftRef.current = false;
@@ -273,14 +299,15 @@ export function RepPage() {
     }
     if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted || !manifestRef.current) return;
 
-    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    if (pendingSyncTimerRef.current) clearTimeout(pendingSyncTimerRef.current);
 
-    debounceTimerRef.current = setTimeout(() => {
+    pendingSyncTimerRef.current = setTimeout(() => {
       const currentManifest = manifestRef.current;
       if (!currentManifest) return;
 
       const pIdsArray = Array.from(presentIds);
       const aIdsArray = Array.from(absentIds);
+      const nowIso = new Date().toISOString();
 
       const draft: VehicleDraftState = {
         presentIds: pIdsArray,
@@ -294,11 +321,11 @@ export function RepPage() {
         cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
         settledLedgerIds: Array.from(collectedCancellationIds),
         externalSponsees,
-        updatedAt: new Date().toISOString(),
+        updatedAt: nowIso,
         updatedBy: clientIdRef.current,
       };
 
-      lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
+      lastAppliedDraftAtRef.current = nowIso;
 
       // Update vehicle draft and passenger present status optimistically
       const updatedSignups = currentManifest.signups.map((p) => {
@@ -324,7 +351,7 @@ export function RepPage() {
     }, SYNC_DEBOUNCE_MS);
 
     return () => {
-      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+      if (pendingSyncTimerRef.current) clearTimeout(pendingSyncTimerRef.current);
     };
   }, [
     selectedVehicleId, selectedVehicle, presentIds, absentIds,
@@ -333,17 +360,13 @@ export function RepPage() {
     save
   ]);
 
-  // Instant local toggle handlers (Zero lag, pure React state)
+  // Instant local toggle handlers (Zero lag, pure React state, deterministic single click)
   const handleSetPresent = useCallback((passengerId: string, wantPresent: boolean) => {
+    lastLocalEditTimeRef.current = Date.now();
     if (wantPresent) {
       setPresentIds((prev) => {
-        const next = new Set(prev);
-        if (next.has(passengerId)) {
-          next.delete(passengerId); // Toggle off if clicked again
-        } else {
-          next.add(passengerId);
-        }
-        return next;
+        if (prev.has(passengerId)) return prev;
+        return new Set(prev).add(passengerId);
       });
       setAbsentIds((prev) => {
         if (!prev.has(passengerId)) return prev;
@@ -353,13 +376,8 @@ export function RepPage() {
       });
     } else {
       setAbsentIds((prev) => {
-        const next = new Set(prev);
-        if (next.has(passengerId)) {
-          next.delete(passengerId); // Toggle off if clicked again
-        } else {
-          next.add(passengerId);
-        }
-        return next;
+        if (prev.has(passengerId)) return prev;
+        return new Set(prev).add(passengerId);
       });
       setPresentIds((prev) => {
         if (!prev.has(passengerId)) return prev;
@@ -371,6 +389,7 @@ export function RepPage() {
   }, []);
 
   const handleToggleSponsored = useCallback((passengerId: string) => {
+    lastLocalEditTimeRef.current = Date.now();
     setSponsoredIds((prev) => {
       const next = new Set(prev);
       if (next.has(passengerId)) next.delete(passengerId);
@@ -380,6 +399,7 @@ export function RepPage() {
   }, []);
 
   const handleSetNote = useCallback((passengerId: string, text: string) => {
+    lastLocalEditTimeRef.current = Date.now();
     setNotes((prev) => ({ ...prev, [passengerId]: text }));
   }, []);
 
@@ -498,9 +518,9 @@ export function RepPage() {
     if (!manifest || !selectedVehicle) return;
     if (!repName.trim() || !licensePlate.trim()) return;
 
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = null;
+    if (pendingSyncTimerRef.current) {
+      clearTimeout(pendingSyncTimerRef.current);
+      pendingSyncTimerRef.current = null;
     }
 
     setSubmitting(true);
