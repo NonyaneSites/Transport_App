@@ -1,16 +1,19 @@
 import * as XLSX from 'xlsx';
 import type { Passenger, ServiceType } from './types';
-import { SERVICE_TYPES } from './types';
+import { SERVICE_TYPES, hubDisplayName } from './types';
 import { sanitizeTransportValue } from './transportSanitization';
+import { toTitleCase, sanitizePhone, parseTimestampToISO, normalizeService, parseGoogleSheetSignups, type RawSheetRow } from './importer';
+
+export { parseGoogleSheetSignups, type RawSheetRow, toTitleCase, sanitizePhone, parseTimestampToISO, normalizeService };
 
 interface ParseOptions {
   selectedDate: string;
   selectedService: ServiceType;
 }
 
-const SERVING_KEYWORDS = ['serving', 'usher', 'choir', 'band', 'altar', 'media', 'intercession', 'creatives', 'info desk', 'cares', 'kids church'];
+const SERVING_KEYWORDS = ['serving', 'usher', 'choir', 'band', 'altar', 'media', 'intercession', 'creatives', 'info desk', 'cares', 'kids church', 'volunteer'];
 
-const TRANSPORT_QUESTION_PATTERNS = ['do you need transport', 'need transport', 'transport required'];
+const TRANSPORT_QUESTION_PATTERNS = ['do you need transport', 'need transport', 'transport required', 'require transport'];
 
 // Mapping from area-name values (what appears in the Area Stops2 column)
 // to the column header that holds the specific stop for that area.
@@ -56,33 +59,56 @@ function findColumn(headers: string[], patterns: string[]): string | null {
 }
 
 function extractFullName(row: RawRow, headers: string[]): string {
+  // Direct Full Name / Name columns
+  const fullNameCol = findColumn(headers, ['full name', 'first and last name', 'name', 'passenger name']);
+  if (fullNameCol && clean(row[fullNameCol])) {
+    return toTitleCase(clean(row[fullNameCol]));
+  }
+
+  // Name2 + Surname (standard Microsoft Forms template)
   const name2Col = findColumn(headers, ['name2', 'name 2']);
-  const surnameCol = findColumn(headers, ['surname']);
+  const surnameCol = findColumn(headers, ['surname', 'last name', 'lastname', 'family name']);
   const name2 = name2Col ? clean(row[name2Col]) : '';
   const surname = surnameCol ? clean(row[surnameCol]) : '';
 
-  // Primary path: Name2 (first name) + Surname
-  if (name2 && surname) return `${name2} ${surname}`;
-  if (name2) return name2;
-  if (surname) return surname;
+  if (name2 && surname) return toTitleCase(`${name2} ${surname}`);
+  if (name2) return toTitleCase(name2);
+  if (surname) return toTitleCase(surname);
 
   // Fallback: First Name + Surname
   const firstNameCol = findColumn(headers, ['first name', 'firstname', 'name1', 'name 1']);
   const first = firstNameCol ? clean(row[firstNameCol]) : '';
-  if (first && surname) return `${first} ${surname}`;
-  if (first) return first;
+  if (first && surname) return toTitleCase(`${first} ${surname}`);
+  if (first) return toTitleCase(first);
 
   // Last resort: any column with "name" in it
   for (const h of headers) {
     const lh = lower(h);
     if (lh.includes('name') && !lh.includes('surname') && clean(row[h])) {
-      return clean(row[h]);
+      return toTitleCase(clean(row[h]));
     }
   }
   return '';
 }
 
 function extractStop(row: RawRow, headers: string[]): string {
+  // Direct Pickup Stop columns (2026 Google Sheet / MS Form format)
+  const directStopCol = findColumn(headers, [
+    'pickup stop',
+    'boarding location',
+    'sub-stop',
+    'sub stop',
+    'where will you join',
+    'pickup location',
+    'stop',
+  ]);
+  if (directStopCol && clean(row[directStopCol])) {
+    const directStop = clean(row[directStopCol]);
+    if (directStop && !directStop.toLowerCase().includes('area stops')) {
+      return directStop;
+    }
+  }
+
   // Step 1: find the area column (Area Stops2) to know which area the person selected
   const areaCol = findColumn(headers, ['area stops2', 'area stops 2', 'area stops']);
   const areaValue = areaCol ? lower(clean(row[areaCol])) : '';
@@ -117,8 +143,9 @@ function extractStop(row: RawRow, headers: string[]): string {
 // The forms have three separate structure columns: SZ1 Structures, SZ2 Structures, YZ Structures.
 // Only one is populated per row depending on which zone the person belongs to.
 const STRUCTURE_COLUMN_PATTERNS = [
+  'structure', 'zone / structure', 'zone',
   'sz1 structures', 'sz1', 'sz2 structures', 'sz2', 'yz structures', 'yz',
-  'structure', 'assembly', 'assembly structure', 'home structure', 'home assembly',
+  'assembly', 'assembly structure', 'home structure', 'home assembly',
   'fellowship structure', 'pcf structure',
 ];
 
@@ -128,18 +155,37 @@ function extractStructure(row: RawRow, headers: string[]): string {
     const col = findColumn(headers, [pattern]);
     if (col) {
       const val = clean(row[col]);
-      if (val) return val;
+      if (val) return val.toUpperCase();
     }
   }
-  // Fallback: scan all columns for one whose header contains "structure" or "assembly"
+  // Fallback: scan all columns for one whose header contains "structure" or "assembly" or "zone"
   for (const h of headers) {
     const lh = lower(clean(h));
-    if ((lh.includes('structure') || lh.includes('assembly')) && !lh.includes('area')) {
+    if ((lh.includes('structure') || lh.includes('assembly') || lh.includes('zone')) && !lh.includes('area')) {
       const val = clean(row[h]);
-      if (val) return val;
+      if (val) return val.toUpperCase();
     }
   }
   return '';
+}
+
+function extractPhone(row: RawRow, headers: string[]): string | undefined {
+  const col = findColumn(headers, ['phone number', 'whatsapp number', 'contact number', 'phone', 'whatsapp', 'contact', 'cell', 'mobile']);
+  if (!col) return undefined;
+  return sanitizePhone(row[col]);
+}
+
+function extractEmail(row: RawRow, headers: string[]): string | undefined {
+  const col = findColumn(headers, ['email address', 'email', 'user email', 'mail']);
+  if (!col) return undefined;
+  const raw = clean(row[col]);
+  return raw ? raw.toLowerCase() : undefined;
+}
+
+function extractTimestamp(row: RawRow, headers: string[]): string | undefined {
+  const col = findColumn(headers, ['completion time', 'submission time', 'timestamp', 'created at', 'date submitted']);
+  if (!col) return undefined;
+  return parseTimestampToISO(row[col]);
 }
 
 function wantsTransport(row: RawRow, headers: string[]): boolean {
@@ -310,11 +356,21 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
     seen.add(id);
 
     const structure = extractStructure(row, headers);
+    const phone = extractPhone(row, headers);
+    const userEmail = extractEmail(row, headers);
+    const timestamp = extractTimestamp(row, headers);
+    const hub = hubDisplayName('Taxi', stop);
+
     passengers.push({
       id,
       fullName: name,
       stop,
       structure,
+      phone,
+      userEmail,
+      timestamp,
+      hub,
+      service: opts.selectedService,
       assignedTo: null,
       present: false,
       cancellationFeeOwed: false,

@@ -3,6 +3,11 @@ export interface Passenger {
   fullName: string;
   stop: string;
   structure: string;
+  phone?: string;
+  userEmail?: string;
+  timestamp?: string;
+  hub?: string;
+  service?: string;
   assignedTo: string | null;
   present: boolean;
   cancellationFeeOwed: boolean;

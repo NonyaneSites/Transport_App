@@ -1,6 +1,7 @@
 import { supabase, MANIFESTS_TABLE } from './supabase';
 import type { Manifest, Passenger, Vehicle } from './types';
 import { hubDisplayName } from './types';
+export { parseGoogleSheetSignups, type RawSheetRow } from './importer';
 
 export async function loadManifest(key: string): Promise<Manifest | null> {
   const { data, error } = await supabase
