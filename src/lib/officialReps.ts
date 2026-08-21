@@ -72,4 +72,3 @@ export function allocateSubStopsIntact(
 
   return { allocated, remaining };
 }
-}
