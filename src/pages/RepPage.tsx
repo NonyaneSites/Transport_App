@@ -7,8 +7,9 @@ import {
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
+import { supabase, MANIFESTS_TABLE } from '@/lib/supabase';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey, shortDate } from '@/lib/dates';
-import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType, type Passenger, type Vehicle, type VehicleDraftState } from '@/lib/types';
+import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType, type Passenger, type Vehicle, type VehicleDraftState, type Manifest } from '@/lib/types';
 import { hubDisplayName } from '@/lib/types';
 import { sortVehiclesNatural } from '@/lib/sort';
 import { vehicleRiders, passengersByPoolGroup } from '@/lib/manifest';
@@ -330,52 +331,78 @@ export function RepPage() {
     if (pendingSyncTimerRef.current) clearTimeout(pendingSyncTimerRef.current);
 
     pendingSyncTimerRef.current = setTimeout(() => {
-      const currentManifest = manifestRef.current;
-      if (!currentManifest) return;
+      (async () => {
+        // Re-fetch the manifest from the database right before writing,
+        // instead of trusting manifestRef.current. manifestRef only reflects
+        // whatever this tab has heard about (its initial load plus any
+        // realtime events it has received). If another tab or the Admin
+        // page changed vehicles/signups in the meantime and this tab hasn't
+        // heard about it yet, saving our in-memory copy would silently wipe
+        // out that other change (e.g. an admin's vehicle deletion
+        // reappearing). A fresh read right before the write shrinks that
+        // race window to essentially nothing.
+        let baseManifest: Manifest | null = manifestRef.current;
+        try {
+          const { data, error: fetchError } = await supabase
+            .from(MANIFESTS_TABLE)
+            .select('date, signups, vehicles, created_at, updated_at')
+            .eq('date', key)
+            .maybeSingle();
+          if (!fetchError && data) {
+            baseManifest = data as Manifest;
+          }
+        } catch {
+          // Fall back to the in-memory copy if the refetch fails; still
+          // far better than doing nothing.
+        }
+        if (!baseManifest) return;
 
-      const pIdsArray = Array.from(presentIds);
-      const aIdsArray = Array.from(absentIds);
-      const nowIso = new Date().toISOString();
+        const pIdsArray = Array.from(presentIds);
+        const aIdsArray = Array.from(absentIds);
+        const nowIso = new Date().toISOString();
 
-      const draft: VehicleDraftState = {
-        presentIds: pIdsArray,
-        absentIds: aIdsArray,
-        sponsoredIds: Array.from(sponsoredIds),
-        notes,
-        repName: repName.trim(),
-        coReps: coReps.filter(Boolean),
-        licensePlate: licensePlate.trim(),
-        generalNotes: generalNotes.trim(),
-        cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
-        settledLedgerIds: Array.from(collectedCancellationIds),
-        externalSponsees,
-        updatedAt: nowIso,
-        updatedBy: clientIdRef.current,
-      };
+        const draft: VehicleDraftState = {
+          presentIds: pIdsArray,
+          absentIds: aIdsArray,
+          sponsoredIds: Array.from(sponsoredIds),
+          notes,
+          repName: repName.trim(),
+          coReps: coReps.filter(Boolean),
+          licensePlate: licensePlate.trim(),
+          generalNotes: generalNotes.trim(),
+          cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+          settledLedgerIds: Array.from(collectedCancellationIds),
+          externalSponsees,
+          updatedAt: nowIso,
+          updatedBy: clientIdRef.current,
+        };
 
-      lastAppliedDraftAtRef.current = nowIso;
+        lastAppliedDraftAtRef.current = nowIso;
 
-      // Update vehicle draft and passenger present status optimistically
-      const updatedSignups = currentManifest.signups.map((p) => {
-        if (presentIds.has(p.id)) return { ...p, present: true };
-        if (absentIds.has(p.id)) return { ...p, present: false };
-        return p;
-      });
+        // Apply this rep's present/absent + draft changes on top of the
+        // freshest known manifest, rather than overwriting vehicles/signups
+        // wholesale from a possibly-stale local copy.
+        const updatedSignups = baseManifest.signups.map((p) => {
+          if (presentIds.has(p.id)) return { ...p, present: true };
+          if (absentIds.has(p.id)) return { ...p, present: false };
+          return p;
+        });
 
-      const updatedVehicles = currentManifest.vehicles.map((v) =>
-        v.id === selectedVehicleId
-          ? {
-              ...v,
-              repName: repName.trim() || v.repName,
-              licensePlate: licensePlate.trim() || v.licensePlate,
-              draftState: draft,
-            }
-          : v
-      );
+        const updatedVehicles = baseManifest.vehicles.map((v) =>
+          v.id === selectedVehicleId
+            ? {
+                ...v,
+                repName: repName.trim() || v.repName,
+                licensePlate: licensePlate.trim() || v.licensePlate,
+                draftState: draft,
+              }
+            : v
+        );
 
-      save({ ...currentManifest, signups: updatedSignups, vehicles: updatedVehicles }).catch(() => {
-        /* background sync is best-effort */
-      });
+        save({ ...baseManifest, signups: updatedSignups, vehicles: updatedVehicles }).catch(() => {
+          /* background sync is best-effort */
+        });
+      })();
     }, SYNC_DEBOUNCE_MS);
 
     return () => {
