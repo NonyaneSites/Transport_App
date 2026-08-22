@@ -10,6 +10,7 @@ import { listAllManifests } from '@/lib/manifest';
 import { listLedgerEntries, downloadSessionStatsExcel } from '@/lib/ledger';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey as parseKey } from '@/lib/dates';
 import { SERVICE_TYPES, RESET_PASSWORD, type ServiceType, type Passenger, type Manifest } from '@/lib/types';
+import { isSamePassenger } from '@/lib/importer';
 
 export function AdminPage() {
   const [date, setDate] = useState(upcomingSunday);
@@ -38,12 +39,31 @@ export function AdminPage() {
 
   async function handleImport(passengers: Passenger[]) {
     if (!manifest) {
-      await save({ date: key, signups: passengers, vehicles: [] });
+      // Deduplicate incoming batch among itself if saving fresh manifest
+      const deduplicated: Passenger[] = [];
+      for (const incoming of passengers) {
+        if (!deduplicated.some((p) => isSamePassenger(p, incoming))) {
+          deduplicated.push(incoming);
+        }
+      }
+      await save({ date: key, signups: deduplicated, vehicles: [] });
       return;
     }
-    const existingIds = new Set(manifest.signups.map((p) => p.id));
-    const fresh = passengers.filter((p) => !existingIds.has(p.id));
-    await save({ ...manifest, signups: [...manifest.signups, ...fresh] });
+
+    // Discard any incoming passenger who matches an existing signup (keeping live state untouched)
+    // and also prevent adding duplicates within the incoming batch itself
+    const fresh: Passenger[] = [];
+    for (const incoming of passengers) {
+      const alreadyInManifest = manifest.signups.some((existing) => isSamePassenger(existing, incoming));
+      const alreadyInFresh = fresh.some((p) => isSamePassenger(p, incoming));
+      if (!alreadyInManifest && !alreadyInFresh) {
+        fresh.push(incoming);
+      }
+    }
+
+    if (fresh.length > 0) {
+      await save({ ...manifest, signups: [...manifest.signups, ...fresh] });
+    }
   }
 
   async function handleReset() {

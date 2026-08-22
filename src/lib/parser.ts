@@ -2,9 +2,9 @@ import * as XLSX from 'xlsx';
 import type { Passenger, ServiceType } from './types';
 import { MIN_TAXI_THRESHOLD, hubDisplayName } from './types';
 import { sanitizeTransportValue } from './transportSanitization';
-import { toTitleCase, sanitizePhone, parseTimestampToISO, normalizeService, parseGoogleSheetSignups, type RawSheetRow } from './importer';
+import { toTitleCase, sanitizePhone, parseTimestampToISO, normalizeService, parseGoogleSheetSignups, isSamePassenger, normalizePassengerText, type RawSheetRow } from './importer';
 
-export { parseGoogleSheetSignups, type RawSheetRow, toTitleCase, sanitizePhone, parseTimestampToISO, normalizeService };
+export { parseGoogleSheetSignups, type RawSheetRow, toTitleCase, sanitizePhone, parseTimestampToISO, normalizeService, isSamePassenger, normalizePassengerText };
 
 interface ParseOptions {
   selectedDate: string;

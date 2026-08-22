@@ -7,6 +7,50 @@ export interface RawSheetRow {
 }
 
 /**
+ * Normalizes text for passenger duplicate matching:
+ * - Converts to lowercase
+ * - Trims leading and trailing whitespace
+ * - Collapses repeated whitespace into a single space
+ * - Strips punctuation and symbols (retaining letters, numbers, and spaces)
+ */
+export function normalizePassengerText(str?: string | null): string {
+  if (!str) return '';
+  return str
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '') // remove accent diacritics
+    .replace(/[^\p{L}\p{N}\s]/gu, '') // strip punctuation / symbols
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Robust duplicate check for passengers:
+ * Returns true if EITHER:
+ * 1. Their `id` strings match exactly (non-empty), OR
+ * 2. Their normalized `fullName` AND normalized `stop` match.
+ */
+export function isSamePassenger(
+  a: Pick<Passenger, 'id' | 'fullName' | 'stop'>,
+  b: Pick<Passenger, 'id' | 'fullName' | 'stop'>
+): boolean {
+  if (!a || !b) return false;
+
+  // 1. Exact ID match
+  if (a.id && b.id && a.id.trim() === b.id.trim()) {
+    return true;
+  }
+
+  // 2. Normalized fullName + normalized stop match
+  const aName = normalizePassengerText(a.fullName);
+  const bName = normalizePassengerText(b.fullName);
+  const aStop = normalizePassengerText(a.stop);
+  const bStop = normalizePassengerText(b.stop);
+
+  return Boolean(aName && bName && aName === bName && aStop === bStop);
+}
+
+/**
  * Converts strings to Title Case (e.g. "john doe" -> "John Doe", "SIPHO DLAMINI" -> "Sipho Dlamini")
  */
 export function toTitleCase(str: string): string {

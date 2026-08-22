@@ -5,8 +5,8 @@ import {
   Check, Clock, StickyNote, Sparkles, ArrowUpDown, UserCheck
 } from 'lucide-react';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
-import { hubDisplayName, sortByRouteSequence, SERVICE_TYPES } from '@/lib/types';
-import { sortVehiclesNatural } from '@/lib/sort';
+import { hubDisplayName, SERVICE_TYPES } from '@/lib/types';
+import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { passengersByStop, passengersByPoolGroup, unassignedPassengers } from '@/lib/manifest';
 import { parseManifestKey, shortDate } from '@/lib/dates';
 import { allocateSubStopsIntact } from '@/lib/allocation';
@@ -157,12 +157,11 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
 
   const unassigned = unassignedPassengers(localManifest);
 
-  // Overview pool — always shown at the raw sub-stop level
+  // Overview pool — always shown at the raw sub-stop level in numerical order of remaining signups
   const stopsMap = passengersByStop(unassigned);
-  const stopNames = sortByRouteSequence(
-    Object.keys(stopsMap).filter((s) => stopsMap[s].length > 0),
-    (s) => s
-  );
+  const stopNames = Object.keys(stopsMap)
+    .filter((s) => stopsMap[s].length > 0)
+    .sort((a, b) => stopsMap[b].length - stopsMap[a].length || naturalCompare(a, b));
 
   // Vehicle cards always render in natural alphanumeric order
   const sortedVehicles = sortVehiclesNatural(localManifest.vehicles);
@@ -170,10 +169,9 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
 
   function poolForVehicleType(vehicleType: 'Bus' | 'Taxi'): { key: string; count: number }[] {
     const map = passengersByPoolGroup(unassigned, vehicleType);
-    const keys = sortByRouteSequence(
-      Object.keys(map).filter((k) => map[k].length > 0),
-      (k) => k
-    );
+    const keys = Object.keys(map)
+      .filter((k) => map[k].length > 0)
+      .sort((a, b) => map[b].length - map[a].length || naturalCompare(a, b));
     return keys.map((k) => ({ key: k, count: map[k].length }));
   }
 

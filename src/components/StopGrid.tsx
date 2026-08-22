@@ -1,5 +1,6 @@
 import { MapPin, Users } from 'lucide-react';
 import type { Passenger } from '@/lib/types';
+import { naturalCompare } from '@/lib/sort';
 import { passengersByStop, unassignedPassengers } from '@/lib/manifest';
 
 interface Props {
@@ -8,7 +9,7 @@ interface Props {
 
 export function StopGrid({ passengers }: Props) {
   const byStop = passengersByStop(passengers);
-  const stops = Object.keys(byStop).sort((a, b) => byStop[b].length - byStop[a].length);
+  const stops = Object.keys(byStop).sort((a, b) => byStop[b].length - byStop[a].length || naturalCompare(a, b));
   const unassigned = unassignedPassengers({ date: '', signups: passengers, vehicles: [] }).length;
 
   if (stops.length === 0) {
