@@ -3,6 +3,30 @@ import { supabase } from './supabase';
 import { MANIFESTS_TABLE } from './supabase';
 import type { Manifest } from './types';
 
+// Deterministic stringify (sorted object keys) so two manifests that are
+// content-identical compare equal even if Postgres/jsonb returns object
+// keys in a different order than the client sent them in.
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function manifestContentEqual(a: Manifest, b: Manifest): boolean {
+  return (
+    stableStringify(a.signups) === stableStringify(b.signups) &&
+    stableStringify(a.vehicles) === stableStringify(b.vehicles)
+  );
+}
+
 export function useManifest(key: string | null): {
   manifest: Manifest | null;
   loading: boolean;
@@ -13,7 +37,15 @@ export function useManifest(key: string | null): {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const keyRef = useRef<string | null>(null);
-  const pendingSavesRef = useRef<number>(0);
+  // The manifest content from our own most recent save (in flight or
+  // completed) for this key. Used to recognize realtime "echoes" of our
+  // own writes without relying on a fixed cooldown timer.
+  const lastSavedRef = useRef<Manifest | null>(null);
+  // Chains save() calls so upserts for this date are never in flight
+  // concurrently. Without this, two rapid moves could hit Postgres out of
+  // order (a slower first request committing after a faster second one),
+  // silently reverting the newer change.
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     if (!key) {
@@ -36,7 +68,9 @@ export function useManifest(key: string | null): {
           .maybeSingle();
         if (loadError) throw loadError;
         if (keyRef.current === key) {
-          setManifest((data as Manifest) ?? null);
+          const loaded = (data as Manifest) ?? null;
+          setManifest(loaded);
+          lastSavedRef.current = loaded;
           setLoading(false);
         }
       } catch (e) {
@@ -54,12 +88,16 @@ export function useManifest(key: string | null): {
         { event: '*', schema: 'public', table: MANIFESTS_TABLE, filter: `date=eq.${key}` },
         (payload) => {
           if (keyRef.current !== key) return;
-          // If we have local saves in-flight, ignore realtime echoes to prevent UI stutter/reverts
-          if (pendingSavesRef.current > 0) return;
           const row = payload.new as Manifest | undefined;
-          if (row) {
-            setManifest({ date: row.date, signups: row.signups ?? [], vehicles: row.vehicles ?? [] });
-          }
+          if (!row) return;
+          const incoming: Manifest = { date: row.date, signups: row.signups ?? [], vehicles: row.vehicles ?? [] };
+          // Ignore this event if it just confirms our own latest save (an
+          // echo of a write we already applied locally) — applying it again
+          // is a no-op at best and, if a slower earlier save's echo arrives
+          // after a newer one, would revert the newer change at worst.
+          if (lastSavedRef.current && manifestContentEqual(lastSavedRef.current, incoming)) return;
+          lastSavedRef.current = incoming;
+          setManifest(incoming);
         }
       )
       .subscribe();
@@ -71,19 +109,23 @@ export function useManifest(key: string | null): {
   }, [key]);
 
   async function save(m: Manifest): Promise<void> {
-    pendingSavesRef.current += 1;
+    // Optimistic local update happens immediately and synchronously, so the
+    // UI never waits on the network for a move to "stick" locally.
+    lastSavedRef.current = m;
     setManifest(m);
-    try {
+
+    const doUpsert = async () => {
       const { error: upsertError } = await supabase
         .from(MANIFESTS_TABLE)
         .upsert({ date: m.date, signups: m.signups, vehicles: m.vehicles }, { onConflict: 'date' });
       if (upsertError) throw upsertError;
-    } finally {
-      // Small cooldown before allowing realtime echoes to avoid stale broadcast race
-      setTimeout(() => {
-        pendingSavesRef.current = Math.max(0, pendingSavesRef.current - 1);
-      }, 500);
-    }
+    };
+
+    // Queue this upsert behind any still-in-flight one for this manifest,
+    // so requests always reach Postgres in the order they were issued.
+    const run = saveChainRef.current.then(doUpsert, doUpsert);
+    saveChainRef.current = run.catch(() => {});
+    return run;
   }
 
   return { manifest, loading, error, save };
