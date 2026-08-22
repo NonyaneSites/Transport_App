@@ -141,29 +141,60 @@ function createMockClient() {
           rowsToInsert.forEach((r) => mockStorage.notify(tableName, 'INSERT', r));
           return { data: rowsToInsert, error: null };
         },
-        async upsert(rowOrRows: TableRow | TableRow[], { onConflict }: { onConflict?: string } = {}): Promise<{ data: TableRow[]; error: null }> {
+        upsert(rowOrRows: TableRow | TableRow[], { onConflict }: { onConflict?: string } = {}) {
+          // Mirrors supabase-js: upsert() returns a chainable/thenable
+          // builder, so callers can either await it directly or chain
+          // .select(...).maybeSingle() / .single() off it before awaiting.
           const items = Array.isArray(rowOrRows) ? rowOrRows : [rowOrRows];
-          const current = [...mockStorage.getTable(tableName)];
-          const keyField = onConflict || 'id';
+          const resultRows: TableRow[] = [];
 
-          for (const item of items) {
-            const now = new Date().toISOString();
-            const fullItem = {
-              ...item,
-              updated_at: now,
-              created_at: item.created_at || now,
-            };
-            const idx = current.findIndex((r) => r[keyField] === fullItem[keyField]);
-            if (idx !== -1) {
-              current[idx] = { ...current[idx], ...fullItem };
-              mockStorage.notify(tableName, 'UPDATE', current[idx]);
-            } else {
-              current.push(fullItem);
-              mockStorage.notify(tableName, 'INSERT', fullItem);
+          const apply = () => {
+            if (resultRows.length > 0) return resultRows;
+            const current = [...mockStorage.getTable(tableName)];
+            const keyField = onConflict || 'id';
+
+            for (const item of items) {
+              const now = new Date().toISOString();
+              const fullItem = {
+                ...item,
+                updated_at: now,
+                created_at: item.created_at || now,
+              };
+              const idx = current.findIndex((r) => r[keyField] === fullItem[keyField]);
+              if (idx !== -1) {
+                current[idx] = { ...current[idx], ...fullItem };
+                mockStorage.notify(tableName, 'UPDATE', current[idx]);
+                resultRows.push(current[idx]);
+              } else {
+                current.push(fullItem);
+                mockStorage.notify(tableName, 'INSERT', fullItem);
+                resultRows.push(fullItem);
+              }
             }
-          }
-          mockStorage.setTable(tableName, current);
-          return { data: items, error: null };
+            mockStorage.setTable(tableName, current);
+            return resultRows;
+          };
+
+          const upsertBuilder = {
+            select(_cols?: string) {
+              void _cols;
+              return upsertBuilder;
+            },
+            async maybeSingle(): Promise<{ data: TableRow | null; error: null }> {
+              const rows = apply();
+              return { data: rows.length > 0 ? rows[0] : null, error: null };
+            },
+            async single(): Promise<{ data: TableRow | null; error: null }> {
+              const rows = apply();
+              return { data: rows.length > 0 ? rows[0] : null, error: null };
+            },
+            then(resolve: (res: { data: TableRow[]; error: null }) => void) {
+              const rows = apply();
+              return Promise.resolve({ data: rows, error: null }).then(resolve);
+            },
+          };
+
+          return upsertBuilder;
         },
         async delete(): Promise<{ data: TableRow[]; error: null }> {
           const current = mockStorage.getTable(tableName);
