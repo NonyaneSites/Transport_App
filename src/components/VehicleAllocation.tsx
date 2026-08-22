@@ -156,9 +156,12 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
         console.error('Cloud manifest save error:', err);
       } finally {
         setSaving(false);
-        setTimeout(() => {
-          isLocalMutationPendingRef.current = false;
-        }, 300);
+        // useManifest.save() applies the manifest to its own state
+        // synchronously (before the network call), and now serializes
+        // writes so an older save can never land after a newer one — so
+        // once this save resolves, the parent `manifest` prop is already
+        // caught up and it's safe to resume syncing from it right away.
+        isLocalMutationPendingRef.current = false;
       }
     }, 200);
   }, [onSave]);
