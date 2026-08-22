@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Lock, Trash2, Loader2, AlertTriangle, Calendar, Users, Bus, ArrowUpRight, XCircle, FileSpreadsheet, ChevronDown, ChevronRight, History } from 'lucide-react';
+import { Lock, Trash2, Loader2, AlertTriangle, Calendar, Users, Bus, ArrowUpRight, XCircle, FileSpreadsheet, ChevronDown, ChevronRight, History, Download, FileDown } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
@@ -11,6 +11,7 @@ import { listLedgerEntries, downloadSessionStatsExcel } from '@/lib/ledger';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey as parseKey } from '@/lib/dates';
 import { SERVICE_TYPES, RESET_PASSWORD, type ServiceType, type Passenger, type Manifest } from '@/lib/types';
 import { isSamePassenger } from '@/lib/importer';
+import { generateWhatsAppRouteManifest, generateWhatsAppRepManifest, downloadTextFile } from '@/lib/whatsappManifest';
 
 export function AdminPage() {
   const [date, setDate] = useState(upcomingSunday);
@@ -204,15 +205,15 @@ export function AdminPage() {
                 </div>
               ) : (
                 <>
-                  <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center">
-                    <div className="relative flex-1">
+                  <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center flex-wrap">
+                    <div className="relative flex-1 min-w-[240px]">
                       <Calendar className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
                       <select
                         value={archiveSelected}
                         onChange={(e) => setArchiveSelected(e.target.value)}
                         className="input-field pl-10"
                       >
-                        <option value="" className="bg-card-2">Select a session to download stats...</option>
+                        <option value="" className="bg-card-2">Select a session to download...</option>
                         {sessionList.map((m) => {
                           const { date: mDate, service: mService } = parseKey(m.date);
                           const def = SERVICE_TYPES.find((s) => s.value === mService);
@@ -224,20 +225,55 @@ export function AdminPage() {
                         })}
                       </select>
                     </div>
-                    <button
-                      onClick={() => {
-                        const m = sessionList.find((s) => s.date === archiveSelected);
-                        if (!m) return;
-                        const lookup = (id: string) => m.signups.find((p) => p.id === id);
-                        const { date: mDate } = parseKey(m.date);
-                        downloadSessionStatsExcel(m.vehicles, lookup, `session_stats_${mDate}.xlsx`);
-                      }}
-                      disabled={!archiveSelected}
-                      className={archiveSelected ? 'btn-success' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted'}
-                    >
-                      <FileSpreadsheet className="h-4 w-4" />
-                      Download Session Stats
-                    </button>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        onClick={() => {
+                          const m = sessionList.find((s) => s.date === archiveSelected);
+                          if (!m) return;
+                          const lookup = (id: string) => m.signups.find((p) => p.id === id);
+                          const { date: mDate } = parseKey(m.date);
+                          downloadSessionStatsExcel(m.vehicles, lookup, `session_stats_${mDate}.xlsx`);
+                        }}
+                        disabled={!archiveSelected}
+                        className={archiveSelected ? 'btn-ghost border-line text-xs py-2 px-3 flex items-center gap-1.5' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted text-xs py-2 px-3'}
+                        title="Download full session Excel workbook"
+                      >
+                        <FileSpreadsheet className="h-4 w-4 text-emerald-400" />
+                        <span>Stats Excel</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          const m = sessionList.find((s) => s.date === archiveSelected);
+                          if (!m) return;
+                          const { date: mDate, service: mService } = parseKey(m.date);
+                          const text = generateWhatsAppRouteManifest(m, mService as ServiceType);
+                          downloadTextFile(`whatsapp_manifest_${mDate}_${mService}.txt`, text);
+                        }}
+                        disabled={!archiveSelected}
+                        className={archiveSelected ? 'btn-success text-xs py-2 px-3 flex items-center gap-1.5' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted text-xs py-2 px-3'}
+                        title="Download WhatsApp Route & Stop Schedule Manifest (.txt)"
+                      >
+                        <Download className="h-4 w-4" />
+                        <span>WhatsApp Manifest</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          const m = sessionList.find((s) => s.date === archiveSelected);
+                          if (!m) return;
+                          const { date: mDate, service: mService } = parseKey(m.date);
+                          const text = generateWhatsAppRepManifest(m, mService as ServiceType);
+                          downloadTextFile(`whatsapp_rep_manifest_${mDate}_${mService}.txt`, text);
+                        }}
+                        disabled={!archiveSelected}
+                        className={archiveSelected ? 'btn-crimson text-xs py-2 px-3 flex items-center gap-1.5' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted text-xs py-2 px-3'}
+                        title="Download WhatsApp Rep Manifest with numbered passenger roster (.txt)"
+                      >
+                        <FileDown className="h-4 w-4" />
+                        <span>Rep Manifest</span>
+                      </button>
+                    </div>
                   </div>
 
                   <div className="overflow-hidden rounded-xl border border-line">

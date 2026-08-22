@@ -114,31 +114,34 @@ export function RepPage() {
 
   const repStructure = repName ? getRepStructure(repName) : null;
 
-  // Auto-match vehicle when typing rep name if not yet selected
+  // Exact match vehicle when typing rep name if not yet selected (requires exact full name match)
   useEffect(() => {
     if (!manifest || selectedVehicleId) return;
     const q = repName.trim().toLowerCase();
-    if (q.length < 2) return;
+    if (q.length < 3) return;
 
     const repMatch = matchRiderToOfficialRep({ fullName: repName });
 
     const match = manifest.vehicles.find((v) => {
       const vRep = (v.repName ?? '').trim().toLowerCase();
       if (vRep) {
-        if (vRep === q || vRep.includes(q) || q.includes(vRep)) return true;
+        // Strict exact match with assigned rep name or official registered alias
+        if (vRep === q) return true;
         if (repMatch && (vRep === repMatch.fullName.toLowerCase() || repMatch.aliases.some((a) => a.toLowerCase() === vRep))) {
           return true;
         }
       }
 
-      // Check if this typed name matches any passenger on board this vehicle
+      // Check if this typed name matches a passenger on board this vehicle EXACTLY
       const vRiders = vehicleRiders(manifest, v);
       for (const r of vRiders) {
         const normRider = r.fullName.trim().toLowerCase();
-        if (normRider === q || normRider.includes(q) || q.includes(normRider)) return true;
+        if (normRider === q) return true;
         if (repMatch) {
           const rMatch = matchRiderToOfficialRep(r);
-          if (rMatch && rMatch.fullName === repMatch.fullName) return true;
+          if (rMatch && rMatch.fullName.toLowerCase() === repMatch.fullName.toLowerCase() && normRider === q) {
+            return true;
+          }
         }
       }
       return false;

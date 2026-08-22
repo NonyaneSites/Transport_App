@@ -1,16 +1,22 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Bus, Car, Plus, Trash2, Users, ArrowRight, Undo2, X, UserCog, MoveRight,
-  CheckCircle2, ChevronDown, ChevronRight, ChevronUp, MapPin, MessageCircle,
-  Check, Clock, StickyNote, Sparkles, ArrowUpDown, UserCheck
+  CheckCircle2, ChevronDown, ChevronRight, ChevronUp, MapPin,
+  Check, Clock, StickyNote, Sparkles, ArrowUpDown, UserCheck, Download,
+  FileText, Copy, Eye, FileDown
 } from 'lucide-react';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
-import { hubDisplayName, SERVICE_TYPES } from '@/lib/types';
+import { hubDisplayName } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { passengersByStop, passengersByPoolGroup, unassignedPassengers } from '@/lib/manifest';
-import { parseManifestKey, shortDate } from '@/lib/dates';
+import { parseManifestKey } from '@/lib/dates';
 import { allocateSubStopsIntact } from '@/lib/allocation';
 import { detectVehicleRep, detectAllVehicleReps, getRepStructure, isPassengerRepOfVehicle, matchRiderToOfficialRep } from '@/lib/officialReps';
+import {
+  generateWhatsAppRouteManifest,
+  generateWhatsAppRepManifest,
+  downloadTextFile
+} from '@/lib/whatsappManifest';
 
 function DebouncedInput({
   value,
@@ -68,12 +74,12 @@ function DebouncedInput({
 
 interface Props {
   manifest: Manifest;
-  serviceLabel: string;
+  serviceLabel?: string;
   service: ServiceType;
   onSave: (m: Manifest) => Promise<void>;
 }
 
-export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: Props) {
+export function VehicleAllocation({ manifest, service, onSave }: Props) {
   // Local optimistic state for instant zero-lag UI updates and rapid actions
   const [localManifest, setLocalManifest] = useState<Manifest>(manifest);
   const latestManifestRef = useRef<Manifest>(manifest);
@@ -122,7 +128,9 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
   const [moveToVehicle, setMoveToVehicle] = useState<string>('');
   const [showSubmitted, setShowSubmitted] = useState(false);
   const [highlightRep, setHighlightRep] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copiedRoute, setCopiedRoute] = useState(false);
+  const [copiedRep, setCopiedRep] = useState(false);
+  const [previewManifestType, setPreviewManifestType] = useState<'route' | 'rep' | null>(null);
 
   /**
    * Performs an immediate synchronous mutation on the local manifest,
@@ -425,45 +433,10 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
     setMoveToVehicle('');
   }
 
-  function periodLabel(period: 'AM' | 'PM'): string {
-    return period === 'AM' ? 'Morning' : 'Evening';
-  }
-
-  function buildWhatsAppManifest(): string {
-    const lines: string[] = [];
-    const { date: sessionDate } = parseManifestKey(localManifest.date);
-    const def = SERVICE_TYPES.find((s) => s.value === service);
-    const header = def ? `${periodLabel(def.period)} ${def.mode} Taxis` : `${serviceLabel} Taxis`;
-    lines.push(`*${header}*`);
-    lines.push(`*${shortDate(sessionDate)}*`);
-
-    const vehiclesToExport = sortVehiclesNatural(localManifest.vehicles.filter((v) => !v.submitted));
-
-    for (const vehicle of vehiclesToExport) {
-      const riders = riderPassengers(vehicle);
-      if (riders.length === 0) continue;
-
-      lines.push(`*${vehicle.name}*`);
-
-      const groups = ridersGroupedByHub(vehicle);
-      for (const group of groups) {
-        const time = vehicle.stopTimes?.[group.label];
-        lines.push(time ? `\u{1F6D1} ${group.label} - *${time}*` : `\u{1F6D1} ${group.label}`);
-      }
-
-      const note = (vehicle.generalNotes ?? '').trim();
-      if (note) lines.push(`*(${note})*`);
-    }
-
-    return lines.join('\n');
-  }
-
-  async function copyWhatsApp() {
-    const text = buildWhatsAppManifest();
+  async function copyTextToClipboard(text: string): Promise<boolean> {
     try {
       await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      return true;
     } catch {
       const ta = document.createElement('textarea');
       ta.value = text;
@@ -471,30 +444,221 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
       ta.select();
       document.execCommand('copy');
       document.body.removeChild(ta);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      return true;
     }
   }
 
+  async function handleCopyRouteManifest() {
+    const text = generateWhatsAppRouteManifest(localManifest, service);
+    await copyTextToClipboard(text);
+    setCopiedRoute(true);
+    setTimeout(() => setCopiedRoute(false), 2000);
+  }
+
+  function handleDownloadRouteManifest() {
+    const text = generateWhatsAppRouteManifest(localManifest, service);
+    const { date: sessionDate } = parseManifestKey(localManifest.date);
+    downloadTextFile(`whatsapp_manifest_${sessionDate}_${service}.txt`, text);
+  }
+
+  async function handleCopyRepManifest() {
+    const text = generateWhatsAppRepManifest(localManifest, service);
+    await copyTextToClipboard(text);
+    setCopiedRep(true);
+    setTimeout(() => setCopiedRep(false), 2000);
+  }
+
+  function handleDownloadRepManifest() {
+    const text = generateWhatsAppRepManifest(localManifest, service);
+    const { date: sessionDate } = parseManifestKey(localManifest.date);
+    downloadTextFile(`whatsapp_rep_manifest_${sessionDate}_${service}.txt`, text);
+  }
+
+  const hasAllocatedVehicles = localManifest.vehicles.length > 0 && localManifest.vehicles.some((v) => riderPassengers(v).length > 0);
+
   return (
     <div className="card">
-      <div className="mb-4 flex items-center justify-between gap-2">
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-2">
           <div className="h-5 w-1 rounded-full bg-crimson-500" />
           <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">Vehicle Route Allocation</h2>
           {saving && <span className="text-[11px] text-muted animate-pulse font-mono">Syncing…</span>}
         </div>
-        {localManifest.vehicles.length > 0 && localManifest.vehicles.some((v) => riderPassengers(v).length > 0) && (
-          <button
-            onClick={copyWhatsApp}
-            className="btn-success px-3 py-2 text-xs"
-            title="Copy WhatsApp manifest to clipboard"
-          >
-            {copied ? <Check className="h-4 w-4" /> : <MessageCircle className="h-4 w-4" />}
-            {copied ? 'Copied!' : 'Copy WhatsApp Manifest'}
-          </button>
+
+        {/* Quick manifest export action buttons in header */}
+        {hasAllocatedVehicles && (
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Route Manifest Button Group */}
+            <div className="inline-flex rounded-lg border border-success/30 bg-success/10 p-0.5 shadow-sm">
+              <button
+                type="button"
+                onClick={handleDownloadRouteManifest}
+                className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold text-success-light hover:bg-success/20 transition-colors"
+                title="Download WhatsApp Route Manifest (.txt)"
+              >
+                <Download className="h-3.5 w-3.5" />
+                <span>Route Manifest (.txt)</span>
+              </button>
+              <div className="w-[1px] bg-success/20 my-1" />
+              <button
+                type="button"
+                onClick={handleCopyRouteManifest}
+                className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-success-light hover:bg-success/20 transition-colors"
+                title="Copy Route Manifest to clipboard"
+              >
+                {copiedRoute ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                <span>{copiedRoute ? 'Copied' : 'Copy'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPreviewManifestType('route')}
+                className="inline-flex items-center gap-1 rounded-md px-1.5 py-1.5 text-xs font-medium text-success-light/80 hover:bg-success/20 transition-colors"
+                title="Preview Route Manifest"
+              >
+                <Eye className="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            {/* Rep Manifest Button Group */}
+            <div className="inline-flex rounded-lg border border-amber-500/30 bg-amber-500/10 p-0.5 shadow-sm">
+              <button
+                type="button"
+                onClick={handleDownloadRepManifest}
+                className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition-colors"
+                title="Download WhatsApp Rep Manifest with passenger roster (.txt)"
+              >
+                <FileDown className="h-3.5 w-3.5" />
+                <span>Rep Manifest (.txt)</span>
+              </button>
+              <div className="w-[1px] bg-amber-500/20 my-1" />
+              <button
+                type="button"
+                onClick={handleCopyRepManifest}
+                className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/20 transition-colors"
+                title="Copy Rep Manifest with passenger roster to clipboard"
+              >
+                {copiedRep ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                <span>{copiedRep ? 'Copied' : 'Copy'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPreviewManifestType('rep')}
+                className="inline-flex items-center gap-1 rounded-md px-1.5 py-1.5 text-xs font-medium text-amber-300/80 hover:bg-amber-500/20 transition-colors"
+                title="Preview Rep Manifest"
+              >
+                <Eye className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
         )}
       </div>
+
+      {/* Manifest Preview Modal */}
+      {previewManifestType && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-fade-in">
+          <div className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-2xl border border-line bg-card shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between border-b border-line px-5 py-4 bg-card-2/60">
+              <div className="flex items-center gap-2">
+                <FileText className="h-5 w-5 text-crimson-400" />
+                <div>
+                  <h3 className="font-display text-sm font-bold text-ink">
+                    {previewManifestType === 'route' ? 'WhatsApp Route Manifest Preview' : 'WhatsApp Rep Manifest Preview'}
+                  </h3>
+                  <p className="text-[11px] text-muted">
+                    {previewManifestType === 'route'
+                      ? 'Formatted for transport coordination and driver stop times'
+                      : 'Formatted with numbered passenger roster by stop for vehicle reps'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewManifestType(null)}
+                className="rounded-lg p-1.5 text-muted hover:bg-card hover:text-ink transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="p-5 flex-1 overflow-y-auto">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPreviewManifestType('route')}
+                    className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all ${
+                      previewManifestType === 'route'
+                        ? 'bg-success/20 text-success-light border border-success/40'
+                        : 'bg-card-2 text-muted hover:text-ink'
+                    }`}
+                  >
+                    Route Manifest
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewManifestType('rep')}
+                    className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all ${
+                      previewManifestType === 'rep'
+                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                        : 'bg-card-2 text-muted hover:text-ink'
+                    }`}
+                  >
+                    Rep Manifest (With Riders)
+                  </button>
+                </div>
+              </div>
+
+              <pre className="rounded-xl border border-line bg-black/60 p-4 font-mono text-xs text-ink/90 whitespace-pre-wrap leading-relaxed max-h-[50vh] overflow-y-auto select-all">
+                {previewManifestType === 'route'
+                  ? generateWhatsAppRouteManifest(localManifest, service)
+                  : generateWhatsAppRepManifest(localManifest, service)}
+              </pre>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3.5 bg-card-2/60">
+              {previewManifestType === 'route' ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleCopyRouteManifest}
+                    className="btn-ghost text-xs px-3 py-2 flex items-center gap-1.5 border-line"
+                  >
+                    {copiedRoute ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+                    <span>{copiedRoute ? 'Copied to Clipboard' : 'Copy to Clipboard'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadRouteManifest}
+                    className="btn-success text-xs px-4 py-2 flex items-center gap-1.5"
+                  >
+                    <Download className="h-4 w-4" />
+                    <span>Download .txt</span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleCopyRepManifest}
+                    className="btn-ghost text-xs px-3 py-2 flex items-center gap-1.5 border-line"
+                  >
+                    {copiedRep ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+                    <span>{copiedRep ? 'Copied to Clipboard' : 'Copy to Clipboard'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadRepManifest}
+                    className="btn-crimson text-xs px-4 py-2 flex items-center gap-1.5"
+                  >
+                    <Download className="h-4 w-4" />
+                    <span>Download .txt</span>
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add vehicle */}
       <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-end">

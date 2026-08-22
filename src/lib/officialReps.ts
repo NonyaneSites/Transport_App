@@ -120,24 +120,16 @@ export function matchRiderToOfficialRep(rider: {
   if (!normName) return null;
 
   const rawStruct = (rider.structure ?? '').trim().toUpperCase().replace(/\s+/g, '');
-  const nameParts = normName.split(/\s+/).filter(Boolean);
-  const riderLastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
 
   // 1. Structure is present: STRICT matching required!
-  // Both structure AND surname/official alias must belong to that specific structure.
+  // Both structure AND exact full name or exact registered alias must match.
   if (rawStruct) {
     for (const rep of ALL_OFFICIAL_REPS) {
       if (rep.structure.toUpperCase() === rawStruct) {
-        const repLastName = rep.lastName.toLowerCase();
         const repFullName = rep.fullName.toLowerCase();
 
         // Exact full name match in this structure
         if (normName === repFullName) {
-          return rep;
-        }
-
-        // Surname match in this structure (e.g. "Amo Nhlabathi" for "Amogelang Nhlabathi" in S9)
-        if (riderLastName && riderLastName === repLastName) {
           return rep;
         }
 
@@ -151,16 +143,16 @@ export function matchRiderToOfficialRep(rider: {
     return null;
   }
 
-  // 2. No structure provided on rider: match ONLY by exact full name or strict full-name aliases
+  // 2. No structure provided on rider: match ONLY by exact full name or strict registered aliases
   for (const rep of ALL_OFFICIAL_REPS) {
     const repFullNameNorm = rep.fullName.toLowerCase();
     if (normName === repFullNameNorm) {
       return rep;
     }
-    // Full-name alias match (must have first & last or unique full name alias)
+    // Full-name alias match
     for (const alias of rep.aliases) {
       const normAlias = alias.toLowerCase();
-      if (normName === normAlias && normAlias.includes(' ')) {
+      if (normName === normAlias) {
         return rep;
       }
     }
@@ -221,7 +213,7 @@ export function isPassengerRepOfVehicle(
   const repOfficial = matchRiderToOfficialRep({ fullName: repName });
   const passOfficial = matchRiderToOfficialRep(passenger);
 
-  if (repOfficial && passOfficial && repOfficial.fullName === passOfficial.fullName) {
+  if (repOfficial && passOfficial && repOfficial.fullName.toLowerCase() === passOfficial.fullName.toLowerCase()) {
     return true;
   }
   if (repOfficial && normPass === repOfficial.fullName.toLowerCase()) {
@@ -231,20 +223,7 @@ export function isPassengerRepOfVehicle(
     return true;
   }
 
-  // 3. Match by surname and structure if both are present
-  if (passenger.structure) {
-    const pStruct = passenger.structure.trim().toUpperCase();
-    const repStruct = getRepStructure(repName);
-    if (repStruct && pStruct === repStruct.toUpperCase()) {
-      const pLastName = normPass.split(/\s+/).pop() ?? '';
-      const rLastName = normRep.split(/\s+/).pop() ?? '';
-      if (pLastName.length > 2 && pLastName === rLastName) {
-        return true;
-      }
-    }
-  }
-
-  // 4. Check aliases
+  // 3. Check aliases
   if (repOfficial) {
     if (repOfficial.aliases.some((a) => a.toLowerCase() === normPass)) {
       return true;
