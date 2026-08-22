@@ -5,6 +5,7 @@ import {
   type LedgerEntry,
 } from './ledger';
 import { shortDate } from './dates';
+import firebaseConfig from '../../firebase-applet-config.json';
 
 // Keys stored in localStorage
 const GOOGLE_ACCESS_TOKEN_KEY = 'crc_gsuite_access_token';
@@ -15,8 +16,9 @@ const GOOGLE_CLIENT_ID_KEY = 'crc_gsuite_client_id';
 
 // Default project client ID or environment variable
 const DEFAULT_CLIENT_ID =
+  firebaseConfig.oAuthClientId ||
   (import.meta as unknown as { env: Record<string, string> }).env?.VITE_GOOGLE_CLIENT_ID ||
-  '504215512188-app.apps.googleusercontent.com';
+  '504215512188-9q2mlt1ue0cakrnko3q3qp8vk4sl4m4m.apps.googleusercontent.com';
 
 const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file';
 
@@ -66,7 +68,11 @@ export function clearGoogleSession(): void {
 }
 
 export function getGoogleClientId(): string {
-  return localStorage.getItem(GOOGLE_CLIENT_ID_KEY) || DEFAULT_CLIENT_ID;
+  const stored = localStorage.getItem(GOOGLE_CLIENT_ID_KEY);
+  if (stored && stored.includes('504215512188') && !stored.includes('app.apps')) {
+    return stored;
+  }
+  return DEFAULT_CLIENT_ID;
 }
 
 export function setGoogleClientId(clientId: string): void {
