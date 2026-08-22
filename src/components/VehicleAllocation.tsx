@@ -208,7 +208,10 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
       riders: [],
       orderedStops: [],
     };
-    mutateAndSave((prev) => ({ ...prev, vehicles: [...prev.vehicles, vehicle] }));
+    mutateAndSave((prev) => ({
+      ...prev,
+      vehicles: sortVehiclesNatural([...prev.vehicles, vehicle]),
+    }));
     setNewName('');
   }
 
@@ -528,10 +531,25 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
       {/* Unassigned pool overview — raw sub-stop level, regardless of vehicle type */}
       {unassigned.length > 0 && (
         <div className="mb-5 rounded-xl border border-line bg-card-2/50 p-4">
-          <div className="mb-2 flex items-center gap-2">
-            <Users className="h-4 w-4 text-muted" />
-            <span className="text-xs font-semibold uppercase tracking-wide text-muted">Unassigned Pool</span>
-            <span className="badge bg-crimson-500/15 text-crimson-300">{unassigned.length} waiting</span>
+          <div className="mb-2 flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2">
+              <Users className="h-4 w-4 text-muted" />
+              <span className="text-xs font-semibold uppercase tracking-wide text-muted">Unassigned Pool</span>
+              <span className="badge bg-crimson-500/15 text-crimson-300">{unassigned.length} waiting</span>
+            </div>
+            {/* Breakdown by Category */}
+            <div className="flex items-center gap-1.5 text-[11px]">
+              {unassigned.filter((p) => p.category === 'Ushers').length > 0 && (
+                <span className="badge bg-amber-500/15 text-amber-300">
+                  {unassigned.filter((p) => p.category === 'Ushers').length} Ushers (Early)
+                </span>
+              )}
+              {unassigned.filter((p) => p.category === 'Normal').length > 0 && (
+                <span className="badge bg-sky-500/15 text-sky-300">
+                  {unassigned.filter((p) => p.category === 'Normal').length} Normal
+                </span>
+              )}
+            </div>
           </div>
           <div className="flex flex-wrap gap-1.5">
             {stopNames.map((stop) => (
@@ -1005,6 +1023,13 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
                                         {p.structure && !pOfficial && (
                                           <span className="rounded bg-bg/60 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted">{p.structure}</span>
                                         )}
+                                        {p.category === 'Ushers' ? (
+                                          <span className="badge bg-amber-500/15 text-amber-300 text-[10px]">Usher (Early)</span>
+                                        ) : p.category === 'Normal' ? (
+                                          <span className="badge bg-sky-500/15 text-sky-300 text-[10px]">Normal</span>
+                                        ) : p.ministry && p.ministry !== 'Serving' ? (
+                                          <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px]">{p.ministry}</span>
+                                        ) : null}
                                         <span className="badge bg-bg/60 text-muted text-[10px]">{p.stop}</span>
                                         {p.present && (
                                           <span className="badge bg-success/15 text-success-light text-[10px]">Present</span>

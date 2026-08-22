@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import type { Passenger, ServiceType } from './types';
-import { SERVICE_TYPES, hubDisplayName } from './types';
+import { MIN_TAXI_THRESHOLD, hubDisplayName } from './types';
 import { sanitizeTransportValue } from './transportSanitization';
 import { toTitleCase, sanitizePhone, parseTimestampToISO, normalizeService, parseGoogleSheetSignups, type RawSheetRow } from './importer';
 
@@ -11,9 +11,68 @@ interface ParseOptions {
   selectedService: ServiceType;
 }
 
-const SERVING_KEYWORDS = ['serving', 'usher', 'choir', 'band', 'altar', 'media', 'intercession', 'creatives', 'info desk', 'cares', 'kids church', 'volunteer'];
+const SERVING_KEYWORDS = [
+  'serving',
+  'usher',
+  'choir',
+  'band',
+  'altar',
+  'media',
+  'intercession',
+  'creatives',
+  'info desk',
+  'cares',
+  'kids church',
+  'volunteer',
+  'deaconess',
+  'music',
+];
 
 const TRANSPORT_QUESTION_PATTERNS = ['do you need transport', 'need transport', 'transport required', 'require transport'];
+
+export function extractCategoryAndMinistry(row: RawRow, headers: string[]): { category: 'Ushers' | 'Serving' | 'Normal'; ministry: string } {
+  const serviceTypeCol = findColumn(headers, [
+    'am service type',
+    'pm service type',
+    'service type',
+    'servicetype',
+    'which service are you attending',
+  ]);
+  const servingCol = findColumn(headers, ['serving ministry', 'serving', 'ministry']);
+
+  const rawService = serviceTypeCol ? clean(row[serviceTypeCol]) : '';
+  const rawMinistry = servingCol ? clean(row[servingCol]) : '';
+  const serviceLower = lower(rawService);
+  const ministryLower = lower(rawMinistry);
+
+  // 1. Explicit Ushers (Early)
+  if (
+    serviceLower.includes('usher (early)') ||
+    serviceLower.includes('ushers (early)') ||
+    serviceLower.includes('usher(early)') ||
+    serviceLower.includes('ushers(early)') ||
+    (serviceLower.includes('usher') && serviceLower.includes('early')) ||
+    (serviceLower.includes('early') && ministryLower.includes('usher'))
+  ) {
+    return { category: 'Ushers', ministry: rawMinistry || 'Usher (Early)' };
+  }
+
+  // 2. Explicit Normal / Non-serving
+  if (serviceLower === 'normal' || serviceLower.startsWith('normal')) {
+    return { category: 'Normal', ministry: '' };
+  }
+
+  // 3. Serving
+  if (
+    serviceLower.includes('serving') ||
+    SERVING_KEYWORDS.some((k) => ministryLower.includes(k) || serviceLower.includes(k)) ||
+    Boolean(rawMinistry)
+  ) {
+    return { category: 'Serving', ministry: rawMinistry || 'Serving' };
+  }
+
+  return { category: 'Normal', ministry: '' };
+}
 
 // Mapping from area-name values (what appears in the Area Stops column)
 // to the column header pattern that holds the specific sub-stop for that area.
@@ -186,7 +245,7 @@ function extractStructure(row: RawRow, headers: string[]): string {
 }
 
 function extractPhone(row: RawRow, headers: string[]): string | undefined {
-  const col = findColumn(headers, ['phone number', 'whatsapp number', 'contact number', 'phone', 'whatsapp', 'contact', 'cell', 'mobile']);
+  const col = findColumn(headers, ['phone number', 'whatsapp number', 'contact number', 'phone', 'whatsapp', 'contact', 'cell', 'mobile', 'cellphone']);
   if (!col) return undefined;
   return sanitizePhone(row[col]);
 }
@@ -213,27 +272,6 @@ function wantsTransport(row: RawRow, headers: string[]): boolean {
   // "No, ..." variants
   if (val.startsWith('no')) return false;
   return true;
-}
-
-function matchesService(row: RawRow, headers: string[], selected: ServiceType): boolean {
-  const def = SERVICE_TYPES.find((s) => s.value === selected);
-  if (!def) return true;
-
-  // AM files have "AM Service Type", PM files have "PM Service Type"
-  const serviceTypeCol = findColumn(headers, ['am service type', 'pm service type', 'service type', 'servicetype']);
-  const servingCol = findColumn(headers, ['serving ministry', 'serving', 'ministry']);
-
-  const serviceVal = serviceTypeCol ? lower(clean(row[serviceTypeCol])) : '';
-  const ministryVal = servingCol ? lower(clean(row[servingCol])) : '';
-  const rawService = `${serviceVal} ${ministryVal}`;
-
-  // "Serving" in the service type column, or any serving ministry keyword
-  const isServingRow = SERVING_KEYWORDS.some((k) => rawService.includes(k));
-
-  // Also check: if service type is explicitly "Normal", it's not serving
-  if (def.mode === 'Serving') return isServingRow;
-  // For Normal mode: include rows that are NOT serving
-  return !isServingRow;
 }
 
 const MONTH_MAP: Record<string, number> = {
@@ -327,12 +365,26 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
   }
   const headers = Object.keys(rows[0]);
 
+  // Pass 1: Gather all valid signups for the selected date requiring transport
+  interface ValidatedCandidate {
+    row: RawRow;
+    name: string;
+    stop: string;
+    structure: string;
+    phone?: string;
+    userEmail?: string;
+    timestamp?: string;
+    hub: string;
+    category: 'Ushers' | 'Serving' | 'Normal';
+    ministry: string;
+    id: string;
+  }
+
+  const dateMatchedCandidates: ValidatedCandidate[] = [];
+  const seenCandidateIds = new Set<string>();
   let skipped = 0;
   let matchedDate = 0;
-  let matchedService = 0;
   let matchedTransport = 0;
-  const passengers: Passenger[] = [];
-  const seen = new Set<string>();
 
   for (const row of rows) {
     const name = extractFullName(row, headers);
@@ -353,45 +405,127 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
     }
     matchedDate++;
 
-    if (!matchesService(row, headers, opts.selectedService)) {
-      skipped++;
-      continue;
-    }
-    matchedService++;
-
-    // Stop is kept as the raw, sanitized sub-stop — hub consolidation for
-    // Taxis happens at display/allocation time (see hubDisplayName in
-    // ./types), never at parse time, so Buses can still show their explicit
-    // sub-stop breakdown.
     const stop = extractStop(row, headers);
     const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-    if (seen.has(id)) {
+    if (seenCandidateIds.has(id)) {
       skipped++;
       continue;
     }
-    seen.add(id);
+    seenCandidateIds.add(id);
 
     const structure = extractStructure(row, headers);
     const phone = extractPhone(row, headers);
     const userEmail = extractEmail(row, headers);
     const timestamp = extractTimestamp(row, headers);
     const hub = hubDisplayName('Taxi', stop);
+    const { category, ministry } = extractCategoryAndMinistry(row, headers);
 
-    passengers.push({
-      id,
-      fullName: name,
+    dateMatchedCandidates.push({
+      row,
+      name,
       stop,
       structure,
       phone,
       userEmail,
       timestamp,
       hub,
-      service: opts.selectedService,
-      assignedTo: null,
-      present: false,
-      cancellationFeeOwed: false,
+      category,
+      ministry,
+      id,
     });
   }
 
-  return { passengers, skipped, totalRows: rows.length, matchedDate, matchedService, matchedTransport, warnings };
+  // Count categories for the selected date
+  const ushersCount = dateMatchedCandidates.filter((c) => c.category === 'Ushers').length;
+  const normalCount = dateMatchedCandidates.filter((c) => c.category === 'Normal').length;
+
+  const selectedService = opts.selectedService;
+  const passengers: Passenger[] = [];
+
+  // Pass 2: Filter and apply auto-merging logic based on selectedService and 15-passenger minimum
+  for (const c of dateMatchedCandidates) {
+    let include = false;
+
+    if (selectedService === 'AM_Ushers') {
+      // Dedicated Ushers (Early) service
+      include = c.category === 'Ushers';
+    } else if (selectedService === 'AM_Normal' || selectedService === 'PM_Normal') {
+      // Dedicated Normal transport service
+      include = c.category === 'Normal';
+    } else if (selectedService === 'AM_Serving') {
+      // AM Serving main service
+      if (c.category === 'Serving') {
+        include = true;
+      } else if (c.category === 'Ushers') {
+        // Auto-merge into AM Serving if not enough for a dedicated Ushers taxi (< 15)
+        include = ushersCount < MIN_TAXI_THRESHOLD;
+      } else if (c.category === 'Normal') {
+        // Auto-merge into AM Serving if not enough for a normal taxi (< 15)
+        include = normalCount < MIN_TAXI_THRESHOLD;
+      }
+    } else if (selectedService === 'PM_Serving') {
+      // PM Serving
+      include = c.category === 'Serving';
+    }
+
+    if (include) {
+      passengers.push({
+        id: c.id,
+        fullName: c.name,
+        stop: c.stop,
+        structure: c.structure,
+        phone: c.phone,
+        userEmail: c.userEmail,
+        timestamp: c.timestamp,
+        hub: c.hub,
+        service: opts.selectedService,
+        category: c.category,
+        ministry: c.ministry,
+        assignedTo: null,
+        present: false,
+        cancellationFeeOwed: false,
+      });
+    }
+  }
+
+  const matchedService = passengers.length;
+  const totalExcluded = dateMatchedCandidates.length - passengers.length;
+  skipped += totalExcluded;
+
+  // Informative notices & warnings based on threshold
+  if (selectedService === 'AM_Serving') {
+    if (ushersCount > 0 && ushersCount < MIN_TAXI_THRESHOLD) {
+      warnings.push(`Auto-Included: ${ushersCount} Ushers (Early) signups merged into AM Serving (${ushersCount} < ${MIN_TAXI_THRESHOLD} minimum for a dedicated taxi).`);
+    } else if (ushersCount >= MIN_TAXI_THRESHOLD) {
+      warnings.push(`Notice: ${ushersCount} Ushers (Early) signups detected (≥ ${MIN_TAXI_THRESHOLD}). They have enough for a dedicated taxi under "AM Service — Ushers (Early)".`);
+    }
+
+    if (normalCount > 0 && normalCount < MIN_TAXI_THRESHOLD) {
+      warnings.push(`Auto-Included: ${normalCount} AM Normal signups merged into AM Serving (${normalCount} < ${MIN_TAXI_THRESHOLD} minimum for a taxi).`);
+    } else if (normalCount >= MIN_TAXI_THRESHOLD) {
+      warnings.push(`Notice: ${normalCount} AM Normal signups detected. Available under "AM Service — Normal Only".`);
+    }
+  } else if (selectedService === 'AM_Ushers') {
+    if (ushersCount > 0 && ushersCount < MIN_TAXI_THRESHOLD) {
+      warnings.push(`Note: ${ushersCount} Ushers (Early) signups (< ${MIN_TAXI_THRESHOLD} taxi minimum). In "AM Service — Serving Only", these will automatically merge with AM Serving.`);
+    } else if (ushersCount >= MIN_TAXI_THRESHOLD) {
+      warnings.push(`✓ ${ushersCount} Ushers (Early) signups available — enough for a dedicated taxi (${Math.floor(ushersCount / 15)} taxi(s)).`);
+    }
+  } else if (selectedService === 'AM_Normal') {
+    if (normalCount > 0 && normalCount < MIN_TAXI_THRESHOLD) {
+      warnings.push(`Note: ${normalCount} AM Normal signups (< ${MIN_TAXI_THRESHOLD} taxi minimum). In "AM Service — Serving Only", these will automatically merge with AM Serving.`);
+    } else if (normalCount >= MIN_TAXI_THRESHOLD) {
+      warnings.push(`✓ ${normalCount} AM Normal signups available.`);
+    }
+  }
+
+  return {
+    passengers,
+    skipped,
+    totalRows: rows.length,
+    matchedDate,
+    matchedService,
+    matchedTransport,
+    warnings,
+  };
 }

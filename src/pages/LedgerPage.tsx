@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
+import { GoogleSheetsSyncCard } from '@/components/GoogleSheetsSyncCard';
 import {
   listLedgerEntries, deleteLedgerEntry, downloadLedgerExcel,
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
@@ -134,6 +135,18 @@ export function LedgerPage() {
             SZ Cancellation List.
           </p>
         </div>
+
+        {/* Google Sheets Live Sync Card */}
+        <GoogleSheetsSyncCard
+          onSyncComplete={async () => {
+            try {
+              const updated = await listLedgerEntries();
+              setEntries(updated);
+            } catch (err) {
+              console.warn(err);
+            }
+          }}
+        />
 
         {loading ? (
           <div className="flex flex-col items-center gap-3 py-20">

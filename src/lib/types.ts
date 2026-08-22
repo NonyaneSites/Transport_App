@@ -8,6 +8,8 @@ export interface Passenger {
   timestamp?: string;
   hub?: string;
   service?: string;
+  category?: 'Ushers' | 'Serving' | 'Normal';
+  ministry?: string;
   assignedTo: string | null;
   present: boolean;
   cancellationFeeOwed: boolean;
@@ -91,12 +93,14 @@ export interface Manifest {
 
 export type ServiceType =
   | 'AM_Serving'
+  | 'AM_Ushers'
   | 'AM_Normal'
   | 'PM_Serving'
   | 'PM_Normal';
 
-export const SERVICE_TYPES: { value: ServiceType; label: string; period: 'AM' | 'PM'; mode: 'Serving' | 'Normal' }[] = [
+export const SERVICE_TYPES: { value: ServiceType; label: string; period: 'AM' | 'PM'; mode: 'Serving' | 'Normal' | 'Ushers' }[] = [
   { value: 'AM_Serving', label: 'AM Service — Serving Only', period: 'AM', mode: 'Serving' },
+  { value: 'AM_Ushers', label: 'AM Service — Ushers (Early)', period: 'AM', mode: 'Ushers' },
   { value: 'AM_Normal', label: 'AM Service — Normal Only', period: 'AM', mode: 'Normal' },
   { value: 'PM_Serving', label: 'PM Service — Serving Only', period: 'PM', mode: 'Serving' },
   { value: 'PM_Normal', label: 'PM Service — Normal Only', period: 'PM', mode: 'Normal' },
@@ -104,6 +108,7 @@ export const SERVICE_TYPES: { value: ServiceType; label: string; period: 'AM' | 
 
 export const RESET_PASSWORD = 'CRC2026!';
 export const CANCELLATION_FEE = 40;
+export const MIN_TAXI_THRESHOLD = 15;
 
 export const LARGE_BUS_THRESHOLD = 40;
 

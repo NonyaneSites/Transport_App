@@ -75,6 +75,9 @@ export function normalizeService(raw: string, defaultService?: string): string {
   const isAM = s.includes('am') || s.includes('morning') || s.includes('08:') || s.includes('09:') || s.includes('10:');
   const isPM = s.includes('pm') || s.includes('evening') || s.includes('afternoon') || s.includes('17:') || s.includes('18:');
 
+  const isUshers = s.includes('usher (early)') || s.includes('ushers (early)') || (s.includes('usher') && s.includes('early'));
+  if (isAM && isUshers) return 'AM_Ushers';
+
   const isServing = s.includes('serving') || s.includes('usher') || s.includes('choir') || s.includes('band') || s.includes('volunteer');
   const isMega = s.includes('mega');
 
@@ -240,6 +243,26 @@ export function parseGoogleSheetSignups(
       ]);
       const service = normalizeService(rawService, defaultService);
 
+      // Ministry & Category
+      const rawMinistry = findValue(['Serving Ministry', 'Serving', 'Ministry']);
+      let category: 'Ushers' | 'Serving' | 'Normal' = 'Normal';
+      const sLower = rawService.toLowerCase();
+      const mLower = rawMinistry.toLowerCase();
+      if (
+        sLower.includes('usher (early)') ||
+        sLower.includes('ushers (early)') ||
+        (sLower.includes('usher') && sLower.includes('early'))
+      ) {
+        category = 'Ushers';
+      } else if (
+        sLower.includes('serving') ||
+        mLower.includes('usher') ||
+        mLower.includes('serving') ||
+        Boolean(rawMinistry)
+      ) {
+        category = 'Serving';
+      }
+
       // Hub derivation
       const explicitHub = findValue(['Hub', 'Master Hub', 'Taxi Hub']);
       const hub = explicitHub
@@ -258,6 +281,8 @@ export function parseGoogleSheetSignups(
         timestamp,
         hub,
         service,
+        category,
+        ministry: rawMinistry || (category === 'Ushers' ? 'Usher (Early)' : undefined),
         assignedTo: null,
         present: false,
         cancellationFeeOwed: false,

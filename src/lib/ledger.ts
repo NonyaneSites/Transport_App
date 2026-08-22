@@ -88,6 +88,24 @@ export async function insertAbsentees(
   if (error) throw error;
 }
 
+/**
+ * Withdraws absentees for a given vehicle/session when a Rep reopens attendance
+ * for editing. This ensures the cancellation ledger only reflects confirmed,
+ * currently submitted attendance lists.
+ */
+export async function withdrawAbsentees(
+  manifestKey: string,
+  riderNames: string[]
+): Promise<void> {
+  if (riderNames.length === 0) return;
+  const { error } = await supabase
+    .from(LEDGER_TABLE)
+    .delete()
+    .eq('manifest_key', manifestKey)
+    .in('passenger_name', riderNames);
+  if (error) throw error;
+}
+
 export async function listLedgerEntries(): Promise<LedgerEntry[]> {
   const { data, error } = await supabase
     .from(LEDGER_TABLE)
@@ -303,6 +321,7 @@ export interface AggregatedLedgerRow {
   key: string;
   structure: string;
   repName: string;
+  vehicleName: string;
   name: string;
   service: string;
   latestDate: string; // yyyy-mm-dd, most recent
@@ -349,6 +368,7 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
         key: `${structure}-${latest.passenger_name}`,
         structure,
         repName: latest.rep_name || latest.submitted_by || '—',
+        vehicleName: latest.vehicle_name || '—',
         name: latest.passenger_name,
         service: latest.service,
         latestDate: latest.date,

@@ -3,7 +3,7 @@ import {
   Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
   Smartphone, Wifi, ChevronDown, ChevronRight, MapPin, Send, Cross,
   HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus, Search, Banknote,
-  Sparkles,
+  Sparkles, FileSpreadsheet, ExternalLink,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
@@ -12,7 +12,8 @@ import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType,
 import { hubDisplayName } from '@/lib/types';
 import { sortVehiclesNatural } from '@/lib/sort';
 import { vehicleRiders, passengersByPoolGroup } from '@/lib/manifest';
-import { insertAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEntry } from '@/lib/ledger';
+import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEntry } from '@/lib/ledger';
+import { autoSyncGoogleSheetsSilently, getStoredSpreadsheet } from '@/lib/googleSheets';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
 
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
@@ -618,13 +619,63 @@ export function RepPage() {
 
       await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
 
+      // Automatically sync cancellation ledger to Google Sheets immediately
+      let sheetsNote = '';
+      try {
+        const syncResult = await autoSyncGoogleSheetsSilently();
+        if (syncResult.synced) {
+          sheetsNote = ' Cancellation ledger automatically synced to Google Sheets.';
+        }
+      } catch (sheetErr) {
+        console.warn('Sheets auto-sync notice:', sheetErr);
+      }
+
       setSubmitMsg(
         `Submitted! ${presentCount} present, ${absentCount} absent. ` +
-        `${absentees.length > 0 ? `${absentees.length} absentees added to cancellation ledger. ` : ''}` +
+        `${absentees.length > 0 ? `${absentees.length} absentee(s) added to cancellation ledger.` : ''}` +
+        `${sheetsNote} ` +
         `Thank you, ${repDisplayName}.`
       );
     } catch (e) {
       setSubmitMsg(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleReopen() {
+    if (!manifest || !selectedVehicle) return;
+    setSubmitting(true);
+    setSubmitMsg(null);
+    try {
+      // 1. Withdraw absentees for this vehicle from cancellation_ledger
+      const vehicleRiderNames = riders.map((r) => r.fullName);
+      await withdrawAbsentees(key, vehicleRiderNames);
+
+      // 2. Mark vehicle unsubmitted
+      const updatedVehicles = manifest.vehicles.map((v) =>
+        v.id === selectedVehicle.id
+          ? { ...v, submitted: false, submittedAt: undefined, submittedBy: undefined }
+          : v
+      );
+      await save({ ...manifest, vehicles: updatedVehicles });
+
+      // 3. Immediately re-sync to Google Sheets so withdrawn names are removed from the sheet
+      let sheetsNote = '';
+      try {
+        const syncResult = await autoSyncGoogleSheetsSilently();
+        if (syncResult.synced) {
+          sheetsNote = ' Google Sheet updated: unsubmitted names withdrawn.';
+        }
+      } catch (sheetErr) {
+        console.warn('Sheets auto-sync notice on reopen:', sheetErr);
+      }
+
+      setSubmitMsg(
+        `Attendance reopened for editing. Unconfirmed absentees have been withdrawn from the cancellation ledger until you submit again.${sheetsNote}`
+      );
+    } catch (e) {
+      setSubmitMsg(`Error reopening: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSubmitting(false);
     }
@@ -994,37 +1045,51 @@ export function RepPage() {
 
                 {submitMsg && (
                   <div
-                    className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${
+                    className={`flex flex-col gap-2 rounded-lg border p-3 text-sm ${
                       submitMsg.startsWith('Error')
                         ? 'border-crimson-500/30 bg-crimson-900/20 text-crimson-300'
                         : 'border-success/30 bg-success/10 text-success-light'
                     }`}
                   >
-                    {submitMsg.startsWith('Error') ? (
-                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                    ) : (
-                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+                    <div className="flex items-start gap-2">
+                      {submitMsg.startsWith('Error') ? (
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                      ) : (
+                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+                      )}
+                      <span className="flex-1">{submitMsg}</span>
+                    </div>
+                    {getStoredSpreadsheet().url && (
+                      <div className="mt-1 flex items-center justify-end">
+                        <a
+                          href={getStoredSpreadsheet().url!}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 transition-colors"
+                        >
+                          <FileSpreadsheet className="h-3.5 w-3.5" />
+                          View Live Google Sheet
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      </div>
                     )}
-                    <span>{submitMsg}</span>
                   </div>
                 )}
 
                 {isSubmitted && (
                   <button
-                    onClick={() => {
-                      setSubmitMsg(null);
-                      if (manifest && selectedVehicle) {
-                        const updatedVehicles = manifest.vehicles.map((v) =>
-                          v.id === selectedVehicle.id
-                            ? { ...v, submitted: false, submittedAt: undefined, submittedBy: undefined }
-                            : v
-                        );
-                        save({ ...manifest, vehicles: updatedVehicles });
-                      }
-                    }}
+                    onClick={handleReopen}
+                    disabled={submitting}
                     className="btn-ghost w-full text-xs"
                   >
-                    Re-open for editing
+                    {submitting ? (
+                      <span className="flex items-center justify-center gap-1.5">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Reopening…
+                      </span>
+                    ) : (
+                      'Re-open for editing (withdraws unconfirmed absentees)'
+                    )}
                   </button>
                 )}
               </>
@@ -1439,6 +1504,16 @@ const PassengerRow = React.memo(function PassengerRow({
             {passenger.structure && (
               <span className="ml-2 inline-block rounded bg-bg/60 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-muted">
                 {passenger.structure}
+              </span>
+            )}
+            {passenger.category === 'Ushers' && (
+              <span className="ml-1.5 inline-block rounded bg-amber-500/15 text-amber-300 px-1.5 py-0.5 text-[10px] font-semibold">
+                Usher (Early)
+              </span>
+            )}
+            {passenger.category === 'Normal' && (
+              <span className="ml-1.5 inline-block rounded bg-sky-500/15 text-sky-300 px-1.5 py-0.5 text-[10px]">
+                Normal
               </span>
             )}
             {passenger.stop && (

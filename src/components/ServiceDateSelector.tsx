@@ -53,7 +53,15 @@ export function ServiceDateSelector({ date, service, onDateChange, onServiceChan
             </select>
           </div>
           <p className="mt-1.5 text-xs text-muted">
-            {service.includes('Serving') ? 'Serving ministries only' : 'Standard transport (non-serving)'}
+            {service === 'AM_Ushers'
+              ? 'Ushers (Early) — requires 15+ signups for dedicated taxi (otherwise merges to AM Serving)'
+              : service === 'AM_Serving'
+              ? 'AM Serving ministries (auto-merges Ushers / Normal if < 15 signups)'
+              : service === 'AM_Normal'
+              ? 'AM Standard transport (auto-merges into AM Serving if < 15 signups)'
+              : service.includes('Serving')
+              ? 'PM Serving ministries only'
+              : 'PM Standard transport (non-serving)'}
           </p>
         </div>
       </div>
