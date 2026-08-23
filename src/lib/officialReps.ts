@@ -112,11 +112,12 @@ export const OFFICIAL_STRUCTURE_REPS: Record<string, string[]> = ALL_OFFICIAL_RE
  * 2. Full Name / Alias matching (e.g. "Amo Nhlabathi", "Shaun Tsiloane")
  * 3. Last name + known nickname matching
  */
-export function matchRiderToOfficialRep(rider: {
-  fullName: string;
+export function matchRiderToOfficialRep(rider?: {
+  fullName?: string;
   structure?: string;
-}): OfficialRep | null {
-  const normName = rider.fullName.trim().toLowerCase();
+} | null): OfficialRep | null {
+  if (!rider || !rider.fullName) return null;
+  const normName = (rider.fullName || '').trim().toLowerCase();
   if (!normName) return null;
 
   const rawStruct = (rider.structure ?? '').trim().toUpperCase().replace(/\s+/g, '');
@@ -170,12 +171,14 @@ export interface DetectedRepOnBoard {
 }
 
 export function detectAllVehicleReps(
-  riders: { fullName: string; structure?: string }[]
+  riders?: { fullName: string; structure?: string }[] | null
 ): DetectedRepOnBoard[] {
+  if (!Array.isArray(riders)) return [];
   const seenCanonical = new Set<string>();
   const detected: DetectedRepOnBoard[] = [];
 
   for (const rider of riders) {
+    if (!rider || !rider.fullName) continue;
     const match = matchRiderToOfficialRep(rider);
     if (match && !seenCanonical.has(match.fullName)) {
       seenCanonical.add(match.fullName);
@@ -189,8 +192,9 @@ export function detectAllVehicleReps(
  * Returns the canonical name of an official rep if one is present among vehicle riders.
  */
 export function detectVehicleRep(
-  riders: { fullName: string; structure?: string }[]
+  riders?: { fullName: string; structure?: string }[] | null
 ): string | null {
+  if (!Array.isArray(riders)) return null;
   const all = detectAllVehicleReps(riders);
   return all.length > 0 ? all[0].rep.fullName : null;
 }
@@ -199,19 +203,20 @@ export function detectVehicleRep(
  * Determines if a specific passenger is the designated Transport Rep for a vehicle.
  */
 export function isPassengerRepOfVehicle(
-  passenger: { fullName: string; structure?: string },
-  repName?: string
+  passenger?: { fullName?: string; structure?: string } | null,
+  repName?: string | null
 ): boolean {
-  if (!repName || !passenger.fullName) return false;
+  if (!passenger || !passenger.fullName || !repName) return false;
   const normRep = repName.trim().toLowerCase();
-  const normPass = passenger.fullName.trim().toLowerCase();
+  const normPass = (passenger.fullName || '').trim().toLowerCase();
+  if (!normRep || !normPass) return false;
 
   // 1. Direct name match
   if (normPass === normRep) return true;
 
   // 2. Canonical official rep match
   const repOfficial = matchRiderToOfficialRep({ fullName: repName });
-  const passOfficial = matchRiderToOfficialRep(passenger);
+  const passOfficial = matchRiderToOfficialRep({ fullName: passenger.fullName, structure: passenger.structure });
 
   if (repOfficial && passOfficial && repOfficial.fullName.toLowerCase() === passOfficial.fullName.toLowerCase()) {
     return true;
@@ -236,7 +241,7 @@ export function isPassengerRepOfVehicle(
 /**
  * Find structure code for an official rep
  */
-export function getRepStructure(repName: string): string | null {
+export function getRepStructure(repName?: string | null): string | null {
   if (!repName) return null;
   const match = matchRiderToOfficialRep({ fullName: repName });
   if (match) return match.structure;

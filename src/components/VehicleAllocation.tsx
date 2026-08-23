@@ -93,7 +93,8 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
 
   // Sync when parent manifest updates from cloud without overwriting active local edits
   useEffect(() => {
-    if (manifest.date !== latestManifestRef.current.date) {
+    if (!manifest) return;
+    if (manifest.date !== latestManifestRef.current?.date) {
       if (saveDebounceTimerRef.current) {
         clearTimeout(saveDebounceTimerRef.current);
         saveDebounceTimerRef.current = null;
@@ -196,20 +197,22 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     .sort((a, b) => stopsMap[b].length - stopsMap[a].length || naturalCompare(a, b));
 
   // Vehicle cards always render in natural alphanumeric order
-  const sortedVehicles = sortVehiclesNatural(localManifest.vehicles);
-  const submittedVehicles = sortVehiclesNatural(localManifest.vehicles.filter((v) => v.submitted));
+  const sortedVehicles = sortVehiclesNatural(localManifest?.vehicles || []);
+  const submittedVehicles = sortVehiclesNatural((localManifest?.vehicles || []).filter((v) => v?.submitted));
 
   function poolForVehicleType(vehicleType: 'Bus' | 'Taxi'): { key: string; count: number }[] {
     const map = passengersByPoolGroup(unassigned, vehicleType);
     const keys = Object.keys(map)
-      .filter((k) => map[k].length > 0)
+      .filter((k) => map[k] && map[k].length > 0)
       .sort((a, b) => map[b].length - map[a].length || naturalCompare(a, b));
     return keys.map((k) => ({ key: k, count: map[k].length }));
   }
 
-  function riderPassengers(vehicle: Vehicle): Passenger[] {
+  function riderPassengers(vehicle?: Vehicle | null): Passenger[] {
+    if (!vehicle || !Array.isArray(vehicle.riders)) return [];
+    const signups = localManifest?.signups || [];
     return vehicle.riders
-      .map((id) => localManifest.signups.find((p) => p.id === id))
+      .map((id) => signups.find((p) => p && p.id === id))
       .filter((p): p is Passenger => Boolean(p));
   }
 
@@ -217,16 +220,17 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     const riders = riderPassengers(vehicle);
     const groups: Record<string, Passenger[]> = {};
     for (const r of riders) {
-      const label = hubDisplayName(vehicle.type, r.stop);
+      if (!r) continue;
+      const label = hubDisplayName(vehicle?.type || 'Taxi', r.stop);
       if (!groups[label]) groups[label] = [];
       groups[label].push(r);
     }
-    const order = vehicle.orderedStops ?? [];
+    const order = vehicle?.orderedStops ?? [];
     const orderedLabels = order.filter((l) => groups[l]);
     const extraLabels = Object.keys(groups)
       .filter((l) => !orderedLabels.includes(l))
-      .sort((a, b) => groups[b].length - groups[a].length);
-    return [...orderedLabels, ...extraLabels].map((label) => ({ label, riders: groups[label] }));
+      .sort((a, b) => (groups[b]?.length || 0) - (groups[a]?.length || 0));
+    return [...orderedLabels, ...extraLabels].map((label) => ({ label, riders: groups[label] || [] }));
   }
 
   function addVehicle() {
@@ -505,13 +509,16 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   // Filtered passenger search results for Admin
   const filteredSearchPassengers = useMemo(() => {
     const q = adminSearchQuery.trim().toLowerCase();
-    return localManifest.signups.filter((p) => {
+    const signups = localManifest?.signups || [];
+    const vehicles = localManifest?.vehicles || [];
+    return signups.filter((p) => {
+      if (!p) return false;
       // 1. Role / status filter tab
       if (adminSearchFilter === 'unassigned' && p.assignedTo) return false;
       if (adminSearchFilter === 'assigned' && !p.assignedTo) return false;
       if (adminSearchFilter === 'reps') {
         const isOfficial = matchRiderToOfficialRep(p);
-        const assignedVeh = p.assignedTo ? localManifest.vehicles.find((v) => v.id === p.assignedTo) : null;
+        const assignedVeh = p.assignedTo ? vehicles.find((v) => v?.id === p.assignedTo) : null;
         const isActiveRep = assignedVeh ? isPassengerRepOfVehicle(p, assignedVeh.repName) : false;
         if (!isOfficial && !isActiveRep) return false;
       }
@@ -520,17 +527,17 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       // 2. Query matching
       if (!q) return true;
 
-      const nameMatch = p.fullName.toLowerCase().includes(q);
-      const stopMatch = p.stop.toLowerCase().includes(q);
+      const nameMatch = (p.fullName || '').toLowerCase().includes(q);
+      const stopMatch = (p.stop || '').toLowerCase().includes(q);
       const structMatch = (p.structure || '').toLowerCase().includes(q);
       const phoneMatch = (p.phone || '').includes(q);
       const ministryMatch = (p.ministry || '').toLowerCase().includes(q);
-      const assignedVeh = p.assignedTo ? localManifest.vehicles.find((v) => v.id === p.assignedTo) : null;
-      const vehMatch = assignedVeh ? assignedVeh.name.toLowerCase().includes(q) : false;
+      const assignedVeh = p.assignedTo ? vehicles.find((v) => v?.id === p.assignedTo) : null;
+      const vehMatch = assignedVeh ? (assignedVeh.name || '').toLowerCase().includes(q) : false;
 
       return nameMatch || stopMatch || structMatch || phoneMatch || ministryMatch || vehMatch;
     });
-  }, [localManifest.signups, localManifest.vehicles, adminSearchQuery, adminSearchFilter]);
+  }, [localManifest?.signups, localManifest?.vehicles, adminSearchQuery, adminSearchFilter]);
 
   async function copyTextToClipboard(text: string): Promise<boolean> {
     try {

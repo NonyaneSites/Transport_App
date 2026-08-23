@@ -32,13 +32,30 @@ export function AdminPage() {
   const [exportModalManifest, setExportModalManifest] = useState<{ manifest: Manifest; serviceLabel: string } | null>(null);
 
   useEffect(() => {
+    let isMounted = true;
     (async () => {
       try {
-        const [mans, ledger] = await Promise.all([listAllManifests(), listLedgerEntries()]);
-        setSessionList(mans);
-        setLedgerCount(ledger.length);
-      } catch { /* ignore — non-critical */ }
+        const [mans, ledger] = await Promise.all([
+          listAllManifests().catch((err) => {
+            console.error('Failed to list manifests:', err);
+            return [];
+          }),
+          listLedgerEntries().catch((err) => {
+            console.error('Failed to list ledger entries:', err);
+            return [];
+          }),
+        ]);
+        if (isMounted) {
+          setSessionList(Array.isArray(mans) ? mans : []);
+          setLedgerCount(Array.isArray(ledger) ? ledger.length : 0);
+        }
+      } catch (err) {
+        console.error('Session list fetch error:', err);
+      }
     })();
+    return () => {
+      isMounted = false;
+    };
   }, [manifest?.updated_at]);
 
   async function handleImport(passengers: Passenger[]) {

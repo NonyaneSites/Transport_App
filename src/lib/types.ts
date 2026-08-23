@@ -201,7 +201,8 @@ export const BUS_EOH_ALIASES = new Set([
 ]);
 
 /** Returns 'EOH' if this stop is a known Bus spelling-variant of the EOH campus address, else null. */
-export function stopToBusHub(stop: string): string | null {
+export function stopToBusHub(stop?: string | null): string | null {
+  if (!stop) return null;
   const norm = stop.trim().toLowerCase();
   for (const alias of BUS_EOH_ALIASES) {
     if (alias.toLowerCase() === norm) return 'EOH';
@@ -223,7 +224,8 @@ export const INDIVIDUAL_STOPS = [
 export const MASTER_HUBS = ['Braam', 'Gate 7', 'EOH'] as const;
 
 /** Returns the Master Hub for a given stop, or null if the stop is not part of any hub (Buses always use the raw stop). */
-export function stopToHub(stop: string): string | null {
+export function stopToHub(stop?: string | null): string | null {
+  if (!stop) return null;
   const norm = stop.trim().toLowerCase();
   for (const h of TAXI_HUBS) {
     if (h.stops.some((s) => s.toLowerCase() === norm)) {
@@ -254,7 +256,8 @@ export function stopToHub(stop: string): string | null {
  *   EOH spelling variants (see BUS_EOH_ALIASES), which canonicalize to a
  *   single "EOH" stop since they're the same physical address.
  */
-export function hubDisplayName(vehicleType: 'Bus' | 'Taxi', stop: string): string {
+export function hubDisplayName(vehicleType: 'Bus' | 'Taxi', stop?: string | null): string {
+  if (!stop) return 'Unknown';
   if (vehicleType === 'Taxi') {
     const hub = stopToHub(stop);
     if (hub) return hub;
@@ -284,8 +287,9 @@ export const ROUTE_SEQUENCE: string[] = [
 ];
 
 /** Index of a stop/hub label in the canonical route sequence (unknown labels sort last, in encounter order). */
-export function routeSequenceIndex(key: string): number {
-  const norm = key.trim().toLowerCase();
+export function routeSequenceIndex(key?: string | null): number {
+  if (!key) return ROUTE_SEQUENCE.length;
+  const norm = (key ?? '').trim().toLowerCase();
   const idx = ROUTE_SEQUENCE.findIndex((s) => s.toLowerCase() === norm);
   return idx === -1 ? ROUTE_SEQUENCE.length : idx;
 }
