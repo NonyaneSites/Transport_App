@@ -7,15 +7,15 @@ import {
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
-import { supabase, MANIFESTS_TABLE } from '@/lib/supabase';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey, shortDate } from '@/lib/dates';
-import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType, type Passenger, type Vehicle, type VehicleDraftState, type Manifest } from '@/lib/types';
+import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType, type Passenger, type Vehicle, type VehicleDraftState } from '@/lib/types';
 import { hubDisplayName } from '@/lib/types';
 import { sortVehiclesNatural } from '@/lib/sort';
 import { vehicleRiders, passengersByPoolGroup } from '@/lib/manifest';
 import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEntry } from '@/lib/ledger';
 import { autoSyncGoogleSheetsSilently } from '@/lib/googleSheets';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
+import { RepStatsCopyCard } from '@/components/RepStatsCopyCard';
 
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
 const SYNC_DEBOUNCE_MS = 300; // 300ms debounce for Supabase background sync
@@ -25,6 +25,14 @@ interface ExternalSponsee {
   sponseeName: string;
   taxiName: string;
   amount: number;
+}
+
+export interface ManualCancellation {
+  id: string;
+  passengerName: string;
+  structure?: string;
+  amount: number;
+  note?: string;
 }
 
 function makeClientId(): string {
@@ -61,10 +69,11 @@ export function RepPage() {
   // Cash & sponsorship calculator
   const [externalSponsees, setExternalSponsees] = useState<ExternalSponsee[]>([]);
 
-  // Past-cancellation cash collection
+  // Past-cancellation cash collection & manual cancellation settlement
   const [pastCancellations, setPastCancellations] = useState<LedgerEntry[]>([]);
   const [loadingPastCancellations, setLoadingPastCancellations] = useState(false);
   const [collectedCancellationIds, setCollectedCancellationIds] = useState<Set<string>>(new Set());
+  const [manualCancellations, setManualCancellations] = useState<ManualCancellation[]>([]);
   const [cancellationSearch, setCancellationSearch] = useState('');
 
   // Draft auto-save/restore & sync locks
@@ -93,7 +102,9 @@ export function RepPage() {
   // Walk-in
   const [walkInOpen, setWalkInOpen] = useState(false);
   const [walkInName, setWalkInName] = useState('');
+  const [walkInStructure, setWalkInStructure] = useState('');
   const [transferPrompt, setTransferPrompt] = useState<{ passenger: Passenger; fromVehicle: Vehicle } | null>(null);
+  const prevVehicleIdRef = useRef<string | null>(null);
 
   const serviceLabel = SERVICE_TYPES.find((s) => s.value === service)?.label ?? service;
   const { date: parsedDate } = parseManifestKey(key);
@@ -114,6 +125,39 @@ export function RepPage() {
   );
 
   const repStructure = repName ? getRepStructure(repName) : null;
+
+  // Prune any IDs that are no longer riders of this vehicle (e.g. moved by admin to another taxi)
+  useEffect(() => {
+    if (!selectedVehicle) return;
+    const currentRiderIdSet = new Set(selectedVehicle.riders);
+    setPresentIds((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (currentRiderIdSet.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+    setAbsentIds((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (currentRiderIdSet.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+    setSponsoredIds((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (currentRiderIdSet.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [selectedVehicle]);
 
   // Exact match vehicle when typing rep name if not yet selected (requires exact full name match)
   useEffect(() => {
@@ -161,6 +205,7 @@ export function RepPage() {
     setCoReps([]);
     setExternalSponsees([]);
     setCollectedCancellationIds(new Set());
+    setManualCancellations([]);
   }, []);
 
   const applyDraftState = useCallback((draft: VehicleDraftState, vehicleRidersList: Passenger[]) => {
@@ -183,17 +228,21 @@ export function RepPage() {
     setCoReps(draft.coReps ?? []);
     setExternalSponsees(draft.externalSponsees ?? []);
     setCollectedCancellationIds(new Set(draft.settledLedgerIds ?? []));
+    setManualCancellations(draft.manualCancellations ?? []);
     if (draft.repName !== undefined) setRepName(draft.repName);
     if (draft.licensePlate !== undefined) setLicensePlate(draft.licensePlate);
   }, []);
 
   // Initialize/restore state when manifest loads or vehicle is selected
   useEffect(() => {
-    setWalkInOpen(false);
-    setWalkInName('');
-    setTransferPrompt(null);
-
     if (!selectedVehicleId) {
+      if (prevVehicleIdRef.current !== null) {
+        setWalkInOpen(false);
+        setWalkInName('');
+        setWalkInStructure('');
+        setTransferPrompt(null);
+        prevVehicleIdRef.current = null;
+      }
       if (initializedKeyRef.current !== '') {
         resetLocalDraftState();
         setDraftRestored(false);
@@ -208,6 +257,15 @@ export function RepPage() {
     const currentKey = `${key}:${selectedVehicleId}`;
     if (initializedKeyRef.current === currentKey) {
       return;
+    }
+
+    // Vehicle selection has changed
+    if (prevVehicleIdRef.current !== selectedVehicleId) {
+      setWalkInOpen(false);
+      setWalkInName('');
+      setWalkInStructure('');
+      setTransferPrompt(null);
+      prevVehicleIdRef.current = selectedVehicleId;
     }
 
     const vehicle = manifest.vehicles.find((v) => v.id === selectedVehicleId);
@@ -238,6 +296,7 @@ export function RepPage() {
       setCoReps(vehicle.coReps ?? []);
       setExternalSponsees([]);
       setCollectedCancellationIds(new Set());
+      setManualCancellations([]);
       if (vehicle.repName) setRepName(vehicle.repName);
       if (vehicle.licensePlate) setLicensePlate(vehicle.licensePlate);
       lastAppliedDraftAtRef.current = null;
@@ -317,7 +376,9 @@ export function RepPage() {
   const sponsoredDeduction = presentSponsoredCount * FARE;
   const baseCash = grossPresentCash - sponsoredDeduction;
   const externalCash = externalSponsees.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
-  const pastCancellationCash = collectedCancellationIds.size * FARE;
+  const selectedLedgerCash = collectedCancellationIds.size * FARE;
+  const manualCancellationCash = manualCancellations.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
+  const pastCancellationCash = selectedLedgerCash + manualCancellationCash;
   const totalCash = baseCash + externalCash + pastCancellationCash;
 
   // 300ms Debounced Supabase Sync
@@ -331,78 +392,53 @@ export function RepPage() {
     if (pendingSyncTimerRef.current) clearTimeout(pendingSyncTimerRef.current);
 
     pendingSyncTimerRef.current = setTimeout(() => {
-      (async () => {
-        // Re-fetch the manifest from the database right before writing,
-        // instead of trusting manifestRef.current. manifestRef only reflects
-        // whatever this tab has heard about (its initial load plus any
-        // realtime events it has received). If another tab or the Admin
-        // page changed vehicles/signups in the meantime and this tab hasn't
-        // heard about it yet, saving our in-memory copy would silently wipe
-        // out that other change (e.g. an admin's vehicle deletion
-        // reappearing). A fresh read right before the write shrinks that
-        // race window to essentially nothing.
-        let baseManifest: Manifest | null = manifestRef.current;
-        try {
-          const { data, error: fetchError } = await supabase
-            .from(MANIFESTS_TABLE)
-            .select('date, signups, vehicles, created_at, updated_at')
-            .eq('date', key)
-            .maybeSingle();
-          if (!fetchError && data) {
-            baseManifest = data as Manifest;
-          }
-        } catch {
-          // Fall back to the in-memory copy if the refetch fails; still
-          // far better than doing nothing.
-        }
-        if (!baseManifest) return;
+      const currentManifest = manifestRef.current;
+      if (!currentManifest) return;
 
-        const pIdsArray = Array.from(presentIds);
-        const aIdsArray = Array.from(absentIds);
-        const nowIso = new Date().toISOString();
+      const pIdsArray = Array.from(presentIds);
+      const aIdsArray = Array.from(absentIds);
+      const nowIso = new Date().toISOString();
 
-        const draft: VehicleDraftState = {
-          presentIds: pIdsArray,
-          absentIds: aIdsArray,
-          sponsoredIds: Array.from(sponsoredIds),
-          notes,
-          repName: repName.trim(),
-          coReps: coReps.filter(Boolean),
-          licensePlate: licensePlate.trim(),
-          generalNotes: generalNotes.trim(),
-          cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
-          settledLedgerIds: Array.from(collectedCancellationIds),
-          externalSponsees,
-          updatedAt: nowIso,
-          updatedBy: clientIdRef.current,
-        };
+      const draft: VehicleDraftState = {
+        presentIds: pIdsArray,
+        absentIds: aIdsArray,
+        sponsoredIds: Array.from(sponsoredIds),
+        notes,
+        repName: repName.trim(),
+        coReps: coReps.filter(Boolean),
+        licensePlate: licensePlate.trim(),
+        generalNotes: generalNotes.trim(),
+        cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+        settledLedgerIds: Array.from(collectedCancellationIds),
+        manualCancellations,
+        externalSponsees,
+        updatedAt: nowIso,
+        updatedBy: clientIdRef.current,
+      };
 
-        lastAppliedDraftAtRef.current = nowIso;
+      lastAppliedDraftAtRef.current = nowIso;
 
-        // Apply this rep's present/absent + draft changes on top of the
-        // freshest known manifest, rather than overwriting vehicles/signups
-        // wholesale from a possibly-stale local copy.
-        const updatedSignups = baseManifest.signups.map((p) => {
-          if (presentIds.has(p.id)) return { ...p, present: true };
-          if (absentIds.has(p.id)) return { ...p, present: false };
-          return p;
-        });
+      // Update vehicle draft and passenger present status optimistically
+      const updatedSignups = currentManifest.signups.map((p) => {
+        if (presentIds.has(p.id)) return { ...p, present: true };
+        if (absentIds.has(p.id)) return { ...p, present: false };
+        return p;
+      });
 
-        const updatedVehicles = baseManifest.vehicles.map((v) =>
-          v.id === selectedVehicleId
-            ? {
-                ...v,
-                repName: repName.trim() || v.repName,
-                licensePlate: licensePlate.trim() || v.licensePlate,
-                draftState: draft,
-              }
-            : v
-        );
+      const updatedVehicles = currentManifest.vehicles.map((v) =>
+        v.id === selectedVehicleId
+          ? {
+              ...v,
+              repName: repName.trim() || v.repName,
+              licensePlate: licensePlate.trim() || v.licensePlate,
+              draftState: draft,
+            }
+          : v
+      );
 
-        save({ ...baseManifest, signups: updatedSignups, vehicles: updatedVehicles }).catch(() => {
-          /* background sync is best-effort */
-        });
-      })();
+      save({ ...currentManifest, signups: updatedSignups, vehicles: updatedVehicles }).catch(() => {
+        /* background sync is best-effort */
+      });
     }, SYNC_DEBOUNCE_MS);
 
     return () => {
@@ -411,7 +447,8 @@ export function RepPage() {
   }, [
     selectedVehicleId, selectedVehicle, presentIds, absentIds,
     sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
-    externalSponsees, collectedCancellationIds, baseCash, externalCash, pastCancellationCash,
+    externalSponsees, collectedCancellationIds, manualCancellations,
+    baseCash, externalCash, pastCancellationCash,
     save
   ]);
 
@@ -431,7 +468,7 @@ export function RepPage() {
       });
     } else {
       setAbsentIds((prev) => {
-        if (prev.has(passengerId)) return prev;
+        if (!prev.has(passengerId)) return prev;
         return new Set(prev).add(passengerId);
       });
       setPresentIds((prev) => {
@@ -471,6 +508,27 @@ export function RepPage() {
       else next.add(entryId);
       return next;
     });
+  };
+
+  const addManualCancellation = (initialName?: string) => {
+    setManualCancellations((prev) => [
+      ...prev,
+      {
+        id: `canc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        passengerName: initialName || '',
+        structure: '',
+        amount: FARE,
+        note: '',
+      },
+    ]);
+  };
+
+  const updateManualCancellation = (id: string, patch: Partial<ManualCancellation>) => {
+    setManualCancellations((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+  };
+
+  const removeManualCancellation = (id: string) => {
+    setManualCancellations((prev) => prev.filter((c) => c.id !== id));
   };
 
   const addExternalSponsee = () => {
@@ -523,7 +581,7 @@ export function RepPage() {
         id: `walkin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         fullName: walkInName.trim(),
         stop: 'Walk-In',
-        structure: '',
+        structure: walkInStructure.trim(),
         assignedTo: selectedVehicle.id,
         present: true,
         cancellationFeeOwed: false,
@@ -538,6 +596,7 @@ export function RepPage() {
       setPresentIds((prev) => new Set(prev).add(newPassenger.id));
     }
     setWalkInName('');
+    setWalkInStructure('');
     setWalkInOpen(false);
   }
 
@@ -549,7 +608,14 @@ export function RepPage() {
     );
     const updatedVehicles = manifest.vehicles.map((v) => {
       if (fromVehicleId && v.id === fromVehicleId) {
-        return { ...v, riders: v.riders.filter((id) => id !== passenger.id) };
+        const nextRiders = v.riders.filter((id) => id !== passenger.id);
+        const cleanedDraft = v.draftState ? {
+          ...v.draftState,
+          presentIds: v.draftState.presentIds?.filter((id) => id !== passenger.id),
+          absentIds: v.draftState.absentIds?.filter((id) => id !== passenger.id),
+          sponsoredIds: v.draftState.sponsoredIds?.filter((id) => id !== passenger.id),
+        } : undefined;
+        return { ...v, riders: nextRiders, draftState: cleanedDraft };
       }
       if (v.id === selectedVehicle.id) {
         if (v.riders.includes(passenger.id)) return v;
@@ -566,6 +632,7 @@ export function RepPage() {
     await assignWalkIn(transferPrompt.passenger, transferPrompt.fromVehicle.id);
     setTransferPrompt(null);
     setWalkInName('');
+    setWalkInStructure('');
     setWalkInOpen(false);
   }
 
@@ -602,8 +669,12 @@ export function RepPage() {
       const settledNames = pastCancellations
         .filter((e) => collectedCancellationIds.has(e.id))
         .map((e) => e.passenger_name);
-      const settledNote = settledNames.length > 0
-        ? `Past cancellations collected in cash: ${settledNames.join(', ')}. `
+      const manualCancSummaries = manualCancellations
+        .filter((c) => c.passengerName.trim() || c.amount > 0)
+        .map((c) => `${c.passengerName.trim() || 'Anonymous'}${c.structure ? ` (${c.structure.trim()})` : ''} (R${c.amount}${c.note ? ` - ${c.note.trim()}` : ''})`);
+      const allSettledInfo = [...settledNames, ...manualCancSummaries];
+      const settledNote = allSettledInfo.length > 0
+        ? `Past cancellations collected in cash: ${allSettledInfo.join(', ')}. `
         : '';
 
       await insertAbsentees(
@@ -619,11 +690,18 @@ export function RepPage() {
         `${coRepNote}${cashNote}${sponseeNote}${settledNote}${generalNotes.trim()}`.trim()
       );
 
-      if (collectedCancellationIds.size > 0) {
-        await settleLedgerEntries(Array.from(collectedCancellationIds));
-        setPastCancellations((prev) => prev.filter((e) => !collectedCancellationIds.has(e.id)));
+      // Auto-settle ledger entries by selected ID and matching manual passenger names if any
+      const matchingLedgerIds = pastCancellations
+        .filter((e) => manualCancellations.some((m) => m.passengerName.trim() && m.passengerName.trim().toLowerCase() === e.passenger_name.trim().toLowerCase()))
+        .map((e) => e.id);
+      const allIdsToSettle = Array.from(new Set([...Array.from(collectedCancellationIds), ...matchingLedgerIds]));
+
+      if (allIdsToSettle.length > 0) {
+        await settleLedgerEntries(allIdsToSettle);
+        setPastCancellations((prev) => prev.filter((e) => !allIdsToSettle.includes(e.id)));
         setCollectedCancellationIds(new Set());
       }
+      setManualCancellations([]);
 
       const updatedSignups = manifest.signups.map((p) => {
         if (presentIds.has(p.id)) return { ...p, present: true };
@@ -927,43 +1005,66 @@ export function RepPage() {
 
                 {/* Walk-in */}
                 {!isSubmitted && (
-                  <div className="card">
+                  <div className="card border-line bg-card">
                     {!walkInOpen ? (
                       <button
+                        type="button"
                         onClick={() => setWalkInOpen(true)}
-                        className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-line py-2.5 text-xs font-semibold text-muted hover:border-crimson-500/40 hover:text-crimson-300"
+                        className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-crimson-500/40 bg-crimson-500/5 py-2.5 text-xs font-bold text-crimson-300 hover:bg-crimson-500/10 hover:border-crimson-500 transition-all shadow-sm"
                       >
-                        <UserPlus className="h-4 w-4" />
-                        + Add Walk-In
+                        <UserPlus className="h-4 w-4 text-crimson-400" />
+                        + Add Walk-In Passenger
                       </button>
                     ) : (
-                      <div className="space-y-2">
-                        <label className="block text-xs font-semibold uppercase tracking-wide text-muted">
-                          Walk-In Passenger Name
-                        </label>
-                        <div className="flex gap-1.5">
+                      <div className="space-y-3 animate-fade-in">
+                        <div className="flex items-center justify-between">
+                          <label className="block text-xs font-bold uppercase tracking-wide text-ink flex items-center gap-1.5">
+                            <UserPlus className="h-3.5 w-3.5 text-crimson-400" />
+                            Add Walk-In to {selectedVehicle.name}
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => { setWalkInOpen(false); setWalkInName(''); setWalkInStructure(''); }}
+                            className="rounded p-1 text-muted hover:bg-card-2 hover:text-ink text-xs"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                        <div className="flex flex-col gap-2 sm:flex-row">
                           <input
                             type="text"
                             value={walkInName}
                             onChange={(e) => setWalkInName(e.target.value)}
                             onKeyDown={(e) => e.key === 'Enter' && handleAddWalkIn()}
-                            placeholder="Type the passenger's name"
-                            className="input-field text-xs"
+                            placeholder="Full name (e.g. Sipho Dlamini)"
+                            className="input-field text-xs font-medium flex-1"
                             autoFocus
                           />
-                          <button
-                            onClick={handleAddWalkIn}
-                            disabled={!walkInName.trim()}
-                            className="btn-crimson px-3 py-2 text-xs whitespace-nowrap"
-                          >
-                            Add
-                          </button>
-                          <button
-                            onClick={() => { setWalkInOpen(false); setWalkInName(''); }}
-                            className="btn-ghost px-3 py-2 text-xs"
-                          >
-                            Cancel
-                          </button>
+                          <input
+                            type="text"
+                            value={walkInStructure}
+                            onChange={(e) => setWalkInStructure(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleAddWalkIn()}
+                            placeholder="Structure / FTV (optional, e.g. S3)"
+                            className="input-field text-xs sm:w-36"
+                          />
+                          <div className="flex gap-1.5">
+                            <button
+                              type="button"
+                              onClick={handleAddWalkIn}
+                              disabled={!walkInName.trim()}
+                              className="btn-crimson px-3 py-2 text-xs font-bold whitespace-nowrap shadow-sm disabled:opacity-40"
+                            >
+                              Add Walk-In
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => { setWalkInOpen(false); setWalkInName(''); setWalkInStructure(''); }}
+                              className="btn-ghost px-3 py-2 text-xs"
+                            >
+                              Cancel
+                            </button>
+                          </div>
                         </div>
                       </div>
                     )}
@@ -982,6 +1083,18 @@ export function RepPage() {
                   sponsoredIds={sponsoredIds}
                   notes={notes}
                   disabled={isSubmitted || submitting}
+                />
+
+                {/* Rep Stats for Stats Link (Present, FTVs, Sponsorships, Absentees) */}
+                <RepStatsCopyCard
+                  riders={riders}
+                  presentIds={presentIds}
+                  absentIds={absentIds}
+                  sponsoredIds={sponsoredIds}
+                  notes={notes}
+                  vehicleName={selectedVehicle.name}
+                  repName={repName}
+                  isSubmitted={isSubmitted}
                 />
 
                 {!isSubmitted && (
@@ -1016,6 +1129,10 @@ export function RepPage() {
                       loadingPastCancellations={loadingPastCancellations}
                       collectedCancellationIds={collectedCancellationIds}
                       onToggleCancellation={toggleCollectedCancellation}
+                      manualCancellations={manualCancellations}
+                      onAddManualCancellation={addManualCancellation}
+                      onUpdateManualCancellation={updateManualCancellation}
+                      onRemoveManualCancellation={removeManualCancellation}
                       pastCancellationCash={pastCancellationCash}
                       search={cancellationSearch}
                       onSearchChange={setCancellationSearch}
@@ -1187,6 +1304,7 @@ function CashCalculatorCard({
   presentCount, presentSponsoredCount, fare, grossPresentCash, sponsoredDeduction,
   externalSponsees, onAddSponsee, onUpdateSponsee, onRemoveSponsee, externalCash,
   pastCancellations, loadingPastCancellations, collectedCancellationIds, onToggleCancellation,
+  manualCancellations, onAddManualCancellation, onUpdateManualCancellation, onRemoveManualCancellation,
   pastCancellationCash, search, onSearchChange,
   baseCash, totalCash,
 }: {
@@ -1204,6 +1322,10 @@ function CashCalculatorCard({
   loadingPastCancellations: boolean;
   collectedCancellationIds: Set<string>;
   onToggleCancellation: (id: string) => void;
+  manualCancellations: ManualCancellation[];
+  onAddManualCancellation: (initialName?: string) => void;
+  onUpdateManualCancellation: (id: string, patch: Partial<ManualCancellation>) => void;
+  onRemoveManualCancellation: (id: string) => void;
   pastCancellationCash: number;
   search: string;
   onSearchChange: (v: string) => void;
@@ -1216,12 +1338,15 @@ function CashCalculatorCard({
     if (collectedCancellationIds.has(e.id)) return false;
     return e.passenger_name.toLowerCase().includes(q) || (e.structure || '').toLowerCase().includes(q);
   });
+  const totalSettledCount = selectedCancellations.length + manualCancellations.length;
 
   return (
     <div className="card">
-      <div className="mb-3 flex items-center gap-2">
-        <Wallet className="h-4 w-4 text-crimson-400" />
-        <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">Physical Cash Calculator</h2>
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Wallet className="h-4 w-4 text-crimson-400" />
+          <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">Physical Cash Calculator</h2>
+        </div>
       </div>
 
       <div className="space-y-1.5 rounded-lg bg-card-2/60 p-3 text-xs">
@@ -1281,15 +1406,78 @@ function CashCalculatorCard({
       </div>
 
       {/* Settle past cancellation */}
-      <div className="mt-3">
-        <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-crimson-400">
-          <Banknote className="h-3.5 w-3.5" />
-          Settle a Past Cancellation (Cash)
-          {collectedCancellationIds.size > 0 && (
-            <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px]">{collectedCancellationIds.size} selected</span>
-          )}
+      <div className="mt-3 border-t border-line/60 pt-3">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-crimson-400">
+            <Banknote className="h-4 w-4 text-crimson-400" />
+            <span>Settle Past Cancellation / Debt (Cash)</span>
+            {totalSettledCount > 0 && (
+              <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px]">
+                {totalSettledCount} settled (+R{pastCancellationCash})
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => onAddManualCancellation()}
+            className="flex items-center gap-1 rounded-md bg-crimson-600 px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-crimson-500 transition-colors"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            + Add Cancellation Payment
+          </button>
         </div>
 
+        {/* Manual cancellation payments list */}
+        {manualCancellations.length > 0 && (
+          <div className="mb-2.5 space-y-2">
+            {manualCancellations.map((c) => (
+              <div
+                key={c.id}
+                className="flex flex-col gap-1.5 rounded-lg border border-crimson-500/30 bg-crimson-500/5 p-2.5 sm:flex-row sm:items-center"
+              >
+                <input
+                  type="text"
+                  value={c.passengerName}
+                  onChange={(e) => onUpdateManualCancellation(c.id, { passengerName: e.target.value })}
+                  placeholder="Passenger Name (e.g. Garainaya Mnisi)"
+                  className="input-field py-1.5 text-xs sm:flex-1 font-medium"
+                />
+                <input
+                  type="text"
+                  value={c.structure ?? ''}
+                  onChange={(e) => onUpdateManualCancellation(c.id, { structure: e.target.value })}
+                  placeholder="Structure / Note (optional)"
+                  className="input-field py-1.5 text-xs sm:w-44"
+                />
+                <div className="flex items-center gap-1 text-xs text-muted">
+                  R
+                  <input
+                    type="number"
+                    min="0"
+                    step="10"
+                    value={c.amount}
+                    onChange={(e) =>
+                      onUpdateManualCancellation(c.id, {
+                        amount: Math.max(0, parseInt(e.target.value, 10) || 0),
+                      })
+                    }
+                    className="input-field w-16 py-1 text-center text-xs font-mono font-bold"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onRemoveManualCancellation(c.id)}
+                  className="rounded-md p-1.5 text-muted hover:bg-crimson-900/30 hover:text-crimson-300"
+                  title="Remove"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Selected ledger items */}
         {selectedCancellations.length > 0 && (
           <div className="mb-2 space-y-1.5">
             {selectedCancellations.map((e) => (
@@ -1300,8 +1488,10 @@ function CashCalculatorCard({
                 <span className="min-w-0 truncate text-crimson-200">
                   <span className="font-semibold">{e.passenger_name}</span>
                   <span className="text-muted"> — {shortDate(e.date)} · {formatServicePeriodMode(e.service)}</span>
+                  {e.structure && <span className="text-muted"> ({e.structure})</span>}
                 </span>
                 <button
+                  type="button"
                   onClick={() => onToggleCancellation(e.id)}
                   className="shrink-0 rounded p-1 text-muted hover:bg-crimson-900/30 hover:text-crimson-300"
                   title="Remove"
@@ -1313,24 +1503,39 @@ function CashCalculatorCard({
           </div>
         )}
 
+        {/* Search bar & quick-add */}
         <div className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
           <input
             type="text"
             value={search}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search by name or structure to settle a past cancellation…"
+            placeholder="Search ledger by name, or type name to add cancellation payment…"
             className="input-field py-1.5 pl-8 text-xs"
           />
         </div>
 
         {search.trim().length > 0 && (
           <div className="mt-2 max-h-56 space-y-1.5 overflow-y-auto rounded-lg border border-line bg-card-2/40 p-2 animate-fade-in">
+            {/* Quick-add button for the typed search string */}
+            <button
+              type="button"
+              onClick={() => {
+                onAddManualCancellation(search.trim());
+                onSearchChange('');
+              }}
+              className="flex w-full items-center justify-between gap-2 rounded-md border border-dashed border-crimson-500/50 bg-crimson-900/20 px-2.5 py-2 text-left text-xs text-crimson-300 transition-colors hover:bg-crimson-900/40"
+            >
+              <span className="flex items-center gap-1.5">
+                <Plus className="h-3.5 w-3.5 shrink-0" />
+                <span>Add &ldquo;<strong>{search.trim()}</strong>&rdquo; as cancellation payment</span>
+              </span>
+              <span className="shrink-0 font-mono font-bold text-xs text-crimson-200">+R{fare}</span>
+            </button>
+
             {loadingPastCancellations ? (
-              <p className="py-2 text-center text-[11px] text-muted">Loading outstanding cancellations…</p>
-            ) : searchResults.length === 0 ? (
-              <p className="py-2 text-center text-[11px] text-muted">No outstanding cancellations match your search.</p>
-            ) : (
+              <p className="py-2 text-center text-[11px] text-muted">Loading ledger entries…</p>
+            ) : searchResults.length > 0 ? (
               searchResults.map((e) => (
                 <button
                   key={e.id}
@@ -1348,13 +1553,15 @@ function CashCalculatorCard({
                   <span className="shrink-0 font-mono text-[10px] text-muted">R{fare}</span>
                 </button>
               ))
-            )}
+            ) : null}
           </div>
         )}
 
-        <p className="mt-1.5 text-[10px] text-muted">
-          Selecting a match adds R{fare} to this vehicle's expected cash and clears that person's debt on submit.
-        </p>
+        {pastCancellations.length === 0 && manualCancellations.length === 0 && !loadingPastCancellations && search.trim().length === 0 && (
+          <p className="mt-1.5 text-[11px] text-muted">
+            Have someone paying a past cancellation fee in cash? Click <strong className="text-crimson-300">+ Add Cancellation Payment</strong> above to include it in the vehicle&apos;s cash calculation.
+          </p>
+        )}
       </div>
 
       {/* Live total */}
@@ -1363,13 +1570,20 @@ function CashCalculatorCard({
           <span>Base Passenger Cash</span>
           <span className="font-mono font-semibold text-ink">R{baseCash}</span>
         </div>
+        {externalCash > 0 && (
+          <div className="flex items-center justify-between text-muted">
+            <span>+ External Sponsee Cash</span>
+            <span className="font-mono font-semibold text-ink">R{externalCash}</span>
+          </div>
+        )}
         <div className="flex items-center justify-between text-muted">
-          <span>+ External Sponsee Cash</span>
-          <span className="font-mono font-semibold text-ink">R{externalCash}</span>
-        </div>
-        <div className="flex items-center justify-between text-muted">
-          <span>+ Past Cancellation Cash Collected</span>
-          <span className="font-mono font-semibold text-ink">R{pastCancellationCash}</span>
+          <span>+ Past Cancellation Cash Settled</span>
+          <span className="font-mono font-semibold text-ink">
+            R{pastCancellationCash}
+            {totalSettledCount > 0 && (
+              <span className="text-[10px] text-muted ml-1">({totalSettledCount} person{totalSettledCount > 1 ? 's' : ''})</span>
+            )}
+          </span>
         </div>
         <div className="mt-1 flex items-center justify-between border-t border-crimson-500/20 pt-1.5">
           <span className="font-semibold text-ink">Total Physical Cash Expected in Vehicle</span>

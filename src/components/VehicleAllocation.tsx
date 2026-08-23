@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Bus, Car, Plus, Trash2, Users, ArrowRight, Undo2, X, UserCog, MoveRight,
   CheckCircle2, ChevronDown, ChevronRight, ChevronUp, MapPin,
   Check, Clock, StickyNote, Sparkles, ArrowUpDown, UserCheck, Download,
-  FileText, Copy, Eye, FileDown
+  FileText, Copy, Eye, FileDown, Search
 } from 'lucide-react';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
 import { hubDisplayName } from '@/lib/types';
@@ -123,6 +123,12 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   const [expandedVehicle, setExpandedVehicle] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // Search functionality for admins to find and move passengers
+  const [adminSearchQuery, setAdminSearchQuery] = useState('');
+  const [adminSearchFilter, setAdminSearchFilter] = useState<'all' | 'unassigned' | 'assigned' | 'reps' | 'ushers'>('all');
+  const [searchMoveTarget, setSearchMoveTarget] = useState<Record<string, string>>({});
+  const [moveNotification, setMoveNotification] = useState<{ text: string; timestamp: number } | null>(null);
+
   const [moveFromVehicle, setMoveFromVehicle] = useState<string>('');
   const [movePassengerId, setMovePassengerId] = useState<string>('');
   const [moveToVehicle, setMoveToVehicle] = useState<string>('');
@@ -156,14 +162,11 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
         console.error('Cloud manifest save error:', err);
       } finally {
         setSaving(false);
-        // useManifest.save() applies the manifest to its own state
-        // synchronously (before the network call), and now serializes
-        // writes so an older save can never land after a newer one — so
-        // once this save resolves, the parent `manifest` prop is already
-        // caught up and it's safe to resume syncing from it right away.
-        isLocalMutationPendingRef.current = false;
+        setTimeout(() => {
+          isLocalMutationPendingRef.current = false;
+        }, 1000);
       }
-    }, 200);
+    }, 150);
   }, [onSave]);
 
   const unassigned = unassignedPassengers(localManifest);
@@ -387,37 +390,67 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     });
   }
 
-  function movePassenger(passengerId: string, fromVehicleId: string, toVehicleId: string) {
+  function movePassenger(
+    passengerId: string,
+    fromVehicleId: string | 'unassigned' | '',
+    toVehicleId: string | 'unassigned' | ''
+  ) {
     if (!passengerId || !toVehicleId || fromVehicleId === toVehicleId) return;
 
     mutateAndSave((prev) => {
-      const toVehicle = prev.vehicles.find((v) => v.id === toVehicleId);
       const passenger = prev.signups.find((p) => p.id === passengerId);
-      if (!toVehicle || !passenger) return prev;
-      const poolKey = hubDisplayName(toVehicle.type, passenger.stop);
+      if (!passenger) return prev;
 
+      const isUnassigning = toVehicleId === 'unassigned';
+      const toVehicle = !isUnassigning ? prev.vehicles.find((v) => v.id === toVehicleId) : null;
+      if (!isUnassigning && !toVehicle) return prev;
+
+      const poolKey = toVehicle ? hubDisplayName(toVehicle.type, passenger.stop) : '';
+
+      // 1. Update signups
       const updatedSignups = prev.signups.map((p) =>
-        p.id === passengerId ? { ...p, assignedTo: toVehicleId } : p
+        p.id === passengerId ? { ...p, assignedTo: isUnassigning ? null : toVehicleId } : p
       );
 
+      // 2. Update vehicles
       const updatedVehicles = prev.vehicles.map((v) => {
-        if (v.id === fromVehicleId) {
+        // Origin vehicle (if it was assigned to a vehicle)
+        if (fromVehicleId && fromVehicleId !== 'unassigned' && v.id === fromVehicleId) {
           const nextRiders = v.riders.filter((id) => id !== passengerId);
           const remainingRiders = updatedSignups.filter((p) => nextRiders.includes(p.id));
           const detected = detectVehicleRep(remainingRiders);
           const repStillOnBoard = v.repName && remainingRiders.some((r) => isPassengerRepOfVehicle(r, v.repName));
+
+          // Clean up draftState so draft echoes never hold this passenger
+          const cleanedDraft = v.draftState
+            ? {
+                ...v.draftState,
+                presentIds: v.draftState.presentIds?.filter((id) => id !== passengerId),
+                absentIds: v.draftState.absentIds?.filter((id) => id !== passengerId),
+                sponsoredIds: v.draftState.sponsoredIds?.filter((id) => id !== passengerId),
+              }
+            : undefined;
+
+          const activeHubs = new Set(remainingRiders.map((p) => hubDisplayName(v.type, p.stop)));
+          const nextOrderedStops = (v.orderedStops ?? []).filter((s) => activeHubs.has(s));
+
           return {
             ...v,
             riders: nextRiders,
+            orderedStops: nextOrderedStops,
+            draftState: cleanedDraft,
             repName: repStillOnBoard ? v.repName : (detected || undefined),
           };
         }
-        if (v.id === toVehicleId) {
+
+        // Destination vehicle
+        if (!isUnassigning && v.id === toVehicleId) {
           const orderedStops = v.orderedStops ?? [];
           const nextOrderedStops = orderedStops.includes(poolKey) ? orderedStops : [...orderedStops, poolKey];
-          const nextRiders = [...v.riders, passengerId];
+          const nextRiders = v.riders.includes(passengerId) ? v.riders : [...v.riders, passengerId];
           const allRiders = updatedSignups.filter((p) => nextRiders.includes(p.id));
           const autoRep = detectVehicleRep(allRiders);
+
           return {
             ...v,
             riders: nextRiders,
@@ -425,16 +458,61 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
             repName: v.repName || autoRep || undefined,
           };
         }
+
         return v;
       });
 
       return { ...prev, signups: updatedSignups, vehicles: updatedVehicles };
     });
 
+    const targetPassenger = localManifest.signups.find((p) => p.id === passengerId);
+    const destName =
+      toVehicleId === 'unassigned'
+        ? 'Unassigned Pool'
+        : localManifest.vehicles.find((v) => v.id === toVehicleId)?.name || 'Vehicle';
+
+    if (targetPassenger) {
+      setMoveNotification({
+        text: `✓ Moved ${targetPassenger.fullName} to ${destName}`,
+        timestamp: Date.now(),
+      });
+      setTimeout(() => setMoveNotification(null), 3500);
+    }
+
     setMoveFromVehicle('');
     setMovePassengerId('');
     setMoveToVehicle('');
   }
+
+  // Filtered passenger search results for Admin
+  const filteredSearchPassengers = useMemo(() => {
+    const q = adminSearchQuery.trim().toLowerCase();
+    return localManifest.signups.filter((p) => {
+      // 1. Role / status filter tab
+      if (adminSearchFilter === 'unassigned' && p.assignedTo) return false;
+      if (adminSearchFilter === 'assigned' && !p.assignedTo) return false;
+      if (adminSearchFilter === 'reps') {
+        const isOfficial = matchRiderToOfficialRep(p);
+        const assignedVeh = p.assignedTo ? localManifest.vehicles.find((v) => v.id === p.assignedTo) : null;
+        const isActiveRep = assignedVeh ? isPassengerRepOfVehicle(p, assignedVeh.repName) : false;
+        if (!isOfficial && !isActiveRep) return false;
+      }
+      if (adminSearchFilter === 'ushers' && p.category !== 'Ushers') return false;
+
+      // 2. Query matching
+      if (!q) return true;
+
+      const nameMatch = p.fullName.toLowerCase().includes(q);
+      const stopMatch = p.stop.toLowerCase().includes(q);
+      const structMatch = (p.structure || '').toLowerCase().includes(q);
+      const phoneMatch = (p.phone || '').includes(q);
+      const ministryMatch = (p.ministry || '').toLowerCase().includes(q);
+      const assignedVeh = p.assignedTo ? localManifest.vehicles.find((v) => v.id === p.assignedTo) : null;
+      const vehMatch = assignedVeh ? assignedVeh.name.toLowerCase().includes(q) : false;
+
+      return nameMatch || stopMatch || structMatch || phoneMatch || ministryMatch || vehMatch;
+    });
+  }, [localManifest.signups, localManifest.vehicles, adminSearchQuery, adminSearchFilter]);
 
   async function copyTextToClipboard(text: string): Promise<boolean> {
     try {
@@ -725,6 +803,253 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
           </div>
         </div>
       )}
+
+      {/* Move notification toast */}
+      {moveNotification && (
+        <div className="mb-4 flex items-center justify-between gap-2 rounded-xl border border-success/40 bg-success/15 px-4 py-2.5 text-xs font-semibold text-success-light animate-fade-in shadow-md">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4 text-success" />
+            <span>{moveNotification.text}</span>
+          </div>
+          <button
+            onClick={() => setMoveNotification(null)}
+            className="rounded p-1 text-success-light/70 hover:bg-success/20 hover:text-success-light"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Admin Passenger Search & Quick-Move Console */}
+      <div className="mb-5 rounded-xl border border-line bg-card p-4 shadow-sm">
+        <div className="mb-3 flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-2">
+            <Search className="h-4 w-4 text-crimson-400" />
+            <span className="text-xs font-bold uppercase tracking-wide text-ink">
+              Find & Move Passengers
+            </span>
+            <span className="badge bg-card-2 text-muted text-[11px]">
+              {localManifest.signups.length} total signups
+            </span>
+          </div>
+          {adminSearchQuery && (
+            <button
+              onClick={() => setAdminSearchQuery('')}
+              className="text-[11px] text-muted hover:text-ink font-medium"
+            >
+              Clear search
+            </button>
+          )}
+        </div>
+
+        {/* Search input bar */}
+        <div className="relative mb-3">
+          <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted pointer-events-none" />
+          <input
+            type="text"
+            value={adminSearchQuery}
+            onChange={(e) => setAdminSearchQuery(e.target.value)}
+            placeholder="Search by name, structure (e.g. S3), pickup stop, phone, or assigned vehicle..."
+            className="input-field pl-9 text-xs"
+          />
+          {adminSearchQuery && (
+            <button
+              onClick={() => setAdminSearchQuery('')}
+              className="absolute right-2.5 top-2 rounded p-0.5 text-muted hover:text-ink"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+
+        {/* Filter category tabs */}
+        <div className="flex flex-wrap gap-1.5 mb-3 text-xs">
+          <button
+            type="button"
+            onClick={() => setAdminSearchFilter('all')}
+            className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+              adminSearchFilter === 'all'
+                ? 'bg-crimson-600 text-white font-semibold shadow-xs'
+                : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
+            }`}
+          >
+            All ({localManifest.signups.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setAdminSearchFilter('unassigned')}
+            className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+              adminSearchFilter === 'unassigned'
+                ? 'bg-crimson-600 text-white font-semibold shadow-xs'
+                : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
+            }`}
+          >
+            Unassigned ({unassigned.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setAdminSearchFilter('assigned')}
+            className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+              adminSearchFilter === 'assigned'
+                ? 'bg-crimson-600 text-white font-semibold shadow-xs'
+                : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
+            }`}
+          >
+            Assigned ({localManifest.signups.length - unassigned.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setAdminSearchFilter('reps')}
+            className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+              adminSearchFilter === 'reps'
+                ? 'bg-amber-600 text-white font-semibold shadow-xs'
+                : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
+            }`}
+          >
+            ⭐ Official Reps
+          </button>
+          <button
+            type="button"
+            onClick={() => setAdminSearchFilter('ushers')}
+            className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+              adminSearchFilter === 'ushers'
+                ? 'bg-amber-600 text-white font-semibold shadow-xs'
+                : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
+            }`}
+          >
+            Ushers
+          </button>
+        </div>
+
+        {/* Live Search Results List */}
+        {(adminSearchQuery.trim() !== '' || adminSearchFilter !== 'all') && (
+          <div className="mt-3 rounded-lg border border-line/60 bg-bg/40 p-3 max-h-96 overflow-y-auto space-y-2">
+            <div className="flex items-center justify-between text-[11px] text-muted mb-1">
+              <span>
+                Found <strong className="text-ink">{filteredSearchPassengers.length}</strong> matching person{filteredSearchPassengers.length === 1 ? '' : 's'}
+              </span>
+              {filteredSearchPassengers.length > 30 && (
+                <span>Showing first 30 results (type to narrow down)</span>
+              )}
+            </div>
+
+            {filteredSearchPassengers.length === 0 ? (
+              <div className="py-6 text-center text-xs text-muted">
+                No passengers found matching "{adminSearchQuery}".
+              </div>
+            ) : (
+              filteredSearchPassengers.slice(0, 35).map((p) => {
+                const assignedVehicle = p.assignedTo ? localManifest.vehicles.find((v) => v.id === p.assignedTo) : null;
+                const isOfficialRep = matchRiderToOfficialRep(p);
+                const isActiveRep = assignedVehicle ? isPassengerRepOfVehicle(p, assignedVehicle.repName) : false;
+                const targetVeh = searchMoveTarget[p.id] !== undefined ? searchMoveTarget[p.id] : '';
+
+                return (
+                  <div
+                    key={p.id}
+                    className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 rounded-lg border border-line/70 bg-card p-2.5 hover:border-line transition-all shadow-xs"
+                  >
+                    {/* Passenger details */}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-semibold text-xs text-ink">{p.fullName}</span>
+                        {p.structure && (
+                          <span className="badge bg-crimson-500/10 text-crimson-300 font-mono text-[10px]">
+                            {p.structure}
+                          </span>
+                        )}
+                        {isOfficialRep && (
+                          <span className="badge bg-amber-500/15 text-amber-300 font-semibold text-[10px] flex items-center gap-0.5">
+                            ⭐ Official Rep ({isOfficialRep.structure})
+                          </span>
+                        )}
+                        {isActiveRep && !isOfficialRep && (
+                          <span className="badge bg-amber-500/15 text-amber-300 font-semibold text-[10px]">
+                            ★ Active Rep
+                          </span>
+                        )}
+                        {p.category === 'Ushers' && (
+                          <span className="badge bg-amber-500/10 text-amber-300 text-[10px]">
+                            Usher
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted flex-wrap">
+                        <span className="flex items-center gap-1">
+                          <MapPin className="h-3 w-3 text-muted" />
+                          {p.stop}
+                        </span>
+                        <span>·</span>
+                        <span>
+                          Current:{' '}
+                          {assignedVehicle ? (
+                            <strong className="text-sky-400">
+                              {assignedVehicle.type === 'Bus' ? '🚌' : '🚕'} {assignedVehicle.name}
+                            </strong>
+                          ) : (
+                            <span className="text-crimson-300 font-medium">⏳ Unassigned Pool</span>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Quick Move Action */}
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <select
+                        value={targetVeh}
+                        onChange={(e) => setSearchMoveTarget((prev) => ({ ...prev, [p.id]: e.target.value }))}
+                        className="input-field py-1 text-xs w-40 bg-card-2"
+                      >
+                        <option value="" className="bg-card-2">
+                          Move to...
+                        </option>
+                        {p.assignedTo && (
+                          <option value="unassigned" className="bg-card-2 text-crimson-300">
+                            ⏳ Unassigned Pool
+                          </option>
+                        )}
+                        {sortVehiclesNatural(
+                          localManifest.vehicles.filter((v) => v.id !== p.assignedTo)
+                        ).map((v) => (
+                          <option key={v.id} value={v.id} className="bg-card-2">
+                            {v.type === 'Bus' ? '🚌' : '🚕'} {v.name} ({v.riders.length} riders)
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!targetVeh) return;
+                          movePassenger(p.id, p.assignedTo || 'unassigned', targetVeh);
+                          setSearchMoveTarget((prev) => ({ ...prev, [p.id]: '' }));
+                        }}
+                        disabled={!targetVeh}
+                        className="btn-crimson px-2.5 py-1 text-xs font-semibold whitespace-nowrap disabled:opacity-40"
+                      >
+                        Move
+                      </button>
+                      {assignedVehicle && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setExpandedVehicle(assignedVehicle.id);
+                            const el = document.getElementById(`vehicle-card-${assignedVehicle.id}`);
+                            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                          }}
+                          className="btn-ghost p-1 text-muted hover:text-ink text-[11px]"
+                          title="Locate Vehicle"
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Move person between vehicles */}
       {localManifest.vehicles.length >= 2 && (

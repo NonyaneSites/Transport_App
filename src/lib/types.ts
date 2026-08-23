@@ -37,6 +37,10 @@ export interface VehicleDraftState {
   cashCollected?: Record<string, number>;
   settledLedgerIds?: string[]; // historical debt IDs selected for settlement
   /**
+   * Manual cancellation fees paid in cash (e.g. when passenger is not on the ledger yet).
+   */
+  manualCancellations?: { id: string; passengerName: string; structure?: string; amount: number; note?: string }[];
+  /**
    * Cash-calculator sponsees paying for a passenger riding in a different
    * vehicle. Not covered by `cashCollected` (which only holds numeric
    * totals), so the full entries are kept here to round-trip the
