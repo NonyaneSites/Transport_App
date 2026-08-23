@@ -449,29 +449,69 @@ export function downloadSessionStatsExcel(
 ): void {
   const wb = XLSX.utils.book_new();
 
-  // Sheet 1: Vehicle Summary
+  // Helper for FTV check
+  const isFTV = (p: Passenger) => {
+    const s = (p.structure || '').toUpperCase();
+    const m = (p.ministry || '').toUpperCase();
+    const cat = (p.category || '').toUpperCase();
+    return s.includes('FTV') || s.includes('VISITOR') || s.includes('FIRST TIME') ||
+      m.includes('FTV') || m.includes('VISITOR') || cat.includes('FTV') || cat.includes('VISITOR');
+  };
+
+  const formatRider = (p: Passenger) => {
+    const name = p.fullName.trim();
+    const struct = (p.structure || '').trim();
+    return struct ? `${name} ${struct}` : name;
+  };
+
+  // Sheet 1: Vehicle Summary with Formatted Lists
   const vehicleRows = vehicles.map((v) => {
     const riders = v.riders.map(passengerLookup).filter((p): p is Passenger => Boolean(p));
-    const present = riders.filter((p) => p.present).length;
-    const absent = riders.length - present;
+    const isSubmitted = Boolean(v.submitted);
+    const pSet = new Set(v.draftState?.presentIds || []);
+    const aSet = new Set(v.draftState?.absentIds || []);
+    const sSet = new Set(v.draftState?.sponsoredIds || []);
+
+    const presentRiders = isSubmitted
+      ? riders.filter((p) => p.present)
+      : (pSet.size > 0 ? riders.filter((p) => pSet.has(p.id)) : []);
+
+    const absentRiders = isSubmitted
+      ? riders.filter((p) => !p.present)
+      : (aSet.size > 0 ? riders.filter((p) => aSet.has(p.id)) : []);
+
+    const sponsoredRiders = isSubmitted
+      ? riders.filter((p) => p.sponsored)
+      : (sSet.size > 0 ? riders.filter((p) => sSet.has(p.id) || p.sponsored) : riders.filter((p) => p.sponsored));
+
+    const ftvRiders = presentRiders.filter(isFTV);
+
     return {
       'Vehicle': v.name,
       'Type': v.type,
       'Rep': v.repName || v.submittedBy || '—',
       'License Plate': v.licensePlate || '—',
       'Total Passengers': riders.length,
-      'Present': present,
-      'Absent': absent,
+      'Present': presentRiders.length,
+      'Absent': absentRiders.length,
+      'FTVs': ftvRiders.length,
+      'Sponsored': sponsoredRiders.length,
+      'Fare Collected (R)': presentRiders.length * 40,
+      'Present Members & Visitors': presentRiders.length > 0 ? presentRiders.map(formatRider).join(', ') : 'None',
+      'First Time Visitors (FTVs)': ftvRiders.length > 0 ? ftvRiders.map(formatRider).join(', ') : 'None',
+      'Sponsorships': sponsoredRiders.length > 0 ? sponsoredRiders.map(formatRider).join(', ') : 'None',
+      'Cancellations (Absentees)': absentRiders.length > 0 ? absentRiders.map(formatRider).join(', ') : 'None',
       'Submitted': v.submitted ? 'Yes' : 'No',
-      'General Notes': v.generalNotes || '',
+      'General Notes': v.generalNotes || v.draftState?.generalNotes || '',
     };
   });
   const wsVehicles = XLSX.utils.json_to_sheet(vehicleRows);
   wsVehicles['!cols'] = [
     { wch: 16 }, { wch: 6 }, { wch: 20 }, { wch: 14 }, { wch: 14 },
-    { wch: 8 }, { wch: 8 }, { wch: 9 }, { wch: 40 },
+    { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 10 }, { wch: 14 },
+    { wch: 50 }, { wch: 35 }, { wch: 30 }, { wch: 40 }, { wch: 9 }, { wch: 30 },
   ];
-  XLSX.utils.book_append_sheet(wb, wsVehicles, 'Vehicle Summary');
+  XLSX.utils.book_append_sheet(wb, wsVehicles, 'Vehicle Stats Summary');
 
   // Sheet 2: Full Passenger List
   const passengerRows: Record<string, string | number>[] = [];
@@ -484,7 +524,9 @@ export function downloadSessionStatsExcel(
         'Name': p.fullName,
         'Structure': p.structure || '—',
         'Stop': p.stop,
+        'Phone': p.phone || '—',
         'Present': p.present ? 'Yes' : 'No',
+        'FTV': isFTV(p) ? 'Yes' : 'No',
         'Sponsored': p.sponsored ? 'Yes' : 'No',
         'Sponsor Note': p.sponsorNote || '',
       });
@@ -493,9 +535,9 @@ export function downloadSessionStatsExcel(
   if (passengerRows.length > 0) {
     const wsPassengers = XLSX.utils.json_to_sheet(passengerRows);
     wsPassengers['!cols'] = [
-      { wch: 16 }, { wch: 28 }, { wch: 10 }, { wch: 22 }, { wch: 8 }, { wch: 8 }, { wch: 35 },
+      { wch: 16 }, { wch: 28 }, { wch: 10 }, { wch: 22 }, { wch: 16 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 35 },
     ];
-    XLSX.utils.book_append_sheet(wb, wsPassengers, 'Passengers');
+    XLSX.utils.book_append_sheet(wb, wsPassengers, 'Detailed Passengers');
   }
 
   XLSX.writeFile(wb, fileName);

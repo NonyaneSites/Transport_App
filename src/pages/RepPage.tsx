@@ -546,6 +546,8 @@ export function RepPage() {
     setExternalSponsees((prev) => prev.filter((s) => s.id !== id));
   };
 
+  const [transferring, setTransferring] = useState(false);
+
   function findByName(name: string): Passenger | undefined {
     const q = name.trim().toLowerCase();
     if (!q || !manifest) return undefined;
@@ -553,8 +555,13 @@ export function RepPage() {
       ?? manifest.signups.find((p) => p.fullName.trim().toLowerCase().includes(q));
   }
 
-  function vehicleFor(vehicleId: string | null): Vehicle | undefined {
-    return manifest?.vehicles.find((v) => v.id === vehicleId) ?? undefined;
+  function findVehicleForPassenger(p: Passenger): Vehicle | undefined {
+    if (!manifest) return undefined;
+    if (p.assignedTo) {
+      const v = manifest.vehicles.find((veh) => veh.id === p.assignedTo);
+      if (v) return v;
+    }
+    return manifest.vehicles.find((veh) => veh.riders.includes(p.id));
   }
 
   function orderedStopsWith(vehicle: Vehicle, poolKey: string): string[] {
@@ -566,17 +573,21 @@ export function RepPage() {
     if (!manifest || !selectedVehicle || !walkInName.trim()) return;
     const existing = findByName(walkInName);
 
-    if (existing && existing.assignedTo && existing.assignedTo !== selectedVehicle.id) {
-      const fromVehicle = vehicleFor(existing.assignedTo);
-      if (fromVehicle) {
+    if (existing) {
+      const fromVehicle = findVehicleForPassenger(existing);
+      if (fromVehicle && fromVehicle.id !== selectedVehicle.id) {
         setTransferPrompt({ passenger: existing, fromVehicle });
         return;
       }
-    }
-
-    if (existing) {
-      await assignWalkIn(existing, existing.assignedTo);
+      // If already unassigned or in this vehicle, assign and mark present
+      await assignWalkIn(existing, fromVehicle?.id ?? existing.assignedTo ?? null);
     } else {
+      if (pendingSyncTimerRef.current) {
+        clearTimeout(pendingSyncTimerRef.current);
+        pendingSyncTimerRef.current = null;
+      }
+      lastLocalEditTimeRef.current = Date.now();
+
       const newPassenger: Passenger = {
         id: `walkin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         fullName: walkInName.trim(),
@@ -587,13 +598,56 @@ export function RepPage() {
         cancellationFeeOwed: false,
       };
       const poolKey = hubDisplayName(selectedVehicle.type, newPassenger.stop);
-      const updatedVehicles = manifest.vehicles.map((v) =>
-        v.id === selectedVehicle.id
-          ? { ...v, riders: [...v.riders, newPassenger.id], orderedStops: orderedStopsWith(v, poolKey) }
-          : v
-      );
-      await save({ ...manifest, signups: [...manifest.signups, newPassenger], vehicles: updatedVehicles });
+      const updatedVehicles = manifest.vehicles.map((v) => {
+        if (v.id !== selectedVehicle.id) return v;
+        const nextRiders = [...v.riders, newPassenger.id];
+        const nextOrderedStops = orderedStopsWith(v, poolKey);
+        const existingDraftPresent = v.draftState?.presentIds ?? [];
+        const nextDraftPresent = existingDraftPresent.includes(newPassenger.id)
+          ? existingDraftPresent
+          : [...existingDraftPresent, newPassenger.id];
+
+        const nextDraft: VehicleDraftState = {
+          presentIds: nextDraftPresent,
+          absentIds: v.draftState?.absentIds ?? [],
+          sponsoredIds: v.draftState?.sponsoredIds ?? Array.from(sponsoredIds),
+          notes: v.draftState?.notes ?? notes,
+          repName: repName.trim() || v.repName || '',
+          coReps: coReps.filter(Boolean),
+          licensePlate: licensePlate.trim() || v.licensePlate || '',
+          generalNotes: generalNotes.trim() || v.generalNotes || '',
+          cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+          settledLedgerIds: Array.from(collectedCancellationIds),
+          manualCancellations,
+          externalSponsees,
+          updatedAt: new Date().toISOString(),
+          updatedBy: clientIdRef.current,
+        };
+
+        return {
+          ...v,
+          riders: nextRiders,
+          orderedStops: nextOrderedStops,
+          draftState: nextDraft,
+        };
+      });
+
+      const nextManifest: Manifest = {
+        ...manifest,
+        signups: [...manifest.signups, newPassenger],
+        vehicles: updatedVehicles,
+      };
+
+      manifestRef.current = nextManifest;
       setPresentIds((prev) => new Set(prev).add(newPassenger.id));
+      setAbsentIds((prev) => {
+        if (!prev.has(newPassenger.id)) return prev;
+        const next = new Set(prev);
+        next.delete(newPassenger.id);
+        return next;
+      });
+
+      await save(nextManifest);
     }
     setWalkInName('');
     setWalkInStructure('');
@@ -602,12 +656,27 @@ export function RepPage() {
 
   async function assignWalkIn(passenger: Passenger, fromVehicleId: string | null) {
     if (!manifest || !selectedVehicle) return;
-    const poolKey = hubDisplayName(selectedVehicle.type, passenger.stop);
+
+    if (pendingSyncTimerRef.current) {
+      clearTimeout(pendingSyncTimerRef.current);
+      pendingSyncTimerRef.current = null;
+    }
+    lastLocalEditTimeRef.current = Date.now();
+
+    const poolKey = hubDisplayName(selectedVehicle.type, passenger.stop || 'Walk-In');
+
+    // 1. Update signups
     const updatedSignups = manifest.signups.map((p) =>
       p.id === passenger.id ? { ...p, assignedTo: selectedVehicle.id, present: true } : p
     );
+    if (!updatedSignups.some((p) => p.id === passenger.id)) {
+      updatedSignups.push({ ...passenger, assignedTo: selectedVehicle.id, present: true });
+    }
+
+    // 2. Update vehicles
     const updatedVehicles = manifest.vehicles.map((v) => {
-      if (fromVehicleId && v.id === fromVehicleId) {
+      // Remove from origin vehicle
+      if (fromVehicleId && v.id === fromVehicleId && v.id !== selectedVehicle.id) {
         const nextRiders = v.riders.filter((id) => id !== passenger.id);
         const cleanedDraft = v.draftState ? {
           ...v.draftState,
@@ -617,23 +686,90 @@ export function RepPage() {
         } : undefined;
         return { ...v, riders: nextRiders, draftState: cleanedDraft };
       }
+
+      // Add to destination vehicle
       if (v.id === selectedVehicle.id) {
-        if (v.riders.includes(passenger.id)) return v;
-        return { ...v, riders: [...v.riders, passenger.id], orderedStops: orderedStopsWith(v, poolKey) };
+        const nextRiders = v.riders.includes(passenger.id) ? v.riders : [...v.riders, passenger.id];
+        const nextOrderedStops = orderedStopsWith(v, poolKey);
+        const existingDraftPresent = v.draftState?.presentIds ?? [];
+        const nextDraftPresent = existingDraftPresent.includes(passenger.id)
+          ? existingDraftPresent
+          : [...existingDraftPresent, passenger.id];
+        const nextDraftAbsent = (v.draftState?.absentIds ?? []).filter((id) => id !== passenger.id);
+
+        const nextDraft: VehicleDraftState = {
+          presentIds: nextDraftPresent,
+          absentIds: nextDraftAbsent,
+          sponsoredIds: v.draftState?.sponsoredIds ?? Array.from(sponsoredIds),
+          notes: v.draftState?.notes ?? notes,
+          repName: repName.trim() || v.repName || '',
+          coReps: coReps.filter(Boolean),
+          licensePlate: licensePlate.trim() || v.licensePlate || '',
+          generalNotes: generalNotes.trim() || v.generalNotes || '',
+          cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+          settledLedgerIds: Array.from(collectedCancellationIds),
+          manualCancellations,
+          externalSponsees,
+          updatedAt: new Date().toISOString(),
+          updatedBy: clientIdRef.current,
+        };
+
+        return {
+          ...v,
+          riders: nextRiders,
+          orderedStops: nextOrderedStops,
+          draftState: nextDraft,
+        };
       }
+
+      // Any other vehicle that might have had this rider
+      if (v.riders.includes(passenger.id) && v.id !== selectedVehicle.id) {
+        const nextRiders = v.riders.filter((id) => id !== passenger.id);
+        const cleanedDraft = v.draftState ? {
+          ...v.draftState,
+          presentIds: v.draftState.presentIds?.filter((id) => id !== passenger.id),
+          absentIds: v.draftState.absentIds?.filter((id) => id !== passenger.id),
+          sponsoredIds: v.draftState.sponsoredIds?.filter((id) => id !== passenger.id),
+        } : undefined;
+        return { ...v, riders: nextRiders, draftState: cleanedDraft };
+      }
+
       return v;
     });
-    await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
+
+    const nextManifest: Manifest = {
+      ...manifest,
+      signups: updatedSignups,
+      vehicles: updatedVehicles,
+    };
+
+    manifestRef.current = nextManifest;
+
     setPresentIds((prev) => new Set(prev).add(passenger.id));
+    setAbsentIds((prev) => {
+      if (!prev.has(passenger.id)) return prev;
+      const next = new Set(prev);
+      next.delete(passenger.id);
+      return next;
+    });
+
+    await save(nextManifest);
   }
 
   async function confirmTransfer() {
-    if (!transferPrompt) return;
-    await assignWalkIn(transferPrompt.passenger, transferPrompt.fromVehicle.id);
-    setTransferPrompt(null);
-    setWalkInName('');
-    setWalkInStructure('');
-    setWalkInOpen(false);
+    if (!transferPrompt || transferring) return;
+    setTransferring(true);
+    try {
+      await assignWalkIn(transferPrompt.passenger, transferPrompt.fromVehicle.id);
+      setTransferPrompt(null);
+      setWalkInName('');
+      setWalkInStructure('');
+      setWalkInOpen(false);
+    } catch (e) {
+      console.error('Walk-in transfer error:', e);
+    } finally {
+      setTransferring(false);
+    }
   }
 
   async function handleSubmit() {
@@ -1239,30 +1375,52 @@ export function RepPage() {
       {transferPrompt && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm animate-fade-in"
-          onClick={() => setTransferPrompt(null)}
+          onClick={() => { if (!transferring) setTransferPrompt(null); }}
         >
           <div
             className="w-full max-w-sm rounded-2xl border border-line bg-card p-6 shadow-crimson animate-slide-up"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="mb-4 flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-warning/15 border border-warning/30">
+            <div className="mb-4 flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-warning/15 border border-warning/30">
                 <AlertTriangle className="h-5 w-5 text-warning" />
               </div>
               <div>
-                <h3 className="font-display text-base font-bold text-ink">Already Assigned</h3>
-                <p className="text-xs text-muted">
-                  This person is assigned to <span className="font-semibold text-ink">{transferPrompt.fromVehicle.name}</span>.
-                  Transfer them to this vehicle?
+                <h3 className="font-display text-base font-bold text-ink">Transfer Passenger</h3>
+                <p className="mt-1 text-xs text-muted">
+                  <span className="font-semibold text-ink">{transferPrompt.passenger.fullName}</span> is currently allocated to <span className="font-semibold text-crimson-400">{transferPrompt.fromVehicle.name}</span>.
                 </p>
+                <div className="mt-2 rounded-lg border border-line bg-card-2 p-2.5 text-[11px] text-muted space-y-1">
+                  <div>From: <span className="font-semibold text-ink">{transferPrompt.fromVehicle.name}</span></div>
+                  <div>To: <span className="font-semibold text-success-light">{selectedVehicle?.name}</span></div>
+                  {transferPrompt.passenger.stop && <div>Stop: <span className="font-medium text-ink">{transferPrompt.passenger.stop}</span></div>}
+                  {transferPrompt.passenger.structure && <div>Structure: <span className="font-medium text-ink">{transferPrompt.passenger.structure}</span></div>}
+                </div>
               </div>
             </div>
             <div className="flex gap-2">
-              <button onClick={() => { setTransferPrompt(null); }} className="btn-ghost flex-1">
+              <button
+                type="button"
+                onClick={() => setTransferPrompt(null)}
+                disabled={transferring}
+                className="btn-ghost flex-1 disabled:opacity-50"
+              >
                 Cancel
               </button>
-              <button onClick={confirmTransfer} className="btn-crimson flex-1">
-                Transfer
+              <button
+                type="button"
+                onClick={confirmTransfer}
+                disabled={transferring}
+                className="btn-crimson flex-1 flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                {transferring ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span>Transferring…</span>
+                  </>
+                ) : (
+                  'Transfer & Check In'
+                )}
               </button>
             </div>
           </div>

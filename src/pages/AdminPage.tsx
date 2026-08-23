@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Lock, Trash2, Loader2, AlertTriangle, Calendar, Users, Bus, ArrowUpRight, XCircle, FileSpreadsheet, ChevronDown, ChevronRight, History, Download, FileDown } from 'lucide-react';
+import { Lock, Trash2, Loader2, AlertTriangle, Calendar, Users, Bus, ArrowUpRight, XCircle, FileSpreadsheet, ChevronDown, ChevronRight, History, Download, FileDown, Eye, Table } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
@@ -7,11 +7,13 @@ import { ExcelUpload } from '@/components/ExcelUpload';
 import { VehicleAllocation } from '@/components/VehicleAllocation';
 import { useManifest } from '@/lib/useManifest';
 import { listAllManifests } from '@/lib/manifest';
-import { listLedgerEntries, downloadSessionStatsExcel } from '@/lib/ledger';
+import { listLedgerEntries } from '@/lib/ledger';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey as parseKey } from '@/lib/dates';
 import { SERVICE_TYPES, RESET_PASSWORD, type ServiceType, type Passenger, type Manifest } from '@/lib/types';
 import { isSamePassenger } from '@/lib/importer';
 import { generateWhatsAppRouteManifest, generateWhatsAppRepManifest, downloadTextFile } from '@/lib/whatsappManifest';
+import { downloadTaxiStatsExcel, downloadTaxiStatsCSV } from '@/lib/statsExport';
+import { AdminStatsExportModal } from '@/components/AdminStatsExportModal';
 
 export function AdminPage() {
   const [date, setDate] = useState(upcomingSunday);
@@ -27,6 +29,7 @@ export function AdminPage() {
   const [ledgerCount, setLedgerCount] = useState(0);
   const [archiveSelected, setArchiveSelected] = useState('');
   const [showHistory, setShowHistory] = useState(false);
+  const [exportModalManifest, setExportModalManifest] = useState<{ manifest: Manifest; serviceLabel: string } | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -138,10 +141,23 @@ export function AdminPage() {
             </div>
             <div className="text-xs text-muted font-mono">{key}</div>
           </div>
-          <button onClick={() => setResetOpen(true)} className="btn-danger">
-            <Trash2 className="h-4 w-4" />
-            Reset Manifests
-          </button>
+          <div className="flex items-center gap-2 flex-wrap">
+            {manifest && manifest.vehicles.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setExportModalManifest({ manifest, serviceLabel })}
+                className="btn-ghost border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/15 text-xs py-2 px-3 flex items-center gap-1.5"
+                title="Download consolidated Taxi Stats for Excel or Google Sheets"
+              >
+                <FileSpreadsheet className="h-4 w-4 text-emerald-400" />
+                <span>Export Taxi Stats</span>
+              </button>
+            )}
+            <button onClick={() => setResetOpen(true)} className="btn-danger">
+              <Trash2 className="h-4 w-4" />
+              Reset Manifests
+            </button>
+          </div>
         </div>
 
         {error && (
@@ -230,16 +246,44 @@ export function AdminPage() {
                         onClick={() => {
                           const m = sessionList.find((s) => s.date === archiveSelected);
                           if (!m) return;
-                          const lookup = (id: string) => m.signups.find((p) => p.id === id);
-                          const { date: mDate } = parseKey(m.date);
-                          downloadSessionStatsExcel(m.vehicles, lookup, `session_stats_${mDate}.xlsx`);
+                          downloadTaxiStatsExcel(m);
+                        }}
+                        disabled={!archiveSelected}
+                        className={archiveSelected ? 'btn-ghost border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 text-xs py-2 px-3 flex items-center gap-1.5' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted text-xs py-2 px-3'}
+                        title="Download full session Taxi Stats Excel workbook (.xlsx)"
+                      >
+                        <FileSpreadsheet className="h-4 w-4 text-emerald-400" />
+                        <span>Stats Excel (.xlsx)</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          const m = sessionList.find((s) => s.date === archiveSelected);
+                          if (!m) return;
+                          downloadTaxiStatsCSV(m);
                         }}
                         disabled={!archiveSelected}
                         className={archiveSelected ? 'btn-ghost border-line text-xs py-2 px-3 flex items-center gap-1.5' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted text-xs py-2 px-3'}
-                        title="Download full session Excel workbook"
+                        title="Download CSV table for Google Sheets import (.csv)"
                       >
-                        <FileSpreadsheet className="h-4 w-4 text-emerald-400" />
-                        <span>Stats Excel</span>
+                        <Table className="h-4 w-4 text-sky-400" />
+                        <span>Stats CSV</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          const m = sessionList.find((s) => s.date === archiveSelected);
+                          if (!m) return;
+                          const { service: mService } = parseKey(m.date);
+                          const def = SERVICE_TYPES.find((s) => s.value === mService);
+                          setExportModalManifest({ manifest: m, serviceLabel: def?.label ?? mService });
+                        }}
+                        disabled={!archiveSelected}
+                        className={archiveSelected ? 'btn-ghost border-line text-xs py-2 px-3 flex items-center gap-1.5 text-amber-300 hover:bg-amber-500/10' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted text-xs py-2 px-3'}
+                        title="Open full Taxi Stats Export & Table Preview Console"
+                      >
+                        <Eye className="h-4 w-4 text-amber-400" />
+                        <span>Stats Hub</span>
                       </button>
 
                       <button
@@ -286,6 +330,7 @@ export function AdminPage() {
                             <th className="px-4 py-3 text-right font-display text-xs font-bold uppercase tracking-wider text-muted">Vehicles</th>
                             <th className="px-4 py-3 text-right font-display text-xs font-bold uppercase tracking-wider text-muted">Present</th>
                             <th className="px-4 py-3 text-right font-display text-xs font-bold uppercase tracking-wider text-muted">Updated</th>
+                            <th className="px-4 py-3 text-center font-display text-xs font-bold uppercase tracking-wider text-muted">Quick Actions</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-line/60">
@@ -321,6 +366,26 @@ export function AdminPage() {
                                   <span className="text-xs text-muted"> / {m.signups.length}</span>
                                 </td>
                                 <td className="px-4 py-3 text-right font-mono text-xs text-muted">{updated}</td>
+                                <td className="px-4 py-3 text-center">
+                                  <div className="flex items-center justify-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => downloadTaxiStatsExcel(m)}
+                                      title="Download Taxi Stats (.xlsx)"
+                                      className="rounded-lg p-1.5 text-emerald-400 hover:bg-emerald-500/20 transition-colors"
+                                    >
+                                      <FileSpreadsheet className="h-4 w-4" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setExportModalManifest({ manifest: m, serviceLabel: def?.label ?? mService })}
+                                      title="Open Stats Console"
+                                      className="rounded-lg p-1.5 text-amber-400 hover:bg-amber-500/20 transition-colors"
+                                    >
+                                      <Eye className="h-4 w-4" />
+                                    </button>
+                                  </div>
+                                </td>
                               </tr>
                             );
                           })}
@@ -383,6 +448,16 @@ export function AdminPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Stats Export Modal */}
+      {exportModalManifest && (
+        <AdminStatsExportModal
+          manifest={exportModalManifest.manifest}
+          serviceLabel={exportModalManifest.serviceLabel}
+          isOpen={true}
+          onClose={() => setExportModalManifest(null)}
+        />
       )}
 
       <Footer />
