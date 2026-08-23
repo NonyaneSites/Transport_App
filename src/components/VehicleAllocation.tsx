@@ -84,7 +84,7 @@ interface Props {
   onSave: (m: Manifest) => Promise<void>;
 }
 
-export function VehicleAllocation({ manifest, service, onSave }: Props) {
+export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: Props) {
   // Local optimistic state for instant zero-lag UI updates and rapid actions
   const [localManifest, setLocalManifest] = useState<Manifest>(manifest);
   const latestManifestRef = useRef<Manifest>(manifest);
