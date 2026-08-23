@@ -30,7 +30,10 @@ export function useManifest(key: string | null): {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const keyRef = useRef<string | null>(null);
-  const pendingSavesRef = useRef<number>(0);
+
+  // Track the updatedAt timestamp of the last thing WE saved.
+  // Used to suppress our own realtime echoes without blocking external updates.
+  const lastSavedUpdatedAtRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!key) {
@@ -71,14 +74,24 @@ export function useManifest(key: string | null): {
         { event: '*', schema: 'public', table: MANIFESTS_TABLE, filter: `date=eq.${key}` },
         (payload) => {
           if (keyRef.current !== key) return;
-          // If we have local saves in-flight, ignore realtime echoes to prevent UI stutter/reverts
-          if (pendingSavesRef.current > 0) return;
-          const row = payload.new;
-          if (row) {
-            const normalized = normalizeManifestData(row);
-            if (normalized) {
-              setManifest(normalized);
-            }
+
+          const row = payload.new as (Partial<Manifest> & { updated_at?: string }) | null;
+          if (!row) return;
+
+          // Suppress echoes of our own saves only — external updates (e.g. from the
+          // Admin page) must always flow through so the Rep sees them immediately.
+          // We identify our own echo by comparing the DB-assigned updated_at timestamp
+          // against the one we received back from our most recent save.
+          if (
+            lastSavedUpdatedAtRef.current &&
+            row.updated_at === lastSavedUpdatedAtRef.current
+          ) {
+            return;
+          }
+
+          const normalized = normalizeManifestData(row);
+          if (normalized) {
+            setManifest(normalized);
           }
         }
       )
@@ -91,26 +104,25 @@ export function useManifest(key: string | null): {
   }, [key]);
 
   async function save(m: Manifest): Promise<void> {
-    pendingSavesRef.current += 1;
     const normalized = normalizeManifestData(m) || m;
+    // Optimistically update local state immediately for zero-lag UI
     setManifest(normalized);
-    try {
-      const { error: upsertError } = await supabase
-        .from(MANIFESTS_TABLE)
-        .upsert(
-          {
-            date: normalized.date,
-            signups: normalized.signups,
-            vehicles: normalized.vehicles,
-          },
-          { onConflict: 'date' }
-        );
-      if (upsertError) throw upsertError;
-    } finally {
-      // Cooldown before allowing realtime echoes to avoid stale broadcast race
-      setTimeout(() => {
-        pendingSavesRef.current = Math.max(0, pendingSavesRef.current - 1);
-      }, 1500);
+    const { error: upsertError, data } = await supabase
+      .from(MANIFESTS_TABLE)
+      .upsert(
+        {
+          date: normalized.date,
+          signups: normalized.signups,
+          vehicles: normalized.vehicles,
+        },
+        { onConflict: 'date' }
+      )
+      .select('updated_at')
+      .single();
+    if (upsertError) throw upsertError;
+    // Record the server-assigned updated_at so we can suppress only our own echo
+    if (data?.updated_at) {
+      lastSavedUpdatedAtRef.current = data.updated_at;
     }
   }
 
