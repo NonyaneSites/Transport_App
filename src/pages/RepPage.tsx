@@ -468,7 +468,7 @@ export function RepPage() {
       });
     } else {
       setAbsentIds((prev) => {
-        if (!prev.has(passengerId)) return prev;
+        if (prev.has(passengerId)) return prev;
         return new Set(prev).add(passengerId);
       });
       setPresentIds((prev) => {
@@ -1221,18 +1221,6 @@ export function RepPage() {
                   disabled={isSubmitted || submitting}
                 />
 
-                {/* Rep Stats for Stats Link (Present, FTVs, Sponsorships, Absentees) */}
-                <RepStatsCopyCard
-                  riders={riders}
-                  presentIds={presentIds}
-                  absentIds={absentIds}
-                  sponsoredIds={sponsoredIds}
-                  notes={notes}
-                  vehicleName={selectedVehicle.name}
-                  repName={repName}
-                  isSubmitted={isSubmitted}
-                />
-
                 {!isSubmitted && (
                   <>
                     {/* General notes */}
@@ -1352,6 +1340,27 @@ export function RepPage() {
                     )}
                   </button>
                 )}
+
+                {/* Session Archive — Transport Stats */}
+                <div className="mt-2 flex items-center gap-2">
+                  <div className="h-px flex-1 bg-line" />
+                  <span className="text-[10px] font-semibold uppercase tracking-widest text-muted">Session Archive</span>
+                  <div className="h-px flex-1 bg-line" />
+                </div>
+                <RepStatsCopyCard
+                  riders={riders}
+                  presentIds={presentIds}
+                  absentIds={absentIds}
+                  sponsoredIds={sponsoredIds}
+                  notes={notes}
+                  vehicleName={selectedVehicle.name}
+                  repName={repName}
+                  isSubmitted={isSubmitted}
+                  licensePlate={licensePlate}
+                  serviceLabel={serviceLabel}
+                  date={prettyDate(date)}
+                  totalCash={totalCash}
+                />
               </>
             )}
 
