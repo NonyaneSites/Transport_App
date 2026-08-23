@@ -6,7 +6,7 @@ import {
   FileText, Copy, Eye, FileDown, Search, FileSpreadsheet
 } from 'lucide-react';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
-import { hubDisplayName } from '@/lib/types';
+import { hubDisplayName, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { passengersByStop, passengersByPoolGroup, unassignedPassengers } from '@/lib/manifest';
 import { parseManifestKey } from '@/lib/dates';
@@ -523,6 +523,9 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
         if (!isOfficial && !isActiveRep) return false;
       }
       if (adminSearchFilter === 'ushers' && p.category !== 'Ushers') return false;
+      if (adminSearchFilter === 'ftv' && p.memberType !== 'FTV') return false;
+      if (adminSearchFilter === 'visitors' && p.memberType !== 'V') return false;
+      if (adminSearchFilter === 'members' && p.memberType !== 'M') return false;
 
       // 2. Query matching
       if (!q) return true;
@@ -532,10 +535,15 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
       const structMatch = (p.structure || '').toLowerCase().includes(q);
       const phoneMatch = (p.phone || '').includes(q);
       const ministryMatch = (p.ministry || '').toLowerCase().includes(q);
+      const memberTypeMatch = p.memberType ? (
+        (p.memberType === 'FTV' && (q === 'ftv' || q.includes('first') || q.includes('visitor'))) ||
+        (p.memberType === 'V' && (q === 'v' || q.includes('visitor') || q.includes('guest'))) ||
+        (p.memberType === 'M' && (q === 'm' || q.includes('member')))
+      ) : false;
       const assignedVeh = p.assignedTo ? vehicles.find((v) => v?.id === p.assignedTo) : null;
       const vehMatch = assignedVeh ? (assignedVeh.name || '').toLowerCase().includes(q) : false;
 
-      return nameMatch || stopMatch || structMatch || phoneMatch || ministryMatch || vehMatch;
+      return nameMatch || stopMatch || structMatch || phoneMatch || ministryMatch || memberTypeMatch || vehMatch;
     });
   }, [localManifest?.signups, localManifest?.vehicles, adminSearchQuery, adminSearchFilter]);
 
@@ -845,16 +853,26 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
               <span className="text-xs font-semibold uppercase tracking-wide text-muted">Unassigned Pool</span>
               <span className="badge bg-crimson-500/15 text-crimson-300">{unassigned.length} waiting</span>
             </div>
-            {/* Breakdown by Category */}
-            <div className="flex items-center gap-1.5 text-[11px]">
+            {/* Breakdown by Category & Attendee Status */}
+            <div className="flex items-center gap-1.5 text-[11px] flex-wrap">
               {unassigned.filter((p) => p.category === 'Ushers').length > 0 && (
                 <span className="badge bg-amber-500/15 text-amber-300">
                   {unassigned.filter((p) => p.category === 'Ushers').length} Ushers (Early)
                 </span>
               )}
-              {unassigned.filter((p) => p.category === 'Normal').length > 0 && (
+              {unassigned.filter((p) => p.memberType === 'FTV').length > 0 && (
+                <span className="badge bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/40">
+                  {unassigned.filter((p) => p.memberType === 'FTV').length} FTV
+                </span>
+              )}
+              {unassigned.filter((p) => p.memberType === 'V').length > 0 && (
+                <span className="badge bg-purple-500/20 text-purple-300 font-bold border border-purple-500/40">
+                  {unassigned.filter((p) => p.memberType === 'V').length} Visitors
+                </span>
+              )}
+              {unassigned.filter((p) => p.category === 'Normal' && !p.memberType).length > 0 && (
                 <span className="badge bg-sky-500/15 text-sky-300">
-                  {unassigned.filter((p) => p.category === 'Normal').length} Normal
+                  {unassigned.filter((p) => p.category === 'Normal' && !p.memberType).length} Normal
                 </span>
               )}
             </div>
@@ -914,7 +932,7 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
             type="text"
             value={adminSearchQuery}
             onChange={(e) => setAdminSearchQuery(e.target.value)}
-            placeholder="Search by name, structure (e.g. S3), pickup stop, phone, or assigned vehicle..."
+            placeholder="Search by name, status (FTV/V/M), structure (e.g. S3), pickup stop, phone, or assigned vehicle..."
             className="input-field pl-9 text-xs"
           />
           {adminSearchQuery && (
@@ -984,6 +1002,32 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
           >
             Ushers
           </button>
+          {localManifest.signups.some((p) => p.memberType === 'FTV') && (
+            <button
+              type="button"
+              onClick={() => setAdminSearchFilter('ftv')}
+              className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+                adminSearchFilter === 'ftv'
+                  ? 'bg-emerald-600 text-white font-semibold shadow-xs'
+                  : 'bg-card-2 text-emerald-400 hover:bg-card-2/80 hover:text-emerald-300'
+              }`}
+            >
+              🌟 FTV ({localManifest.signups.filter((p) => p.memberType === 'FTV').length})
+            </button>
+          )}
+          {localManifest.signups.some((p) => p.memberType === 'V') && (
+            <button
+              type="button"
+              onClick={() => setAdminSearchFilter('visitors')}
+              className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+                adminSearchFilter === 'visitors'
+                  ? 'bg-purple-600 text-white font-semibold shadow-xs'
+                  : 'bg-card-2 text-purple-400 hover:bg-card-2/80 hover:text-purple-300'
+              }`}
+            >
+              👥 Visitors ({localManifest.signups.filter((p) => p.memberType === 'V').length})
+            </button>
+          )}
         </div>
 
         {/* Live Search Results List */}
@@ -1033,11 +1077,14 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
                             ★ Active Rep
                           </span>
                         )}
-                        {p.category === 'Ushers' && (
-                          <span className="badge bg-amber-500/10 text-amber-300 text-[10px]">
-                            Usher
-                          </span>
-                        )}
+                        {(() => {
+                          const statusBadge = getPassengerStatusBadge(p);
+                          return statusBadge ? (
+                            <span className={`badge text-[10px] ${statusBadge.colorClass}`} title={statusBadge.title}>
+                              {statusBadge.label}
+                            </span>
+                          ) : null;
+                        })()}
                       </div>
                       <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted flex-wrap">
                         <span className="flex items-center gap-1">
@@ -1578,13 +1625,14 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
                                         {p.structure && !pOfficial && (
                                           <span className="rounded bg-bg/60 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted">{p.structure}</span>
                                         )}
-                                        {p.category === 'Ushers' ? (
-                                          <span className="badge bg-amber-500/15 text-amber-300 text-[10px]">Usher (Early)</span>
-                                        ) : p.category === 'Normal' ? (
-                                          <span className="badge bg-sky-500/15 text-sky-300 text-[10px]">Normal</span>
-                                        ) : p.ministry && p.ministry !== 'Serving' ? (
-                                          <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px]">{p.ministry}</span>
-                                        ) : null}
+                                        {(() => {
+                                          const statusBadge = getPassengerStatusBadge(p);
+                                          return statusBadge ? (
+                                            <span className={`badge text-[10px] ${statusBadge.colorClass}`} title={statusBadge.title}>
+                                              {statusBadge.label}
+                                            </span>
+                                          ) : null;
+                                        })()}
                                         <span className="badge bg-bg/60 text-muted text-[10px]">{p.stop}</span>
                                         {p.present && (
                                           <span className="badge bg-success/15 text-success-light text-[10px]">Present</span>

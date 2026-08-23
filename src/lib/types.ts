@@ -10,11 +10,86 @@ export interface Passenger {
   service?: string;
   category?: 'Ushers' | 'Serving' | 'Normal';
   ministry?: string;
+  memberType?: 'M' | 'V' | 'FTV';
   assignedTo: string | null;
   present: boolean;
   cancellationFeeOwed: boolean;
   sponsored?: boolean;
   sponsorNote?: string;
+}
+
+/**
+ * Returns the badge details to render for a passenger, respecting the strict precedence:
+ * 1. Early Serving Usher ('Usher (Early)') always takes top priority.
+ * 2. Membership status ('FTV', 'V', 'M') takes precedence over generic serving ministries.
+ * 3. Specific serving ministry (if not 'Serving' or empty) is shown if no memberType is set.
+ * 4. Normal / default status.
+ */
+export function getPassengerStatusBadge(p?: Partial<Passenger> | null): {
+  code: string;
+  label: string;
+  colorClass: string;
+  title: string;
+} | null {
+  if (!p) return null;
+
+  // 1. Early Serving Usher holds permanent priority
+  if (p.category === 'Ushers') {
+    return {
+      code: 'USHER',
+      label: 'Usher (Early)',
+      colorClass: 'bg-amber-500/15 text-amber-300 border border-amber-500/30',
+      title: 'Early Serving Usher',
+    };
+  }
+
+  // 2. Member / Visitor / First Time Visitor status holds precedence over serving ministries
+  if (p.memberType === 'FTV') {
+    return {
+      code: 'FTV',
+      label: 'FTV',
+      colorClass: 'bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/40',
+      title: 'First Time Visitor',
+    };
+  }
+  if (p.memberType === 'V') {
+    return {
+      code: 'V',
+      label: 'V',
+      colorClass: 'bg-purple-500/20 text-purple-300 font-bold border border-purple-500/40',
+      title: 'Visitor',
+    };
+  }
+  if (p.memberType === 'M') {
+    return {
+      code: 'M',
+      label: 'M',
+      colorClass: 'bg-sky-500/20 text-sky-300 font-bold border border-sky-500/40',
+      title: 'Member',
+    };
+  }
+
+  // 3. Fallback to specific serving ministry if present
+  if (p.ministry && p.ministry !== 'Serving') {
+    return {
+      code: 'MINISTRY',
+      label: p.ministry,
+      colorClass: 'bg-crimson-500/15 text-crimson-300 border border-crimson-500/30',
+      title: p.ministry,
+    };
+  }
+
+  // 4. Normal
+  if (p.category === 'Normal') {
+    return {
+      code: 'NORMAL',
+      label: 'Normal',
+      colorClass: 'bg-sky-500/15 text-sky-300 border border-sky-500/25',
+      title: 'Normal Transport',
+    };
+  }
+
+  return null;
 }
 
 /**

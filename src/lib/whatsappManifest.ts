@@ -1,6 +1,7 @@
 import { shortDate, parseManifestKey } from './dates';
 import { SERVICE_TYPES, hubDisplayName, type Manifest, type Vehicle, type Passenger, type ServiceType } from './types';
 import { sortVehiclesNatural } from './sort';
+import { isPassengerRepOfVehicle, matchRiderToOfficialRep } from './officialReps';
 
 function periodLabel(period: 'AM' | 'PM'): string {
   return period === 'AM' ? 'Morning' : 'Evening';
@@ -124,7 +125,12 @@ export function generateWhatsAppRepManifest(manifest: Manifest, service: Service
     for (const group of groups) {
       lines.push(`🛑 ${group.label} (${group.riders.length})`);
       for (const rider of group.riders) {
-        lines.push(`${riderNumber}. ${rider.fullName.trim()}`);
+        const isRep = isPassengerRepOfVehicle(rider, vehicle.repName)
+          || (vehicle.repName ? rider.fullName.trim().toLowerCase() === vehicle.repName.trim().toLowerCase() : false)
+          || (!vehicle.repName && Boolean(matchRiderToOfficialRep(rider)));
+        
+        const displayName = isRep ? `*${rider.fullName.trim()}*` : rider.fullName.trim();
+        lines.push(`${riderNumber}. ${displayName}`);
         riderNumber++;
       }
     }

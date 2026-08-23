@@ -9,7 +9,7 @@ import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey, shortDate } from '@/lib/dates';
 import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType, type Passenger, type Vehicle, type VehicleDraftState } from '@/lib/types';
-import { hubDisplayName } from '@/lib/types';
+import { hubDisplayName, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural } from '@/lib/sort';
 import { vehicleRiders, passengersByPoolGroup } from '@/lib/manifest';
 import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEntry } from '@/lib/ledger';
@@ -1885,16 +1885,14 @@ const PassengerRow = React.memo(function PassengerRow({
                 {passenger.structure}
               </span>
             )}
-            {passenger.category === 'Ushers' && (
-              <span className="ml-1.5 inline-block rounded bg-amber-500/15 text-amber-300 px-1.5 py-0.5 text-[10px] font-semibold">
-                Usher (Early)
-              </span>
-            )}
-            {passenger.category === 'Normal' && (
-              <span className="ml-1.5 inline-block rounded bg-sky-500/15 text-sky-300 px-1.5 py-0.5 text-[10px]">
-                Normal
-              </span>
-            )}
+            {(() => {
+              const statusBadge = getPassengerStatusBadge(passenger);
+              return statusBadge ? (
+                <span className={`ml-1.5 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold ${statusBadge.colorClass}`} title={statusBadge.title}>
+                  {statusBadge.label}
+                </span>
+              ) : null;
+            })()}
             {passenger.stop && (
               <span className="ml-1.5 inline-block rounded bg-bg/60 px-1.5 py-0.5 text-[10px] text-muted">
                 {passenger.stop}

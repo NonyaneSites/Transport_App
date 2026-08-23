@@ -32,6 +32,9 @@ export interface ExtractedVehicleStats {
  * Checks if a passenger's structure or notes suggest they are a First Time Visitor
  */
 export function isAutoFirstTimeVisitor(passenger: Passenger, riderNote?: string): boolean {
+  if (passenger.memberType === 'FTV') {
+    return true;
+  }
   const s = (passenger.structure || '').toUpperCase();
   const m = (passenger.ministry || '').toUpperCase();
   const cat = (passenger.category || '').toUpperCase();

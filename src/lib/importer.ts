@@ -313,6 +313,43 @@ export function parseGoogleSheetSignups(
         ? sanitizeTransportValue(explicitHub)
         : hubDisplayName('Taxi', effectiveStop);
 
+      // Member / Visitor / FTV detection
+      const rawMemberCol = findValue([
+        'Are you a member or visitor',
+        'Are you a member or a visitor',
+        'Member or Visitor',
+        'Member / Visitor',
+        'Member/Visitor',
+        'Membership Status',
+        'Are you a member',
+        'Member, visitor or first time visitor',
+        'Visitor or Member',
+        'Visitor / Member',
+        'Visitor Status',
+        'Member Status',
+        'Membership',
+        'Category of attendee',
+        'Attendee Type',
+        'Visitor',
+        'First Time Visitor',
+      ]);
+      let memberType: 'M' | 'V' | 'FTV' | undefined = undefined;
+      const structUpper = (structure || '').toUpperCase();
+      if (structUpper.includes('FTV') || structUpper.includes('FIRST TIME')) {
+        memberType = 'FTV';
+      } else if (structUpper.includes('VISITOR')) {
+        memberType = 'V';
+      } else if (rawMemberCol) {
+        const val = rawMemberCol.toLowerCase().trim();
+        if (val.includes('first') || val.includes('ftv') || val.includes('1st') || val.includes('new')) {
+          memberType = 'FTV';
+        } else if (val.includes('visitor') || val.includes('visiting') || val.includes('guest') || val === 'v') {
+          memberType = 'V';
+        } else if (val.includes('member') || val === 'm') {
+          memberType = 'M';
+        }
+      }
+
       const id = `p-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 6)}`;
 
       return {
@@ -327,6 +364,7 @@ export function parseGoogleSheetSignups(
         service,
         category,
         ministry: rawMinistry || (category === 'Ushers' ? 'Usher (Early)' : undefined),
+        memberType,
         assignedTo: null,
         present: false,
         cancellationFeeOwed: false,
