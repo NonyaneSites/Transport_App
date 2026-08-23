@@ -76,12 +76,12 @@ export function extractVehicleStats(
   vehicle: Vehicle,
   passengerLookup: (id: string) => Passenger | undefined
 ): ExtractedVehicleStats {
-  const rawRiders = vehicle.riders
+  const rawRiders = (vehicle?.riders || [])
     .map(passengerLookup)
     .filter((p): p is Passenger => Boolean(p));
 
-  const isSubmitted = Boolean(vehicle.submitted);
-  const hasDraft = Boolean(vehicle.draftState && (vehicle.draftState.presentIds?.length || vehicle.draftState.absentIds?.length));
+  const isSubmitted = Boolean(vehicle?.submitted);
+  const hasDraft = Boolean(vehicle?.draftState && (vehicle?.draftState?.presentIds?.length || vehicle?.draftState?.absentIds?.length));
 
   let status: 'Submitted' | 'Draft in Progress' | 'Unmarked' = 'Unmarked';
   if (isSubmitted) {
@@ -95,7 +95,7 @@ export function extractVehicleStats(
   let sponsoredRiders: Passenger[] = [];
   let ftvRiders: Passenger[] = [];
 
-  const notesMap = vehicle.draftState?.notes || {};
+  const notesMap = vehicle?.draftState?.notes || {};
 
   if (isSubmitted) {
     // When submitted, presence and sponsored flags are persisted directly on signups
@@ -103,7 +103,7 @@ export function extractVehicleStats(
     absentRiders = rawRiders.filter((p) => !p.present);
     sponsoredRiders = rawRiders.filter((p) => p.sponsored);
     ftvRiders = presentRiders.filter((p) => isAutoFirstTimeVisitor(p, notesMap[p.id]));
-  } else if (hasDraft && vehicle.draftState) {
+  } else if (hasDraft && vehicle?.draftState) {
     // When in draft, read from draftState ID sets
     const pSet = new Set(vehicle.draftState.presentIds || []);
     const aSet = new Set(vehicle.draftState.absentIds || []);
@@ -126,15 +126,15 @@ export function extractVehicleStats(
   const sponsoredListStr = joinPassengerStats(sponsoredRiders);
   const cancellationListStr = joinPassengerStats(absentRiders);
 
-  // R40 per present passenger
-  const fareCollected = presentRiders.length * 40;
+  // R40 per present passenger (Buses free or 0 fare)
+  const fareCollected = (vehicle?.type || 'Taxi') === 'Bus' ? 0 : presentRiders.length * 40;
 
   return {
-    vehicleId: vehicle.id,
-    name: vehicle.name,
-    type: vehicle.type,
-    repName: vehicle.repName || vehicle.submittedBy || '—',
-    licensePlate: vehicle.licensePlate || '—',
+    vehicleId: vehicle?.id || '',
+    name: vehicle?.name || 'Vehicle',
+    type: vehicle?.type || 'Taxi',
+    repName: vehicle?.repName || vehicle?.submittedBy || '—',
+    licensePlate: vehicle?.licensePlate || '—',
     status,
     totalRiders: rawRiders.length,
     presentCount: presentRiders.length,
@@ -150,7 +150,7 @@ export function extractVehicleStats(
     ftvListStr,
     sponsoredListStr,
     cancellationListStr,
-    generalNotes: vehicle.generalNotes || vehicle.draftState?.generalNotes || '',
+    generalNotes: vehicle?.generalNotes || vehicle?.draftState?.generalNotes || '',
     rawRiders,
   };
 }
@@ -159,8 +159,9 @@ export function extractVehicleStats(
  * Extracts stats for all vehicles in a manifest sorted in natural order
  */
 export function extractAllVehicleStats(manifest: Manifest): ExtractedVehicleStats[] {
-  const passengerLookup = (id: string) => manifest.signups.find((p) => p.id === id);
-  const sorted = sortVehiclesNatural(manifest.vehicles);
+  const signups = manifest?.signups || [];
+  const passengerLookup = (id: string) => signups.find((p) => p.id === id);
+  const sorted = sortVehiclesNatural(manifest?.vehicles || []);
   return sorted.map((v) => extractVehicleStats(v, passengerLookup));
 }
 

@@ -10,7 +10,20 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
     .eq('date', key)
     .maybeSingle();
   if (error) throw error;
-  return (data as Manifest) ?? null;
+  if (!data) return null;
+  return {
+    date: data.date,
+    signups: Array.isArray(data.signups) ? data.signups : [],
+    vehicles: Array.isArray(data.vehicles)
+      ? data.vehicles.map((v: Vehicle) => ({
+          ...v,
+          riders: Array.isArray(v.riders) ? v.riders : [],
+          orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
+        }))
+      : [],
+    created_at: data.created_at,
+    updated_at: data.updated_at,
+  };
 }
 
 export async function upsertManifest(manifest: Manifest): Promise<void> {
@@ -19,8 +32,8 @@ export async function upsertManifest(manifest: Manifest): Promise<void> {
     .upsert(
       {
         date: manifest.date,
-        signups: manifest.signups,
-        vehicles: manifest.vehicles,
+        signups: Array.isArray(manifest.signups) ? manifest.signups : [],
+        vehicles: Array.isArray(manifest.vehicles) ? manifest.vehicles : [],
       },
       { onConflict: 'date' }
     );
@@ -33,7 +46,20 @@ export async function listAllManifests(): Promise<Manifest[]> {
     .select('date, signups, vehicles, created_at, updated_at')
     .order('date', { ascending: false });
   if (error) throw error;
-  return (data as Manifest[]) ?? [];
+  if (!data) return [];
+  return data.map((d) => ({
+    date: d.date,
+    signups: Array.isArray(d.signups) ? d.signups : [],
+    vehicles: Array.isArray(d.vehicles)
+      ? d.vehicles.map((v: Vehicle) => ({
+          ...v,
+          riders: Array.isArray(v.riders) ? v.riders : [],
+          orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
+        }))
+      : [],
+    created_at: d.created_at,
+    updated_at: d.updated_at,
+  }));
 }
 
 export async function deleteManifest(key: string): Promise<void> {

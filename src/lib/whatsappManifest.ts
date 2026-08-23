@@ -19,8 +19,10 @@ function serviceTitle(service: ServiceType, style: 'standard' | 'rep'): string {
 }
 
 function getRiderPassengers(manifest: Manifest, vehicle: Vehicle): Passenger[] {
-  return vehicle.riders
-    .map((id) => manifest.signups.find((p) => p.id === id))
+  const signups = manifest?.signups || [];
+  const riders = vehicle?.riders || [];
+  return riders
+    .map((id) => signups.find((p) => p.id === id))
     .filter((p): p is Passenger => Boolean(p));
 }
 
@@ -42,35 +44,43 @@ export function getRidersGroupedByHub(manifest: Manifest, vehicle: Vehicle): { l
 
 /**
  * Builds the standard WhatsApp Route/Stop Schedule Manifest
+ * with distinct blank line spacing between vehicle blocks and bold markdown formatting:
  * e.g.
- * Morning Serving Taxis
- * 09/08/2026
- * Taxi 1
- * 🛑 Braam - 06:30
- * Taxi 3
- * 🛑 Braam - 06:30
- * 🛑 Gate 7 - 06:35
+ * *Morning Serving Taxis*
+ * *23/08/2026*
+ * 
+ *  *Taxi 1* 
+ * 🛑 Braam - *06:30*
+ * 
+ *  *Taxi 2* 
+ * 🛑 Braam - *06:30*
+ * 
+ *  *Taxi 3* 
+ * 🛑 Braam - *06:30*
+ * 🛑 Gate 7 - *06:35*
  */
 export function generateWhatsAppRouteManifest(manifest: Manifest, service: ServiceType): string {
   const lines: string[] = [];
-  const { date: sessionDate } = parseManifestKey(manifest.date);
+  const { date: sessionDate } = parseManifestKey(manifest?.date || '');
   const header = serviceTitle(service, 'standard');
 
-  lines.push(header);
-  lines.push(shortDate(sessionDate));
+  lines.push(`*${header}*`);
+  lines.push(`*${shortDate(sessionDate)}*`);
 
-  const vehiclesToExport = sortVehiclesNatural(manifest.vehicles.filter((v) => !v.submitted));
+  const vehiclesToExport = sortVehiclesNatural((manifest?.vehicles || []).filter((v) => !v.submitted));
 
   for (const vehicle of vehiclesToExport) {
     const riders = getRiderPassengers(manifest, vehicle);
     if (riders.length === 0) continue;
 
-    lines.push(vehicle.name);
+    // Distinct blank line separation before each vehicle block
+    lines.push('');
+    lines.push(` *${vehicle.name}* `);
 
     const groups = getRidersGroupedByHub(manifest, vehicle);
     for (const group of groups) {
       const time = vehicle.stopTimes?.[group.label];
-      lines.push(time ? `\u{1F6D1} ${group.label} - ${time}` : `\u{1F6D1} ${group.label}`);
+      lines.push(time ? `🛑 ${group.label} - *${time}*` : `🛑 ${group.label}`);
     }
 
     const note = (vehicle.generalNotes ?? '').trim();
@@ -82,49 +92,37 @@ export function generateWhatsAppRouteManifest(manifest: Manifest, service: Servi
 
 /**
  * Builds the detailed WhatsApp Rep Manifest with passenger names numbered per stop
- * e.g.
- * Am Serving Taxis
- * 09/08/2026
- * Taxi 1
- * 🛑 Braam (15)
- * 1. Moses Mashilo
- * 2. Garainaya Mnisi
- * ...
- * Taxi 3 - 15
- * 🛑 Braam (8)
- * 1. Shaun Tsiloane
- * ...
- * 8. Kamogelo Lekgau
- * 🛑 Gate 7 (7)
- * 9. Lloyd Nyalungu
- * ...
+ * with clean blank lines between vehicles and bold headings
  */
 export function generateWhatsAppRepManifest(manifest: Manifest, service: ServiceType): string {
   const lines: string[] = [];
-  const { date: sessionDate } = parseManifestKey(manifest.date);
+  const { date: sessionDate } = parseManifestKey(manifest?.date || '');
   const header = serviceTitle(service, 'rep');
 
-  lines.push(header);
-  lines.push(shortDate(sessionDate));
+  lines.push(`*${header}*`);
+  lines.push(`*${shortDate(sessionDate)}*`);
 
-  const vehiclesToExport = sortVehiclesNatural(manifest.vehicles.filter((v) => !v.submitted));
+  const vehiclesToExport = sortVehiclesNatural((manifest?.vehicles || []).filter((v) => !v.submitted));
 
   for (const vehicle of vehiclesToExport) {
     const riders = getRiderPassengers(manifest, vehicle);
     if (riders.length === 0) continue;
 
+    // Distinct blank line separation before each vehicle block
+    lines.push('');
+
     const groups = getRidersGroupedByHub(manifest, vehicle);
     
-    // If vehicle has multiple stops, show "Taxi X - <total riders>", otherwise "Taxi X" (or Taxi X (15))
+    // If vehicle has multiple stops, show " *Taxi X - <total riders>* ", otherwise " *Taxi X* "
     if (groups.length > 1) {
-      lines.push(`${vehicle.name} - ${riders.length}`);
+      lines.push(` *${vehicle.name} - ${riders.length}* `);
     } else {
-      lines.push(vehicle.name);
+      lines.push(` *${vehicle.name}* `);
     }
 
     let riderNumber = 1;
     for (const group of groups) {
-      lines.push(`\u{1F6D1} ${group.label} (${group.riders.length})`);
+      lines.push(`🛑 ${group.label} (${group.riders.length})`);
       for (const rider of group.riders) {
         lines.push(`${riderNumber}. ${rider.fullName.trim()}`);
         riderNumber++;

@@ -88,9 +88,9 @@ export function AdminPage() {
 
   const serviceLabel = SERVICE_TYPES.find((s) => s.value === service)?.label ?? service;
 
-  const totalRegistrations = sessionList.reduce((sum, m) => sum + m.signups.length, 0);
-  const totalVehicles = sessionList.reduce((sum, m) => sum + m.vehicles.length, 0);
-  const totalPresent = sessionList.reduce((sum, m) => sum + m.signups.filter((p) => p.present).length, 0);
+  const totalRegistrations = (sessionList || []).reduce((sum, m) => sum + (m?.signups?.length || 0), 0);
+  const totalVehicles = (sessionList || []).reduce((sum, m) => sum + (m?.vehicles?.length || 0), 0);
+  const totalPresent = (sessionList || []).reduce((sum, m) => sum + (m?.signups?.filter((p) => p?.present)?.length || 0), 0);
 
   return (
     <div className="min-h-screen">
@@ -128,7 +128,7 @@ export function AdminPage() {
             date={date}
             service={service}
             onImport={handleImport}
-            existingCount={manifest?.signups.length ?? 0}
+            existingCount={manifest?.signups?.length ?? 0}
           />
         </div>
 
@@ -142,7 +142,7 @@ export function AdminPage() {
             <div className="text-xs text-muted font-mono">{key}</div>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            {manifest && manifest.vehicles.length > 0 && (
+            {manifest && (manifest.vehicles?.length ?? 0) > 0 && (
               <button
                 type="button"
                 onClick={() => setExportModalManifest({ manifest, serviceLabel })}
@@ -175,7 +175,23 @@ export function AdminPage() {
         ) : (
           <div className="mt-5 space-y-5">
             <VehicleAllocation
-              manifest={manifest ?? { date: key, signups: [], vehicles: [] }}
+              manifest={
+                manifest
+                  ? {
+                      date: manifest.date,
+                      signups: Array.isArray(manifest.signups) ? manifest.signups : [],
+                      vehicles: Array.isArray(manifest.vehicles)
+                        ? manifest.vehicles.map((v) => ({
+                            ...v,
+                            riders: Array.isArray(v.riders) ? v.riders : [],
+                            orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
+                          }))
+                        : [],
+                      created_at: manifest.created_at,
+                      updated_at: manifest.updated_at,
+                    }
+                  : { date: key, signups: [], vehicles: [] }
+              }
               serviceLabel={serviceLabel}
               service={service}
               onSave={save}
@@ -231,11 +247,13 @@ export function AdminPage() {
                       >
                         <option value="" className="bg-card-2">Select a session to download...</option>
                         {sessionList.map((m) => {
-                          const { date: mDate, service: mService } = parseKey(m.date);
+                          const { date: mDate, service: mService } = parseKey(m.date || '');
                           const def = SERVICE_TYPES.find((s) => s.value === mService);
+                          const signupsLen = m.signups?.length || 0;
+                          const vehiclesLen = m.vehicles?.length || 0;
                           return (
                             <option key={m.date} value={m.date} className="bg-card-2">
-                              {prettyDate(mDate)} · {def?.label ?? mService} — {m.signups.length} registered, {m.vehicles.length} vehicles
+                              {prettyDate(mDate)} · {def?.label ?? mService} — {signupsLen} registered, {vehiclesLen} vehicles
                             </option>
                           );
                         })}
@@ -274,7 +292,7 @@ export function AdminPage() {
                         onClick={() => {
                           const m = sessionList.find((s) => s.date === archiveSelected);
                           if (!m) return;
-                          const { service: mService } = parseKey(m.date);
+                          const { service: mService } = parseKey(m.date || '');
                           const def = SERVICE_TYPES.find((s) => s.value === mService);
                           setExportModalManifest({ manifest: m, serviceLabel: def?.label ?? mService });
                         }}
@@ -290,7 +308,7 @@ export function AdminPage() {
                         onClick={() => {
                           const m = sessionList.find((s) => s.date === archiveSelected);
                           if (!m) return;
-                          const { date: mDate, service: mService } = parseKey(m.date);
+                          const { date: mDate, service: mService } = parseKey(m.date || '');
                           const text = generateWhatsAppRouteManifest(m, mService as ServiceType);
                           downloadTextFile(`whatsapp_manifest_${mDate}_${mService}.txt`, text);
                         }}
@@ -306,7 +324,7 @@ export function AdminPage() {
                         onClick={() => {
                           const m = sessionList.find((s) => s.date === archiveSelected);
                           if (!m) return;
-                          const { date: mDate, service: mService } = parseKey(m.date);
+                          const { date: mDate, service: mService } = parseKey(m.date || '');
                           const text = generateWhatsAppRepManifest(m, mService as ServiceType);
                           downloadTextFile(`whatsapp_rep_manifest_${mDate}_${mService}.txt`, text);
                         }}
@@ -335,9 +353,11 @@ export function AdminPage() {
                         </thead>
                         <tbody className="divide-y divide-line/60">
                           {sessionList.map((m) => {
-                            const { date: mDate, service: mService } = parseKey(m.date);
+                            const { date: mDate, service: mService } = parseKey(m.date || '');
                             const def = SERVICE_TYPES.find((s) => s.value === mService);
-                            const present = m.signups.filter((p) => p.present).length;
+                            const signupsList = Array.isArray(m.signups) ? m.signups : [];
+                            const vehiclesList = Array.isArray(m.vehicles) ? m.vehicles : [];
+                            const present = signupsList.filter((p) => p?.present).length;
                             const updated = m.updated_at ? new Date(m.updated_at).toLocaleString('en-ZA', {
                               day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
                             }) : '—';
@@ -356,14 +376,14 @@ export function AdminPage() {
                                   </div>
                                 </td>
                                 <td className="px-4 py-3 text-right">
-                                  <span className="font-display text-lg font-bold text-ink">{m.signups.length}</span>
+                                  <span className="font-display text-lg font-bold text-ink">{signupsList.length}</span>
                                 </td>
                                 <td className="px-4 py-3 text-right">
-                                  <span className="font-display text-lg font-bold text-crimson-400">{m.vehicles.length}</span>
+                                  <span className="font-display text-lg font-bold text-crimson-400">{vehiclesList.length}</span>
                                 </td>
                                 <td className="px-4 py-3 text-right">
                                   <span className="font-display text-lg font-bold text-success-light">{present}</span>
-                                  <span className="text-xs text-muted"> / {m.signups.length}</span>
+                                  <span className="text-xs text-muted"> / {signupsList.length}</span>
                                 </td>
                                 <td className="px-4 py-3 text-right font-mono text-xs text-muted">{updated}</td>
                                 <td className="px-4 py-3 text-center">
