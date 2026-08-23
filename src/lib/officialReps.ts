@@ -36,13 +36,13 @@ export const ALL_OFFICIAL_REPS: OfficialRep[] = [
 
   // S9
   { fullName: 'Amogelang Nhlabathi', structure: 'S9', lastName: 'Nhlabathi', aliases: ['Amo Nhlabathi', 'Amogelang N', 'Amo N'] },
-  { fullName: 'Neo Mokoena', structure: 'S9', lastName: 'Mokoena', aliases: ['Neo Mokeona'], role: 'Taxi Coordination' },
 
   // S10
   { fullName: 'Lisakhanya Mbinda', structure: 'S10', lastName: 'Mbinda', aliases: ['Lisa Mbinda'] },
   { fullName: 'Aphiwe Thusi', structure: 'S10', lastName: 'Thusi', aliases: ['Aphi Thusi'] },
 
   // S11
+  { fullName: 'Neo Mokoena', structure: 'S11', lastName: 'Mokoena', aliases: ['Neo Mokeona'], role: 'Taxi Coordination' },
   { fullName: 'Merica Nkabinde', structure: 'S11', lastName: 'Nkabinde', aliases: [], role: 'Bus Coordinator' },
 
   // S13

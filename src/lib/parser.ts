@@ -84,11 +84,7 @@ export function extractMemberType(row: RawRow, headers: string[], structure?: st
   return undefined;
 }
 
-export function extractCategoryAndMinistry(
-  row: RawRow,
-  headers: string[],
-  sheetName?: string
-): { category: 'Ushers' | 'Serving' | 'Normal'; ministry: string } {
+export function extractCategoryAndMinistry(row: RawRow, headers: string[]): { category: 'Ushers' | 'Serving' | 'Normal'; ministry: string } {
   const serviceTypeCol = findColumn(headers, [
     'am service type',
     'pm service type',
@@ -102,7 +98,6 @@ export function extractCategoryAndMinistry(
   const rawMinistry = servingCol ? clean(row[servingCol]) : '';
   const serviceLower = lower(rawService);
   const ministryLower = lower(rawMinistry);
-  const sheetLower = lower(clean(sheetName || ''));
 
   // 1. Explicit Ushers (Early)
   if (
@@ -111,18 +106,13 @@ export function extractCategoryAndMinistry(
     serviceLower.includes('usher(early)') ||
     serviceLower.includes('ushers(early)') ||
     (serviceLower.includes('usher') && serviceLower.includes('early')) ||
-    (serviceLower.includes('early') && ministryLower.includes('usher')) ||
-    sheetLower.includes('usher')
+    (serviceLower.includes('early') && ministryLower.includes('usher'))
   ) {
     return { category: 'Ushers', ministry: rawMinistry || 'Usher (Early)' };
   }
 
   // 2. Explicit Normal / Non-serving
-  if (
-    serviceLower === 'normal' ||
-    serviceLower.startsWith('normal') ||
-    (sheetLower.includes('normal') && !sheetLower.includes('serving'))
-  ) {
+  if (serviceLower === 'normal' || serviceLower.startsWith('normal')) {
     return { category: 'Normal', ministry: '' };
   }
 
@@ -130,8 +120,7 @@ export function extractCategoryAndMinistry(
   if (
     serviceLower.includes('serving') ||
     SERVING_KEYWORDS.some((k) => ministryLower.includes(k) || serviceLower.includes(k)) ||
-    Boolean(rawMinistry) ||
-    sheetLower.includes('serving')
+    Boolean(rawMinistry)
   ) {
     return { category: 'Serving', ministry: rawMinistry || 'Serving' };
   }
@@ -406,70 +395,6 @@ function matchesDate(row: RawRow, headers: string[], selectedDate: string): bool
   return true;
 }
 
-export function matchesService(
-  row: RawRow,
-  headers: string[],
-  selectedService: ServiceType,
-  sheetName: string = ''
-): boolean {
-  const selectedPeriod: 'AM' | 'PM' = selectedService.startsWith('AM') ? 'AM' : 'PM';
-  const normSheet = lower(clean(sheetName));
-
-  // If sheet explicitly declares PM, do not include in AM service
-  if (selectedPeriod === 'AM' && (normSheet.includes('pm') || normSheet.includes('evening')) && !normSheet.includes('am')) {
-    return false;
-  }
-  // If sheet explicitly declares AM, do not include in PM service
-  if (selectedPeriod === 'PM' && (normSheet.includes('am') || normSheet.includes('morning')) && !normSheet.includes('pm')) {
-    return false;
-  }
-
-  // Check row service column for AM / PM indicators
-  const serviceCol = findColumn(headers, [
-    'which service are you attending',
-    'service attending',
-    'service',
-    'am service type',
-    'pm service type',
-    'service type',
-    'servicetype',
-  ]);
-
-  if (serviceCol) {
-    const val = lower(clean(row[serviceCol]));
-    if (val) {
-      if (
-        selectedPeriod === 'AM' &&
-        (val.includes('pm') || val.includes('evening') || val.includes('afternoon') || val.includes('17:00') || val.includes('18:00')) &&
-        !val.includes('am') &&
-        !val.includes('morning')
-      ) {
-        return false;
-      }
-      if (
-        selectedPeriod === 'PM' &&
-        (val.includes('am') || val.includes('morning') || val.includes('08:30') || val.includes('10:00')) &&
-        !val.includes('pm') &&
-        !val.includes('evening')
-      ) {
-        return false;
-      }
-    }
-  }
-
-  // Check if both AM and PM columns exist in the row
-  const amCol = findColumn(headers, ['am service type', 'am service', 'am serving']);
-  const pmCol = findColumn(headers, ['pm service type', 'pm service', 'pm serving']);
-  if (amCol && pmCol) {
-    const amVal = clean(row[amCol]);
-    const pmVal = clean(row[pmCol]);
-    if (selectedPeriod === 'AM' && !amVal && pmVal) return false;
-    if (selectedPeriod === 'PM' && !pmVal && amVal) return false;
-  }
-
-  return true;
-}
-
 export interface ParseResult {
   passengers: Passenger[];
   skipped: number;
@@ -482,18 +407,19 @@ export interface ParseResult {
 
 export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResult {
   const wb = XLSX.read(file, { type: 'array', cellDates: true });
-  if (!wb.SheetNames || wb.SheetNames.length === 0) {
-    return {
-      passengers: [],
-      skipped: 0,
-      totalRows: 0,
-      matchedDate: 0,
-      matchedService: 0,
-      matchedTransport: 0,
-      warnings: ['No sheets found in workbook.'],
-    };
+  const sheetName = wb.SheetNames[0];
+  if (!sheetName) {
+    return { passengers: [], skipped: 0, totalRows: 0, matchedDate: 0, matchedService: 0, matchedTransport: 0, warnings: ['No sheets found in workbook.'] };
   }
+  const sheet = wb.Sheets[sheetName];
+  const rows = XLSX.utils.sheet_to_json<RawRow>(sheet, { defval: '' });
+  const warnings: string[] = [];
+  if (rows.length === 0) {
+    return { passengers: [], skipped: 0, totalRows: 0, matchedDate: 0, matchedService: 0, matchedTransport: 0, warnings: ['Sheet has no data rows.'] };
+  }
+  const headers = Object.keys(rows[0]);
 
+  // Pass 1: Gather all valid signups for the selected date requiring transport
   interface ValidatedCandidate {
     row: RawRow;
     name: string;
@@ -507,86 +433,66 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
     ministry: string;
     memberType?: 'M' | 'V' | 'FTV';
     id: string;
-    sheetName: string;
   }
 
   const dateMatchedCandidates: ValidatedCandidate[] = [];
   const seenCandidateIds = new Set<string>();
-  let totalRows = 0;
   let skipped = 0;
   let matchedDate = 0;
   let matchedTransport = 0;
-  const warnings: string[] = [];
 
-  // Iterate across ALL sheets in the workbook
-  for (const sheetName of wb.SheetNames) {
-    const sheet = wb.Sheets[sheetName];
-    if (!sheet) continue;
-
-    const rows = XLSX.utils.sheet_to_json<RawRow>(sheet, { defval: '' });
-    if (rows.length === 0) continue;
-    const headers = Object.keys(rows[0]);
-    totalRows += rows.length;
-
-    for (const row of rows) {
-      const name = extractFullName(row, headers);
-      if (!name) {
-        skipped++;
-        continue;
-      }
-
-      if (!wantsTransport(row, headers)) {
-        skipped++;
-        continue;
-      }
-      matchedTransport++;
-
-      if (!matchesDate(row, headers, opts.selectedDate)) {
-        skipped++;
-        continue;
-      }
-      matchedDate++;
-
-      if (!matchesService(row, headers, opts.selectedService, sheetName)) {
-        skipped++;
-        continue;
-      }
-
-      const stop = extractStop(row, headers);
-      const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-      if (seenCandidateIds.has(id)) {
-        skipped++;
-        continue;
-      }
-      seenCandidateIds.add(id);
-
-      const structure = extractStructure(row, headers);
-      const phone = extractPhone(row, headers);
-      const userEmail = extractEmail(row, headers);
-      const timestamp = extractTimestamp(row, headers);
-      const hub = hubDisplayName('Taxi', stop);
-      const { category, ministry } = extractCategoryAndMinistry(row, headers, sheetName);
-      const memberType = extractMemberType(row, headers, structure);
-
-      dateMatchedCandidates.push({
-        row,
-        name,
-        stop,
-        structure,
-        phone,
-        userEmail,
-        timestamp,
-        hub,
-        category,
-        ministry,
-        memberType,
-        id,
-        sheetName,
-      });
+  for (const row of rows) {
+    const name = extractFullName(row, headers);
+    if (!name) {
+      skipped++;
+      continue;
     }
+
+    if (!wantsTransport(row, headers)) {
+      skipped++;
+      continue;
+    }
+    matchedTransport++;
+
+    if (!matchesDate(row, headers, opts.selectedDate)) {
+      skipped++;
+      continue;
+    }
+    matchedDate++;
+
+    const stop = extractStop(row, headers);
+    const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+    if (seenCandidateIds.has(id)) {
+      skipped++;
+      continue;
+    }
+    seenCandidateIds.add(id);
+
+    const structure = extractStructure(row, headers);
+    const phone = extractPhone(row, headers);
+    const userEmail = extractEmail(row, headers);
+    const timestamp = extractTimestamp(row, headers);
+    const hub = hubDisplayName('Taxi', stop);
+    const { category, ministry } = extractCategoryAndMinistry(row, headers);
+    const memberType = extractMemberType(row, headers, structure);
+
+    dateMatchedCandidates.push({
+      row,
+      name,
+      stop,
+      structure,
+      phone,
+      userEmail,
+      timestamp,
+      hub,
+      category,
+      ministry,
+      memberType,
+      id,
+    });
   }
 
-  // Count categories for the selected date & service
+  // Count categories for the selected date
   const ushersCount = dateMatchedCandidates.filter((c) => c.category === 'Ushers').length;
   const normalCount = dateMatchedCandidates.filter((c) => c.category === 'Normal').length;
 
@@ -616,7 +522,7 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
       }
     } else if (selectedService === 'PM_Serving') {
       // PM Serving
-      include = c.category === 'Serving' || c.category === 'Ushers';
+      include = c.category === 'Serving';
     }
 
     if (include) {
@@ -674,7 +580,7 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
   return {
     passengers,
     skipped,
-    totalRows,
+    totalRows: rows.length,
     matchedDate,
     matchedService,
     matchedTransport,
