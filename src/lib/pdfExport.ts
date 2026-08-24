@@ -143,7 +143,6 @@ export function downloadCancellationDebtPdf(
   const report = compileDebtReport(entries);
   const grandTotal = report.reduce((sum, s) => sum + s.totalDebt, 0);
   const totalDebtors = report.reduce((sum, s) => sum + s.people.length, 0);
-  const totalEntries = entries.length;
 
   const todayStr = new Date().toLocaleDateString('en-ZA', {
     year: 'numeric',
@@ -172,15 +171,19 @@ export function downloadCancellationDebtPdf(
   // --- Summary Box ---
   doc.setDrawColor(220, 38, 38);
   doc.setFillColor(254, 242, 242);
-  doc.roundedRect(margin, y, pageWidth - margin * 2, 16, 2, 2, 'FD');
+  doc.roundedRect(margin, y, pageWidth - margin * 2, 11, 2, 2, 'FD');
 
-  doc.setTextColor(30, 41, 59);
+  doc.setTextColor(185, 28, 28);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9);
-  doc.text(`Total Outstanding Debt: R${grandTotal.toLocaleString()}`, margin + 4, y + 6);
-  doc.text(`Structures: ${report.length}  |  Total Debtors: ${totalDebtors}  |  Total Missed Trips: ${totalEntries}`, margin + 4, y + 12);
+  doc.setFontSize(10);
+  doc.text(`Total Outstanding Debt: R${grandTotal.toLocaleString()}`, margin + 4, y + 7.5);
 
-  y += 20;
+  doc.setTextColor(71, 85, 105);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.5);
+  doc.text(`Total Debtors: ${totalDebtors}`, pageWidth - margin - 40, y + 7.5);
+
+  y += 15;
 
   // --- Official Bank & Policy Details ---
   doc.setDrawColor(203, 213, 225);
@@ -221,17 +224,44 @@ export function downloadCancellationDebtPdf(
   doc.setFont('helvetica', 'normal');
   doc.text('Name + Structure (e.g. John Doe S1)', margin + 122, y + 16);
 
-  doc.setFont('helvetica', 'italic');
+  doc.setFont('helvetica', 'normal');
   doc.setFontSize(7.5);
+  doc.setTextColor(71, 85, 105);
   doc.text(
     '• Unpaid cancellation fees must be settled within 3 weeks. Each structure is collectively liable for its members.',
     margin + 4,
-    y + 21
+    y + 20.5
   );
-  doc.text(
-    '• Cash may be paid to a transport rep on your next trip. Upload Proof of Payment (POP): https://forms.gle/HDvmuZywzNitWFpU6',
-    margin + 4,
-    y + 25
+
+  const bulletPrefix = '• Cash may be paid to a transport rep on your next trip. ';
+  doc.setTextColor(71, 85, 105);
+  doc.setFont('helvetica', 'normal');
+  doc.text(bulletPrefix, margin + 4, y + 25);
+
+  const bulletPrefixWidth = doc.getTextWidth(bulletPrefix);
+  const popText = 'Upload Proof of Payment (POP): ';
+  doc.setTextColor(15, 23, 42);
+  doc.setFont('helvetica', 'bold');
+  doc.text(popText, margin + 4 + bulletPrefixWidth, y + 25);
+
+  const popTextWidth = doc.getTextWidth(popText);
+  const linkUrl = 'https://forms.gle/HDvmuZywzNitWFpU6';
+  const linkDisplay = 'https://forms.gle/HDvmuZywzNitWFpU6';
+
+  // Make the link prominent Royal Blue and clickable
+  doc.setTextColor(29, 78, 216); // Royal Blue (#1D4ED8)
+  doc.setFont('helvetica', 'bold');
+  doc.textWithLink(linkDisplay, margin + 4 + bulletPrefixWidth + popTextWidth, y + 25, { url: linkUrl });
+
+  // Underline to make it immediately obvious it's interactive
+  const linkWidth = doc.getTextWidth(linkDisplay);
+  doc.setDrawColor(29, 78, 216);
+  doc.setLineWidth(0.25);
+  doc.line(
+    margin + 4 + bulletPrefixWidth + popTextWidth,
+    y + 25.5,
+    margin + 4 + bulletPrefixWidth + popTextWidth + linkWidth,
+    y + 25.5
   );
 
   y += 32;
@@ -240,16 +270,27 @@ export function downloadCancellationDebtPdf(
   const tableRows: (string | { content: string; styles?: Record<string, unknown>; colSpan?: number })[][] = [];
 
   for (const structGroup of report) {
-    // Structure Section Header row: e.g. "S1 - (Debt: R160)"
+    // Structure Section Header row with total debt positioned directly in the Amount Owing column (bold crimson)
     tableRows.push([
       {
-        content: `${structGroup.structure} - (Debt: R${structGroup.totalDebt})`,
-        colSpan: 3,
+        content: structGroup.structure,
+        colSpan: 2,
+        styles: {
+          fillColor: [241, 245, 249],
+          textColor: [15, 23, 42],
+          fontStyle: 'bold',
+          fontSize: 9.5,
+          cellPadding: { top: 3.5, bottom: 3.5, left: 4, right: 4 },
+        },
+      },
+      {
+        content: `R${structGroup.totalDebt.toLocaleString()}`,
         styles: {
           fillColor: [241, 245, 249],
           textColor: [185, 28, 28],
           fontStyle: 'bold',
-          fontSize: 9.5,
+          fontSize: 10,
+          halign: 'right',
           cellPadding: { top: 3.5, bottom: 3.5, left: 4, right: 4 },
         },
       },
@@ -262,7 +303,7 @@ export function downloadCancellationDebtPdf(
       tableRows.push([
         person.name,
         datesStr,
-        `R${person.totalDebt}`,
+        `R${person.totalDebt.toLocaleString()}`,
       ]);
     }
   }
@@ -290,7 +331,7 @@ export function downloadCancellationDebtPdf(
     columnStyles: {
       0: { cellWidth: 55, fontStyle: 'bold' },
       1: { cellWidth: 'auto', textColor: [71, 85, 105] },
-      2: { cellWidth: 26, halign: 'right', fontStyle: 'bold', textColor: [185, 28, 28] },
+      2: { cellWidth: 30, halign: 'right', fontStyle: 'bold', textColor: [185, 28, 28] },
     },
     didDrawPage: (data) => {
       // Footer on every page

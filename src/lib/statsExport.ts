@@ -1,7 +1,7 @@
 import * as XLSX from 'xlsx';
 import type { Manifest, Vehicle, Passenger } from './types';
 import { sortVehiclesNatural } from './sort';
-import { shortDate, parseManifestKey } from './dates';
+import { shortDate, parseManifestKey, prettyDate } from './dates';
 
 export interface ExtractedVehicleStats {
   vehicleId: string;
@@ -26,10 +26,11 @@ export interface ExtractedVehicleStats {
   cancellationListStr: string;
   generalNotes: string;
   rawRiders: Passenger[];
+  submittedAt?: string;
 }
 
 /**
- * Checks if a passenger's structure or notes suggest they are a First Time Visitor
+ * Checks if a passenger's structure, memberType, category, or notes suggest they are a First Time Visitor
  */
 export function isAutoFirstTimeVisitor(passenger: Passenger, riderNote?: string): boolean {
   if (passenger.memberType === 'FTV') {
@@ -39,8 +40,12 @@ export function isAutoFirstTimeVisitor(passenger: Passenger, riderNote?: string)
   const m = (passenger.ministry || '').toUpperCase();
   const cat = (passenger.category || '').toUpperCase();
   const n = (riderNote || '').toUpperCase();
+  const name = (passenger.fullName || '').toUpperCase();
 
   if (s.includes('FTV') || s.includes('VISITOR') || s.includes('FIRST TIME') || s.includes('GUEST') || s.includes('NEW')) {
+    return true;
+  }
+  if (name.includes('FTV') || name.includes('FIRST TIME')) {
     return true;
   }
   if (m.includes('FTV') || m.includes('VISITOR') || m.includes('FIRST TIME')) {
@@ -155,6 +160,7 @@ export function extractVehicleStats(
     cancellationListStr,
     generalNotes: vehicle?.generalNotes || vehicle?.draftState?.generalNotes || '',
     rawRiders,
+    submittedAt: vehicle?.submittedAt,
   };
 }
 
@@ -170,82 +176,75 @@ export function extractAllVehicleStats(manifest: Manifest): ExtractedVehicleStat
 
 /**
  * Generates an Excel (.xlsx) workbook containing:
- * 1. Sheet "Taxi Stats Summary" (Each taxi with counts + full lists formatted as "Person A S3, Person B S2")
- * 2. Sheet "Detailed Passenger Roster" (Individual passenger rows with taxi, status, stop, structure, debt)
- * 3. Sheet "Stats Link Copy Roster" (Pre-formatted text blocks ready for copy/pasting)
+ * 1. Sheet "Transport Stats Summary" with the exact columns
+ * 2. Sheet "Detailed Passenger Roster"
+ * 3. Sheet "Stats Link Format"
  */
 export function downloadTaxiStatsExcel(manifest: Manifest, customFileName?: string): void {
   const statsList = extractAllVehicleStats(manifest);
   const { date: sessionDate, service: sessionService } = parseManifestKey(manifest.date);
   const wb = XLSX.utils.book_new();
 
-  // 1. Sheet 1: Taxi Stats Summary
+  // 1. Sheet 1: Transport Stats Summary (Matches exact transport stats columns)
   const summaryRows = statsList.map((s) => ({
-    'Vehicle': s.name,
-    'Type': s.type,
-    'Rep Name': s.repName,
-    'License Plate': s.licensePlate,
-    'Status': s.status,
-    'Total Allocated': s.totalRiders,
-    'Present Count': s.presentCount,
-    'Absent Count': s.absentCount,
-    'FTV Count': s.ftvCount,
-    'Sponsored Count': s.sponsoredCount,
-    'Fare Total (R)': s.fareCollected,
-    'List of Present Members & Visitors': s.presentListStr,
-    'List of First Time Visitors (FTVs)': s.ftvListStr,
-    'List of Sponsorships': s.sponsoredListStr,
-    'List of Cancellations (Absentees)': s.cancellationListStr,
-    'General Notes': s.generalNotes,
+    'Timestamp': s.submittedAt || new Date().toISOString(),
+    'Money Collector Name & Surname': s.repName !== '—' ? s.repName : '',
+    'Date': sessionDate,
+    'Service': sessionService || 'Service',
+    'Vehicle type': s.type,
+    'Vehicle Number Plate': s.licensePlate !== '—' ? s.licensePlate : '',
+    'Taxi No./Bus No.': s.name,
+    'Members & Visitors list (Name & Surname - As written when booking)': s.presentListStr,
+    "FTV's List (Name & Surname - As written when booking)": s.ftvListStr,
+    'Headcount': s.presentCount,
+    'Total Money Collected ': s.fareCollected,
+    'Money Outstanding/extra ': s.absentCount > 0 ? -(s.absentCount * 40) : 0,
+    'Cancellations (Full name incl. Structure)': s.cancellationListStr,
+    'Sponsorships (Name, Surname and Structure)': s.sponsoredListStr,
+    'Additional notes (People paying for others, Cancellations being paid etc.)': s.generalNotes,
   }));
 
-  // Append Grand Total row
-  const totalAllocated = statsList.reduce((sum, s) => sum + s.totalRiders, 0);
-  const totalPresent = statsList.reduce((sum, s) => sum + s.presentCount, 0);
-  const totalAbsent = statsList.reduce((sum, s) => sum + s.absentCount, 0);
-  const totalFTVs = statsList.reduce((sum, s) => sum + s.ftvCount, 0);
-  const totalSponsored = statsList.reduce((sum, s) => sum + s.sponsoredCount, 0);
-  const totalFares = statsList.reduce((sum, s) => sum + s.fareCollected, 0);
+  const totalHeadcount = statsList.reduce((sum, s) => sum + s.presentCount, 0);
+  const totalCollected = statsList.reduce((sum, s) => sum + s.fareCollected, 0);
+  const totalOutstanding = statsList.reduce((sum, s) => sum + (s.absentCount > 0 ? -(s.absentCount * 40) : 0), 0);
 
   summaryRows.push({
-    'Vehicle': 'GRAND TOTAL',
-    'Type': '—',
-    'Rep Name': '—',
-    'License Plate': '—',
-    'Status': '—',
-    'Total Allocated': totalAllocated,
-    'Present Count': totalPresent,
-    'Absent Count': totalAbsent,
-    'FTV Count': totalFTVs,
-    'Sponsored Count': totalSponsored,
-    'Fare Total (R)': totalFares,
-    'List of Present Members & Visitors': '—',
-    'List of First Time Visitors (FTVs)': '—',
-    'List of Sponsorships': '—',
-    'List of Cancellations (Absentees)': '—',
-    'General Notes': '',
+    'Timestamp': 'GRAND TOTAL',
+    'Money Collector Name & Surname': '',
+    'Date': sessionDate,
+    'Service': sessionService || '',
+    'Vehicle type': '—',
+    'Vehicle Number Plate': '',
+    'Taxi No./Bus No.': `${statsList.length} Vehicles`,
+    'Members & Visitors list (Name & Surname - As written when booking)': '—',
+    "FTV's List (Name & Surname - As written when booking)": '—',
+    'Headcount': totalHeadcount,
+    'Total Money Collected ': totalCollected,
+    'Money Outstanding/extra ': totalOutstanding,
+    'Cancellations (Full name incl. Structure)': '—',
+    'Sponsorships (Name, Surname and Structure)': '—',
+    'Additional notes (People paying for others, Cancellations being paid etc.)': '',
   });
 
   const wsSummary = XLSX.utils.json_to_sheet(summaryRows);
   wsSummary['!cols'] = [
-    { wch: 14 }, // Vehicle
-    { wch: 8 },  // Type
-    { wch: 20 }, // Rep Name
-    { wch: 14 }, // License Plate
-    { wch: 18 }, // Status
-    { wch: 15 }, // Total Allocated
-    { wch: 13 }, // Present Count
-    { wch: 13 }, // Absent Count
-    { wch: 11 }, // FTV Count
-    { wch: 16 }, // Sponsored Count
-    { wch: 13 }, // Fare Total
-    { wch: 55 }, // Present List
-    { wch: 40 }, // FTV List
-    { wch: 35 }, // Sponsorships
+    { wch: 22 }, // Timestamp
+    { wch: 24 }, // Money Collector
+    { wch: 12 }, // Date
+    { wch: 16 }, // Service
+    { wch: 12 }, // Vehicle type
+    { wch: 18 }, // Number Plate
+    { wch: 16 }, // Taxi No./Bus No.
+    { wch: 55 }, // Members & Visitors list
+    { wch: 45 }, // FTV list
+    { wch: 12 }, // Headcount
+    { wch: 20 }, // Total Money Collected
+    { wch: 22 }, // Money Outstanding/extra
     { wch: 45 }, // Cancellations
-    { wch: 30 }, // Notes
+    { wch: 40 }, // Sponsorships
+    { wch: 40 }, // Additional notes
   ];
-  XLSX.utils.book_append_sheet(wb, wsSummary, 'Taxi Stats Summary');
+  XLSX.utils.book_append_sheet(wb, wsSummary, 'Transport Stats Summary');
 
   // 2. Sheet 2: Detailed Passenger Roster
   const passengerRows: Record<string, string | number>[] = [];
@@ -275,27 +274,27 @@ export function downloadTaxiStatsExcel(manifest: Manifest, customFileName?: stri
   if (passengerRows.length > 0) {
     const wsPassengers = XLSX.utils.json_to_sheet(passengerRows);
     wsPassengers['!cols'] = [
-      { wch: 14 }, // Vehicle
-      { wch: 10 }, // Type
-      { wch: 28 }, // Full Name
-      { wch: 12 }, // Structure
-      { wch: 24 }, // Stop
-      { wch: 16 }, // Phone
-      { wch: 12 }, // Status
-      { wch: 8 },  // FTV
-      { wch: 10 }, // Sponsored
-      { wch: 25 }, // Sponsor Note
-      { wch: 20 }, // Cancellation Debt
+      { wch: 14 },
+      { wch: 10 },
+      { wch: 28 },
+      { wch: 12 },
+      { wch: 24 },
+      { wch: 16 },
+      { wch: 12 },
+      { wch: 8 },
+      { wch: 10 },
+      { wch: 25 },
+      { wch: 20 },
     ];
     XLSX.utils.book_append_sheet(wb, wsPassengers, 'Detailed Roster');
   }
 
-  // 3. Sheet 3: Google Sheets & WhatsApp Formatted Stats Blocks
+  // 3. Sheet 3: Stats Link Format
   const textBlocks: (string | number)[][] = [
-    ['CRC Johannesburg — Vehicle Stats Link Summary'],
-    [`Session Date: ${shortDate(sessionDate)} · ${sessionService}`],
+    ['CRC Johannesburg — Transport Stats Link Summary'],
+    [`Session Date: ${prettyDate(sessionDate)} · ${sessionService}`],
     [],
-    ['Vehicle', 'Rep', 'Present List', 'FTV List', 'Sponsorship List', 'Cancellation List'],
+    ['Vehicle', 'Rep', 'Present Members & Visitors', 'First Time Visitors', 'Sponsorships', 'Cancellations'],
   ];
 
   statsList.forEach((s) => {
@@ -315,52 +314,50 @@ export function downloadTaxiStatsExcel(manifest: Manifest, customFileName?: stri
   ];
   XLSX.utils.book_append_sheet(wb, wsBlocks, 'Stats Link Format');
 
-  const fileName = customFileName || `taxi_stats_${sessionDate}_${sessionService || 'session'}.xlsx`;
+  const fileName = customFileName || `transport_stats_${sessionDate}_${sessionService || 'session'}.xlsx`;
   XLSX.writeFile(wb, fileName);
 }
 
 /**
- * Downloads a CSV formatted specifically for Google Sheets or Excel
+ * Downloads a CSV formatted specifically matching the official Transport Stats format
  */
 export function downloadTaxiStatsCSV(manifest: Manifest, customFileName?: string): void {
   const statsList = extractAllVehicleStats(manifest);
   const { date: sessionDate, service: sessionService } = parseManifestKey(manifest.date);
 
   const headers = [
-    'Vehicle',
-    'Type',
-    'Rep Name',
-    'License Plate',
-    'Status',
-    'Total Allocated',
-    'Present Count',
-    'Absent Count',
-    'FTV Count',
-    'Sponsored Count',
-    'Fare Total (R)',
-    'List of Present Members & Visitors',
-    'List of First Time Visitors (FTVs)',
-    'List of Sponsorships',
-    'List of Cancellations (Absentees)',
-    'General Notes',
+    'Timestamp',
+    'Money Collector Name & Surname',
+    'Date',
+    'Service',
+    'Vehicle type',
+    'Vehicle Number Plate',
+    'Taxi No./Bus No.',
+    'Members & Visitors list (Name & Surname - As written when booking)',
+    "FTV's List (Name & Surname - As written when booking)",
+    'Headcount',
+    'Total Money Collected ',
+    'Money Outstanding/extra ',
+    'Cancellations (Full name incl. Structure)',
+    'Sponsorships (Name, Surname and Structure)',
+    'Additional notes (People paying for others, Cancellations being paid etc.)',
   ];
 
   const rows = statsList.map((s) => [
-    s.name,
+    s.submittedAt || new Date().toISOString(),
+    s.repName !== '—' ? s.repName : '',
+    sessionDate,
+    sessionService || 'Service',
     s.type,
-    s.repName,
-    s.licensePlate,
-    s.status,
-    s.totalRiders,
-    s.presentCount,
-    s.absentCount,
-    s.ftvCount,
-    s.sponsoredCount,
-    s.fareCollected,
+    s.licensePlate !== '—' ? s.licensePlate : '',
+    s.name,
     s.presentListStr,
     s.ftvListStr,
-    s.sponsoredListStr,
+    s.presentCount,
+    s.fareCollected,
+    s.absentCount > 0 ? -(s.absentCount * 40) : 0,
     s.cancellationListStr,
+    s.sponsoredListStr,
     s.generalNotes,
   ]);
 
@@ -377,49 +374,50 @@ export function downloadTaxiStatsCSV(manifest: Manifest, customFileName?: string
     ...rows.map((row) => row.map(escapeCSV).join(',')),
   ].join('\n');
 
-  const fileName = customFileName || `taxi_stats_${sessionDate}_${sessionService || 'session'}.csv`;
+  const fileName = customFileName || `transport_stats_${sessionDate}_${sessionService || 'session'}.csv`;
   downloadTextBlob(csvContent, fileName, 'text/csv;charset=utf-8;');
 }
 
 /**
- * Generates TSV (Tab-Separated Values) that can be pasted directly into Google Sheets cells
+ * Generates TSV (Tab-Separated Values) matching Transport Stats headers
  */
 export function generateTaxiStatsTSV(manifest: Manifest): string {
   const statsList = extractAllVehicleStats(manifest);
+  const { date: sessionDate, service: sessionService } = parseManifestKey(manifest.date);
 
   const headers = [
-    'Vehicle',
-    'Type',
-    'Rep Name',
-    'Status',
-    'Total',
-    'Present',
-    'Absent',
-    'FTVs',
-    'Sponsored',
-    'Fare (R)',
-    'Present Members & Visitors',
-    'First Time Visitors',
-    'Sponsorships',
-    'Cancellations (Absentees)',
-    'Notes',
+    'Timestamp',
+    'Money Collector Name & Surname',
+    'Date',
+    'Service',
+    'Vehicle type',
+    'Vehicle Number Plate',
+    'Taxi No./Bus No.',
+    'Members & Visitors list (Name & Surname - As written when booking)',
+    "FTV's List (Name & Surname - As written when booking)",
+    'Headcount',
+    'Total Money Collected ',
+    'Money Outstanding/extra ',
+    'Cancellations (Full name incl. Structure)',
+    'Sponsorships (Name, Surname and Structure)',
+    'Additional notes (People paying for others, Cancellations being paid etc.)',
   ];
 
   const rows = statsList.map((s) => [
-    s.name,
+    s.submittedAt || new Date().toISOString(),
+    s.repName !== '—' ? s.repName : '',
+    sessionDate,
+    sessionService || 'Service',
     s.type,
-    s.repName,
-    s.status,
-    s.totalRiders,
-    s.presentCount,
-    s.absentCount,
-    s.ftvCount,
-    s.sponsoredCount,
-    s.fareCollected,
+    s.licensePlate !== '—' ? s.licensePlate : '',
+    s.name,
     s.presentListStr,
     s.ftvListStr,
-    s.sponsoredListStr,
+    s.presentCount,
+    s.fareCollected,
+    s.absentCount > 0 ? -(s.absentCount * 40) : 0,
     s.cancellationListStr,
+    s.sponsoredListStr,
     s.generalNotes,
   ]);
 
@@ -430,7 +428,7 @@ export function generateTaxiStatsTSV(manifest: Manifest): string {
 }
 
 /**
- * Generates a consolidated WhatsApp message summarizing all taxi stats
+ * Generates a consolidated WhatsApp message summarizing all transport stats
  */
 export function generateConsolidatedWhatsAppStatsText(manifest: Manifest, serviceLabel?: string): string {
   const statsList = extractAllVehicleStats(manifest);
@@ -547,3 +545,4 @@ function downloadTextBlob(content: string, fileName: string, mimeType: string) {
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
+

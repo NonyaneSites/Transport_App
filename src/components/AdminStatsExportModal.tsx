@@ -77,7 +77,7 @@ export function AdminStatsExportModal({
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="font-display text-base font-bold text-ink">
-                  Download Taxi Stats for Excel & Google Sheets
+                  Transport Stats for Excel & Google Sheets
                 </h2>
                 <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px] font-mono">
                   {statsList.length} Vehicles

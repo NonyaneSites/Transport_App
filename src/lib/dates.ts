@@ -7,8 +7,9 @@ export function formatDate(date: Date): string {
 
 export function parseDate(yyyyMmDd?: string | null): Date {
   if (!yyyyMmDd || typeof yyyyMmDd !== 'string') return new Date();
-  const parts = yyyyMmDd.split('-');
-  if (parts.length < 3) return new Date(yyyyMmDd);
+  const trimmed = yyyyMmDd.trim();
+  const parts = trimmed.split('-');
+  if (parts.length < 3) return new Date(trimmed);
   const [y, m, d] = parts.map(Number);
   if (isNaN(y) || isNaN(m) || isNaN(d)) return new Date();
   return new Date(y, m - 1, d);
@@ -24,17 +25,25 @@ export function upcomingSunday(): string {
 }
 
 export function prettyDate(yyyyMmDd?: string | null): string {
-  if (!yyyyMmDd) return '—';
-  const d = parseDate(yyyyMmDd);
-  if (isNaN(d.getTime())) return yyyyMmDd;
+  if (!yyyyMmDd || typeof yyyyMmDd !== 'string') return '—';
+  const trimmed = yyyyMmDd.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed) || trimmed.includes('function')) {
+    return '—';
+  }
+  const d = parseDate(trimmed);
+  if (isNaN(d.getTime())) return '—';
   return d.toLocaleDateString('en-ZA', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 }
 
 /** DD/MM/YYYY — used on the Cancellation Ledger, e.g. "08/02/2026" */
 export function shortDate(yyyyMmDd?: string | null): string {
-  if (!yyyyMmDd) return '—';
-  const d = parseDate(yyyyMmDd);
-  if (isNaN(d.getTime())) return yyyyMmDd;
+  if (!yyyyMmDd || typeof yyyyMmDd !== 'string') return '—';
+  const trimmed = yyyyMmDd.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed) || trimmed.includes('function')) {
+    return '—';
+  }
+  const d = parseDate(trimmed);
+  if (isNaN(d.getTime())) return '—';
   const day = String(d.getDate()).padStart(2, '0');
   const month = String(d.getMonth() + 1).padStart(2, '0');
   return `${day}/${month}/${d.getFullYear()}`;

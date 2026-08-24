@@ -30,7 +30,7 @@ export function ServiceDateSelector({ date, service, onDateChange, onServiceChan
               className="input-field pl-10"
             />
           </div>
-          {date && (
+          {date && /^\d{4}-\d{2}-\d{2}$/.test(date) && prettyDate(date) !== '—' && (
             <p className="mt-1.5 text-xs text-muted">{prettyDate(date)}</p>
           )}
         </div>
@@ -54,14 +54,14 @@ export function ServiceDateSelector({ date, service, onDateChange, onServiceChan
           </div>
           <p className="mt-1.5 text-xs text-muted">
             {service === 'AM_Ushers'
-              ? 'Ushers (Early) — requires 15+ signups for dedicated taxi (otherwise merges to AM Serving)'
+              ? 'Ushers Early Service transport'
               : service === 'AM_Serving'
-              ? 'AM Serving ministries (auto-merges Ushers / Normal if < 15 signups)'
+              ? 'AM Serving ministries transport'
               : service === 'AM_Normal'
-              ? 'AM Standard transport (auto-merges into AM Serving if < 15 signups)'
+              ? 'AM Standard Sunday service transport'
               : service.includes('Serving')
-              ? 'PM Serving ministries only'
-              : 'PM Standard transport (non-serving)'}
+              ? 'PM Serving ministries transport'
+              : 'PM Standard Sunday service transport'}
           </p>
         </div>
       </div>

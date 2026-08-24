@@ -3,7 +3,7 @@ import {
   Bus, Car, Plus, Trash2, Users, ArrowRight, Undo2, X, UserCog, MoveRight,
   CheckCircle2, ChevronDown, ChevronRight, ChevronUp, MapPin,
   Check, Clock, StickyNote, Sparkles, ArrowUpDown, UserCheck, Download,
-  FileText, Copy, Eye, FileDown, Search, FileSpreadsheet
+  FileText, Copy, Eye, FileDown, Search
 } from 'lucide-react';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
 import { hubDisplayName, getPassengerStatusBadge } from '@/lib/types';
@@ -17,11 +17,6 @@ import {
   generateWhatsAppRepManifest,
   downloadTextFile
 } from '@/lib/whatsappManifest';
-import {
-  downloadTaxiStatsExcel,
-  generateTaxiStatsTSV
-} from '@/lib/statsExport';
-import { AdminStatsExportModal } from '@/components/AdminStatsExportModal';
 
 function DebouncedInput({
   value,
@@ -79,12 +74,11 @@ function DebouncedInput({
 
 interface Props {
   manifest: Manifest;
-  serviceLabel?: string;
   service: ServiceType;
   onSave: (m: Manifest) => Promise<void>;
 }
 
-export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: Props) {
+export function VehicleAllocation({ manifest, service, onSave }: Props) {
   // Local optimistic state for instant zero-lag UI updates and rapid actions
   const [localManifest, setLocalManifest] = useState<Manifest>(manifest);
   const latestManifestRef = useRef<Manifest>(manifest);
@@ -164,20 +158,7 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
   const [highlightRep, setHighlightRep] = useState<string | null>(null);
   const [copiedRoute, setCopiedRoute] = useState(false);
   const [copiedRep, setCopiedRep] = useState(false);
-  const [copiedStatsTSV, setCopiedStatsTSV] = useState(false);
   const [previewManifestType, setPreviewManifestType] = useState<'route' | 'rep' | null>(null);
-  const [statsModalOpen, setStatsModalOpen] = useState(false);
-
-  const handleCopyStatsTSV = async () => {
-    const tsv = generateTaxiStatsTSV(localManifest);
-    try {
-      await navigator.clipboard.writeText(tsv);
-      setCopiedStatsTSV(true);
-      setTimeout(() => setCopiedStatsTSV(false), 2500);
-    } catch {
-      // Fallback
-    }
-  };
 
   /**
    * Performs an immediate synchronous mutation on the local manifest,
@@ -685,38 +666,6 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
                 <Eye className="h-3.5 w-3.5" />
               </button>
             </div>
-
-            {/* Taxi Stats for Excel & Google Sheets Button Group */}
-            <div className="inline-flex rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-0.5 shadow-sm">
-              <button
-                type="button"
-                onClick={() => downloadTaxiStatsExcel(localManifest)}
-                className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-bold text-emerald-300 hover:bg-emerald-500/20 transition-colors"
-                title="Download full Taxi Stats workbook (.xlsx) for Excel"
-              >
-                <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-400" />
-                <span>Taxi Stats (.xlsx)</span>
-              </button>
-              <div className="w-[1px] bg-emerald-500/25 my-1" />
-              <button
-                type="button"
-                onClick={handleCopyStatsTSV}
-                className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/20 transition-colors"
-                title="Copy tab-delimited table to paste directly into Google Sheets columns"
-              >
-                {copiedStatsTSV ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
-                <span>{copiedStatsTSV ? 'Copied Sheets!' : 'Copy Sheets'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setStatsModalOpen(true)}
-                className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/25 transition-colors bg-emerald-500/15"
-                title="Open Taxi Stats Export & Table Preview Console"
-              >
-                <Eye className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Export Hub</span>
-              </button>
-            </div>
           </div>
         )}
       </div>
@@ -827,14 +776,6 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
           </div>
         </div>
       )}
-
-      {/* Taxi Stats for Excel & Google Sheets Modal */}
-      <AdminStatsExportModal
-        manifest={localManifest}
-        serviceLabel={serviceLabel}
-        isOpen={statsModalOpen}
-        onClose={() => setStatsModalOpen(false)}
-      />
 
       {/* Add vehicle */}
       <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-end">

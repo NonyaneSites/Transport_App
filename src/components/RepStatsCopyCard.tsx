@@ -17,24 +17,31 @@ interface RepStatsCopyCardProps {
 }
 
 /**
- * Checks if a passenger's structure or notes suggest they are a First Time Visitor
+ * Checks if a passenger's type, structure, category, ministry, notes, or name suggest they are a First Time Visitor (FTV)
  */
 function isAutoFirstTimeVisitor(passenger: Passenger, riderNote?: string): boolean {
+  if (passenger.memberType === 'FTV') {
+    return true;
+  }
   const s = (passenger.structure || '').toUpperCase();
   const m = (passenger.ministry || '').toUpperCase();
   const cat = (passenger.category || '').toUpperCase();
   const n = (riderNote || '').toUpperCase();
+  const name = (passenger.fullName || '').toUpperCase();
   
   if (s.includes('FTV') || s.includes('VISITOR') || s.includes('FIRST TIME') || s.includes('GUEST') || s.includes('NEW')) {
     return true;
   }
-  if (m.includes('FTV') || m.includes('VISITOR') || m.includes('FIRST TIME')) {
+  if (name.includes('FTV') || name.includes('FIRST TIME') || name.includes('VISITOR')) {
     return true;
   }
-  if (cat.includes('FTV') || cat.includes('VISITOR')) {
+  if (m.includes('FTV') || m.includes('VISITOR') || m.includes('FIRST TIME') || m.includes('GUEST')) {
     return true;
   }
-  if (n.includes('FTV') || n.includes('VISITOR') || n.includes('FIRST TIME')) {
+  if (cat.includes('FTV') || cat.includes('VISITOR') || cat.includes('FIRST TIME')) {
+    return true;
+  }
+  if (n.includes('FTV') || n.includes('VISITOR') || n.includes('FIRST TIME') || n.includes('GUEST')) {
     return true;
   }
   return false;
@@ -61,7 +68,7 @@ export function RepStatsCopyCard({
   isSubmitted = false,
 }: RepStatsCopyCardProps) {
   const [copiedSection, setCopiedSection] = useState<string | null>(null);
-  const [isExpanded, setIsExpanded] = useState(true);
+  const [isExpanded, setIsExpanded] = useState(false);
   const [manualFtvIds, setManualFtvIds] = useState<Set<string>>(new Set());
   const [formatStyle, setFormatStyle] = useState<'comma' | 'newline'>('comma');
 

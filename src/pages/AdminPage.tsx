@@ -18,9 +18,13 @@ import { AdminStatsExportModal } from '@/components/AdminStatsExportModal';
 export function AdminPage() {
   const [date, setDate] = useState(() => {
     try {
-      return localStorage.getItem('crc_admin_selected_date') || upcomingSunday;
+      const stored = localStorage.getItem('crc_admin_selected_date');
+      if (stored && /^\d{4}-\d{2}-\d{2}$/.test(stored.trim())) {
+        return stored.trim();
+      }
+      return upcomingSunday();
     } catch {
-      return upcomingSunday;
+      return upcomingSunday();
     }
   });
   const [service, setService] = useState<ServiceType>(() => {
@@ -187,17 +191,6 @@ export function AdminPage() {
             <div className="text-xs text-muted font-mono">{key}</div>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            {manifest && (manifest.vehicles?.length ?? 0) > 0 && (
-              <button
-                type="button"
-                onClick={() => setExportModalManifest({ manifest, serviceLabel })}
-                className="btn-ghost border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/15 text-xs py-2 px-3 flex items-center gap-1.5"
-                title="Download consolidated Taxi Stats for Excel or Google Sheets"
-              >
-                <FileSpreadsheet className="h-4 w-4 text-emerald-400" />
-                <span>Export Taxi Stats</span>
-              </button>
-            )}
             <button onClick={() => setResetOpen(true)} className="btn-danger">
               <Trash2 className="h-4 w-4" />
               Reset Manifests
@@ -237,7 +230,6 @@ export function AdminPage() {
                     }
                   : { date: key, signups: [], vehicles: [] }
               }
-              serviceLabel={serviceLabel}
               service={service}
               onSave={save}
             />
@@ -313,10 +305,10 @@ export function AdminPage() {
                         }}
                         disabled={!archiveSelected}
                         className={archiveSelected ? 'btn-ghost border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 text-xs py-2 px-3 flex items-center gap-1.5' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted text-xs py-2 px-3'}
-                        title="Download full session Taxi Stats Excel workbook (.xlsx)"
+                        title="Download full session Transport Stats Excel workbook (.xlsx)"
                       >
                         <FileSpreadsheet className="h-4 w-4 text-emerald-400" />
-                        <span>Stats Excel (.xlsx)</span>
+                        <span>Transport Stats (.xlsx)</span>
                       </button>
 
                       <button
@@ -327,10 +319,10 @@ export function AdminPage() {
                         }}
                         disabled={!archiveSelected}
                         className={archiveSelected ? 'btn-ghost border-line text-xs py-2 px-3 flex items-center gap-1.5' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted text-xs py-2 px-3'}
-                        title="Download CSV table for Google Sheets import (.csv)"
+                        title="Download Transport Stats CSV table (.csv)"
                       >
                         <Table className="h-4 w-4 text-sky-400" />
-                        <span>Stats CSV</span>
+                        <span>Transport Stats CSV</span>
                       </button>
 
                       <button
@@ -343,10 +335,10 @@ export function AdminPage() {
                         }}
                         disabled={!archiveSelected}
                         className={archiveSelected ? 'btn-ghost border-line text-xs py-2 px-3 flex items-center gap-1.5 text-amber-300 hover:bg-amber-500/10' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted text-xs py-2 px-3'}
-                        title="Open full Taxi Stats Export & Table Preview Console"
+                        title="Open full Transport Stats Export & Table Preview Console"
                       >
                         <Eye className="h-4 w-4 text-amber-400" />
-                        <span>Stats Hub</span>
+                        <span>Transport Stats Hub</span>
                       </button>
 
                       <button

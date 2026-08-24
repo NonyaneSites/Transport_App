@@ -41,9 +41,13 @@ function makeClientId(): string {
 export function RepPage() {
   const [date, setDate] = useState(() => {
     try {
-      return localStorage.getItem('crc_rep_selected_date') || upcomingSunday;
+      const stored = localStorage.getItem('crc_rep_selected_date');
+      if (stored && /^\d{4}-\d{2}-\d{2}$/.test(stored.trim())) {
+        return stored.trim();
+      }
+      return upcomingSunday();
     } catch {
-      return upcomingSunday;
+      return upcomingSunday();
     }
   });
   const [service, setService] = useState<ServiceType>(() => {
@@ -64,13 +68,7 @@ export function RepPage() {
     }
   });
 
-  const [repName, setRepName] = useState(() => {
-    try {
-      return localStorage.getItem('crc_rep_name') || '';
-    } catch {
-      return '';
-    }
-  });
+  const [repName, setRepName] = useState('');
   const [coReps, setCoReps] = useState<string[]>([]);
   const [licensePlate, setLicensePlate] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -256,9 +254,11 @@ export function RepPage() {
     setExternalSponsees([]);
     setCollectedCancellationIds(new Set());
     setManualCancellations([]);
+    setRepName('');
+    setLicensePlate('');
   }, []);
 
-  const applyDraftState = useCallback((draft: VehicleDraftState, vehicleRidersList: Passenger[]) => {
+  const applyDraftState = useCallback((draft: VehicleDraftState, vehicleRidersList: Passenger[], fallbackVehicle?: Vehicle | null) => {
     isApplyingDraftRef.current = true;
     const pIds = new Set(draft.presentIds ?? []);
     const aIds = new Set(draft.absentIds ?? []);
@@ -274,13 +274,13 @@ export function RepPage() {
     setAbsentIds(aIds);
     setSponsoredIds(new Set(draft.sponsoredIds ?? []));
     setNotes(draft.notes ?? {});
-    setGeneralNotes(draft.generalNotes ?? '');
-    setCoReps(draft.coReps ?? []);
+    setGeneralNotes(draft.generalNotes ?? fallbackVehicle?.generalNotes ?? '');
+    setCoReps(draft.coReps ?? fallbackVehicle?.coReps ?? []);
     setExternalSponsees(draft.externalSponsees ?? []);
     setCollectedCancellationIds(new Set(draft.settledLedgerIds ?? []));
     setManualCancellations(draft.manualCancellations ?? []);
-    if (draft.repName !== undefined) setRepName(draft.repName);
-    if (draft.licensePlate !== undefined) setLicensePlate(draft.licensePlate);
+    setRepName(draft.repName !== undefined ? draft.repName : (fallbackVehicle?.repName || ''));
+    setLicensePlate(draft.licensePlate !== undefined ? draft.licensePlate : (fallbackVehicle?.licensePlate || ''));
   }, []);
 
   // Initialize/restore state when manifest loads or vehicle is selected
@@ -347,7 +347,7 @@ export function RepPage() {
     }
 
     if (draft) {
-      applyDraftState(draft, currentRiders);
+      applyDraftState(draft, currentRiders, vehicle);
       lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
       setDraftRestored(true);
       const t = setTimeout(() => setDraftRestored(false), 2500);
@@ -367,8 +367,8 @@ export function RepPage() {
       setExternalSponsees([]);
       setCollectedCancellationIds(new Set());
       setManualCancellations([]);
-      if (vehicle.repName) setRepName(vehicle.repName);
-      if (vehicle.licensePlate) setLicensePlate(vehicle.licensePlate);
+      setRepName(vehicle.repName || '');
+      setLicensePlate(vehicle.licensePlate || '');
       lastAppliedDraftAtRef.current = null;
     }
   }, [key, manifest, selectedVehicleId, resetLocalDraftState, applyDraftState]);
@@ -580,7 +580,7 @@ export function RepPage() {
       });
     } else {
       setAbsentIds((prev) => {
-        if (!prev.has(passengerId)) return prev;
+        if (prev.has(passengerId)) return prev;
         return new Set(prev).add(passengerId);
       });
       setPresentIds((prev) => {
@@ -1096,6 +1096,54 @@ export function RepPage() {
     }
   }
 
+  const handleSelectVehicle = (newVehicleId: string) => {
+    // 1. Immediately persist outgoing vehicle's draft if dirty
+    if (selectedVehicleId && isUserDirtyRef.current && selectedVehicle && !selectedVehicle.submitted) {
+      const pIdsArray = Array.from(presentIds);
+      const aIdsArray = Array.from(absentIds);
+      const nowIso = new Date().toISOString();
+      const currentDraft: VehicleDraftState = {
+        presentIds: pIdsArray,
+        absentIds: aIdsArray,
+        sponsoredIds: Array.from(sponsoredIds),
+        notes,
+        repName: repName.trim(),
+        coReps: coReps.filter(Boolean),
+        licensePlate: licensePlate.trim(),
+        generalNotes: generalNotes.trim(),
+        cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+        settledLedgerIds: Array.from(collectedCancellationIds),
+        manualCancellations,
+        externalSponsees,
+        updatedAt: nowIso,
+        updatedBy: clientIdRef.current,
+      };
+      try {
+        localStorage.setItem(`crc_rep_draft_${key}_${selectedVehicleId}`, JSON.stringify(currentDraft));
+      } catch {
+        // storage unavailable
+      }
+      updateVehicleDraft(
+        selectedVehicleId,
+        currentDraft,
+        repName.trim(),
+        licensePlate.trim(),
+        pIdsArray,
+        aIdsArray
+      ).catch(() => {});
+    }
+
+    if (pendingSyncTimerRef.current) {
+      clearTimeout(pendingSyncTimerRef.current);
+      pendingSyncTimerRef.current = null;
+    }
+    isUserDirtyRef.current = false;
+    isApplyingDraftRef.current = true;
+    setSelectedVehicleId(newVehicleId);
+    setSubmitMsg(null);
+    setRiderSearch('');
+  };
+
   const isSubmitted = selectedVehicle?.submitted ?? false;
 
   // Filtered riders based on search text and status tab
@@ -1187,73 +1235,28 @@ export function RepPage() {
           <div className="mt-4 space-y-4">
             {/* Rep name + vehicle picker */}
             <div className="card">
-              <div className="mb-3 flex items-center gap-2">
-                <div className="h-5 w-1 rounded-full bg-crimson-500" />
-                <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">
-                  Select Your Vehicle
-                </h2>
-              </div>
-
-              <div className="mb-1.5 flex items-center justify-between">
-                <label className="block text-xs font-semibold uppercase tracking-wide text-muted">
-                  Your Name <span className="text-crimson-400">*</span>
-                </label>
-                {repStructure && (
-                  <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px]">
-                    Official Structure Rep ({repStructure})
+              <div className="mb-3 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="h-5 w-1 rounded-full bg-crimson-500" />
+                  <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">
+                    Select Your Vehicle
+                  </h2>
+                </div>
+                {selectedVehicle && (
+                  <span className="text-xs font-semibold text-crimson-400">
+                    {selectedVehicle.name} ({selectedVehicle.type})
                   </span>
                 )}
               </div>
 
-              <input
-                type="text"
-                value={repName}
-                onChange={(e) => {
-                  isUserDirtyRef.current = true;
-                  setRepName(e.target.value);
-                }}
-                placeholder="Start typing your name…"
-                className="input-field mb-1.5"
-              />
-
-              {detectedOfficialRep && !repName && (
-                <div className="mb-2 flex items-center justify-between gap-2 rounded-lg border border-crimson-500/30 bg-crimson-500/10 px-2.5 py-1.5 text-xs">
-                  <span className="flex items-center gap-1.5 text-crimson-300">
-                    <Sparkles className="h-3.5 w-3.5 text-crimson-400" />
-                    Detected official rep: <strong>{detectedOfficialRep}</strong>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      isUserDirtyRef.current = true;
-                      setRepName(detectedOfficialRep);
-                    }}
-                    className="text-xs font-bold text-crimson-400 underline hover:text-crimson-300"
-                  >
-                    Use Name
-                  </button>
-                </div>
-              )}
-
-              {selectedVehicle && repName.trim() && (selectedVehicle.repName ?? '').trim().toLowerCase() === repName.trim().toLowerCase() && (
-                <p className="mb-3 flex items-center gap-1 text-xs text-success-light">
-                  <CheckCircle2 className="h-3.5 w-3.5" />
-                  Auto-selected {selectedVehicle.name} — you're the assigned rep.
-                </p>
-              )}
-
-              <p className="mb-3 text-xs text-muted">
-                Or pick the taxi or bus the admin assigned you directly:
-              </p>
-              <div className="relative">
+              <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
+                Choose Taxi or Bus
+              </label>
+              <div className="relative mb-3">
                 <Car className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
                 <select
                   value={selectedVehicleId}
-                  onChange={(e) => {
-                    setSelectedVehicleId(e.target.value);
-                    setSubmitMsg(null);
-                    setRiderSearch('');
-                  }}
+                  onChange={(e) => handleSelectVehicle(e.target.value)}
                   className="input-field pl-10"
                 >
                   <option value="" className="bg-card-2">Choose your vehicle…</option>
@@ -1269,8 +1272,82 @@ export function RepPage() {
                 </select>
               </div>
 
-              {selectedVehicleId && (
-                <div className="mt-3 space-y-3">
+              {!selectedVehicleId ? (
+                <div className="space-y-2 border-t border-line/60 pt-3">
+                  <p className="text-xs text-muted">
+                    Or find your vehicle by typing your name:
+                  </p>
+                  <input
+                    type="text"
+                    value={repName}
+                    onChange={(e) => {
+                      setRepName(e.target.value);
+                    }}
+                    placeholder="Start typing your name to match your vehicle…"
+                    className="input-field text-xs"
+                  />
+                </div>
+              ) : (
+                <div className="space-y-3 border-t border-line/60 pt-3">
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between">
+                      <label className="block text-xs font-semibold uppercase tracking-wide text-muted">
+                        Your Name (Rep / Driver) <span className="text-crimson-400">*</span>
+                      </label>
+                      {repStructure && (
+                        <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px]">
+                          Official Structure Rep ({repStructure})
+                        </span>
+                      )}
+                    </div>
+
+                    <input
+                      type="text"
+                      value={repName}
+                      onChange={(e) => {
+                        isUserDirtyRef.current = true;
+                        setRepName(e.target.value);
+                      }}
+                      placeholder="Enter rep name for this vehicle…"
+                      className="input-field mb-1.5"
+                    />
+
+                    {detectedOfficialRep && !repName && (
+                      <div className="mb-2 flex items-center justify-between gap-2 rounded-lg border border-crimson-500/30 bg-crimson-500/10 px-2.5 py-1.5 text-xs">
+                        <span className="flex items-center gap-1.5 text-crimson-300">
+                          <Sparkles className="h-3.5 w-3.5 text-crimson-400" />
+                          Detected official rep: <strong>{detectedOfficialRep}</strong>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            isUserDirtyRef.current = true;
+                            setRepName(detectedOfficialRep);
+                          }}
+                          className="text-xs font-bold text-crimson-400 underline hover:text-crimson-300"
+                        >
+                          Use Name
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
+                      License Plate <span className="text-crimson-400">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={licensePlate}
+                      onChange={(e) => {
+                        isUserDirtyRef.current = true;
+                        setLicensePlate(e.target.value);
+                      }}
+                      placeholder="Required for this vehicle — e.g. GP 123 ABC"
+                      className="input-field uppercase"
+                    />
+                  </div>
+
                   {/* Co-Reps */}
                   <div>
                     <div className="mb-1.5 flex items-center justify-between">
@@ -1300,22 +1377,6 @@ export function RepPage() {
                         ))}
                       </div>
                     )}
-                  </div>
-
-                  <div>
-                    <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
-                      License Plate <span className="text-crimson-400">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      value={licensePlate}
-                      onChange={(e) => {
-                        isUserDirtyRef.current = true;
-                        setLicensePlate(e.target.value);
-                      }}
-                      placeholder="Required — e.g. GP 123 ABC"
-                      className="input-field uppercase"
-                    />
                   </div>
                 </div>
               )}
@@ -1610,18 +1671,6 @@ export function RepPage() {
                   />
                 )}
 
-                {/* Rep Stats for Stats Link (Present, FTVs, Sponsorships, Absentees) */}
-                <RepStatsCopyCard
-                  riders={riders}
-                  presentIds={presentIds}
-                  absentIds={absentIds}
-                  sponsoredIds={sponsoredIds}
-                  notes={notes}
-                  vehicleName={selectedVehicle.name}
-                  repName={repName}
-                  isSubmitted={isSubmitted}
-                />
-
                 {!isSubmitted && (
                   <>
                     {/* General notes */}
@@ -1748,6 +1797,18 @@ export function RepPage() {
                     )}
                   </button>
                 )}
+
+                {/* Copy Stats for Stats Link Accordion (at bottom of vehicle portal) */}
+                <RepStatsCopyCard
+                  riders={riders}
+                  presentIds={presentIds}
+                  absentIds={absentIds}
+                  sponsoredIds={sponsoredIds}
+                  notes={notes}
+                  vehicleName={selectedVehicle.name}
+                  repName={repName}
+                  isSubmitted={isSubmitted}
+                />
               </>
             )}
 
