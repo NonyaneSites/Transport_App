@@ -1,16 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BookOpen, Loader2, AlertTriangle, FileSpreadsheet, Search, Trash2, Filter, XCircle,
-  ChevronDown, ChevronRight, Upload, CheckCircle2,
+  ChevronDown, ChevronRight, Upload, CheckCircle2, FileText,
 } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
-import { GoogleSheetsSyncCard } from '@/components/GoogleSheetsSyncCard';
 import {
   listLedgerEntries, deleteLedgerEntry, downloadLedgerExcel,
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
 } from '@/lib/ledger';
+import { downloadCancellationDebtPdf } from '@/lib/pdfExport';
 import { shortDate } from '@/lib/dates';
 import { naturalCompare } from '@/lib/sort';
 
@@ -131,22 +131,9 @@ export function LedgerPage() {
           </h1>
           <p className="mt-2 max-w-2xl text-sm text-muted">
             Structure and rep, cancellation date, name, and amount owing — the complete record of transport
-            cancellation debt across every session. Banking details and payment policy are on the downloadable
-            SZ Cancellation List.
+            cancellation debt across every session. Download official PDFs in structure format or export spreadsheets.
           </p>
         </div>
-
-        {/* Google Sheets Live Sync Card */}
-        <GoogleSheetsSyncCard
-          onSyncComplete={async () => {
-            try {
-              const updated = await listLedgerEntries();
-              setEntries(updated);
-            } catch (err) {
-              console.warn(err);
-            }
-          }}
-        />
 
         {loading ? (
           <div className="flex flex-col items-center gap-3 py-20">
@@ -188,14 +175,22 @@ export function LedgerPage() {
                   title="Bulk-import historical cancellation records (Structure, Date, Service, Passenger Name, Amount)"
                 >
                   {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-                  Import Cancellation History
+                  Import History
+                </button>
+                <button
+                  onClick={() => downloadCancellationDebtPdf(filtered.length > 0 ? filtered : entries)}
+                  className="btn-crimson flex items-center gap-2 shadow-md hover:shadow-crimson"
+                  title="Download official PDF report grouped by Structure and Person with CRC banking info"
+                >
+                  <FileText className="h-4 w-4" />
+                  Download Debt PDF
                 </button>
                 <button
                   onClick={() => downloadLedgerExcel(filtered.length > 0 ? filtered : entries, `SZ_Cancellation_List_${new Date().toISOString().slice(0,10)}.xlsx`)}
-                  className="btn-success"
+                  className="btn-success flex items-center gap-2"
                 >
                   <FileSpreadsheet className="h-4 w-4" />
-                  Download Ledger
+                  Excel Export
                 </button>
               </div>
             </div>

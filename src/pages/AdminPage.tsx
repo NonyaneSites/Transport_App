@@ -16,10 +16,38 @@ import { downloadTaxiStatsExcel, downloadTaxiStatsCSV } from '@/lib/statsExport'
 import { AdminStatsExportModal } from '@/components/AdminStatsExportModal';
 
 export function AdminPage() {
-  const [date, setDate] = useState(upcomingSunday);
-  const [service, setService] = useState<ServiceType>('AM_Serving');
+  const [date, setDate] = useState(() => {
+    try {
+      return localStorage.getItem('crc_admin_selected_date') || upcomingSunday;
+    } catch {
+      return upcomingSunday;
+    }
+  });
+  const [service, setService] = useState<ServiceType>(() => {
+    try {
+      return (localStorage.getItem('crc_admin_selected_service') as ServiceType) || 'AM_Serving';
+    } catch {
+      return 'AM_Serving';
+    }
+  });
   const key = manifestKey(date, service);
   const { manifest, loading, error, save } = useManifest(key);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('crc_admin_selected_date', date);
+    } catch {
+      // localStorage full or disabled
+    }
+  }, [date]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('crc_admin_selected_service', service);
+    } catch {
+      // localStorage full or disabled
+    }
+  }, [service]);
 
   const [resetOpen, setResetOpen] = useState(false);
   const [resetPwd, setResetPwd] = useState('');

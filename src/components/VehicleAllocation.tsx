@@ -111,9 +111,31 @@ export function VehicleAllocation({ manifest, serviceLabel, service, onSave }: P
     }
   }, [manifest]);
 
-  // Flush any pending save on unmount
+  // Flush any pending save on unmount, refresh, or tab exit
   useEffect(() => {
+    const handleExitFlush = () => {
+      if (saveDebounceTimerRef.current || isLocalMutationPendingRef.current) {
+        if (saveDebounceTimerRef.current) {
+          clearTimeout(saveDebounceTimerRef.current);
+          saveDebounceTimerRef.current = null;
+        }
+        try {
+          localStorage.setItem(`crc_admin_manifest_${latestManifestRef.current.date}`, JSON.stringify(latestManifestRef.current));
+        } catch {
+          // localStorage full or disabled
+        }
+        onSave(latestManifestRef.current).catch(() => {});
+      }
+    };
+
+    window.addEventListener('beforeunload', handleExitFlush);
+    window.addEventListener('pagehide', handleExitFlush);
+    document.addEventListener('visibilitychange', handleExitFlush);
+
     return () => {
+      window.removeEventListener('beforeunload', handleExitFlush);
+      window.removeEventListener('pagehide', handleExitFlush);
+      document.removeEventListener('visibilitychange', handleExitFlush);
       if (saveDebounceTimerRef.current) {
         clearTimeout(saveDebounceTimerRef.current);
         saveDebounceTimerRef.current = null;

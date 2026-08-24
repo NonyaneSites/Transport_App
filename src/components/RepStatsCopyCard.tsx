@@ -14,10 +14,6 @@ interface RepStatsCopyCardProps {
   vehicleName: string;
   repName: string;
   isSubmitted?: boolean;
-  licensePlate?: string;
-  serviceLabel?: string;
-  date?: string;
-  totalCash?: number;
 }
 
 /**
@@ -63,10 +59,6 @@ export function RepStatsCopyCard({
   vehicleName,
   repName,
   isSubmitted = false,
-  licensePlate,
-  serviceLabel,
-  date,
-  totalCash,
 }: RepStatsCopyCardProps) {
   const [copiedSection, setCopiedSection] = useState<string | null>(null);
   const [isExpanded, setIsExpanded] = useState(true);
@@ -123,37 +115,29 @@ export function RepStatsCopyCard({
   const absenteeText = formatList(absenteePassengers);
 
   // Full unified stats template for pasting into WhatsApp / summaries
-  // Format mirrors the Transport Stats Excel form columns
   const allStatsTemplate = useMemo(() => {
     const lines: string[] = [];
     lines.push(`*${vehicleName.toUpperCase()} — TRANSPORT STATS*`);
-    if (repName.trim()) lines.push(`Money Collector: ${repName.trim()}`);
-    if (date) lines.push(`Date: ${date}`);
-    if (serviceLabel) lines.push(`Service: ${serviceLabel}`);
-    if (licensePlate?.trim()) lines.push(`Vehicle Number Plate: ${licensePlate.trim()}`);
+    if (repName.trim()) lines.push(`Rep: ${repName.trim()}`);
     lines.push('');
 
-    lines.push(`*Headcount:* ${presentPassengers.length}`);
-    if (totalCash !== undefined) lines.push(`*Total Money Collected:* R${totalCash}`);
-    lines.push('');
-
-    lines.push('*Members & Visitors List:*');
+    lines.push('*List of present members and visitors:*');
     lines.push(presentText || 'None');
     lines.push('');
 
-    lines.push("*FTV's List:*");
+    lines.push('*List of first time visitors:*');
     lines.push(ftvText || 'None');
     lines.push('');
 
-    lines.push('*Sponsorships:*');
+    lines.push('*List of sponsorships:*');
     lines.push(sponsoredText || 'None');
     lines.push('');
 
-    lines.push('*Cancellations:*');
+    lines.push('*List of cancellations:*');
     lines.push(absenteeText || 'None');
 
     return lines.join('\n');
-  }, [vehicleName, repName, date, serviceLabel, licensePlate, presentPassengers.length, totalCash, presentText, ftvText, sponsoredText, absenteeText]);
+  }, [vehicleName, repName, presentText, ftvText, sponsoredText, absenteeText]);
 
   function toggleManualFtv(passengerId: string) {
     setManualFtvIds((prev) => {
@@ -177,7 +161,7 @@ export function RepStatsCopyCard({
           </div>
           <div>
             <h3 className="font-display text-sm font-bold text-ink flex items-center gap-1.5 flex-wrap">
-              Transport Stats
+              Copy Stats for Stats Link
               <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px]">
                 {presentPassengers.length} Present · {absenteePassengers.length} Absent
               </span>
@@ -188,7 +172,7 @@ export function RepStatsCopyCard({
               )}
             </h3>
             <p className="text-[11px] text-muted">
-              Copy lists in Excel form format — <span className="font-mono text-crimson-300 font-semibold">Name Structure</span> (e.g. Person A S3)
+              Copy individual lists formatted as <span className="font-mono text-crimson-300 font-semibold">Name Structure</span> (e.g. Person A S3)
             </p>
           </div>
         </button>

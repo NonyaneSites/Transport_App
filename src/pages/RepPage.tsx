@@ -3,22 +3,21 @@ import {
   Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
   Smartphone, Wifi, ChevronDown, ChevronRight, MapPin, Send, Cross,
   HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus, Search, Banknote,
-  Sparkles,
+  Sparkles, ArrowDownAZ, RotateCcw, Check,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey, shortDate } from '@/lib/dates';
 import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType, type Passenger, type Vehicle, type VehicleDraftState } from '@/lib/types';
 import { hubDisplayName, getPassengerStatusBadge } from '@/lib/types';
-import { sortVehiclesNatural } from '@/lib/sort';
+import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { vehicleRiders, passengersByPoolGroup } from '@/lib/manifest';
 import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEntry } from '@/lib/ledger';
-import { autoSyncGoogleSheetsSilently } from '@/lib/googleSheets';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
 import { RepStatsCopyCard } from '@/components/RepStatsCopyCard';
 
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
-const SYNC_DEBOUNCE_MS = 300; // 300ms debounce for Supabase background sync
+const SYNC_DEBOUNCE_MS = 800; // 800ms debounce to batch rapid taps on mobile and cut data consumption
 
 interface ExternalSponsee {
   id: string;
@@ -36,24 +35,42 @@ export interface ManualCancellation {
 }
 
 function makeClientId(): string {
-  return `dev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  return `rep_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function RepPage() {
-  const [date, setDate] = useState(upcomingSunday);
-  const [service, setService] = useState<ServiceType>('PM_Normal');
+  const [date, setDate] = useState(() => {
+    try {
+      return localStorage.getItem('crc_rep_selected_date') || upcomingSunday;
+    } catch {
+      return upcomingSunday;
+    }
+  });
+  const [service, setService] = useState<ServiceType>(() => {
+    try {
+      return (localStorage.getItem('crc_rep_selected_service') as ServiceType) || 'PM_Normal';
+    } catch {
+      return 'PM_Normal';
+    }
+  });
   const key = manifestKey(date, service);
-  const { manifest, loading, error, save } = useManifest(key);
+  const { manifest, loading, error, save, updateVehicleDraft } = useManifest(key);
 
   const [selectedVehicleId, setSelectedVehicleId] = useState<string>(() => {
     try {
-      return sessionStorage.getItem(`rep_vehicle_${key}`) || '';
+      return localStorage.getItem(`crc_rep_vehicle_${key}`) || '';
     } catch {
       return '';
     }
   });
 
-  const [repName, setRepName] = useState('');
+  const [repName, setRepName] = useState(() => {
+    try {
+      return localStorage.getItem('crc_rep_name') || '';
+    } catch {
+      return '';
+    }
+  });
   const [coReps, setCoReps] = useState<string[]>([]);
   const [licensePlate, setLicensePlate] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -66,38 +83,72 @@ export function RepPage() {
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [generalNotes, setGeneralNotes] = useState('');
 
+  // Rider search, filtering, and view mode for person-by-person check-in
+  const [riderSearch, setRiderSearch] = useState('');
+  const [riderFilter, setRiderFilter] = useState<'all' | 'unticked' | 'present' | 'absent'>('all');
+  const [viewMode, setViewMode] = useState<'stop' | 'alpha'>('stop');
+  const [batchActionMsg, setBatchActionMsg] = useState<string | null>(null);
+
   // Cash & sponsorship calculator
   const [externalSponsees, setExternalSponsees] = useState<ExternalSponsee[]>([]);
 
   // Past-cancellation cash collection & manual cancellation settlement
   const [pastCancellations, setPastCancellations] = useState<LedgerEntry[]>([]);
   const [loadingPastCancellations, setLoadingPastCancellations] = useState(false);
+  const [hasLoadedPastCancellations, setHasLoadedPastCancellations] = useState(false);
   const [collectedCancellationIds, setCollectedCancellationIds] = useState<Set<string>>(new Set());
   const [manualCancellations, setManualCancellations] = useState<ManualCancellation[]>([]);
   const [cancellationSearch, setCancellationSearch] = useState('');
 
-  // Draft auto-save/restore & sync locks
+  // Sync locks & conflict prevention
   const [draftRestored, setDraftRestored] = useState(false);
   const clientIdRef = useRef<string>(makeClientId());
   const pendingSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAppliedDraftAtRef = useRef<string | null>(null);
   const isApplyingDraftRef = useRef(false);
+  const isUserDirtyRef = useRef(false);
   const lastLocalEditTimeRef = useRef<number>(0);
   const initializedKeyRef = useRef<string>('');
 
   const manifestRef = useRef(manifest);
   useEffect(() => { manifestRef.current = manifest; }, [manifest]);
 
-  // Persist selectedVehicleId across refreshes for current manifest key
+  // Persist session preferences to localStorage so closing/refreshing never loses context
+  useEffect(() => {
+    try {
+      localStorage.setItem('crc_rep_selected_date', date);
+    } catch {
+      // storage unavailable
+    }
+  }, [date]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('crc_rep_selected_service', service);
+    } catch {
+      // storage unavailable
+    }
+  }, [service]);
+
   useEffect(() => {
     if (selectedVehicleId) {
       try {
-        sessionStorage.setItem(`rep_vehicle_${key}`, selectedVehicleId);
+        localStorage.setItem(`crc_rep_vehicle_${key}`, selectedVehicleId);
       } catch {
-        /* storage unavailable */
+        // storage unavailable
       }
     }
   }, [key, selectedVehicleId]);
+
+  useEffect(() => {
+    if (repName) {
+      try {
+        localStorage.setItem('crc_rep_name', repName);
+      } catch {
+        // storage unavailable
+      }
+    }
+  }, [repName]);
 
   // Walk-in
   const [walkInOpen, setWalkInOpen] = useState(false);
@@ -115,12 +166,12 @@ export function RepPage() {
   );
 
   const riders = useMemo(
-    () => selectedVehicle ? vehicleRiders(manifest, selectedVehicle) : [],
+    () => (selectedVehicle ? vehicleRiders(manifest, selectedVehicle) : []),
     [manifest, selectedVehicle]
   );
 
   const detectedOfficialRep = useMemo(
-    () => riders.length > 0 ? detectVehicleRep(riders) : null,
+    () => (riders.length > 0 ? detectVehicleRep(riders) : null),
     [riders]
   );
 
@@ -170,14 +221,12 @@ export function RepPage() {
     const match = manifest.vehicles.find((v) => {
       const vRep = (v.repName ?? '').trim().toLowerCase();
       if (vRep) {
-        // Strict exact match with assigned rep name or official registered alias
         if (vRep === q) return true;
         if (repMatch && (vRep === repMatch.fullName.toLowerCase() || repMatch.aliases.some((a) => a.toLowerCase() === vRep))) {
           return true;
         }
       }
 
-      // Check if this typed name matches a passenger on board this vehicle EXACTLY
       const vRiders = vehicleRiders(manifest, v);
       for (const r of vRiders) {
         const normRider = r.fullName.trim().toLowerCase();
@@ -197,6 +246,7 @@ export function RepPage() {
 
   const resetLocalDraftState = useCallback(() => {
     isApplyingDraftRef.current = true;
+    isUserDirtyRef.current = false;
     setPresentIds(new Set());
     setAbsentIds(new Set());
     setSponsoredIds(new Set());
@@ -259,7 +309,6 @@ export function RepPage() {
       return;
     }
 
-    // Vehicle selection has changed
     if (prevVehicleIdRef.current !== selectedVehicleId) {
       setWalkInOpen(false);
       setWalkInName('');
@@ -273,16 +322,37 @@ export function RepPage() {
 
     initializedKeyRef.current = currentKey;
     const currentRiders = vehicleRiders(manifest, vehicle);
-    const draft = !vehicle.submitted ? vehicle.draftState : undefined;
+
+    // Retrieve local device draft cache if any (for instant recovery if refreshed or browser closed)
+    let localDraft: VehicleDraftState | null = null;
+    try {
+      const raw = localStorage.getItem(`crc_rep_draft_${key}_${selectedVehicleId}`);
+      if (raw) localDraft = JSON.parse(raw);
+    } catch {
+      localDraft = null;
+    }
+
+    const cloudDraft = !vehicle.submitted ? vehicle.draftState : undefined;
+
+    // Pick whichever draft has the freshest edits
+    let draft: VehicleDraftState | undefined = undefined;
+    if (localDraft && cloudDraft) {
+      const localTime = localDraft.updatedAt ? new Date(localDraft.updatedAt).getTime() : 0;
+      const cloudTime = cloudDraft.updatedAt ? new Date(cloudDraft.updatedAt).getTime() : 0;
+      draft = localTime >= cloudTime ? localDraft : cloudDraft;
+    } else if (localDraft) {
+      draft = localDraft;
+    } else if (cloudDraft) {
+      draft = cloudDraft;
+    }
 
     if (draft) {
       applyDraftState(draft, currentRiders);
       lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
       setDraftRestored(true);
-      const t = setTimeout(() => setDraftRestored(false), 3000);
+      const t = setTimeout(() => setDraftRestored(false), 2500);
       return () => clearTimeout(t);
     } else {
-      // Default initialization for vehicle
       isApplyingDraftRef.current = true;
       const initialPresent = new Set<string>();
       currentRiders.forEach((r) => {
@@ -308,36 +378,31 @@ export function RepPage() {
     if (!selectedVehicle || selectedVehicle.submitted) return;
     const draft = selectedVehicle.draftState;
     if (!draft) return;
-    // Ignore updates saved by our own client ID
     if (draft.updatedBy === clientIdRef.current) return;
-    // Ignore if we recently made local user edits (within last 2.5 seconds)
     if (Date.now() - lastLocalEditTimeRef.current < 2500) return;
-    // Ignore if already applied this exact draft timestamp
     if (draft.updatedAt && draft.updatedAt === lastAppliedDraftAtRef.current) return;
 
     applyDraftState(draft, riders);
     lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
     setDraftRestored(true);
-    const t = setTimeout(() => setDraftRestored(false), 3000);
+    const t = setTimeout(() => setDraftRestored(false), 2500);
     return () => clearTimeout(t);
   }, [selectedVehicle?.draftState, selectedVehicle, riders, applyDraftState]);
 
-  // Load past cancellations
-  useEffect(() => {
-    let mounted = true;
+  // Load past cancellations on demand when user accesses settlement tools (saves mobile bandwidth)
+  const ensurePastCancellationsLoaded = useCallback(async () => {
+    if (hasLoadedPastCancellations || loadingPastCancellations) return;
     setLoadingPastCancellations(true);
-    (async () => {
-      try {
-        const entries = await listLedgerEntries();
-        if (mounted) setPastCancellations(entries);
-      } catch {
-        /* Non-critical */
-      } finally {
-        if (mounted) setLoadingPastCancellations(false);
-      }
-    })();
-    return () => { mounted = false; };
-  }, []);
+    try {
+      const entries = await listLedgerEntries();
+      setPastCancellations(entries);
+      setHasLoadedPastCancellations(true);
+    } catch {
+      /* non-critical */
+    } finally {
+      setLoadingPastCancellations(false);
+    }
+  }, [hasLoadedPastCancellations, loadingPastCancellations]);
 
   // Stats calculation
   const presentCount = useMemo(() => {
@@ -351,6 +416,10 @@ export function RepPage() {
   const touchedCount = useMemo(() => {
     return riders.filter((r) => presentIds.has(r.id) || absentIds.has(r.id)).length;
   }, [riders, presentIds, absentIds]);
+
+  const untickedCount = useMemo(() => {
+    return Math.max(0, riders.length - touchedCount);
+  }, [riders.length, touchedCount]);
 
   const allTouched = riders.length > 0 && touchedCount === riders.length;
 
@@ -381,63 +450,62 @@ export function RepPage() {
   const pastCancellationCash = selectedLedgerCash + manualCancellationCash;
   const totalCash = baseCash + externalCash + pastCancellationCash;
 
-  // 300ms Debounced Supabase Sync
+  // Conflict-Safe Debounced Background Sync & Instant Local Cache
   useEffect(() => {
     if (isApplyingDraftRef.current) {
       isApplyingDraftRef.current = false;
       return;
     }
-    if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted || !manifestRef.current) return;
+    if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted || !isUserDirtyRef.current) {
+      return;
+    }
 
+    const pIdsArray = Array.from(presentIds);
+    const aIdsArray = Array.from(absentIds);
+    const nowIso = new Date().toISOString();
+
+    const currentDraft: VehicleDraftState = {
+      presentIds: pIdsArray,
+      absentIds: aIdsArray,
+      sponsoredIds: Array.from(sponsoredIds),
+      notes,
+      repName: repName.trim(),
+      coReps: coReps.filter(Boolean),
+      licensePlate: licensePlate.trim(),
+      generalNotes: generalNotes.trim(),
+      cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+      settledLedgerIds: Array.from(collectedCancellationIds),
+      manualCancellations,
+      externalSponsees,
+      updatedAt: nowIso,
+      updatedBy: clientIdRef.current,
+    };
+
+    // 1. Synchronously cache draft on device (Zero loss on crash, refresh, phone lock, tab exit)
+    try {
+      localStorage.setItem(`crc_rep_draft_${key}_${selectedVehicleId}`, JSON.stringify(currentDraft));
+    } catch {
+      // storage unavailable
+    }
+
+    // 2. Debounced background cloud sync to Supabase
     if (pendingSyncTimerRef.current) clearTimeout(pendingSyncTimerRef.current);
 
     pendingSyncTimerRef.current = setTimeout(() => {
-      const currentManifest = manifestRef.current;
-      if (!currentManifest) return;
-
-      const pIdsArray = Array.from(presentIds);
-      const aIdsArray = Array.from(absentIds);
-      const nowIso = new Date().toISOString();
-
-      const draft: VehicleDraftState = {
-        presentIds: pIdsArray,
-        absentIds: aIdsArray,
-        sponsoredIds: Array.from(sponsoredIds),
-        notes,
-        repName: repName.trim(),
-        coReps: coReps.filter(Boolean),
-        licensePlate: licensePlate.trim(),
-        generalNotes: generalNotes.trim(),
-        cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
-        settledLedgerIds: Array.from(collectedCancellationIds),
-        manualCancellations,
-        externalSponsees,
-        updatedAt: nowIso,
-        updatedBy: clientIdRef.current,
-      };
+      if (!isUserDirtyRef.current) return;
+      isUserDirtyRef.current = false;
 
       lastAppliedDraftAtRef.current = nowIso;
 
-      // Update vehicle draft and passenger present status optimistically
-      const updatedSignups = currentManifest.signups.map((p) => {
-        if (presentIds.has(p.id)) return { ...p, present: true };
-        if (absentIds.has(p.id)) return { ...p, present: false };
-        return p;
-      });
-
-      const updatedVehicles = currentManifest.vehicles.map((v) =>
-        v.id === selectedVehicleId
-          ? {
-              ...v,
-              repName: repName.trim() || v.repName,
-              licensePlate: licensePlate.trim() || v.licensePlate,
-              draftState: draft,
-            }
-          : v
-      );
-
-      save({ ...currentManifest, signups: updatedSignups, vehicles: updatedVehicles }).catch(() => {
-        /* background sync is best-effort */
+      updateVehicleDraft(
+        selectedVehicleId,
+        currentDraft,
+        repName.trim(),
+        licensePlate.trim(),
+        pIdsArray,
+        aIdsArray
+      ).catch((err) => {
+        console.warn('Background sync note:', err);
       });
     }, SYNC_DEBOUNCE_MS);
 
@@ -449,12 +517,56 @@ export function RepPage() {
     sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
     externalSponsees, collectedCancellationIds, manualCancellations,
     baseCash, externalCash, pastCancellationCash,
-    save
+    key, updateVehicleDraft,
+  ]);
+
+  // Lifecycle listeners: Flush draft on unexpected tab close, refresh, or mobile app switch
+  useEffect(() => {
+    const handleFlushOnExit = () => {
+      if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted || !isUserDirtyRef.current) return;
+      const currentDraft: VehicleDraftState = {
+        presentIds: Array.from(presentIds),
+        absentIds: Array.from(absentIds),
+        sponsoredIds: Array.from(sponsoredIds),
+        notes,
+        repName: repName.trim(),
+        coReps: coReps.filter(Boolean),
+        licensePlate: licensePlate.trim(),
+        generalNotes: generalNotes.trim(),
+        cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+        settledLedgerIds: Array.from(collectedCancellationIds),
+        manualCancellations,
+        externalSponsees,
+        updatedAt: new Date().toISOString(),
+        updatedBy: clientIdRef.current,
+      };
+      try {
+        localStorage.setItem(`crc_rep_draft_${key}_${selectedVehicleId}`, JSON.stringify(currentDraft));
+      } catch {
+        // storage unavailable
+      }
+    };
+
+    window.addEventListener('beforeunload', handleFlushOnExit);
+    window.addEventListener('pagehide', handleFlushOnExit);
+    document.addEventListener('visibilitychange', handleFlushOnExit);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleFlushOnExit);
+      window.removeEventListener('pagehide', handleFlushOnExit);
+      document.removeEventListener('visibilitychange', handleFlushOnExit);
+    };
+  }, [
+    selectedVehicleId, selectedVehicle, presentIds, absentIds,
+    sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
+    externalSponsees, collectedCancellationIds, manualCancellations,
+    baseCash, externalCash, pastCancellationCash, key,
   ]);
 
   // Instant local toggle handlers (Zero lag, pure React state, deterministic single click)
   const handleSetPresent = useCallback((passengerId: string, wantPresent: boolean) => {
     lastLocalEditTimeRef.current = Date.now();
+    isUserDirtyRef.current = true;
     if (wantPresent) {
       setPresentIds((prev) => {
         if (prev.has(passengerId)) return prev;
@@ -468,7 +580,7 @@ export function RepPage() {
       });
     } else {
       setAbsentIds((prev) => {
-        if (prev.has(passengerId)) return prev;
+        if (!prev.has(passengerId)) return prev;
         return new Set(prev).add(passengerId);
       });
       setPresentIds((prev) => {
@@ -482,6 +594,7 @@ export function RepPage() {
 
   const handleToggleSponsored = useCallback((passengerId: string) => {
     lastLocalEditTimeRef.current = Date.now();
+    isUserDirtyRef.current = true;
     setSponsoredIds((prev) => {
       const next = new Set(prev);
       if (next.has(passengerId)) next.delete(passengerId);
@@ -492,16 +605,94 @@ export function RepPage() {
 
   const handleSetNote = useCallback((passengerId: string, text: string) => {
     lastLocalEditTimeRef.current = Date.now();
+    isUserDirtyRef.current = true;
     setNotes((prev) => ({ ...prev, [passengerId]: text }));
   }, []);
 
-  const addCoRep = () => setCoReps((prev) => [...prev, '']);
-  const updateCoRep = (index: number, val: string) =>
+  // Attendance Check: Mark all unticked riders as Absent
+  const handleMarkUntickedAsAbsent = useCallback(() => {
+    if (!riders.length) return;
+    lastLocalEditTimeRef.current = Date.now();
+    isUserDirtyRef.current = true;
+
+    const untickedRiderIds = riders
+      .filter((r) => !presentIds.has(r.id) && !absentIds.has(r.id))
+      .map((r) => r.id);
+
+    if (untickedRiderIds.length === 0) return;
+
+    setAbsentIds((prev) => {
+      const next = new Set(prev);
+      untickedRiderIds.forEach((id) => next.add(id));
+      return next;
+    });
+
+    setBatchActionMsg(`Marked ${untickedRiderIds.length} unticked passenger(s) as Absent.`);
+    const t = setTimeout(() => setBatchActionMsg(null), 3500);
+    return () => clearTimeout(t);
+  }, [riders, presentIds, absentIds]);
+
+  // Attendance Check: Mark all unticked riders as Present
+  const handleMarkUntickedAsPresent = useCallback(() => {
+    if (!riders.length) return;
+    lastLocalEditTimeRef.current = Date.now();
+    isUserDirtyRef.current = true;
+
+    const untickedRiderIds = riders
+      .filter((r) => !presentIds.has(r.id) && !absentIds.has(r.id))
+      .map((r) => r.id);
+
+    if (untickedRiderIds.length === 0) return;
+
+    setPresentIds((prev) => {
+      const next = new Set(prev);
+      untickedRiderIds.forEach((id) => next.add(id));
+      return next;
+    });
+
+    setBatchActionMsg(`Marked ${untickedRiderIds.length} unticked passenger(s) as Present.`);
+    const t = setTimeout(() => setBatchActionMsg(null), 3500);
+    return () => clearTimeout(t);
+  }, [riders, presentIds, absentIds]);
+
+  // Attendance Check: Reset all attendance marks
+  const handleResetAllTicks = useCallback(() => {
+    if (!riders.length) return;
+    lastLocalEditTimeRef.current = Date.now();
+    isUserDirtyRef.current = true;
+    const riderIdSet = new Set(riders.map((r) => r.id));
+
+    setPresentIds((prev) => {
+      const next = new Set(prev);
+      riderIdSet.forEach((id) => next.delete(id));
+      return next;
+    });
+    setAbsentIds((prev) => {
+      const next = new Set(prev);
+      riderIdSet.forEach((id) => next.delete(id));
+      return next;
+    });
+
+    setBatchActionMsg('Reset all attendance marks for this vehicle.');
+    const t = setTimeout(() => setBatchActionMsg(null), 3000);
+    return () => clearTimeout(t);
+  }, [riders]);
+
+  const addCoRep = () => {
+    isUserDirtyRef.current = true;
+    setCoReps((prev) => [...prev, '']);
+  };
+  const updateCoRep = (index: number, val: string) => {
+    isUserDirtyRef.current = true;
     setCoReps((prev) => prev.map((c, i) => (i === index ? val : c)));
-  const removeCoRep = (index: number) =>
+  };
+  const removeCoRep = (index: number) => {
+    isUserDirtyRef.current = true;
     setCoReps((prev) => prev.filter((_, i) => i !== index));
+  };
 
   const toggleCollectedCancellation = (entryId: string) => {
+    isUserDirtyRef.current = true;
     setCollectedCancellationIds((prev) => {
       const next = new Set(prev);
       if (next.has(entryId)) next.delete(entryId);
@@ -511,6 +702,7 @@ export function RepPage() {
   };
 
   const addManualCancellation = (initialName?: string) => {
+    isUserDirtyRef.current = true;
     setManualCancellations((prev) => [
       ...prev,
       {
@@ -524,14 +716,17 @@ export function RepPage() {
   };
 
   const updateManualCancellation = (id: string, patch: Partial<ManualCancellation>) => {
+    isUserDirtyRef.current = true;
     setManualCancellations((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
   };
 
   const removeManualCancellation = (id: string) => {
+    isUserDirtyRef.current = true;
     setManualCancellations((prev) => prev.filter((c) => c.id !== id));
   };
 
   const addExternalSponsee = () => {
+    isUserDirtyRef.current = true;
     setExternalSponsees((prev) => [
       ...prev,
       { id: `sponsee-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, sponseeName: '', taxiName: '', amount: FARE },
@@ -539,10 +734,12 @@ export function RepPage() {
   };
 
   const updateExternalSponsee = (id: string, patch: Partial<ExternalSponsee>) => {
+    isUserDirtyRef.current = true;
     setExternalSponsees((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   };
 
   const removeExternalSponsee = (id: string) => {
+    isUserDirtyRef.current = true;
     setExternalSponsees((prev) => prev.filter((s) => s.id !== id));
   };
 
@@ -579,7 +776,6 @@ export function RepPage() {
         setTransferPrompt({ passenger: existing, fromVehicle });
         return;
       }
-      // If already unassigned or in this vehicle, assign and mark present
       await assignWalkIn(existing, fromVehicle?.id ?? existing.assignedTo ?? null);
     } else {
       if (pendingSyncTimerRef.current) {
@@ -665,7 +861,6 @@ export function RepPage() {
 
     const poolKey = hubDisplayName(selectedVehicle.type, passenger.stop || 'Walk-In');
 
-    // 1. Update signups
     const updatedSignups = manifest.signups.map((p) =>
       p.id === passenger.id ? { ...p, assignedTo: selectedVehicle.id, present: true } : p
     );
@@ -673,9 +868,7 @@ export function RepPage() {
       updatedSignups.push({ ...passenger, assignedTo: selectedVehicle.id, present: true });
     }
 
-    // 2. Update vehicles
     const updatedVehicles = manifest.vehicles.map((v) => {
-      // Remove from origin vehicle
       if (fromVehicleId && v.id === fromVehicleId && v.id !== selectedVehicle.id) {
         const nextRiders = v.riders.filter((id) => id !== passenger.id);
         const cleanedDraft = v.draftState ? {
@@ -687,7 +880,6 @@ export function RepPage() {
         return { ...v, riders: nextRiders, draftState: cleanedDraft };
       }
 
-      // Add to destination vehicle
       if (v.id === selectedVehicle.id) {
         const nextRiders = v.riders.includes(passenger.id) ? v.riders : [...v.riders, passenger.id];
         const nextOrderedStops = orderedStopsWith(v, poolKey);
@@ -722,7 +914,6 @@ export function RepPage() {
         };
       }
 
-      // Any other vehicle that might have had this rider
       if (v.riders.includes(passenger.id) && v.id !== selectedVehicle.id) {
         const nextRiders = v.riders.filter((id) => id !== passenger.id);
         const cleanedDraft = v.draftState ? {
@@ -826,7 +1017,6 @@ export function RepPage() {
         `${coRepNote}${cashNote}${sponseeNote}${settledNote}${generalNotes.trim()}`.trim()
       );
 
-      // Auto-settle ledger entries by selected ID and matching manual passenger names if any
       const matchingLedgerIds = pastCancellations
         .filter((e) => manualCancellations.some((m) => m.passengerName.trim() && m.passengerName.trim().toLowerCase() === e.passenger_name.trim().toLowerCase()))
         .map((e) => e.id);
@@ -863,11 +1053,10 @@ export function RepPage() {
 
       await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
 
-      // Automatically sync cancellation ledger to Google Sheets in background
       try {
-        await autoSyncGoogleSheetsSilently();
-      } catch (sheetErr) {
-        console.warn('Sheets auto-sync notice:', sheetErr);
+        localStorage.removeItem(`crc_rep_draft_${key}_${selectedVehicle.id}`);
+      } catch {
+        // storage unavailable
       }
 
       setSubmitMsg(
@@ -887,24 +1076,15 @@ export function RepPage() {
     setSubmitting(true);
     setSubmitMsg(null);
     try {
-      // 1. Withdraw absentees for this vehicle from cancellation_ledger
       const vehicleRiderNames = riders.map((r) => r.fullName);
       await withdrawAbsentees(key, vehicleRiderNames);
 
-      // 2. Mark vehicle unsubmitted
       const updatedVehicles = manifest.vehicles.map((v) =>
         v.id === selectedVehicle.id
           ? { ...v, submitted: false, submittedAt: undefined, submittedBy: undefined }
           : v
       );
       await save({ ...manifest, vehicles: updatedVehicles });
-
-      // 3. Immediately re-sync to Google Sheets in background so withdrawn names are removed
-      try {
-        await autoSyncGoogleSheetsSilently();
-      } catch (sheetErr) {
-        console.warn('Sheets auto-sync notice on reopen:', sheetErr);
-      }
 
       setSubmitMsg(
         `Attendance reopened for editing. Unconfirmed absentees have been withdrawn from the cancellation ledger until you submit again.`
@@ -917,6 +1097,29 @@ export function RepPage() {
   }
 
   const isSubmitted = selectedVehicle?.submitted ?? false;
+
+  // Filtered riders based on search text and status tab
+  const filteredRiders = useMemo(() => {
+    const q = riderSearch.trim().toLowerCase();
+    return riders.filter((r) => {
+      // Tab filter
+      if (riderFilter === 'unticked') {
+        if (presentIds.has(r.id) || absentIds.has(r.id)) return false;
+      } else if (riderFilter === 'present') {
+        if (!presentIds.has(r.id)) return false;
+      } else if (riderFilter === 'absent') {
+        if (!absentIds.has(r.id)) return false;
+      }
+
+      // Search query
+      if (!q) return true;
+      return (
+        r.fullName.toLowerCase().includes(q) ||
+        (r.stop || '').toLowerCase().includes(q) ||
+        (r.structure || '').toLowerCase().includes(q)
+      );
+    });
+  }, [riders, riderSearch, riderFilter, presentIds, absentIds]);
 
   return (
     <div className="min-h-screen bg-bg">
@@ -931,7 +1134,7 @@ export function RepPage() {
             </div>
             <div className="flex items-center gap-1 text-[11px] text-muted">
               <Wifi className="h-3 w-3 text-success" />
-              <span>Live transport check-in</span>
+              <span>Low-data mobile check-in</span>
             </div>
           </div>
           <Cross className="h-5 w-5 text-muted" strokeWidth={2} />
@@ -948,8 +1151,7 @@ export function RepPage() {
             Transport Rep Portal
           </h1>
           <p className="mt-1.5 text-sm text-muted">
-            Enter your name to find your assigned vehicle, mark every passenger Present or Absent with instant feedback, and submit
-            attendance.
+            Find your assigned vehicle, search riders person-by-person, tick them off, and quickly mark remaining absentees.
           </p>
         </div>
 
@@ -1006,7 +1208,10 @@ export function RepPage() {
               <input
                 type="text"
                 value={repName}
-                onChange={(e) => setRepName(e.target.value)}
+                onChange={(e) => {
+                  isUserDirtyRef.current = true;
+                  setRepName(e.target.value);
+                }}
                 placeholder="Start typing your name…"
                 className="input-field mb-1.5"
               />
@@ -1019,7 +1224,10 @@ export function RepPage() {
                   </span>
                   <button
                     type="button"
-                    onClick={() => setRepName(detectedOfficialRep)}
+                    onClick={() => {
+                      isUserDirtyRef.current = true;
+                      setRepName(detectedOfficialRep);
+                    }}
                     className="text-xs font-bold text-crimson-400 underline hover:text-crimson-300"
                   >
                     Use Name
@@ -1044,6 +1252,7 @@ export function RepPage() {
                   onChange={(e) => {
                     setSelectedVehicleId(e.target.value);
                     setSubmitMsg(null);
+                    setRiderSearch('');
                   }}
                   className="input-field pl-10"
                 >
@@ -1100,7 +1309,10 @@ export function RepPage() {
                     <input
                       type="text"
                       value={licensePlate}
-                      onChange={(e) => setLicensePlate(e.target.value)}
+                      onChange={(e) => {
+                        isUserDirtyRef.current = true;
+                        setLicensePlate(e.target.value);
+                      }}
                       placeholder="Required — e.g. GP 123 ABC"
                       className="input-field uppercase"
                     />
@@ -1110,8 +1322,18 @@ export function RepPage() {
             </div>
 
             {selectedVehicle && draftRestored && (
-              <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-2.5 text-xs text-success-light">
-                🟢 Draft synced with cloud
+              <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-2.5 text-xs text-success-light animate-fade-in">
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
+                <span>Working draft restored — your progress is preserved.</span>
+              </div>
+            )}
+
+            {selectedVehicle && !isSubmitted && !draftRestored && (
+              <div className="flex items-center justify-between rounded-lg border border-line bg-card/60 px-3 py-1.5 text-[11px] text-muted">
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-2 w-2 rounded-full bg-success animate-pulse" />
+                  Auto-saved on device & cloud — safe against refresh & exit
+                </span>
               </div>
             )}
 
@@ -1207,18 +1429,197 @@ export function RepPage() {
                   </div>
                 )}
 
-                <StopGroupedChecklist
+                {/* PASSENGER SEARCH & ATTENDANCE CHECK TOOLBAR */}
+                <div className="card space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5">
+                      <div className="h-4 w-1 rounded-full bg-crimson-500" />
+                      <h3 className="font-display text-xs font-bold uppercase tracking-wider text-ink">
+                        Passenger Attendance Check
+                      </h3>
+                    </div>
+                    <div className="flex items-center gap-1 bg-card-2 rounded-lg p-0.5 border border-line">
+                      <button
+                        type="button"
+                        onClick={() => setViewMode('stop')}
+                        className={`px-2 py-1 text-[11px] font-semibold rounded ${
+                          viewMode === 'stop' ? 'bg-crimson-600 text-white shadow-xs' : 'text-muted hover:text-ink'
+                        }`}
+                      >
+                        By Stop
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setViewMode('alpha')}
+                        className={`flex items-center gap-1 px-2 py-1 text-[11px] font-semibold rounded ${
+                          viewMode === 'alpha' ? 'bg-crimson-600 text-white shadow-xs' : 'text-muted hover:text-ink'
+                        }`}
+                      >
+                        <ArrowDownAZ className="h-3 w-3" />
+                        A-Z
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Search Bar for Quick Person-by-Person Check */}
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+                    <input
+                      type="text"
+                      value={riderSearch}
+                      onChange={(e) => setRiderSearch(e.target.value)}
+                      placeholder="Search passenger in this bus by name, stop, or structure…"
+                      className="input-field pl-9 pr-8 text-xs font-medium"
+                    />
+                    {riderSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setRiderSearch('')}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-ink"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Filter Tabs: All / Unticked / Present / Absent */}
+                  <div className="grid grid-cols-4 gap-1 rounded-lg bg-card-2 p-1 border border-line text-xs font-semibold">
+                    <button
+                      type="button"
+                      onClick={() => setRiderFilter('all')}
+                      className={`rounded py-1.5 text-center transition-all ${
+                        riderFilter === 'all' ? 'bg-card text-ink shadow-xs' : 'text-muted hover:text-ink'
+                      }`}
+                    >
+                      All ({riders.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRiderFilter('unticked')}
+                      className={`rounded py-1.5 text-center transition-all ${
+                        riderFilter === 'unticked'
+                          ? 'bg-crimson-500/20 text-crimson-300 font-bold border border-crimson-500/40 shadow-xs'
+                          : untickedCount > 0
+                          ? 'text-warning font-bold'
+                          : 'text-muted hover:text-ink'
+                      }`}
+                    >
+                      Unticked ({untickedCount})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRiderFilter('present')}
+                      className={`rounded py-1.5 text-center transition-all ${
+                        riderFilter === 'present' ? 'bg-success/20 text-success-light shadow-xs' : 'text-muted hover:text-ink'
+                      }`}
+                    >
+                      Present ({presentCount})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRiderFilter('absent')}
+                      className={`rounded py-1.5 text-center transition-all ${
+                        riderFilter === 'absent' ? 'bg-crimson-500/20 text-crimson-300 shadow-xs' : 'text-muted hover:text-ink'
+                      }`}
+                    >
+                      Absent ({absentCount})
+                    </button>
+                  </div>
+
+                  {/* Fast Action: Mark Unticked as Absent */}
+                  {!isSubmitted && (
+                    <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                      {untickedCount > 0 ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={handleMarkUntickedAsAbsent}
+                            className="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-crimson-500/40 bg-crimson-500/10 px-3 py-2 text-xs font-bold text-crimson-300 hover:bg-crimson-500/20 transition-all shadow-xs"
+                            title="Place all remaining passengers who were not ticked into the Absent section"
+                          >
+                            <XCircle className="h-4 w-4 text-crimson-400" />
+                            Mark Unticked as Absent ({untickedCount})
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleMarkUntickedAsPresent}
+                            className="flex items-center justify-center gap-1 rounded-lg border border-success/40 bg-success/10 px-2.5 py-2 text-xs font-semibold text-success-light hover:bg-success/20 transition-all shadow-xs"
+                            title="Mark all remaining unticked passengers as Present"
+                          >
+                            <CheckCircle2 className="h-4 w-4 text-success" />
+                            All Present
+                          </button>
+                        </>
+                      ) : (
+                        <div className="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-xs font-semibold text-success-light">
+                          <Check className="h-4 w-4" />
+                          All {riders.length} passengers checked in
+                        </div>
+                      )}
+
+                      {touchedCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleResetAllTicks}
+                          className="flex items-center justify-center gap-1 rounded-lg border border-line bg-card-2/50 px-2.5 py-2 text-[11px] font-medium text-muted hover:text-ink hover:bg-card-2"
+                          title="Reset attendance check for this vehicle"
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                          Reset
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {batchActionMsg && (
+                    <div className="rounded-md border border-crimson-500/30 bg-crimson-900/20 px-3 py-1.5 text-xs text-crimson-200 animate-fade-in flex items-center justify-between">
+                      <span>{batchActionMsg}</span>
+                      <button onClick={() => setBatchActionMsg(null)} className="text-muted hover:text-ink">
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* PASSENGER CHECKLIST (GROUPED BY STOP OR ALPHABETICAL LIST) */}
+                {viewMode === 'stop' && !riderSearch ? (
+                  <StopGroupedChecklist
+                    riders={filteredRiders}
+                    vehicleType={selectedVehicle?.type ?? 'Taxi'}
+                    orderedStops={selectedVehicle?.orderedStops}
+                    presentIds={presentIds}
+                    absentIds={absentIds}
+                    onSetPresent={handleSetPresent}
+                    onToggleSponsored={handleToggleSponsored}
+                    onSetNote={handleSetNote}
+                    sponsoredIds={sponsoredIds}
+                    notes={notes}
+                    disabled={isSubmitted || submitting}
+                  />
+                ) : (
+                  <AlphabeticalChecklist
+                    riders={filteredRiders}
+                    presentIds={presentIds}
+                    absentIds={absentIds}
+                    onSetPresent={handleSetPresent}
+                    onToggleSponsored={handleToggleSponsored}
+                    onSetNote={handleSetNote}
+                    sponsoredIds={sponsoredIds}
+                    notes={notes}
+                    disabled={isSubmitted || submitting}
+                  />
+                )}
+
+                {/* Rep Stats for Stats Link (Present, FTVs, Sponsorships, Absentees) */}
+                <RepStatsCopyCard
                   riders={riders}
-                  vehicleType={selectedVehicle?.type ?? 'Taxi'}
-                  orderedStops={selectedVehicle?.orderedStops}
                   presentIds={presentIds}
                   absentIds={absentIds}
-                  onSetPresent={handleSetPresent}
-                  onToggleSponsored={handleToggleSponsored}
-                  onSetNote={handleSetNote}
                   sponsoredIds={sponsoredIds}
                   notes={notes}
-                  disabled={isSubmitted || submitting}
+                  vehicleName={selectedVehicle.name}
+                  repName={repName}
+                  isSubmitted={isSubmitted}
                 />
 
                 {!isSubmitted && (
@@ -1230,7 +1631,10 @@ export function RepPage() {
                       </label>
                       <textarea
                         value={generalNotes}
-                        onChange={(e) => setGeneralNotes(e.target.value)}
+                        onChange={(e) => {
+                          isUserDirtyRef.current = true;
+                          setGeneralNotes(e.target.value);
+                        }}
                         placeholder="Any notes for this vehicle's submission — e.g. 'Person A in Taxi 1 is paying for Person B in Taxi 2'"
                         rows={2}
                         className="input-field text-xs resize-none"
@@ -1259,7 +1663,11 @@ export function RepPage() {
                       onRemoveManualCancellation={removeManualCancellation}
                       pastCancellationCash={pastCancellationCash}
                       search={cancellationSearch}
-                      onSearchChange={setCancellationSearch}
+                      onSearchChange={(v) => {
+                        setCancellationSearch(v);
+                        ensurePastCancellationsLoaded();
+                      }}
+                      onEnsureLoaded={ensurePastCancellationsLoaded}
                       baseCash={baseCash}
                       totalCash={totalCash}
                     />
@@ -1286,12 +1694,12 @@ export function RepPage() {
                       }`}
                     >
                       {submitting ? (
-                        <span className="flex items-center gap-2">
+                        <span className="flex items-center justify-center gap-2">
                           <Loader2 className="h-5 w-5 animate-spin" />
                           Submitting…
                         </span>
                       ) : (
-                        <span className="flex items-center gap-2">
+                        <span className="flex items-center justify-center gap-2">
                           <Send className="h-5 w-5" />
                           Submit Attendance
                         </span>
@@ -1340,27 +1748,6 @@ export function RepPage() {
                     )}
                   </button>
                 )}
-
-                {/* Session Archive — Transport Stats */}
-                <div className="mt-2 flex items-center gap-2">
-                  <div className="h-px flex-1 bg-line" />
-                  <span className="text-[10px] font-semibold uppercase tracking-widest text-muted">Session Archive</span>
-                  <div className="h-px flex-1 bg-line" />
-                </div>
-                <RepStatsCopyCard
-                  riders={riders}
-                  presentIds={presentIds}
-                  absentIds={absentIds}
-                  sponsoredIds={sponsoredIds}
-                  notes={notes}
-                  vehicleName={selectedVehicle.name}
-                  repName={repName}
-                  isSubmitted={isSubmitted}
-                  licensePlate={licensePlate}
-                  serviceLabel={serviceLabel}
-                  date={prettyDate(date)}
-                  totalCash={totalCash}
-                />
               </>
             )}
 
@@ -1428,7 +1815,7 @@ export function RepPage() {
                     <span>Transferring…</span>
                   </>
                 ) : (
-                  'Transfer & Check In'
+                  <span>Confirm Transfer</span>
                 )}
               </button>
             </div>
@@ -1447,15 +1834,20 @@ function StatCard({
   icon: React.ReactNode;
   accent?: 'success' | 'crimson';
 }) {
-  const color = accent === 'success' ? 'text-success-light' : accent === 'crimson' ? 'text-crimson-400' : 'text-ink';
-  const border = accent === 'success' ? 'border-success/30 bg-success/10' : accent === 'crimson' ? 'border-crimson-500/30 bg-crimson-900/10' : 'border-line bg-card';
+  const accentClass =
+    accent === 'success'
+      ? 'border-success/30 bg-success/5 text-success-light'
+      : accent === 'crimson'
+      ? 'border-crimson-500/30 bg-crimson-500/5 text-crimson-300'
+      : 'border-line bg-card text-ink';
+
   return (
-    <div className={`rounded-xl border p-2.5 text-center ${border}`}>
-      <div className={`flex items-center justify-center gap-1.5 ${color}`}>
+    <div className={`rounded-xl border p-3 text-center ${accentClass}`}>
+      <div className="flex items-center justify-center gap-1 text-xs text-muted mb-1">
         {icon}
-        <span className="font-display text-xl font-bold">{value}</span>
+        <span>{label}</span>
       </div>
-      <div className="mt-0.5 text-[10px] font-medium uppercase tracking-wide text-muted">{label}</div>
+      <div className="font-display text-xl font-bold">{value}</div>
     </div>
   );
 }
@@ -1472,7 +1864,7 @@ function CashCalculatorCard({
   externalSponsees, onAddSponsee, onUpdateSponsee, onRemoveSponsee, externalCash,
   pastCancellations, loadingPastCancellations, collectedCancellationIds, onToggleCancellation,
   manualCancellations, onAddManualCancellation, onUpdateManualCancellation, onRemoveManualCancellation,
-  pastCancellationCash, search, onSearchChange,
+  pastCancellationCash, search, onSearchChange, onEnsureLoaded,
   baseCash, totalCash,
 }: {
   presentCount: number;
@@ -1496,6 +1888,7 @@ function CashCalculatorCard({
   pastCancellationCash: number;
   search: string;
   onSearchChange: (v: string) => void;
+  onEnsureLoaded: () => void;
   baseCash: number;
   totalCash: number;
 }) {
@@ -1586,7 +1979,10 @@ function CashCalculatorCard({
           </div>
           <button
             type="button"
-            onClick={() => onAddManualCancellation()}
+            onClick={() => {
+              onEnsureLoaded();
+              onAddManualCancellation();
+            }}
             className="flex items-center gap-1 rounded-md bg-crimson-600 px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-crimson-500 transition-colors"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -1676,15 +2072,15 @@ function CashCalculatorCard({
           <input
             type="text"
             value={search}
+            onFocus={onEnsureLoaded}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search ledger by name, or type name to add cancellation payment…"
+            placeholder="Search past cancellation debt list, or type name to add payment…"
             className="input-field py-1.5 pl-8 text-xs"
           />
         </div>
 
         {search.trim().length > 0 && (
           <div className="mt-2 max-h-56 space-y-1.5 overflow-y-auto rounded-lg border border-line bg-card-2/40 p-2 animate-fade-in">
-            {/* Quick-add button for the typed search string */}
             <button
               type="button"
               onClick={() => {
@@ -1701,7 +2097,7 @@ function CashCalculatorCard({
             </button>
 
             {loadingPastCancellations ? (
-              <p className="py-2 text-center text-[11px] text-muted">Loading ledger entries…</p>
+              <p className="py-2 text-center text-[11px] text-muted">Loading debt entries…</p>
             ) : searchResults.length > 0 ? (
               searchResults.map((e) => (
                 <button
@@ -1722,12 +2118,6 @@ function CashCalculatorCard({
               ))
             ) : null}
           </div>
-        )}
-
-        {pastCancellations.length === 0 && manualCancellations.length === 0 && !loadingPastCancellations && search.trim().length === 0 && (
-          <p className="mt-1.5 text-[11px] text-muted">
-            Have someone paying a past cancellation fee in cash? Click <strong className="text-crimson-300">+ Add Cancellation Payment</strong> above to include it in the vehicle&apos;s cash calculation.
-          </p>
         )}
       </div>
 
@@ -1801,6 +2191,14 @@ function StopGroupedChecklist({
     setExpandedStops(expand ? new Set(stops) : new Set());
   }
 
+  if (riders.length === 0) {
+    return (
+      <div className="rounded-xl border border-line bg-card p-6 text-center text-xs text-muted">
+        No passengers match this filter.
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between px-1">
@@ -1815,7 +2213,8 @@ function StopGroupedChecklist({
       </div>
 
       {stops.map((stop) => {
-        const stopRiders = byStop[stop];
+        const stopRiders = byStop[stop] || [];
+        if (stopRiders.length === 0) return null;
         const stopPresent = stopRiders.filter((r) => presentIds.has(r.id)).length;
         const stopTouched = stopRiders.filter((r) => presentIds.has(r.id) || absentIds.has(r.id)).length;
         const isExpanded = expandedStops.has(stop);
@@ -1858,6 +2257,52 @@ function StopGroupedChecklist({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function AlphabeticalChecklist({
+  riders, presentIds, absentIds, onSetPresent, onToggleSponsored, onSetNote, sponsoredIds, notes, disabled,
+}: {
+  riders: Passenger[];
+  presentIds: Set<string>;
+  absentIds: Set<string>;
+  onSetPresent: (id: string, present: boolean) => void;
+  onToggleSponsored: (id: string) => void;
+  onSetNote: (id: string, text: string) => void;
+  sponsoredIds: Set<string>;
+  notes: Record<string, string>;
+  disabled: boolean;
+}) {
+  const sorted = useMemo(() => {
+    return [...riders].sort((a, b) => naturalCompare(a.fullName, b.fullName));
+  }, [riders]);
+
+  if (sorted.length === 0) {
+    return (
+      <div className="rounded-xl border border-line bg-card p-6 text-center text-xs text-muted">
+        No passengers match this filter.
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-line bg-card divide-y divide-line/60">
+      {sorted.map((p) => (
+        <PassengerRow
+          key={p.id}
+          passenger={p}
+          isPresent={presentIds.has(p.id)}
+          isAbsent={absentIds.has(p.id)}
+          touched={presentIds.has(p.id) || absentIds.has(p.id)}
+          onSetPresent={onSetPresent}
+          onToggleSponsored={onToggleSponsored}
+          onSetNote={onSetNote}
+          isSponsored={sponsoredIds.has(p.id)}
+          noteText={notes[p.id] ?? ''}
+          disabled={disabled}
+        />
+      ))}
     </div>
   );
 }

@@ -25,6 +25,14 @@ export function useManifest(key: string | null): {
   loading: boolean;
   error: string | null;
   save: (m: Manifest) => Promise<void>;
+  updateVehicleDraft: (
+    vehicleId: string,
+    draftState: Vehicle['draftState'],
+    repName?: string,
+    licensePlate?: string,
+    presentIds?: string[],
+    absentIds?: string[]
+  ) => Promise<void>;
 } {
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [loading, setLoading] = useState(true);
@@ -126,5 +134,92 @@ export function useManifest(key: string | null): {
     }
   }
 
-  return { manifest, loading, error, save };
+  /**
+   * Conflict-safe vehicle draft update:
+   * Merges changes strictly for `vehicleId` without overwriting other vehicles,
+   * unassigned signups, or admin allocations that might have occurred concurrently.
+   */
+  async function updateVehicleDraft(
+    vehicleId: string,
+    draftState: Vehicle['draftState'],
+    repName?: string,
+    licensePlate?: string,
+    presentIds?: string[],
+    absentIds?: string[]
+  ): Promise<void> {
+    if (!key) return;
+
+    // 1. Fetch latest server row to avoid stale manifest overwrites
+    let baseManifest: Manifest | null = manifest;
+    try {
+      const { data: latestRow } = await supabase
+        .from(MANIFESTS_TABLE)
+        .select('date, signups, vehicles, created_at, updated_at')
+        .eq('date', key)
+        .maybeSingle();
+      if (latestRow) {
+        baseManifest = normalizeManifestData(latestRow);
+      }
+    } catch {
+      /* fallback to local baseManifest */
+    }
+
+    if (!baseManifest) return;
+
+    const pSet = presentIds ? new Set(presentIds) : null;
+    const aSet = absentIds ? new Set(absentIds) : null;
+
+    // 2. Only modify the present/absent flag of this specific vehicle's passengers
+    const targetVehicle = baseManifest.vehicles.find((v) => v.id === vehicleId);
+    const vehicleRiderSet = new Set(targetVehicle?.riders ?? []);
+
+    const updatedSignups = baseManifest.signups.map((p) => {
+      if (vehicleRiderSet.has(p.id)) {
+        if (pSet && pSet.has(p.id)) return { ...p, present: true };
+        if (aSet && aSet.has(p.id)) return { ...p, present: false };
+      }
+      return p;
+    });
+
+    // 3. Only update the target vehicle's draft state, leaving other vehicles untouched
+    const updatedVehicles = baseManifest.vehicles.map((v) => {
+      if (v.id === vehicleId) {
+        return {
+          ...v,
+          repName: repName?.trim() || v.repName,
+          licensePlate: licensePlate?.trim() || v.licensePlate,
+          draftState,
+        };
+      }
+      return v;
+    });
+
+    const mergedManifest: Manifest = {
+      ...baseManifest,
+      signups: updatedSignups,
+      vehicles: updatedVehicles,
+    };
+
+    setManifest(mergedManifest);
+
+    const { error: upsertError, data } = await supabase
+      .from(MANIFESTS_TABLE)
+      .upsert(
+        {
+          date: mergedManifest.date,
+          signups: mergedManifest.signups,
+          vehicles: mergedManifest.vehicles,
+        },
+        { onConflict: 'date' }
+      )
+      .select('updated_at')
+      .single();
+
+    if (upsertError) throw upsertError;
+    if (data?.updated_at) {
+      lastSavedUpdatedAtRef.current = data.updated_at;
+    }
+  }
+
+  return { manifest, loading, error, save, updateVehicleDraft };
 }
