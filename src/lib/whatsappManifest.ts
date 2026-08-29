@@ -1,7 +1,7 @@
 import { shortDate, parseManifestKey } from './dates';
 import { SERVICE_TYPES, hubDisplayName, type Manifest, type Vehicle, type Passenger, type ServiceType } from './types';
 import { sortVehiclesNatural } from './sort';
-import { isPassengerRepOfVehicle, matchRiderToOfficialRep } from './officialReps';
+import { isPassengerRepOfVehicle, matchRiderToOfficialRep, detectVehicleRep } from './officialReps';
 
 function periodLabel(period: 'AM' | 'PM'): string {
   return period === 'AM' ? 'Morning' : 'Evening';
