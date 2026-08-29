@@ -5,44 +5,49 @@ import { MANIFESTS_TABLE } from './supabase';
 export type ConnectionState = 'connecting' | 'online' | 'offline';
 
 export function useConnection(): ConnectionState {
-  const [state, setState] = useState<ConnectionState>('connecting');
+  const [state, setState] = useState<ConnectionState>(() =>
+    typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'online'
+  );
 
   useEffect(() => {
     let mounted = true;
-    let channel: ReturnType<typeof supabase.channel> | null = null;
 
-    async function check() {
+    const handleOnline = () => {
+      if (mounted) setState('online');
+    };
+
+    const handleOffline = () => {
+      if (mounted) setState('offline');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    // Perform a single lightweight connection check on mount (head: true transfers 0 bytes payload)
+    (async () => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        if (mounted) setState('offline');
+        return;
+      }
       try {
-        const { error } = await supabase.from(MANIFESTS_TABLE).select('date').limit(1);
+        const { error } = await supabase
+          .from(MANIFESTS_TABLE)
+          .select('date', { count: 'exact', head: true });
         if (mounted) {
           setState(error ? 'offline' : 'online');
         }
       } catch {
         if (mounted) setState('offline');
       }
-    }
-
-    check();
-
-    channel = supabase
-      .channel('connection-heartbeat')
-      .on('postgres_changes', { event: '*', schema: 'public', table: MANIFESTS_TABLE }, () => {
-        if (mounted) setState('online');
-      })
-      .subscribe((status) => {
-        if (!mounted) return;
-        if (status === 'SUBSCRIBED') setState('online');
-        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') setState('offline');
-      });
-
-    const interval = setInterval(check, 15000);
+    })();
 
     return () => {
       mounted = false;
-      clearInterval(interval);
-      if (channel) supabase.removeChannel(channel);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
     };
   }, []);
 
   return state;
 }
+

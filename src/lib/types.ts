@@ -93,12 +93,11 @@ export function getPassengerStatusBadge(p?: Partial<Passenger> | null): {
 }
 
 /**
- * Live, cross-device attendance draft for a single vehicle's Rep Portal
+ * Live, cross-device attendance state for a single vehicle's Rep Portal
  * session — persisted directly on the manifest row (via `Vehicle.draftState`)
- * instead of localStorage, so the same submission in progress stays in sync
- * across every device/tab a Rep has open, and survives a refresh or a
- * different device picking up where another left off. Cleared (set to
- * undefined) once the vehicle's attendance is actually submitted.
+ * and backed by localStorage, so the same check-in session stays in sync
+ * across every device/tab a Rep has open, survives a refresh, and preserves
+ * all marked absentees and present riders upon submission and reopening.
  */
 export interface VehicleDraftState {
   presentIds?: string[];
@@ -242,9 +241,6 @@ export const TAXI_HUBS: { hub: string; stops: string[] }[] = [
     stops: [
       'Campus Central - EOH',
       'Campus Central -EOH',
-      'Campus Central (on Empire)',
-      'Campus Central (on empire)',
-      'Campus Central on empire',
       'EOH Campus Central',
       'Charlotte',
       'Charlotte Maxeke',
@@ -257,16 +253,14 @@ export const TAXI_HUBS: { hub: string; stops: string[] }[] = [
  * BUS-only spelling/name canonicalization. This is NOT route consolidation
  * (a Bus still drives to one physical address per stop) — it exists purely
  * because Microsoft Forms submissions have referred to the same EOH campus
- * address inconsistently across intakes ("Campus Central on empire",
- * "Campus Central - EOH", "Charlotte" / "Charlotte Maxeke"). All of these
- * canonicalize to the single stop name "EOH" for Buses so the sub-stop
- * breakdown doesn't fragment into duplicate rows for the same address.
- * Every other Bus stop remains untouched and fully explicit.
+ * address inconsistently across intakes ("Campus Central - EOH",
+ * "Charlotte" / "Charlotte Maxeke"). All of these canonicalize to the
+ * single stop name "EOH" for Buses so the sub-stop breakdown doesn't
+ * fragment into duplicate rows for the same address.
+ * Every other Bus stop (including Campus Central on Empire) remains untouched
+ * and fully explicit.
  */
 export const BUS_EOH_ALIASES = new Set([
-  'Campus Central on empire',
-  'Campus Central (on empire)',
-  'Campus Central (on Empire)',
   'Campus Central - EOH',
   'Campus Central -EOH',
   'EOH Campus Central',
@@ -279,10 +273,14 @@ export const BUS_EOH_ALIASES = new Set([
 export function stopToBusHub(stop?: string | null): string | null {
   if (!stop) return null;
   const norm = stop.trim().toLowerCase();
+  // Campus Central on Empire is standalone, NOT EOH!
+  if (norm.includes('empire')) {
+    return null;
+  }
   for (const alias of BUS_EOH_ALIASES) {
     if (alias.toLowerCase() === norm) return 'EOH';
   }
-  if (norm.includes('campus central') || norm.includes('charlotte') || norm === 'eoh') {
+  if ((norm.includes('campus central') && norm.includes('eoh')) || norm.includes('charlotte') || norm === 'eoh' || norm.includes('eoh')) {
     return 'EOH';
   }
   return null;
@@ -294,6 +292,7 @@ export const INDIVIDUAL_STOPS = [
   'Laborie', 'Richmond', 'Gate 2', 'Gate 4', "APK McDonald's", 'Westdene', 'Westdene Engen',
   'Junction', 'Education Campus', 'Education campus', 'Saratoga', 'Argyle', 'Arteria', 'Knockando',
   'Randburg Surrey Square',
+  'Campus Central on empire', 'Campus Central (on Empire)', 'Campus Central (on empire)', 'Campus Central - Empire', 'Campus Central Empire',
 ] as const;
 
 export const MASTER_HUBS = ['Braam', 'Gate 7', 'EOH'] as const;
@@ -315,8 +314,12 @@ export function stopToHub(stop?: string | null): string | null {
   ) {
     return 'Gate 7';
   }
+  // Campus Central on Empire is standalone, NOT EOH!
+  if (norm.includes('empire')) {
+    return null;
+  }
   // EOH variations
-  if (norm.includes('campus central') || norm.includes('charlotte') || norm === 'eoh') {
+  if ((norm.includes('campus central') && norm.includes('eoh')) || norm.includes('charlotte') || norm === 'eoh' || norm.includes('eoh')) {
     return 'EOH';
   }
   return null;
@@ -325,7 +328,7 @@ export function stopToHub(stop?: string | null): string | null {
 /**
  * Display grouping key for a passenger's stop, based on vehicle type.
  * - Taxi: consolidated Master Hub (falls back to the raw stop if it isn't
- *   part of any hub, e.g. "Yale").
+ *   part of any hub, e.g. "Yale", "Campus Central on empire").
  * - Bus: the raw, explicit sub-stop — buses physically drive to each
  *   individual address and are never route-consolidated — EXCEPT the known
  *   EOH spelling variants (see BUS_EOH_ALIASES), which canonicalize to a
@@ -357,7 +360,8 @@ export const ROUTE_SEQUENCE: string[] = [
   'Gate 7',
   'Amic Deck - David Webster', 'Barnato', "Amic Deck - Men's Res", 'Amic Deck - Sunnyside', 'Amic Deck - Jubilee',
   'EOH',
-  'Campus Central - EOH', 'EOH Campus Central', 'Campus Central on empire', 'Charlotte', 'Charlotte Maxeke',
+  'Campus Central - EOH', 'EOH Campus Central', 'Charlotte', 'Charlotte Maxeke',
+  'Campus Central on empire', 'Campus Central (on Empire)', 'Campus Central (on empire)', 'Campus Central - Empire', 'Campus Central Empire',
   ...INDIVIDUAL_STOPS,
 ];
 

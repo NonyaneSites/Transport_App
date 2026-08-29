@@ -17,7 +17,7 @@ import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/li
 import { RepStatsCopyCard } from '@/components/RepStatsCopyCard';
 
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
-const SYNC_DEBOUNCE_MS = 800; // 800ms debounce to batch rapid taps on mobile and cut data consumption
+const SYNC_DEBOUNCE_MS = 2500; // 2500ms debounce to batch rapid taps on mobile and drastically reduce Supabase egress
 
 interface ExternalSponsee {
   id: string;
@@ -266,7 +266,11 @@ export function RepPage() {
     // Also populate from existing passenger present status if draft is empty
     if (pIds.size === 0 && aIds.size === 0 && vehicleRidersList.length > 0) {
       vehicleRidersList.forEach((r) => {
-        if (r.present) pIds.add(r.id);
+        if (r.present) {
+          pIds.add(r.id);
+        } else if (fallbackVehicle?.submitted) {
+          aIds.add(r.id);
+        }
       });
     }
 
@@ -332,7 +336,7 @@ export function RepPage() {
       localDraft = null;
     }
 
-    const cloudDraft = !vehicle.submitted ? vehicle.draftState : undefined;
+    const cloudDraft = vehicle.draftState;
 
     // Pick whichever draft has the freshest edits
     let draft: VehicleDraftState | undefined = undefined;
@@ -355,11 +359,16 @@ export function RepPage() {
     } else {
       isApplyingDraftRef.current = true;
       const initialPresent = new Set<string>();
+      const initialAbsent = new Set<string>();
       currentRiders.forEach((r) => {
-        if (r.present) initialPresent.add(r.id);
+        if (r.present) {
+          initialPresent.add(r.id);
+        } else if (vehicle.submitted) {
+          initialAbsent.add(r.id);
+        }
       });
       setPresentIds(initialPresent);
-      setAbsentIds(new Set());
+      setAbsentIds(initialAbsent);
       setSponsoredIds(new Set());
       setNotes({});
       setGeneralNotes(vehicle.generalNotes ?? '');
@@ -375,14 +384,14 @@ export function RepPage() {
 
   // Live cross-device sync (only applies genuine new updates from other devices)
   useEffect(() => {
-    if (!selectedVehicle || selectedVehicle.submitted) return;
+    if (!selectedVehicle) return;
     const draft = selectedVehicle.draftState;
     if (!draft) return;
     if (draft.updatedBy === clientIdRef.current) return;
     if (Date.now() - lastLocalEditTimeRef.current < 2500) return;
     if (draft.updatedAt && draft.updatedAt === lastAppliedDraftAtRef.current) return;
 
-    applyDraftState(draft, riders);
+    applyDraftState(draft, riders, selectedVehicle);
     lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
     setDraftRestored(true);
     const t = setTimeout(() => setDraftRestored(false), 2500);
@@ -1029,6 +1038,23 @@ export function RepPage() {
       }
       setManualCancellations([]);
 
+      const finalizedDraft: VehicleDraftState = {
+        presentIds: Array.from(presentIds),
+        absentIds: Array.from(absentIds),
+        sponsoredIds: Array.from(sponsoredIds),
+        notes,
+        repName: repName.trim(),
+        coReps: coReps.map((c) => c.trim()).filter(Boolean),
+        licensePlate: licensePlate.trim(),
+        generalNotes: generalNotes.trim(),
+        cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+        settledLedgerIds: Array.from(collectedCancellationIds),
+        manualCancellations,
+        externalSponsees,
+        updatedAt: new Date().toISOString(),
+        updatedBy: clientIdRef.current,
+      };
+
       const updatedSignups = manifest.signups.map((p) => {
         if (presentIds.has(p.id)) return { ...p, present: true };
         if (absentIds.has(p.id)) return { ...p, present: false };
@@ -1046,7 +1072,7 @@ export function RepPage() {
               repName: repName.trim(),
               coReps: coReps.map((c) => c.trim()).filter(Boolean),
               generalNotes: generalNotes.trim(),
-              draftState: undefined,
+              draftState: finalizedDraft,
             }
           : v
       );
@@ -1054,7 +1080,7 @@ export function RepPage() {
       await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
 
       try {
-        localStorage.removeItem(`crc_rep_draft_${key}_${selectedVehicle.id}`);
+        localStorage.setItem(`crc_rep_draft_${key}_${selectedVehicle.id}`, JSON.stringify(finalizedDraft));
       } catch {
         // storage unavailable
       }

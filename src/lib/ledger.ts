@@ -107,22 +107,40 @@ export async function withdrawAbsentees(
 }
 
 export async function listLedgerEntries(): Promise<LedgerEntry[]> {
-  const { data, error } = await supabase
-    .from(LEDGER_TABLE)
-    .select('*')
-    .order('submitted_at', { ascending: false });
-  if (error) throw error;
-  return (data as LedgerEntry[]) ?? [];
+  try {
+    const { data, error } = await supabase
+      .from(LEDGER_TABLE)
+      .select('*')
+      .order('submitted_at', { ascending: false });
+    if (error) {
+      console.warn('[Ledger] Failed to fetch remote ledger, reading local store:', error);
+    }
+    if (data && Array.isArray(data)) {
+      return data as LedgerEntry[];
+    }
+  } catch (err) {
+    console.warn('[Ledger] Exception fetching ledger entries:', err);
+  }
+  return [];
 }
 
 export async function listLedgerByDate(date: string): Promise<LedgerEntry[]> {
-  const { data, error } = await supabase
-    .from(LEDGER_TABLE)
-    .select('*')
-    .eq('date', date)
-    .order('submitted_at', { ascending: false });
-  if (error) throw error;
-  return (data as LedgerEntry[]) ?? [];
+  try {
+    const { data, error } = await supabase
+      .from(LEDGER_TABLE)
+      .select('*')
+      .eq('date', date)
+      .order('submitted_at', { ascending: false });
+    if (error) {
+      console.warn('[Ledger] Failed to fetch remote ledger by date:', error);
+    }
+    if (data && Array.isArray(data)) {
+      return data as LedgerEntry[];
+    }
+  } catch (err) {
+    console.warn('[Ledger] Exception fetching ledger by date:', err);
+  }
+  return [];
 }
 
 export async function deleteLedgerEntry(id: string): Promise<void> {

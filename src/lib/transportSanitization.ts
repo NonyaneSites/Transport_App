@@ -24,9 +24,6 @@ const GATE_7 = new Set([
 const EOH = new Set([
   'Campus Central - EOH',
   'Campus Central -EOH',
-  'Campus Central (on Empire)',
-  'Campus Central (on empire)',
-  'Campus Central on empire',
   'EOH Campus Central',
   'Charlotte',
   'Charlotte Maxeke',
@@ -37,9 +34,6 @@ const EOH = new Set([
 // spellings across Forms intakes. Kept in lockstep with BUS_EOH_ALIASES in
 // ./types. NOT route consolidation — see the note there.
 export const BUS_EOH_ALIASES = new Set([
-  'Campus Central on empire',
-  'Campus Central (on empire)',
-  'Campus Central (on Empire)',
   'Campus Central - EOH',
   'Campus Central -EOH',
   'EOH Campus Central',
@@ -73,10 +67,14 @@ export function masterHubForStop(value: unknown): string {
   if (norm.includes('david webster') || norm.includes('barnato') || (norm.includes('amic deck') && (norm.includes('jubilee') || norm.includes('sunnyside') || norm.includes("men's res") || norm.includes('mens res')))) {
     return 'Gate 7';
   }
+  // Campus Central on Empire is standalone, NOT EOH!
+  if (norm.includes('empire')) {
+    return stop;
+  }
   for (const s of EOH) {
     if (s.toLowerCase() === norm) return 'EOH';
   }
-  if (norm.includes('campus central') || norm.includes('charlotte') || norm === 'eoh') {
+  if ((norm.includes('campus central') && norm.includes('eoh')) || norm.includes('charlotte') || norm === 'eoh' || norm.includes('eoh')) {
     return 'EOH';
   }
   return stop;

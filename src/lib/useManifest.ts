@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { supabase } from './supabase';
-import { MANIFESTS_TABLE } from './supabase';
+import { supabase, MANIFESTS_TABLE } from './supabase';
+import { loadManifest } from './manifest';
 import type { Manifest, Vehicle } from './types';
 
 export function normalizeManifestData(raw: Partial<Manifest> | null | undefined): Manifest | null {
@@ -38,6 +38,11 @@ export function useManifest(key: string | null): {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const keyRef = useRef<string | null>(null);
+  const manifestRef = useRef<Manifest | null>(null);
+
+  useEffect(() => {
+    manifestRef.current = manifest;
+  }, [manifest]);
 
   // Track the updatedAt timestamp of the last thing WE saved.
   // Used to suppress our own realtime echoes without blocking external updates.
@@ -57,19 +62,18 @@ export function useManifest(key: string | null): {
 
     (async () => {
       try {
-        const { data, error: loadError } = await supabase
-          .from(MANIFESTS_TABLE)
-          .select('date, signups, vehicles, created_at, updated_at')
-          .eq('date', key)
-          .maybeSingle();
-        if (loadError) throw loadError;
+        const loaded = await loadManifest(key);
         if (keyRef.current === key) {
-          setManifest(normalizeManifestData(data));
+          setManifest(loaded);
           setLoading(false);
         }
       } catch (e) {
         if (keyRef.current === key) {
-          setError(e instanceof Error ? e.message : String(e));
+          const fallback = await loadManifest(key).catch(() => null);
+          setManifest(fallback);
+          if (!fallback) {
+            setError(e instanceof Error ? e.message : String(e));
+          }
           setLoading(false);
         }
       }
@@ -149,21 +153,8 @@ export function useManifest(key: string | null): {
   ): Promise<void> {
     if (!key) return;
 
-    // 1. Fetch latest server row to avoid stale manifest overwrites
-    let baseManifest: Manifest | null = manifest;
-    try {
-      const { data: latestRow } = await supabase
-        .from(MANIFESTS_TABLE)
-        .select('date, signups, vehicles, created_at, updated_at')
-        .eq('date', key)
-        .maybeSingle();
-      if (latestRow) {
-        baseManifest = normalizeManifestData(latestRow);
-      }
-    } catch {
-      /* fallback to local baseManifest */
-    }
-
+    // 1. Use current in-memory manifest state (kept fresh via Realtime)
+    const baseManifest: Manifest | null = manifestRef.current ?? manifest;
     if (!baseManifest) return;
 
     const pSet = presentIds ? new Set(presentIds) : null;

@@ -63,6 +63,7 @@ export function AdminPage() {
   const [showHistory, setShowHistory] = useState(false);
   const [exportModalManifest, setExportModalManifest] = useState<{ manifest: Manifest; serviceLabel: string } | null>(null);
 
+  // Initial load on mount only — avoid re-fetching the entire database history on every live tick
   useEffect(() => {
     let isMounted = true;
     (async () => {
@@ -88,7 +89,21 @@ export function AdminPage() {
     return () => {
       isMounted = false;
     };
-  }, [manifest?.updated_at]);
+  }, []);
+
+  // Sync current active session into sessionList in-memory without database egress
+  useEffect(() => {
+    if (!manifest) return;
+    setSessionList((prev) => {
+      const idx = prev.findIndex((m) => m.date === manifest.date);
+      if (idx >= 0) {
+        const copy = [...prev];
+        copy[idx] = manifest;
+        return copy;
+      }
+      return [manifest, ...prev];
+    });
+  }, [manifest]);
 
   async function handleImport(passengers: Passenger[]) {
     if (!manifest) {
