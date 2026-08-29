@@ -142,14 +142,111 @@ export function extractCategoryAndMinistry(
 // Mapping from area-name values (what appears in the Area Stops column)
 // to the column header pattern that holds the specific sub-stop for that area.
 const AREA_TO_COLUMN: { areaValue: string[]; columnPattern: string[] }[] = [
-  { areaValue: ['braam stops', 'braam'], columnPattern: ['braam stops', 'braam stop', 'braam'] },
-  { areaValue: ['auckland park stops', 'auckland park', 'auckland'], columnPattern: ['auckland park', 'auckland'] },
-  { areaValue: ['cbd stops', 'cbd'], columnPattern: ['cbd stops', 'cbd'] },
-  { areaValue: ['parktown stops', 'parktown'], columnPattern: ['parktown stops', 'parktown'] },
-  { areaValue: ['midrand stops', 'midrand'], columnPattern: ['midrand stops', 'midrand'] },
-  { areaValue: ['soweto stops', 'soweto'], columnPattern: ['soweto stops', 'soweto'] },
-  { areaValue: ['jhb north & west', 'jhb north and west', 'jhb west & north', 'jhb west and north', 'jhb'], columnPattern: ['jhb north & west', 'jhb west & north', 'jhb north and west', 'jhb west and north', 'jhb'] },
+  {
+    areaValue: ['braam stops', 'braam', 'braamfontein'],
+    columnPattern: ['braam stops', 'braam stop', 'braamfontein stops', 'braamfontein stop', 'braamfontein', 'braam'],
+  },
+  {
+    areaValue: ['auckland park stops', 'auckland park', 'auckland', 'apk'],
+    columnPattern: ['auckland park stops', 'auckland park stop', 'auckland park', 'auckland', 'apk'],
+  },
+  {
+    areaValue: ['cbd stops', 'cbd', 'central business district'],
+    columnPattern: ['cbd stops', 'cbd stop', 'cbd'],
+  },
+  {
+    areaValue: ['parktown stops', 'parktown', 'park town'],
+    columnPattern: ['parktown stops', 'parktown stop', 'parktown', 'park town stops', 'park town'],
+  },
+  {
+    areaValue: ['midrand stops', 'midrand'],
+    columnPattern: ['midrand stops', 'midrand stop', 'midrand'],
+  },
+  {
+    areaValue: ['soweto stops', 'soweto'],
+    columnPattern: ['soweto stops', 'soweto stop', 'soweto'],
+  },
+  {
+    areaValue: ['jhb north & west', 'jhb north and west', 'jhb west & north', 'jhb west and north', 'jhb north', 'jhb west', 'jhb', 'randburg'],
+    columnPattern: ['jhb north & west', 'jhb west & north', 'jhb north and west', 'jhb west and north', 'jhb north', 'jhb west', 'jhb', 'randburg'],
+  },
 ];
+
+// Comprehensive known stop signatures for direct cell content matching
+const KNOWN_STOP_SIGNATURES: { pattern: RegExp; canonical: string }[] = [
+  // Standalone Empire
+  { pattern: /campus central.*(empire|on empire)/i, canonical: 'Campus Central (Empire)' },
+  { pattern: /campus central.*empire/i, canonical: 'Campus Central (Empire)' },
+  { pattern: /\bempire\b/i, canonical: 'Campus Central (Empire)' },
+
+  // EOH / Charlotte
+  { pattern: /campus central.*eoh/i, canonical: 'Campus Central - EOH' },
+  { pattern: /eoh.*campus central/i, canonical: 'Campus Central - EOH' },
+  { pattern: /\beoh\b/i, canonical: 'Campus Central - EOH' },
+  { pattern: /charlotte maxeke|charlotte/i, canonical: 'Charlotte Maxeke' },
+
+  // Braam
+  { pattern: /56 jorissen/i, canonical: '56 Jorissen' },
+  { pattern: /\bamani\b/i, canonical: 'Amani' },
+  { pattern: /amic deck.*(david webster|barnato)/i, canonical: 'Amic Deck - David Webster, Barnato' },
+  { pattern: /amic deck.*jubilee/i, canonical: 'Amic Deck - Jubilee' },
+  { pattern: /amic deck.*sunnyside/i, canonical: 'Amic Deck - Sunnyside' },
+  { pattern: /amic deck/i, canonical: 'Amic Deck' },
+  { pattern: /\bapex\b/i, canonical: 'Apex' },
+  { pattern: /\bymca\b/i, canonical: 'YMCA' },
+  { pattern: /david webster/i, canonical: 'David Webster' },
+  { pattern: /barnato/i, canonical: 'Barnato' },
+  { pattern: /sunnyside/i, canonical: 'Sunnyside' },
+  { pattern: /jubilee/i, canonical: 'Jubilee' },
+  { pattern: /men'?s res/i, canonical: "Men's Res" },
+  { pattern: /student digz/i, canonical: 'Student Digzz' },
+
+  // Auckland Park
+  { pattern: /apk mcdonald/i, canonical: "APK McDonald's" },
+  { pattern: /\bgate 7\b/i, canonical: 'Gate 7' },
+  { pattern: /\bgate 2\b/i, canonical: 'Gate 2' },
+  { pattern: /\bgate 4\b/i, canonical: 'Gate 4' },
+  { pattern: /laborie/i, canonical: 'Laborie' },
+  { pattern: /richmond/i, canonical: 'Richmond' },
+  { pattern: /uj bunting|bunting/i, canonical: 'UJ Bunting' },
+  { pattern: /westdene engen/i, canonical: 'Westdene Engen' },
+  { pattern: /westdene/i, canonical: 'Westdene' },
+
+  // CBD
+  { pattern: /dfc bus stop|\bdfc\b/i, canonical: 'DFC bus stop' },
+  { pattern: /focus 1|focus 2|\bfocus\b/i, canonical: 'Focus 1' },
+  { pattern: /ghandi|gandhi/i, canonical: 'Ghandi square' },
+  { pattern: /saratoga/i, canonical: 'Saratoga' },
+  { pattern: /the fields|\bfields\b/i, canonical: 'The Fields' },
+  { pattern: /urban circle/i, canonical: 'Urban Circle' },
+  { pattern: /maboneng/i, canonical: 'Maboneng' },
+  { pattern: /gateway/i, canonical: 'Gateway' },
+
+  // Parktown
+  { pattern: /\bargyle\b/i, canonical: 'Argyle' },
+  { pattern: /\barteria\b/i, canonical: 'Arteria' },
+  { pattern: /education campus/i, canonical: 'Education Campus' },
+  { pattern: /\bjunction\b/i, canonical: 'Junction' },
+  { pattern: /\bknockando\b/i, canonical: 'Knockando' },
+  { pattern: /stanley ave|\bstanley\b/i, canonical: 'Stanley Ave' },
+  { pattern: /\byale\b/i, canonical: 'Yale' },
+
+  // JHB West & North / Midrand / Soweto
+  { pattern: /randburg|surrey square/i, canonical: 'Randburg Surrey Square' },
+  { pattern: /midrand/i, canonical: 'Midrand' },
+  { pattern: /soweto/i, canonical: 'Soweto' },
+];
+
+function inferStopFromStructure(structure?: string): string {
+  if (!structure) return 'Unassigned Stop';
+  const s = structure.toUpperCase().trim();
+  if (['S1', 'S19', 'S26'].includes(s)) return 'Saratoga';
+  if (['S5', 'S6', 'S15', 'S20', 'YZ', 'YA', 'YOUTH'].includes(s)) return '56 Jorissen';
+  if (['S14', 'S18'].includes(s)) return 'Gate 2';
+  if (['S2', 'S3', 'S7', 'S8', 'S9', 'S10', 'S11', 'S12', 'S13', 'S16', 'S17', 'S21', 'S25'].includes(s)) return 'Junction';
+  if (['S4'].includes(s)) return 'Randburg Surrey Square';
+  return 'Unassigned Stop';
+}
 
 interface RawRow {
   [key: string]: string;
@@ -213,9 +310,17 @@ function extractFullName(row: RawRow, headers: string[]): string {
   return '';
 }
 
-function extractStop(row: RawRow, headers: string[]): string {
+function extractStop(row: RawRow, headers: string[], structure?: string): string {
   // Step 1: Check the area column (e.g., 'Area Stops' or 'Area Stops2') to know which area the person chose
-  const areaCol = findColumn(headers, ['area stops2', 'area stops 2', 'area stops', 'area']);
+  const areaCol = findColumn(headers, [
+    'area stops2',
+    'area stops 2',
+    'area stops',
+    'area stop',
+    'area',
+    'select area',
+    'choose area',
+  ]);
   const areaValue = areaCol ? lower(clean(row[areaCol])) : '';
 
   if (areaValue) {
@@ -246,27 +351,58 @@ function extractStop(row: RawRow, headers: string[]): string {
   // Step 3: Direct Pickup Stop columns (exact specific stop questions)
   const directStopCol = findColumn(headers, [
     'pickup stop',
+    'pickup location',
     'boarding location',
     'sub-stop',
     'sub stop',
     'where will you join',
-    'pickup location',
     'specific stop',
     'station',
+    'where do you stay',
+    'stop',
+    'pick up point',
+    'pick up stop',
+    'select stop',
+    'bus stop',
   ]);
   if (directStopCol && directStopCol !== areaCol && clean(row[directStopCol])) {
     const directStop = clean(row[directStopCol]);
-    if (directStop && !lower(directStop).includes('area stops')) {
+    if (directStop && !lower(directStop).includes('area stops') && lower(directStop) !== areaValue) {
       return directStop;
     }
   }
 
-  // Step 4: Fallback to areaValue if no sub-stop was found
-  if (areaCol && clean(row[areaCol])) {
-    return clean(row[areaCol]);
+  // Step 4: Scan EVERY cell value in the row against known stop signatures
+  for (const h of headers) {
+    const val = clean(row[h]);
+    if (!val) continue;
+    const lval = lower(val);
+    if (lval.includes('area stops') || lval === areaValue || lval === 'yes' || lval === 'no') continue;
+
+    for (const sig of KNOWN_STOP_SIGNATURES) {
+      if (sig.pattern.test(val)) {
+        return sig.canonical;
+      }
+    }
   }
 
-  return 'Unknown';
+  // Step 5: Fallback to areaValue if it contains meaningful location info
+  if (areaCol && clean(row[areaCol])) {
+    const av = clean(row[areaCol]);
+    if (!lower(av).includes('area stops') && lower(av) !== 'none') {
+      return av;
+    }
+  }
+
+  // Step 6: Infer from passenger structure
+  if (structure) {
+    const inferred = inferStopFromStructure(structure);
+    if (inferred && inferred !== 'Unassigned Stop') {
+      return inferred;
+    }
+  }
+
+  return 'Unassigned Stop';
 }
 
 // The forms have three separate structure columns: SZ1 Structures, SZ2 Structures, YZ Structures.
@@ -552,7 +688,8 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
         continue;
       }
 
-      const stop = extractStop(row, headers);
+      const structure = extractStructure(row, headers);
+      const stop = extractStop(row, headers, structure);
       const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
       if (seenCandidateIds.has(id)) {
         skipped++;
@@ -560,7 +697,6 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
       }
       seenCandidateIds.add(id);
 
-      const structure = extractStructure(row, headers);
       const phone = extractPhone(row, headers);
       const userEmail = extractEmail(row, headers);
       const timestamp = extractTimestamp(row, headers);

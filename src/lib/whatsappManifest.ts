@@ -122,14 +122,23 @@ export function generateWhatsAppRepManifest(manifest: Manifest, service: Service
     }
 
     let riderNumber = 1;
+    const assignedRepRaw = (vehicle.repName || vehicle.submittedBy || '').trim();
+    const detectedRepName = detectVehicleRep(riders);
+
     for (const group of groups) {
       lines.push(`🛑 ${group.label} (${group.riders.length})`);
       for (const rider of group.riders) {
-        const isRep = isPassengerRepOfVehicle(rider, vehicle.repName)
-          || (vehicle.repName ? rider.fullName.trim().toLowerCase() === vehicle.repName.trim().toLowerCase() : false)
-          || (!vehicle.repName && Boolean(matchRiderToOfficialRep(rider)));
-        
-        const displayName = isRep ? `*${rider.fullName.trim()}*` : rider.fullName.trim();
+        let isRep = false;
+        if (assignedRepRaw) {
+          isRep = isPassengerRepOfVehicle(rider, assignedRepRaw);
+        } else if (detectedRepName) {
+          isRep = isPassengerRepOfVehicle(rider, detectedRepName) || Boolean(matchRiderToOfficialRep(rider));
+        } else {
+          isRep = Boolean(matchRiderToOfficialRep(rider));
+        }
+
+        const cleanName = rider.fullName.trim().replace(/^\*+|\*+$/g, '');
+        const displayName = isRep ? `*${cleanName}*` : cleanName;
         lines.push(`${riderNumber}. ${displayName}`);
         riderNumber++;
       }

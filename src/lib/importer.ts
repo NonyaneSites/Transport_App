@@ -231,12 +231,6 @@ export function parseGoogleSheetSignups(
         }
       }
 
-      if (!rawStop && areaValue) {
-        rawStop = findValue(['Area Stops2', 'Area Stops 2', 'Area Stops', 'Area']);
-      }
-
-      const effectiveStop = sanitizeTransportValue(rawStop) || 'Unspecified';
-
       // Structure extraction (S20, S3, S7, S9, S2, etc.)
       let rawStructure = findValue([
         'SZ1 Structures',
@@ -264,6 +258,83 @@ export function parseGoogleSheetSignups(
       }
 
       const structure = sanitizeTransportValue(rawStructure).toUpperCase();
+
+      // Scan all cells against known stop signatures if rawStop is still empty
+      if (!rawStop) {
+        const KNOWN_STOP_SIGNATURES: { pattern: RegExp; canonical: string }[] = [
+          { pattern: /campus central.*(empire|on empire)/i, canonical: 'Campus Central (Empire)' },
+          { pattern: /campus central.*empire/i, canonical: 'Campus Central (Empire)' },
+          { pattern: /\bempire\b/i, canonical: 'Campus Central (Empire)' },
+          { pattern: /campus central.*eoh/i, canonical: 'Campus Central - EOH' },
+          { pattern: /eoh.*campus central/i, canonical: 'Campus Central - EOH' },
+          { pattern: /\beoh\b/i, canonical: 'Campus Central - EOH' },
+          { pattern: /charlotte maxeke|charlotte/i, canonical: 'Charlotte Maxeke' },
+          { pattern: /56 jorissen/i, canonical: '56 Jorissen' },
+          { pattern: /\bamani\b/i, canonical: 'Amani' },
+          { pattern: /amic deck.*(david webster|barnato)/i, canonical: 'Amic Deck - David Webster, Barnato' },
+          { pattern: /amic deck.*jubilee/i, canonical: 'Amic Deck - Jubilee' },
+          { pattern: /amic deck.*sunnyside/i, canonical: 'Amic Deck - Sunnyside' },
+          { pattern: /amic deck/i, canonical: 'Amic Deck' },
+          { pattern: /\bapex\b/i, canonical: 'Apex' },
+          { pattern: /\bymca\b/i, canonical: 'YMCA' },
+          { pattern: /david webster/i, canonical: 'David Webster' },
+          { pattern: /barnato/i, canonical: 'Barnato' },
+          { pattern: /sunnyside/i, canonical: 'Sunnyside' },
+          { pattern: /jubilee/i, canonical: 'Jubilee' },
+          { pattern: /men'?s res/i, canonical: "Men's Res" },
+          { pattern: /student digz/i, canonical: 'Student Digzz' },
+          { pattern: /apk mcdonald/i, canonical: "APK McDonald's" },
+          { pattern: /\bgate 7\b/i, canonical: 'Gate 7' },
+          { pattern: /\bgate 2\b/i, canonical: 'Gate 2' },
+          { pattern: /\bgate 4\b/i, canonical: 'Gate 4' },
+          { pattern: /laborie/i, canonical: 'Laborie' },
+          { pattern: /richmond/i, canonical: 'Richmond' },
+          { pattern: /uj bunting|bunting/i, canonical: 'UJ Bunting' },
+          { pattern: /westdene engen/i, canonical: 'Westdene Engen' },
+          { pattern: /westdene/i, canonical: 'Westdene' },
+          { pattern: /dfc bus stop|\bdfc\b/i, canonical: 'DFC bus stop' },
+          { pattern: /focus 1|focus 2|\bfocus\b/i, canonical: 'Focus 1' },
+          { pattern: /ghandi|gandhi/i, canonical: 'Ghandi square' },
+          { pattern: /saratoga/i, canonical: 'Saratoga' },
+          { pattern: /the fields|\bfields\b/i, canonical: 'The Fields' },
+          { pattern: /urban circle/i, canonical: 'Urban Circle' },
+          { pattern: /maboneng/i, canonical: 'Maboneng' },
+          { pattern: /gateway/i, canonical: 'Gateway' },
+          { pattern: /\bargyle\b/i, canonical: 'Argyle' },
+          { pattern: /\barteria\b/i, canonical: 'Arteria' },
+          { pattern: /education campus/i, canonical: 'Education Campus' },
+          { pattern: /\bjunction\b/i, canonical: 'Junction' },
+          { pattern: /\bknockando\b/i, canonical: 'Knockando' },
+          { pattern: /stanley ave|\bstanley\b/i, canonical: 'Stanley Ave' },
+          { pattern: /\byale\b/i, canonical: 'Yale' },
+          { pattern: /randburg|surrey square/i, canonical: 'Randburg Surrey Square' },
+          { pattern: /midrand/i, canonical: 'Midrand' },
+          { pattern: /soweto/i, canonical: 'Soweto' },
+        ];
+
+        for (const val of Object.values(row)) {
+          if (!val) continue;
+          const sVal = String(val).trim();
+          for (const sig of KNOWN_STOP_SIGNATURES) {
+            if (sig.pattern.test(sVal)) {
+              rawStop = sig.canonical;
+              break;
+            }
+          }
+          if (rawStop) break;
+        }
+      }
+
+      // Structure inference fallback if stop still empty
+      if (!rawStop && structure) {
+        if (['S1', 'S19', 'S26'].includes(structure)) rawStop = 'Saratoga';
+        else if (['S5', 'S6', 'S15', 'S20', 'YZ', 'YA', 'YOUTH'].includes(structure)) rawStop = '56 Jorissen';
+        else if (['S14', 'S18'].includes(structure)) rawStop = 'Gate 2';
+        else if (['S2', 'S3', 'S7', 'S8', 'S9', 'S10', 'S11', 'S12', 'S13', 'S16', 'S17', 'S21', 'S25'].includes(structure)) rawStop = 'Junction';
+        else if (['S4'].includes(structure)) rawStop = 'Randburg Surrey Square';
+      }
+
+      const effectiveStop = sanitizeTransportValue(rawStop) || 'Unassigned Stop';
 
       // Contact info
       const rawPhone = findValue(['Phone Number', 'WhatsApp Number', 'Contact Number', 'Phone', 'WhatsApp', 'Contact', 'Cell', 'Mobile', 'Cellphone']);

@@ -203,34 +203,55 @@ export function detectVehicleRep(
  * Determines if a specific passenger is the designated Transport Rep for a vehicle.
  */
 export function isPassengerRepOfVehicle(
-  passenger?: { fullName?: string; structure?: string } | null,
+  passenger?: { fullName?: string; structure?: string; name?: string; surname?: string } | null,
   repName?: string | null
 ): boolean {
   if (!passenger || !passenger.fullName || !repName) return false;
-  const normRep = repName.trim().toLowerCase();
+  const rawRep = repName.trim();
   const normPass = (passenger.fullName || '').trim().toLowerCase();
-  if (!normRep || !normPass) return false;
+  const passCombined = `${passenger.name || ''} ${passenger.surname || ''}`.trim().toLowerCase();
+  if (!rawRep || (!normPass && !passCombined)) return false;
 
-  // 1. Direct name match
-  if (normPass === normRep) return true;
+  // Split composite rep names (e.g. "Cassey Lewis, Shaun Tsiloane" or "Cassey & Shaun" or "Cassey and Shaun")
+  const tokens = rawRep
+    .split(/[,&/+]|\band\b/i)
+    .map((t) => t.trim().replace(/\([^)]*\)/g, '').trim())
+    .filter(Boolean);
 
-  // 2. Canonical official rep match
-  const repOfficial = matchRiderToOfficialRep({ fullName: repName });
-  const passOfficial = matchRiderToOfficialRep({ fullName: passenger.fullName, structure: passenger.structure });
+  for (const token of (tokens.length > 0 ? tokens : [rawRep])) {
+    const normRep = token.toLowerCase();
+    if (!normRep) continue;
 
-  if (repOfficial && passOfficial && repOfficial.fullName.toLowerCase() === passOfficial.fullName.toLowerCase()) {
-    return true;
-  }
-  if (repOfficial && normPass === repOfficial.fullName.toLowerCase()) {
-    return true;
-  }
-  if (passOfficial && normRep === passOfficial.fullName.toLowerCase()) {
-    return true;
-  }
+    // 1. Direct name match
+    if (normPass === normRep || passCombined === normRep) return true;
 
-  // 3. Check aliases
-  if (repOfficial) {
-    if (repOfficial.aliases.some((a) => a.toLowerCase() === normPass)) {
+    // 2. Canonical official rep match
+    const repOfficial = matchRiderToOfficialRep({ fullName: token });
+    const passOfficial = matchRiderToOfficialRep({ fullName: passenger.fullName, structure: passenger.structure });
+
+    if (repOfficial && passOfficial && repOfficial.fullName.toLowerCase() === passOfficial.fullName.toLowerCase()) {
+      return true;
+    }
+    if (repOfficial && (normPass === repOfficial.fullName.toLowerCase() || passCombined === repOfficial.fullName.toLowerCase())) {
+      return true;
+    }
+    if (passOfficial && (normRep === passOfficial.fullName.toLowerCase())) {
+      return true;
+    }
+
+    // 3. Check aliases
+    if (repOfficial && repOfficial.aliases.some((a) => a.toLowerCase() === normPass || a.toLowerCase() === passCombined)) {
+      return true;
+    }
+    if (passOfficial && passOfficial.aliases.some((a) => a.toLowerCase() === normRep)) {
+      return true;
+    }
+
+    // 4. Word / parts matching (e.g. "Shaun" matches "Shaun Tsiloane")
+    if (normRep.length >= 3 && (normPass.startsWith(normRep) || normPass.endsWith(normRep) || normPass.includes(normRep))) {
+      return true;
+    }
+    if (normPass.length >= 3 && (normRep.startsWith(normPass) || normRep.endsWith(normPass) || normRep.includes(normPass))) {
       return true;
     }
   }

@@ -162,7 +162,10 @@ export function unassignedPassengers(manifest: Manifest | null): Passenger[] {
 export function passengersByStop(passengers: Passenger[]): Record<string, Passenger[]> {
   const map: Record<string, Passenger[]> = {};
   for (const p of passengers) {
-    const stop = p.stop || 'Unknown';
+    const rawStop = (p.stop || '').trim();
+    const stop = (!rawStop || rawStop.toLowerCase() === 'unknown' || rawStop.toLowerCase() === 'unspecified')
+      ? 'Unassigned Stop'
+      : rawStop;
     if (!map[stop]) map[stop] = [];
     map[stop].push(p);
   }
@@ -180,7 +183,7 @@ export function passengersByPoolGroup(
 ): Record<string, Passenger[]> {
   const map: Record<string, Passenger[]> = {};
   for (const p of passengers) {
-    const key = hubDisplayName(vehicleType, p.stop || 'Unknown');
+    const key = hubDisplayName(vehicleType, p.stop);
     if (!map[key]) map[key] = [];
     map[key].push(p);
   }

@@ -335,7 +335,9 @@ export function stopToHub(stop?: string | null): string | null {
  *   single "EOH" stop since they're the same physical address.
  */
 export function hubDisplayName(vehicleType: 'Bus' | 'Taxi', stop?: string | null): string {
-  if (!stop) return 'Unknown';
+  if (!stop || stop.trim() === '' || stop.toLowerCase() === 'unknown' || stop.toLowerCase() === 'unspecified') {
+    return 'Unassigned Stop';
+  }
   if (vehicleType === 'Taxi') {
     const hub = stopToHub(stop);
     if (hub) return hub;
