@@ -3,7 +3,7 @@ import {
   Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
   Smartphone, Wifi, ChevronDown, ChevronRight, MapPin, Send, Cross,
   HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus, Search, Banknote,
-  Sparkles, ArrowDownAZ, RotateCcw, Check,
+  Sparkles, ArrowDownAZ, RotateCcw, Check, AlertCircle,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
@@ -78,6 +78,7 @@ export function RepPage() {
   const [presentIds, setPresentIds] = useState<Set<string>>(new Set());
   const [absentIds, setAbsentIds] = useState<Set<string>>(new Set());
   const [sponsoredIds, setSponsoredIds] = useState<Set<string>>(new Set());
+  const [unpaidIds, setUnpaidIds] = useState<Set<string>>(new Set());
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [generalNotes, setGeneralNotes] = useState('');
 
@@ -206,6 +207,15 @@ export function RepPage() {
       }
       return changed ? next : prev;
     });
+    setUnpaidIds((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (currentRiderIdSet.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
   }, [selectedVehicle]);
 
   // Exact match vehicle when typing rep name if not yet selected (requires exact full name match)
@@ -248,6 +258,7 @@ export function RepPage() {
     setPresentIds(new Set());
     setAbsentIds(new Set());
     setSponsoredIds(new Set());
+    setUnpaidIds(new Set());
     setNotes({});
     setGeneralNotes('');
     setCoReps([]);
@@ -277,6 +288,7 @@ export function RepPage() {
     setPresentIds(pIds);
     setAbsentIds(aIds);
     setSponsoredIds(new Set(draft.sponsoredIds ?? []));
+    setUnpaidIds(new Set(draft.unpaidIds ?? []));
     setNotes(draft.notes ?? {});
     setGeneralNotes(draft.generalNotes ?? fallbackVehicle?.generalNotes ?? '');
     setCoReps(draft.coReps ?? fallbackVehicle?.coReps ?? []);
@@ -360,16 +372,25 @@ export function RepPage() {
       isApplyingDraftRef.current = true;
       const initialPresent = new Set<string>();
       const initialAbsent = new Set<string>();
+      const initialSponsored = new Set<string>();
+      const initialUnpaid = new Set<string>();
       currentRiders.forEach((r) => {
         if (r.present) {
           initialPresent.add(r.id);
         } else if (vehicle.submitted) {
           initialAbsent.add(r.id);
         }
+        if (r.sponsored) {
+          initialSponsored.add(r.id);
+        }
+        if (r.didNotPay) {
+          initialUnpaid.add(r.id);
+        }
       });
       setPresentIds(initialPresent);
       setAbsentIds(initialAbsent);
-      setSponsoredIds(new Set());
+      setSponsoredIds(initialSponsored);
+      setUnpaidIds(initialUnpaid);
       setNotes({});
       setGeneralNotes(vehicle.generalNotes ?? '');
       setCoReps(vehicle.coReps ?? []);
@@ -477,6 +498,7 @@ export function RepPage() {
       presentIds: pIdsArray,
       absentIds: aIdsArray,
       sponsoredIds: Array.from(sponsoredIds),
+      unpaidIds: Array.from(unpaidIds),
       notes,
       repName: repName.trim(),
       coReps: coReps.filter(Boolean),
@@ -523,7 +545,7 @@ export function RepPage() {
     };
   }, [
     selectedVehicleId, selectedVehicle, presentIds, absentIds,
-    sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
+    sponsoredIds, unpaidIds, notes, generalNotes, coReps, repName, licensePlate,
     externalSponsees, collectedCancellationIds, manualCancellations,
     baseCash, externalCash, pastCancellationCash,
     key, updateVehicleDraft,
@@ -537,6 +559,7 @@ export function RepPage() {
         presentIds: Array.from(presentIds),
         absentIds: Array.from(absentIds),
         sponsoredIds: Array.from(sponsoredIds),
+        unpaidIds: Array.from(unpaidIds),
         notes,
         repName: repName.trim(),
         coReps: coReps.filter(Boolean),
@@ -567,7 +590,7 @@ export function RepPage() {
     };
   }, [
     selectedVehicleId, selectedVehicle, presentIds, absentIds,
-    sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
+    sponsoredIds, unpaidIds, notes, generalNotes, coReps, repName, licensePlate,
     externalSponsees, collectedCancellationIds, manualCancellations,
     baseCash, externalCash, pastCancellationCash, key,
   ]);
@@ -605,6 +628,17 @@ export function RepPage() {
     lastLocalEditTimeRef.current = Date.now();
     isUserDirtyRef.current = true;
     setSponsoredIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(passengerId)) next.delete(passengerId);
+      else next.add(passengerId);
+      return next;
+    });
+  }, []);
+
+  const handleToggleUnpaid = useCallback((passengerId: string) => {
+    lastLocalEditTimeRef.current = Date.now();
+    isUserDirtyRef.current = true;
+    setUnpaidIds((prev) => {
       const next = new Set(prev);
       if (next.has(passengerId)) next.delete(passengerId);
       else next.add(passengerId);
@@ -1042,6 +1076,7 @@ export function RepPage() {
         presentIds: Array.from(presentIds),
         absentIds: Array.from(absentIds),
         sponsoredIds: Array.from(sponsoredIds),
+        unpaidIds: Array.from(unpaidIds),
         notes,
         repName: repName.trim(),
         coReps: coReps.map((c) => c.trim()).filter(Boolean),
@@ -1056,8 +1091,25 @@ export function RepPage() {
       };
 
       const updatedSignups = manifest.signups.map((p) => {
-        if (presentIds.has(p.id)) return { ...p, present: true };
-        if (absentIds.has(p.id)) return { ...p, present: false };
+        if (presentIds.has(p.id)) {
+          return {
+            ...p,
+            present: true,
+            sponsored: sponsoredIds.has(p.id),
+            sponsorNote: notes[p.id] || p.sponsorNote || '',
+            didNotPay: unpaidIds.has(p.id),
+            unpaidNote: notes[p.id] || p.unpaidNote || '',
+          };
+        }
+        if (absentIds.has(p.id)) {
+          return {
+            ...p,
+            present: false,
+            sponsored: false,
+            didNotPay: false,
+            sponsorNote: notes[p.id] || p.sponsorNote || '',
+          };
+        }
         return p;
       });
 
@@ -1678,8 +1730,10 @@ export function RepPage() {
                     absentIds={absentIds}
                     onSetPresent={handleSetPresent}
                     onToggleSponsored={handleToggleSponsored}
+                    onToggleUnpaid={handleToggleUnpaid}
                     onSetNote={handleSetNote}
                     sponsoredIds={sponsoredIds}
+                    unpaidIds={unpaidIds}
                     notes={notes}
                     disabled={isSubmitted || submitting}
                   />
@@ -1690,8 +1744,10 @@ export function RepPage() {
                     absentIds={absentIds}
                     onSetPresent={handleSetPresent}
                     onToggleSponsored={handleToggleSponsored}
+                    onToggleUnpaid={handleToggleUnpaid}
                     onSetNote={handleSetNote}
                     sponsoredIds={sponsoredIds}
+                    unpaidIds={unpaidIds}
                     notes={notes}
                     disabled={isSubmitted || submitting}
                   />
@@ -1830,6 +1886,7 @@ export function RepPage() {
                   presentIds={presentIds}
                   absentIds={absentIds}
                   sponsoredIds={sponsoredIds}
+                  unpaidIds={unpaidIds}
                   notes={notes}
                   vehicleName={selectedVehicle.name}
                   repName={repName}
@@ -2248,8 +2305,10 @@ function StopGroupedChecklist({
   absentIds: Set<string>;
   onSetPresent: (id: string, present: boolean) => void;
   onToggleSponsored: (id: string) => void;
+  onToggleUnpaid: (id: string) => void;
   onSetNote: (id: string, text: string) => void;
   sponsoredIds: Set<string>;
+  unpaidIds: Set<string>;
   notes: Record<string, string>;
   disabled: boolean;
 }) {
@@ -2333,8 +2392,10 @@ function StopGroupedChecklist({
                     touched={presentIds.has(p.id) || absentIds.has(p.id)}
                     onSetPresent={onSetPresent}
                     onToggleSponsored={onToggleSponsored}
+                    onToggleUnpaid={onToggleUnpaid}
                     onSetNote={onSetNote}
                     isSponsored={sponsoredIds.has(p.id)}
+                    isUnpaid={unpaidIds.has(p.id)}
                     noteText={notes[p.id] ?? ''}
                     disabled={disabled}
                   />
@@ -2349,15 +2410,17 @@ function StopGroupedChecklist({
 }
 
 function AlphabeticalChecklist({
-  riders, presentIds, absentIds, onSetPresent, onToggleSponsored, onSetNote, sponsoredIds, notes, disabled,
+  riders, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
 }: {
   riders: Passenger[];
   presentIds: Set<string>;
   absentIds: Set<string>;
   onSetPresent: (id: string, present: boolean) => void;
   onToggleSponsored: (id: string) => void;
+  onToggleUnpaid: (id: string) => void;
   onSetNote: (id: string, text: string) => void;
   sponsoredIds: Set<string>;
+  unpaidIds: Set<string>;
   notes: Record<string, string>;
   disabled: boolean;
 }) {
@@ -2384,8 +2447,10 @@ function AlphabeticalChecklist({
           touched={presentIds.has(p.id) || absentIds.has(p.id)}
           onSetPresent={onSetPresent}
           onToggleSponsored={onToggleSponsored}
+          onToggleUnpaid={onToggleUnpaid}
           onSetNote={onSetNote}
           isSponsored={sponsoredIds.has(p.id)}
+          isUnpaid={unpaidIds.has(p.id)}
           noteText={notes[p.id] ?? ''}
           disabled={disabled}
         />
@@ -2395,7 +2460,7 @@ function AlphabeticalChecklist({
 }
 
 const PassengerRow = React.memo(function PassengerRow({
-  passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onSetNote, isSponsored, noteText, disabled,
+  passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, isSponsored, isUnpaid, noteText, disabled,
 }: {
   passenger: Passenger;
   isPresent: boolean;
@@ -2403,16 +2468,23 @@ const PassengerRow = React.memo(function PassengerRow({
   touched: boolean;
   onSetPresent: (id: string, present: boolean) => void;
   onToggleSponsored: (id: string) => void;
+  onToggleUnpaid: (id: string) => void;
   onSetNote: (id: string, text: string) => void;
   isSponsored: boolean;
+  isUnpaid: boolean;
   noteText: string;
   disabled: boolean;
 }) {
-  const [showNote, setShowNote] = useState(isSponsored);
+  const [showNote, setShowNote] = useState(isSponsored || isUnpaid || !!noteText);
 
   function handleSponsoredToggle() {
     onToggleSponsored(passenger.id);
     if (!isSponsored) setShowNote(true);
+  }
+
+  function handleUnpaidToggle() {
+    onToggleUnpaid(passenger.id);
+    if (!isUnpaid) setShowNote(true);
   }
 
   return (
@@ -2482,27 +2554,49 @@ const PassengerRow = React.memo(function PassengerRow({
         </div>
       </div>
 
-      {/* Sponsored toggle */}
-      <div className="mt-2 flex items-center gap-3">
+      {/* Action Toggles: Sponsored, Didn't Pay, and Note */}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {/* Sponsored Toggle */}
         <button
           type="button"
           onClick={handleSponsoredToggle}
           disabled={disabled}
           className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all active:scale-95 ${
             isSponsored
-              ? 'bg-warning/15 text-warning border border-warning/40'
-              : 'bg-card-2 text-muted border border-line'
+              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold'
+              : 'bg-card-2 text-muted border border-line hover:text-ink'
           }`}
+          title="Mark if someone else is paying for this passenger"
         >
-          <HeartHandshake className="h-3.5 w-3.5" />
-          {isSponsored ? 'Sponsored / Didn\'t Pay' : 'Mark Sponsored'}
+          <HeartHandshake className="h-3.5 w-3.5 text-amber-400" />
+          {isSponsored ? '★ Sponsored' : 'Sponsored'}
         </button>
-        {isSponsored && (
+
+        {/* Didn't Pay Toggle */}
+        <button
+          type="button"
+          onClick={handleUnpaidToggle}
+          disabled={disabled}
+          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all active:scale-95 ${
+            isUnpaid
+              ? 'bg-crimson-500/20 text-crimson-300 border border-crimson-500/50 font-semibold'
+              : 'bg-card-2 text-muted border border-line hover:text-ink'
+          }`}
+          title="Flag that this passenger attended but did not pay fare"
+        >
+          <AlertCircle className="h-3.5 w-3.5 text-crimson-400" />
+          {isUnpaid ? "⚠️ Didn't Pay" : "Didn't Pay"}
+        </button>
+
+        {/* Note button */}
+        {(isSponsored || isUnpaid || showNote || noteText) && (
           <button
             type="button"
             onClick={() => setShowNote(!showNote)}
             disabled={disabled}
-            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted border border-line bg-card-2 transition-all hover:text-ink"
+            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium border border-line bg-card-2 transition-all ${
+              showNote ? 'text-ink border-line-bright' : 'text-muted hover:text-ink'
+            }`}
           >
             <StickyNote className="h-3.5 w-3.5" />
             {showNote ? 'Hide Note' : 'Add Note'}
@@ -2510,19 +2604,29 @@ const PassengerRow = React.memo(function PassengerRow({
         )}
       </div>
 
-      {/* Sponsor note input */}
-      {isSponsored && showNote && (
+      {/* Note input */}
+      {showNote && (
         <div className="mt-2 animate-fade-in">
           <input
             type="text"
             value={noteText}
             onChange={(e) => onSetNote(passenger.id, e.target.value)}
             disabled={disabled}
-            placeholder="Required: Who is paying for this person? (e.g. Person A in Taxi 1)"
+            placeholder={
+              isSponsored
+                ? 'Required: Who is paying for this person? (e.g. Person A in Taxi 1)'
+                : isUnpaid
+                ? 'Note on unpaid fare (e.g. forgot cash, will pay next Sunday)'
+                : 'Note for this passenger...'
+            }
             className="input-field text-xs"
           />
           <p className="mt-1 text-[10px] text-muted">
-            This note is included in the stats and cancellation ledger so we know who covers the cost.
+            {isSponsored
+              ? 'This note is included in the stats and cancellation ledger so we know who covers the cost.'
+              : isUnpaid
+              ? "Flagged for admin visibility under unpaid attendance records."
+              : 'Note visible to reps and admin.'}
           </p>
         </div>
       )}
