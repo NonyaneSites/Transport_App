@@ -552,47 +552,91 @@ export function RepPage() {
   ]);
 
   // Lifecycle listeners: Flush draft on unexpected tab close, refresh, or mobile app switch
+  //
+  // IMPORTANT: this must push to Supabase, not just localStorage. The debounced
+  // background sync (above) waits SYNC_DEBOUNCE_MS before writing to the cloud.
+  // If a rep refreshes, closes the tab, locks their phone, or switches apps before
+  // that timer fires, a localStorage-only flush leaves the edit stranded on that
+  // one device — nothing reaches the shared database, so other reps/devices never
+  // see it and it looks like the change "canceled out".
   useEffect(() => {
+    const buildCurrentDraft = (): VehicleDraftState => ({
+      presentIds: Array.from(presentIds),
+      absentIds: Array.from(absentIds),
+      sponsoredIds: Array.from(sponsoredIds),
+      unpaidIds: Array.from(unpaidIds),
+      notes,
+      repName: repName.trim(),
+      coReps: coReps.filter(Boolean),
+      licensePlate: licensePlate.trim(),
+      generalNotes: generalNotes.trim(),
+      cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+      settledLedgerIds: Array.from(collectedCancellationIds),
+      manualCancellations,
+      externalSponsees,
+      updatedAt: new Date().toISOString(),
+      updatedBy: clientIdRef.current,
+    });
+
     const handleFlushOnExit = () => {
       if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted || !isUserDirtyRef.current) return;
-      const currentDraft: VehicleDraftState = {
-        presentIds: Array.from(presentIds),
-        absentIds: Array.from(absentIds),
-        sponsoredIds: Array.from(sponsoredIds),
-        unpaidIds: Array.from(unpaidIds),
-        notes,
-        repName: repName.trim(),
-        coReps: coReps.filter(Boolean),
-        licensePlate: licensePlate.trim(),
-        generalNotes: generalNotes.trim(),
-        cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
-        settledLedgerIds: Array.from(collectedCancellationIds),
-        manualCancellations,
-        externalSponsees,
-        updatedAt: new Date().toISOString(),
-        updatedBy: clientIdRef.current,
-      };
+      const currentDraft = buildCurrentDraft();
+
       try {
         localStorage.setItem(`crc_rep_draft_${key}_${selectedVehicleId}`, JSON.stringify(currentDraft));
       } catch {
         // storage unavailable
       }
+
+      // Cancel the pending debounce — we're flushing right now instead, so we
+      // don't need it to fire later (and it won't fire reliably in a backgrounded
+      // or closing tab anyway).
+      if (pendingSyncTimerRef.current) {
+        clearTimeout(pendingSyncTimerRef.current);
+        pendingSyncTimerRef.current = null;
+      }
+      isUserDirtyRef.current = false;
+
+      const pIdsArray = Array.from(presentIds);
+      const aIdsArray = Array.from(absentIds);
+      // Fire-and-forget: on 'visibilitychange' (app switch, phone lock, tab
+      // switch) the page is still alive, so this has a real chance to complete
+      // before the tab is actually torn down. On 'beforeunload'/'pagehide' it's
+      // best-effort, but still strictly better than never sending it at all.
+      updateVehicleDraft(
+        selectedVehicleId,
+        currentDraft,
+        repName.trim(),
+        licensePlate.trim(),
+        pIdsArray,
+        aIdsArray
+      ).catch((err) => {
+        console.warn('Exit-flush sync note:', err);
+        // Let the next edit (or a return to this tab) retry the sync.
+        isUserDirtyRef.current = true;
+      });
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        handleFlushOnExit();
+      }
     };
 
     window.addEventListener('beforeunload', handleFlushOnExit);
     window.addEventListener('pagehide', handleFlushOnExit);
-    document.addEventListener('visibilitychange', handleFlushOnExit);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       window.removeEventListener('beforeunload', handleFlushOnExit);
       window.removeEventListener('pagehide', handleFlushOnExit);
-      document.removeEventListener('visibilitychange', handleFlushOnExit);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [
     selectedVehicleId, selectedVehicle, presentIds, absentIds,
     sponsoredIds, unpaidIds, notes, generalNotes, coReps, repName, licensePlate,
     externalSponsees, collectedCancellationIds, manualCancellations,
-    baseCash, externalCash, pastCancellationCash, key,
+    baseCash, externalCash, pastCancellationCash, key, updateVehicleDraft,
   ]);
 
   // Instant local toggle handlers (Zero lag, pure React state, deterministic single click)
