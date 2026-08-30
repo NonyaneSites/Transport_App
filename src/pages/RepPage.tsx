@@ -3,7 +3,7 @@ import {
   Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
   Smartphone, Wifi, ChevronDown, ChevronRight, MapPin, Send, Cross,
   HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus, Search, Banknote,
-  Sparkles, ArrowDownAZ, RotateCcw, Check, AlertCircle,
+  Sparkles, ArrowDownAZ, RotateCcw, Check,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
@@ -78,7 +78,6 @@ export function RepPage() {
   const [presentIds, setPresentIds] = useState<Set<string>>(new Set());
   const [absentIds, setAbsentIds] = useState<Set<string>>(new Set());
   const [sponsoredIds, setSponsoredIds] = useState<Set<string>>(new Set());
-  const [unpaidIds, setUnpaidIds] = useState<Set<string>>(new Set());
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [generalNotes, setGeneralNotes] = useState('');
 
@@ -207,15 +206,6 @@ export function RepPage() {
       }
       return changed ? next : prev;
     });
-    setUnpaidIds((prev) => {
-      let changed = false;
-      const next = new Set<string>();
-      for (const id of prev) {
-        if (currentRiderIdSet.has(id)) next.add(id);
-        else changed = true;
-      }
-      return changed ? next : prev;
-    });
   }, [selectedVehicle]);
 
   // Exact match vehicle when typing rep name if not yet selected (requires exact full name match)
@@ -258,7 +248,6 @@ export function RepPage() {
     setPresentIds(new Set());
     setAbsentIds(new Set());
     setSponsoredIds(new Set());
-    setUnpaidIds(new Set());
     setNotes({});
     setGeneralNotes('');
     setCoReps([]);
@@ -288,7 +277,6 @@ export function RepPage() {
     setPresentIds(pIds);
     setAbsentIds(aIds);
     setSponsoredIds(new Set(draft.sponsoredIds ?? []));
-    setUnpaidIds(new Set(draft.unpaidIds ?? []));
     setNotes(draft.notes ?? {});
     setGeneralNotes(draft.generalNotes ?? fallbackVehicle?.generalNotes ?? '');
     setCoReps(draft.coReps ?? fallbackVehicle?.coReps ?? []);
@@ -372,25 +360,16 @@ export function RepPage() {
       isApplyingDraftRef.current = true;
       const initialPresent = new Set<string>();
       const initialAbsent = new Set<string>();
-      const initialSponsored = new Set<string>();
-      const initialUnpaid = new Set<string>();
       currentRiders.forEach((r) => {
         if (r.present) {
           initialPresent.add(r.id);
         } else if (vehicle.submitted) {
           initialAbsent.add(r.id);
         }
-        if (r.sponsored) {
-          initialSponsored.add(r.id);
-        }
-        if (r.didNotPay) {
-          initialUnpaid.add(r.id);
-        }
       });
       setPresentIds(initialPresent);
       setAbsentIds(initialAbsent);
-      setSponsoredIds(initialSponsored);
-      setUnpaidIds(initialUnpaid);
+      setSponsoredIds(new Set());
       setNotes({});
       setGeneralNotes(vehicle.generalNotes ?? '');
       setCoReps(vehicle.coReps ?? []);
@@ -498,7 +477,6 @@ export function RepPage() {
       presentIds: pIdsArray,
       absentIds: aIdsArray,
       sponsoredIds: Array.from(sponsoredIds),
-      unpaidIds: Array.from(unpaidIds),
       notes,
       repName: repName.trim(),
       coReps: coReps.filter(Boolean),
@@ -545,98 +523,53 @@ export function RepPage() {
     };
   }, [
     selectedVehicleId, selectedVehicle, presentIds, absentIds,
-    sponsoredIds, unpaidIds, notes, generalNotes, coReps, repName, licensePlate,
+    sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
     externalSponsees, collectedCancellationIds, manualCancellations,
     baseCash, externalCash, pastCancellationCash,
     key, updateVehicleDraft,
   ]);
 
   // Lifecycle listeners: Flush draft on unexpected tab close, refresh, or mobile app switch
-  //
-  // IMPORTANT: this must push to Supabase, not just localStorage. The debounced
-  // background sync (above) waits SYNC_DEBOUNCE_MS before writing to the cloud.
-  // If a rep refreshes, closes the tab, locks their phone, or switches apps before
-  // that timer fires, a localStorage-only flush leaves the edit stranded on that
-  // one device — nothing reaches the shared database, so other reps/devices never
-  // see it and it looks like the change "canceled out".
   useEffect(() => {
-    const buildCurrentDraft = (): VehicleDraftState => ({
-      presentIds: Array.from(presentIds),
-      absentIds: Array.from(absentIds),
-      sponsoredIds: Array.from(sponsoredIds),
-      unpaidIds: Array.from(unpaidIds),
-      notes,
-      repName: repName.trim(),
-      coReps: coReps.filter(Boolean),
-      licensePlate: licensePlate.trim(),
-      generalNotes: generalNotes.trim(),
-      cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
-      settledLedgerIds: Array.from(collectedCancellationIds),
-      manualCancellations,
-      externalSponsees,
-      updatedAt: new Date().toISOString(),
-      updatedBy: clientIdRef.current,
-    });
-
     const handleFlushOnExit = () => {
       if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted || !isUserDirtyRef.current) return;
-      const currentDraft = buildCurrentDraft();
-
+      const currentDraft: VehicleDraftState = {
+        presentIds: Array.from(presentIds),
+        absentIds: Array.from(absentIds),
+        sponsoredIds: Array.from(sponsoredIds),
+        notes,
+        repName: repName.trim(),
+        coReps: coReps.filter(Boolean),
+        licensePlate: licensePlate.trim(),
+        generalNotes: generalNotes.trim(),
+        cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+        settledLedgerIds: Array.from(collectedCancellationIds),
+        manualCancellations,
+        externalSponsees,
+        updatedAt: new Date().toISOString(),
+        updatedBy: clientIdRef.current,
+      };
       try {
         localStorage.setItem(`crc_rep_draft_${key}_${selectedVehicleId}`, JSON.stringify(currentDraft));
       } catch {
         // storage unavailable
       }
-
-      // Cancel the pending debounce — we're flushing right now instead, so we
-      // don't need it to fire later (and it won't fire reliably in a backgrounded
-      // or closing tab anyway).
-      if (pendingSyncTimerRef.current) {
-        clearTimeout(pendingSyncTimerRef.current);
-        pendingSyncTimerRef.current = null;
-      }
-      isUserDirtyRef.current = false;
-
-      const pIdsArray = Array.from(presentIds);
-      const aIdsArray = Array.from(absentIds);
-      // Fire-and-forget: on 'visibilitychange' (app switch, phone lock, tab
-      // switch) the page is still alive, so this has a real chance to complete
-      // before the tab is actually torn down. On 'beforeunload'/'pagehide' it's
-      // best-effort, but still strictly better than never sending it at all.
-      updateVehicleDraft(
-        selectedVehicleId,
-        currentDraft,
-        repName.trim(),
-        licensePlate.trim(),
-        pIdsArray,
-        aIdsArray
-      ).catch((err) => {
-        console.warn('Exit-flush sync note:', err);
-        // Let the next edit (or a return to this tab) retry the sync.
-        isUserDirtyRef.current = true;
-      });
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
-        handleFlushOnExit();
-      }
     };
 
     window.addEventListener('beforeunload', handleFlushOnExit);
     window.addEventListener('pagehide', handleFlushOnExit);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
+    document.addEventListener('visibilitychange', handleFlushOnExit);
 
     return () => {
       window.removeEventListener('beforeunload', handleFlushOnExit);
       window.removeEventListener('pagehide', handleFlushOnExit);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      document.removeEventListener('visibilitychange', handleFlushOnExit);
     };
   }, [
     selectedVehicleId, selectedVehicle, presentIds, absentIds,
-    sponsoredIds, unpaidIds, notes, generalNotes, coReps, repName, licensePlate,
+    sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
     externalSponsees, collectedCancellationIds, manualCancellations,
-    baseCash, externalCash, pastCancellationCash, key, updateVehicleDraft,
+    baseCash, externalCash, pastCancellationCash, key,
   ]);
 
   // Instant local toggle handlers (Zero lag, pure React state, deterministic single click)
@@ -672,17 +605,6 @@ export function RepPage() {
     lastLocalEditTimeRef.current = Date.now();
     isUserDirtyRef.current = true;
     setSponsoredIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(passengerId)) next.delete(passengerId);
-      else next.add(passengerId);
-      return next;
-    });
-  }, []);
-
-  const handleToggleUnpaid = useCallback((passengerId: string) => {
-    lastLocalEditTimeRef.current = Date.now();
-    isUserDirtyRef.current = true;
-    setUnpaidIds((prev) => {
       const next = new Set(prev);
       if (next.has(passengerId)) next.delete(passengerId);
       else next.add(passengerId);
@@ -1120,7 +1042,6 @@ export function RepPage() {
         presentIds: Array.from(presentIds),
         absentIds: Array.from(absentIds),
         sponsoredIds: Array.from(sponsoredIds),
-        unpaidIds: Array.from(unpaidIds),
         notes,
         repName: repName.trim(),
         coReps: coReps.map((c) => c.trim()).filter(Boolean),
@@ -1135,25 +1056,8 @@ export function RepPage() {
       };
 
       const updatedSignups = manifest.signups.map((p) => {
-        if (presentIds.has(p.id)) {
-          return {
-            ...p,
-            present: true,
-            sponsored: sponsoredIds.has(p.id),
-            sponsorNote: notes[p.id] || p.sponsorNote || '',
-            didNotPay: unpaidIds.has(p.id),
-            unpaidNote: notes[p.id] || p.unpaidNote || '',
-          };
-        }
-        if (absentIds.has(p.id)) {
-          return {
-            ...p,
-            present: false,
-            sponsored: false,
-            didNotPay: false,
-            sponsorNote: notes[p.id] || p.sponsorNote || '',
-          };
-        }
+        if (presentIds.has(p.id)) return { ...p, present: true };
+        if (absentIds.has(p.id)) return { ...p, present: false };
         return p;
       });
 
@@ -1774,10 +1678,8 @@ export function RepPage() {
                     absentIds={absentIds}
                     onSetPresent={handleSetPresent}
                     onToggleSponsored={handleToggleSponsored}
-                    onToggleUnpaid={handleToggleUnpaid}
                     onSetNote={handleSetNote}
                     sponsoredIds={sponsoredIds}
-                    unpaidIds={unpaidIds}
                     notes={notes}
                     disabled={isSubmitted || submitting}
                   />
@@ -1788,10 +1690,8 @@ export function RepPage() {
                     absentIds={absentIds}
                     onSetPresent={handleSetPresent}
                     onToggleSponsored={handleToggleSponsored}
-                    onToggleUnpaid={handleToggleUnpaid}
                     onSetNote={handleSetNote}
                     sponsoredIds={sponsoredIds}
-                    unpaidIds={unpaidIds}
                     notes={notes}
                     disabled={isSubmitted || submitting}
                   />
@@ -1930,7 +1830,6 @@ export function RepPage() {
                   presentIds={presentIds}
                   absentIds={absentIds}
                   sponsoredIds={sponsoredIds}
-                  unpaidIds={unpaidIds}
                   notes={notes}
                   vehicleName={selectedVehicle.name}
                   repName={repName}
@@ -2349,10 +2248,8 @@ function StopGroupedChecklist({
   absentIds: Set<string>;
   onSetPresent: (id: string, present: boolean) => void;
   onToggleSponsored: (id: string) => void;
-  onToggleUnpaid: (id: string) => void;
   onSetNote: (id: string, text: string) => void;
   sponsoredIds: Set<string>;
-  unpaidIds: Set<string>;
   notes: Record<string, string>;
   disabled: boolean;
 }) {
@@ -2436,10 +2333,8 @@ function StopGroupedChecklist({
                     touched={presentIds.has(p.id) || absentIds.has(p.id)}
                     onSetPresent={onSetPresent}
                     onToggleSponsored={onToggleSponsored}
-                    onToggleUnpaid={onToggleUnpaid}
                     onSetNote={onSetNote}
                     isSponsored={sponsoredIds.has(p.id)}
-                    isUnpaid={unpaidIds.has(p.id)}
                     noteText={notes[p.id] ?? ''}
                     disabled={disabled}
                   />
@@ -2454,17 +2349,15 @@ function StopGroupedChecklist({
 }
 
 function AlphabeticalChecklist({
-  riders, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
+  riders, presentIds, absentIds, onSetPresent, onToggleSponsored, onSetNote, sponsoredIds, notes, disabled,
 }: {
   riders: Passenger[];
   presentIds: Set<string>;
   absentIds: Set<string>;
   onSetPresent: (id: string, present: boolean) => void;
   onToggleSponsored: (id: string) => void;
-  onToggleUnpaid: (id: string) => void;
   onSetNote: (id: string, text: string) => void;
   sponsoredIds: Set<string>;
-  unpaidIds: Set<string>;
   notes: Record<string, string>;
   disabled: boolean;
 }) {
@@ -2491,10 +2384,8 @@ function AlphabeticalChecklist({
           touched={presentIds.has(p.id) || absentIds.has(p.id)}
           onSetPresent={onSetPresent}
           onToggleSponsored={onToggleSponsored}
-          onToggleUnpaid={onToggleUnpaid}
           onSetNote={onSetNote}
           isSponsored={sponsoredIds.has(p.id)}
-          isUnpaid={unpaidIds.has(p.id)}
           noteText={notes[p.id] ?? ''}
           disabled={disabled}
         />
@@ -2504,7 +2395,7 @@ function AlphabeticalChecklist({
 }
 
 const PassengerRow = React.memo(function PassengerRow({
-  passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, isSponsored, isUnpaid, noteText, disabled,
+  passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onSetNote, isSponsored, noteText, disabled,
 }: {
   passenger: Passenger;
   isPresent: boolean;
@@ -2512,23 +2403,16 @@ const PassengerRow = React.memo(function PassengerRow({
   touched: boolean;
   onSetPresent: (id: string, present: boolean) => void;
   onToggleSponsored: (id: string) => void;
-  onToggleUnpaid: (id: string) => void;
   onSetNote: (id: string, text: string) => void;
   isSponsored: boolean;
-  isUnpaid: boolean;
   noteText: string;
   disabled: boolean;
 }) {
-  const [showNote, setShowNote] = useState(isSponsored || isUnpaid || !!noteText);
+  const [showNote, setShowNote] = useState(isSponsored);
 
   function handleSponsoredToggle() {
     onToggleSponsored(passenger.id);
     if (!isSponsored) setShowNote(true);
-  }
-
-  function handleUnpaidToggle() {
-    onToggleUnpaid(passenger.id);
-    if (!isUnpaid) setShowNote(true);
   }
 
   return (
@@ -2598,49 +2482,27 @@ const PassengerRow = React.memo(function PassengerRow({
         </div>
       </div>
 
-      {/* Action Toggles: Sponsored, Didn't Pay, and Note */}
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        {/* Sponsored Toggle */}
+      {/* Sponsored toggle */}
+      <div className="mt-2 flex items-center gap-3">
         <button
           type="button"
           onClick={handleSponsoredToggle}
           disabled={disabled}
           className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all active:scale-95 ${
             isSponsored
-              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold'
-              : 'bg-card-2 text-muted border border-line hover:text-ink'
+              ? 'bg-warning/15 text-warning border border-warning/40'
+              : 'bg-card-2 text-muted border border-line'
           }`}
-          title="Mark if someone else is paying for this passenger"
         >
-          <HeartHandshake className="h-3.5 w-3.5 text-amber-400" />
-          {isSponsored ? '★ Sponsored' : 'Sponsored'}
+          <HeartHandshake className="h-3.5 w-3.5" />
+          {isSponsored ? 'Sponsored / Didn\'t Pay' : 'Mark Sponsored'}
         </button>
-
-        {/* Didn't Pay Toggle */}
-        <button
-          type="button"
-          onClick={handleUnpaidToggle}
-          disabled={disabled}
-          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all active:scale-95 ${
-            isUnpaid
-              ? 'bg-crimson-500/20 text-crimson-300 border border-crimson-500/50 font-semibold'
-              : 'bg-card-2 text-muted border border-line hover:text-ink'
-          }`}
-          title="Flag that this passenger attended but did not pay fare"
-        >
-          <AlertCircle className="h-3.5 w-3.5 text-crimson-400" />
-          {isUnpaid ? "⚠️ Didn't Pay" : "Didn't Pay"}
-        </button>
-
-        {/* Note button */}
-        {(isSponsored || isUnpaid || showNote || noteText) && (
+        {isSponsored && (
           <button
             type="button"
             onClick={() => setShowNote(!showNote)}
             disabled={disabled}
-            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium border border-line bg-card-2 transition-all ${
-              showNote ? 'text-ink border-line-bright' : 'text-muted hover:text-ink'
-            }`}
+            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted border border-line bg-card-2 transition-all hover:text-ink"
           >
             <StickyNote className="h-3.5 w-3.5" />
             {showNote ? 'Hide Note' : 'Add Note'}
@@ -2648,29 +2510,19 @@ const PassengerRow = React.memo(function PassengerRow({
         )}
       </div>
 
-      {/* Note input */}
-      {showNote && (
+      {/* Sponsor note input */}
+      {isSponsored && showNote && (
         <div className="mt-2 animate-fade-in">
           <input
             type="text"
             value={noteText}
             onChange={(e) => onSetNote(passenger.id, e.target.value)}
             disabled={disabled}
-            placeholder={
-              isSponsored
-                ? 'Required: Who is paying for this person? (e.g. Person A in Taxi 1)'
-                : isUnpaid
-                ? 'Note on unpaid fare (e.g. forgot cash, will pay next Sunday)'
-                : 'Note for this passenger...'
-            }
+            placeholder="Required: Who is paying for this person? (e.g. Person A in Taxi 1)"
             className="input-field text-xs"
           />
           <p className="mt-1 text-[10px] text-muted">
-            {isSponsored
-              ? 'This note is included in the stats and cancellation ledger so we know who covers the cost.'
-              : isUnpaid
-              ? "Flagged for admin visibility under unpaid attendance records."
-              : 'Note visible to reps and admin.'}
+            This note is included in the stats and cancellation ledger so we know who covers the cost.
           </p>
         </div>
       )}

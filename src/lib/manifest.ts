@@ -1,7 +1,6 @@
 import { supabase, MANIFESTS_TABLE, mockStorage } from './supabase';
 import type { Manifest, Passenger, Vehicle } from './types';
 import { hubDisplayName } from './types';
-import { normalizePassengerText, getSubmissionTimestampEpoch } from './importer';
 export { parseGoogleSheetSignups, type RawSheetRow } from './importer';
 
 export async function loadManifest(key: string): Promise<Manifest | null> {
@@ -156,55 +155,8 @@ export function findVehicle(manifest: Manifest | null, id: string): Vehicle | un
 }
 
 export function unassignedPassengers(manifest: Manifest | null): Passenger[] {
-  if (!manifest || !Array.isArray(manifest.signups)) return [];
-
-  // Identify all passengers already assigned to a vehicle
-  const allocatedIds = new Set<string>();
-  const allocatedPersons = new Set<string>();
-
-  for (const v of manifest.vehicles || []) {
-    for (const rId of v.riders || []) {
-      allocatedIds.add(rId);
-      const rider = manifest.signups.find((s) => s.id === rId);
-      if (rider) {
-        const norm = normalizePassengerText(rider.fullName);
-        if (norm) allocatedPersons.add(norm);
-      }
-    }
-  }
-
-  // Filter raw unassigned signups
-  const rawUnassigned = manifest.signups.filter((p) => !p.assignedTo && !allocatedIds.has(p.id));
-
-  // Deduplicate among unassigned by person: keep only the most recent signup and exclude anyone already allocated
-  const personMap = new Map<string, { passenger: Passenger; epoch: number; index: number }>();
-
-  rawUnassigned.forEach((p, idx) => {
-    const norm = normalizePassengerText(p.fullName);
-    if (!norm) {
-      personMap.set(`unnamed-${p.id || idx}`, { passenger: p, epoch: 0, index: idx });
-      return;
-    }
-
-    // If person already has an assigned vehicle in this manifest, exclude their stale unassigned duplicate
-    if (allocatedPersons.has(norm)) {
-      return;
-    }
-
-    const epoch = getSubmissionTimestampEpoch(p.timestamp, idx);
-    const existing = personMap.get(norm);
-
-    if (!existing) {
-      personMap.set(norm, { passenger: p, epoch, index: idx });
-    } else {
-      // Prioritize the most recent signup
-      if (epoch > existing.epoch || (epoch === existing.epoch && idx > existing.index)) {
-        personMap.set(norm, { passenger: p, epoch, index: idx });
-      }
-    }
-  });
-
-  return Array.from(personMap.values()).map((item) => item.passenger);
+  if (!manifest) return [];
+  return manifest.signups.filter((p) => !p.assignedTo);
 }
 
 export function passengersByStop(passengers: Passenger[]): Record<string, Passenger[]> {

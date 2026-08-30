@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react';
 import {
   Copy, Check, Users, Sparkles, HeartHandshake, UserX,
-  FileText, ChevronDown, ChevronUp, AlertCircle
+  FileText, ChevronDown, ChevronUp
 } from 'lucide-react';
 import type { Passenger } from '@/lib/types';
 
@@ -10,7 +10,6 @@ interface RepStatsCopyCardProps {
   presentIds: Set<string>;
   absentIds: Set<string>;
   sponsoredIds: Set<string>;
-  unpaidIds?: Set<string>;
   notes?: Record<string, string>;
   vehicleName: string;
   repName: string;
@@ -63,7 +62,6 @@ export function RepStatsCopyCard({
   presentIds,
   absentIds,
   sponsoredIds,
-  unpaidIds = new Set(),
   notes = {},
   vehicleName,
   repName,
@@ -107,12 +105,7 @@ export function RepStatsCopyCard({
     return riders.filter((r) => sponsoredIds.has(r.id));
   }, [riders, sponsoredIds]);
 
-  // 4. Unpaid riders (didn't pay fare)
-  const unpaidPassengers = useMemo(() => {
-    return riders.filter((r) => unpaidIds.has(r.id));
-  }, [riders, unpaidIds]);
-
-  // 5. Cancellations (absentees)
+  // 4. Cancellations (absentees)
   const absenteePassengers = useMemo(() => {
     return riders.filter((r) => absentIds.has(r.id));
   }, [riders, absentIds]);
@@ -126,7 +119,6 @@ export function RepStatsCopyCard({
   const presentText = formatList(presentPassengers);
   const ftvText = formatList(ftvPassengers);
   const sponsoredText = formatList(sponsoredPassengers);
-  const unpaidText = formatList(unpaidPassengers);
   const absenteeText = formatList(absenteePassengers);
 
   // Full unified stats template for pasting into WhatsApp / summaries
@@ -148,15 +140,11 @@ export function RepStatsCopyCard({
     lines.push(sponsoredText || 'None');
     lines.push('');
 
-    lines.push('*List of unpaid fares (Didn\'t pay):*');
-    lines.push(unpaidText || 'None');
-    lines.push('');
-
     lines.push('*List of cancellations:*');
     lines.push(absenteeText || 'None');
 
     return lines.join('\n');
-  }, [vehicleName, repName, presentText, ftvText, sponsoredText, unpaidText, absenteeText]);
+  }, [vehicleName, repName, presentText, ftvText, sponsoredText, absenteeText]);
 
   function toggleManualFtv(passengerId: string) {
     setManualFtvIds((prev) => {
@@ -385,40 +373,7 @@ export function RepStatsCopyCard({
             </div>
           </div>
 
-          {/* 4. List of unpaid fares (Didn't Pay) */}
-          <div className="rounded-xl border border-rose-500/30 bg-rose-500/5 p-3.5">
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <div className="flex items-center gap-1.5">
-                <AlertCircle className="h-4 w-4 text-rose-400" />
-                <span className="text-xs font-bold uppercase tracking-wide text-rose-300">
-                  List of Unpaid Fares / Didn't Pay ({unpaidPassengers.length})
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => copyToClipboard(unpaidText || 'None', 'unpaid')}
-                disabled={unpaidPassengers.length === 0}
-                className="btn-ghost py-1 px-2.5 text-xs flex items-center gap-1 bg-rose-500/15 text-rose-300 border border-rose-500/30 hover:bg-rose-500/25 disabled:opacity-40"
-              >
-                {copiedSection === 'unpaid' ? (
-                  <>
-                    <Check className="h-3.5 w-3.5 text-emerald-400" />
-                    <span>Copied!</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="h-3.5 w-3.5" />
-                    <span>Copy Unpaid List</span>
-                  </>
-                )}
-              </button>
-            </div>
-            <div className="rounded-lg bg-black/40 p-2.5 font-mono text-xs text-ink/90 border border-line min-h-[38px] select-all break-words leading-relaxed">
-              {unpaidText ? unpaidText : <span className="italic text-muted">None</span>}
-            </div>
-          </div>
-
-          {/* 5. List of cancellations (absentees) */}
+          {/* 4. List of cancellations (absentees) */}
           <div className="rounded-xl border border-crimson-500/30 bg-crimson-500/5 p-3.5">
             <div className="flex items-center justify-between gap-2 mb-2">
               <div className="flex items-center gap-1.5">

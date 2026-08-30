@@ -28,7 +28,7 @@ export function normalizePassengerText(str?: string | null): string {
  * Robust duplicate check for passengers:
  * Returns true if EITHER:
  * 1. Their `id` strings match exactly (non-empty), OR
- * 2. Their normalized `fullName` matches.
+ * 2. Their normalized `fullName` AND normalized `stop` match.
  */
 export function isSamePassenger(
   a: Pick<Passenger, 'id' | 'fullName' | 'stop'>,
@@ -41,60 +41,13 @@ export function isSamePassenger(
     return true;
   }
 
-  // 2. Normalized fullName match
+  // 2. Normalized fullName + normalized stop match
   const aName = normalizePassengerText(a.fullName);
   const bName = normalizePassengerText(b.fullName);
+  const aStop = normalizePassengerText(a.stop);
+  const bStop = normalizePassengerText(b.stop);
 
-  return Boolean(aName && bName && aName === bName);
-}
-
-/**
- * Computes an epoch timestamp in milliseconds for reliable chronological comparison of signups.
- * Handles Date instances, ISO strings, Microsoft Forms timestamps (e.g. "8/28/2026 14:38:37"),
- * Excel serial numbers, and falls back to row index.
- */
-export function getSubmissionTimestampEpoch(raw?: unknown, fallbackIndex: number = 0): number {
-  if (!raw && raw !== 0) return fallbackIndex;
-  if (raw instanceof Date && !isNaN(raw.getTime())) {
-    return raw.getTime();
-  }
-  const str = String(raw).trim();
-  if (!str) return fallbackIndex;
-
-  // Standard Date parse
-  const parsed = new Date(str);
-  if (!isNaN(parsed.getTime())) {
-    return parsed.getTime();
-  }
-
-  // Custom regex parsing for M/D/YYYY or D/M/YYYY with time
-  const match = str.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?(?:\s*(am|pm))?/i);
-  if (match) {
-    const partA = parseInt(match[1], 10);
-    const partB = parseInt(match[2], 10);
-    let y = parseInt(match[3], 10);
-    if (y < 100) y += 2000;
-    let hh = match[4] ? parseInt(match[4], 10) : 0;
-    const mm = match[5] ? parseInt(match[5], 10) : 0;
-    const ss = match[6] ? parseInt(match[6], 10) : 0;
-    const ampm = match[7] ? match[7].toLowerCase() : '';
-    if (ampm === 'pm' && hh < 12) hh += 12;
-    if (ampm === 'am' && hh === 12) hh = 0;
-
-    let m = partA;
-    let d = partB;
-    // If first number > 12, it's definitely Day/Month
-    if (partA > 12) {
-      d = partA;
-      m = partB;
-    }
-    const dt = new Date(y, m - 1, d, hh, mm, ss);
-    if (!isNaN(dt.getTime())) {
-      return dt.getTime();
-    }
-  }
-
-  return fallbackIndex;
+  return Boolean(aName && bName && aName === bName && aStop === bStop);
 }
 
 /**
@@ -196,7 +149,7 @@ export function parseGoogleSheetSignups(
     { areaKeywords: ['jhb north & west', 'jhb north and west', 'jhb west & north', 'jhb west and north', 'jhb'], colPatterns: ['jhb north & west', 'jhb west & north', 'jhb north and west', 'jhb west and north', 'jhb'] },
   ];
 
-  const rawParsedList = rows
+  return rows
     .map((row, index) => {
       // Find column values using flexible case-insensitive header matching
       const findValue = (keywords: string[]): string => {
@@ -489,26 +442,4 @@ export function parseGoogleSheetSignups(
       };
     })
     .filter((p) => p.fullName !== 'Unnamed Passenger' || p.stop !== 'Unspecified');
-
-  // Deduplicate signups by person: if someone signed up twice, take account of their most recent signup
-  const personMap = new Map<string, { passenger: Passenger; epoch: number; index: number }>();
-
-  rawParsedList.forEach((p, idx) => {
-    const key = normalizePassengerText(p.fullName);
-    if (!key) return;
-
-    const epoch = getSubmissionTimestampEpoch(p.timestamp, idx);
-    const existing = personMap.get(key);
-
-    if (!existing) {
-      personMap.set(key, { passenger: p, epoch, index: idx });
-    } else {
-      // Compare chronological precedence: higher epoch (or higher row index) wins
-      if (epoch > existing.epoch || (epoch === existing.epoch && idx > existing.index)) {
-        personMap.set(key, { passenger: p, epoch, index: idx });
-      }
-    }
-  });
-
-  return Array.from(personMap.values()).map((item) => item.passenger);
 }

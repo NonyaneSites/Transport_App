@@ -2,29 +2,9 @@ import * as XLSX from 'xlsx';
 import type { Passenger, ServiceType } from './types';
 import { MIN_TAXI_THRESHOLD, hubDisplayName } from './types';
 import { sanitizeTransportValue } from './transportSanitization';
-import {
-  toTitleCase,
-  sanitizePhone,
-  parseTimestampToISO,
-  normalizeService,
-  parseGoogleSheetSignups,
-  isSamePassenger,
-  normalizePassengerText,
-  getSubmissionTimestampEpoch,
-  type RawSheetRow,
-} from './importer';
+import { toTitleCase, sanitizePhone, parseTimestampToISO, normalizeService, parseGoogleSheetSignups, isSamePassenger, normalizePassengerText, type RawSheetRow } from './importer';
 
-export {
-  parseGoogleSheetSignups,
-  type RawSheetRow,
-  toTitleCase,
-  sanitizePhone,
-  parseTimestampToISO,
-  normalizeService,
-  isSamePassenger,
-  normalizePassengerText,
-  getSubmissionTimestampEpoch,
-};
+export { parseGoogleSheetSignups, type RawSheetRow, toTitleCase, sanitizePhone, parseTimestampToISO, normalizeService, isSamePassenger, normalizePassengerText };
 
 interface ParseOptions {
   selectedDate: string;
@@ -650,36 +630,31 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
     };
   }
 
-  interface RawCandidate {
+  interface ValidatedCandidate {
     row: RawRow;
-    headers: string[];
     name: string;
-    normalizedName: string;
     stop: string;
     structure: string;
     phone?: string;
     userEmail?: string;
     timestamp?: string;
-    timestampEpoch: number;
-    wantsTransport: boolean;
-    matchesDate: boolean;
     hub: string;
     category: 'Ushers' | 'Serving' | 'Normal';
     ministry: string;
     memberType?: 'M' | 'V' | 'FTV';
     id: string;
     sheetName: string;
-    rowIndex: number;
   }
 
-  const rawSubmissions: RawCandidate[] = [];
+  const dateMatchedCandidates: ValidatedCandidate[] = [];
+  const seenCandidateIds = new Set<string>();
   let totalRows = 0;
   let skipped = 0;
   let matchedDate = 0;
   let matchedTransport = 0;
   const warnings: string[] = [];
 
-  // Pass 1: Extract all raw row candidates across ALL sheets in the workbook
+  // Iterate across ALL sheets in the workbook
   for (const sheetName of wb.SheetNames) {
     const sheet = wb.Sheets[sheetName];
     if (!sheet) continue;
@@ -687,120 +662,75 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
     const rows = XLSX.utils.sheet_to_json<RawRow>(sheet, { defval: '' });
     if (rows.length === 0) continue;
     const headers = Object.keys(rows[0]);
+    totalRows += rows.length;
 
     for (const row of rows) {
-      totalRows++;
       const name = extractFullName(row, headers);
       if (!name) {
         skipped++;
         continue;
       }
-      const normalizedName = normalizePassengerText(name);
-      if (!normalizedName) {
+
+      if (!wantsTransport(row, headers)) {
+        skipped++;
+        continue;
+      }
+      matchedTransport++;
+
+      if (!matchesDate(row, headers, opts.selectedDate)) {
+        skipped++;
+        continue;
+      }
+      matchedDate++;
+
+      if (!matchesService(row, headers, opts.selectedService, sheetName)) {
         skipped++;
         continue;
       }
 
-      const timestampCol = findColumn(headers, ['completion time', 'submission time', 'timestamp', 'created at', 'date submitted']);
-      const rawTimestamp = timestampCol ? row[timestampCol] : undefined;
-      const timestamp = extractTimestamp(row, headers);
-      const timestampEpoch = getSubmissionTimestampEpoch(rawTimestamp || timestamp, totalRows);
-
       const structure = extractStructure(row, headers);
       const stop = extractStop(row, headers, structure);
+      const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+      if (seenCandidateIds.has(id)) {
+        skipped++;
+        continue;
+      }
+      seenCandidateIds.add(id);
+
       const phone = extractPhone(row, headers);
       const userEmail = extractEmail(row, headers);
+      const timestamp = extractTimestamp(row, headers);
       const hub = hubDisplayName('Taxi', stop);
       const { category, ministry } = extractCategoryAndMinistry(row, headers, sheetName);
       const memberType = extractMemberType(row, headers, structure);
-      const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
-      const wantsTrans = wantsTransport(row, headers);
-      const dateMatch = matchesDate(row, headers, opts.selectedDate);
-
-      rawSubmissions.push({
+      dateMatchedCandidates.push({
         row,
-        headers,
         name,
-        normalizedName,
         stop,
         structure,
         phone,
         userEmail,
         timestamp,
-        timestampEpoch,
-        wantsTransport: wantsTrans,
-        matchesDate: dateMatch,
         hub,
         category,
         ministry,
         memberType,
         id,
         sheetName,
-        rowIndex: totalRows,
       });
     }
   }
 
-  // Pass 2: Group submissions by person and keep strictly the MOST RECENT submission for each person
-  const personGroups = new Map<string, RawCandidate[]>();
-  for (const sub of rawSubmissions) {
-    const group = personGroups.get(sub.normalizedName);
-    if (!group) {
-      personGroups.set(sub.normalizedName, [sub]);
-    } else {
-      group.push(sub);
-    }
-  }
-
-  const dateMatchedCandidates: RawCandidate[] = [];
-
-  for (const [, submissions] of personGroups) {
-    // Sort submissions for this person by timestamp descending (or row index descending if equal)
-    submissions.sort((a, b) => {
-      if (b.timestampEpoch !== a.timestampEpoch) {
-        return b.timestampEpoch - a.timestampEpoch;
-      }
-      return b.rowIndex - a.rowIndex;
-    });
-
-    // The most recent submission takes 100% precedence
-    const mostRecent = submissions[0];
-
-    // Older duplicate submissions for this person are superseded
-    if (submissions.length > 1) {
-      skipped += (submissions.length - 1);
-    }
-
-    // Now evaluate the most recent submission
-    if (!mostRecent.wantsTransport) {
-      skipped++;
-      continue;
-    }
-    matchedTransport++;
-
-    if (!mostRecent.matchesDate) {
-      skipped++;
-      continue;
-    }
-    matchedDate++;
-
-    dateMatchedCandidates.push(mostRecent);
-  }
-
-  // Count categories among valid date-matched submissions
+  // Count categories for the selected date & service
   const ushersCount = dateMatchedCandidates.filter((c) => c.category === 'Ushers').length;
   const normalCount = dateMatchedCandidates.filter((c) => c.category === 'Normal').length;
 
   const selectedService = opts.selectedService;
   const passengers: Passenger[] = [];
 
-  // Pass 3: Filter and apply auto-merging logic based on selectedService and 15-passenger minimum
+  // Pass 2: Filter and apply auto-merging logic based on selectedService and 15-passenger minimum
   for (const c of dateMatchedCandidates) {
-    if (!matchesService(c.row, c.headers, opts.selectedService, c.sheetName)) {
-      continue;
-    }
-
     let include = false;
 
     if (selectedService === 'AM_Ushers') {
