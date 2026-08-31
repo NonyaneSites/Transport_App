@@ -57,7 +57,6 @@ export function LedgerPage() {
   const [editName, setEditName] = useState('');
   const [editStructure, setEditStructure] = useState('');
   const [editDebt, setEditDebt] = useState('');
-  const [editNotes, setEditNotes] = useState('');
   const [editIsSponsored, setEditIsSponsored] = useState(false);
   const [additionalDebtToAdd, setAdditionalDebtToAdd] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
@@ -220,16 +219,6 @@ export function LedgerPage() {
     setOpenStructures(new Set());
   }
 
-  async function handleDeleteRow(row: AggregatedLedgerRow) {
-    try {
-      await Promise.all(row.entryIds.map((id) => deleteLedgerEntry(id)));
-      const idSet = new Set(row.entryIds);
-      setEntries((prev) => prev.filter((e) => !idSet.has(e.id)));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }
-
   function openPaymentModal(row: AggregatedLedgerRow) {
     setPaymentTarget(row);
     setPaymentAmount(String(row.amount));
@@ -247,7 +236,6 @@ export function LedgerPage() {
     setEditName(row.name);
     setEditStructure(row.structure);
     setEditDebt(String(row.amount));
-    setEditNotes(row.notes);
     setEditIsSponsored(row.isSponsoredOrUnpaid);
     setAdditionalDebtToAdd('');
     setEditError(null);
@@ -291,7 +279,6 @@ export function LedgerPage() {
         name: editName.trim(),
         structure: editStructure.trim(),
         newTotalDebt: finalDebt,
-        notes: editNotes,
         isSponsored: editIsSponsored,
       });
 
@@ -1313,20 +1300,7 @@ export function LedgerPage() {
                       </div>
                     </div>
 
-                    {/* Notes & Sponsorship Flag */}
-                    <div>
-                      <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
-                        Notes / Status
-                      </label>
-                      <input
-                        type="text"
-                        value={editNotes}
-                        onChange={(e) => setEditNotes(e.target.value)}
-                        placeholder="e.g. FTV, Did not pitch, Unaccounted"
-                        className="input-field w-full text-xs"
-                      />
-                    </div>
-
+                    {/* Sponsorship Flag */}
                     <div className="flex items-center gap-2 rounded-lg bg-card-2/60 p-2.5 border border-line/60">
                       <input
                         type="checkbox"

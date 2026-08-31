@@ -232,7 +232,6 @@ export function evaluateLedgerSearch(
   const structure = (item.structure || '').toLowerCase().trim();
   const notes = `${item.general_notes || ''} ${item.sponsor_note || ''} ${item.notes || ''}`.toLowerCase().trim();
   const dateStr = `${item.date || ''} ${item.formattedDateList || ''}`.toLowerCase().trim();
-  const rep = (item.repName || item.rep_name || '').toLowerCase().trim();
   const service = `${item.service || ''} ${(item.serviceCodes || []).join(' ')}`.toLowerCase().trim();
 
   const nameWords = fullName.split(/\s+/).filter(Boolean);
@@ -275,8 +274,9 @@ export function evaluateLedgerSearch(
     return { matched: true, score: 500 };
   }
 
-  // 7. Multi-token match across all fields (name + structure + notes + dates + service)
-  const combinedAll = `${fullName} ${structure} ${notes} ${dateStr} ${rep} ${service}`;
+  // 7. Multi-token match across passenger details (name + structure + notes + dates + service)
+  // Note: rep name is intentionally excluded so searching a person's name doesn't return everyone in that rep's structure
+  const combinedAll = `${fullName} ${structure} ${notes} ${dateStr} ${service}`;
   const allTokensInCombined = qTokens.every((token) => combinedAll.includes(token));
   if (allTokensInCombined) {
     let score = 300;
