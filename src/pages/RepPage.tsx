@@ -12,7 +12,7 @@ import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType,
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { vehicleRiders } from '@/lib/manifest';
-import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEntry } from '@/lib/ledger';
+import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, type LedgerEntry } from '@/lib/ledger';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
 import { RepStatsCopyCard } from '@/components/RepStatsCopyCard';
 import { getServicePeriod, transferPassengerAcrossServices, crossCheckPassengerAcrossDate } from '@/lib/transfer';
@@ -2151,6 +2151,9 @@ function StatCard({
 }
 
 function formatServicePeriodMode(service: string): string {
+  if (!service) return '';
+  const code = extractServiceCode(service);
+  if (code && code !== 'UNSPECIFIED') return code;
   const parts = service.split('—').map((s) => s.trim());
   const period = (parts[0] ?? '').split(' ')[0] || '';
   const mode = (parts[1] ?? '').replace(/only/i, '').trim();

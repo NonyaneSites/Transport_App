@@ -11,7 +11,6 @@ import {
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
 } from '@/lib/ledger';
 import { downloadCancellationDebtPdf } from '@/lib/pdfExport';
-import { shortDate } from '@/lib/dates';
 import { naturalCompare } from '@/lib/sort';
 
 export function LedgerPage() {
@@ -260,62 +259,196 @@ export function LedgerPage() {
             </div>
 
             {/* Grouped by structure — strict alphanumeric order (S1, S2, S9, S13) */}
-            <div className="space-y-3">
-              {groupedByStructure.map(({ structure, rows, totalDebt: structDebt }) => {
+            <div className="space-y-4">
+              {groupedByStructure.map(({ structure, reps, rows, cancellationRows, sponsorshipRows, cancellationDebt, sponsorshipDebt, totalDebt: structDebt }) => {
                 const isCollapsed = collapsedStructures.has(structure);
-                // Structure-only heading — rep names are never shown as a header or primary title here.
+                const repsText = reps && reps.length > 0 ? ` · Reps: ${reps.join(', ')}` : '';
                 const structureLabel = structure === 'No Structure' ? structure : `Structure ${structure}`;
+
                 return (
-                  <div key={structure} className="overflow-hidden rounded-2xl border border-line bg-card">
+                  <div key={structure} className="overflow-hidden rounded-2xl border border-line bg-card shadow-sm">
                     <button
                       onClick={() => toggleStructure(structure)}
-                      className="flex w-full items-center justify-between gap-2 border-b border-line/60 bg-card-2/40 px-4 py-3 text-left transition-colors hover:bg-card-2/70"
+                      className="flex w-full items-center justify-between gap-2 border-b border-line/60 bg-card-2/60 px-4 py-3.5 text-left transition-colors hover:bg-card-2"
                     >
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         {isCollapsed ? <ChevronRight className="h-4 w-4 text-muted" /> : <ChevronDown className="h-4 w-4 text-muted" />}
                         <span className="font-display text-sm font-bold text-ink">{structureLabel}</span>
-                        <span className="badge bg-bg/60 text-muted text-[10px]">{rows.length}</span>
+                        {repsText && <span className="text-xs text-muted font-normal">{repsText}</span>}
+                        <span className="badge bg-bg/60 text-muted text-[10px]">{rows.length} total</span>
+                        {sponsorshipRows.length > 0 && (
+                          <span className="badge bg-amber-500/15 text-amber-300 border border-amber-500/25 text-[10px]">
+                            {sponsorshipRows.length} sponsorship/unpaid
+                          </span>
+                        )}
                       </div>
-                      <span className="font-display text-sm font-bold text-crimson-400">R{structDebt}</span>
+                      <div className="flex items-center gap-2 font-display text-sm font-bold">
+                        <span className="text-crimson-400">R{structDebt}</span>
+                      </div>
                     </button>
+
                     {!isCollapsed && (
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-left text-sm">
-                          <thead>
-                            <tr className="border-b border-line bg-card-2/50">
-                              <th className="px-4 py-3 font-display text-xs font-bold uppercase tracking-wider text-muted">Structure</th>
-                              <th className="px-4 py-3 font-display text-xs font-bold uppercase tracking-wider text-muted">Cancellation Date</th>
-                              <th className="px-4 py-3 font-display text-xs font-bold uppercase tracking-wider text-muted">Name</th>
-                              <th className="px-4 py-3 font-display text-xs font-bold uppercase tracking-wider text-muted">Amount Owing</th>
-                              <th className="px-4 py-3 text-right font-display text-xs font-bold uppercase tracking-wider text-muted">Actions</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-line/60">
-                            {rows.map((row) => (
-                              <tr key={row.key} className="transition-colors hover:bg-card-2/30">
-                                <td className="px-4 py-3 text-ink">{row.structure}</td>
-                                <td className="px-4 py-3 text-muted">{shortDate(row.latestDate)}</td>
-                                <td className="px-4 py-3">
-                                  <span className="font-semibold text-ink">{row.name}</span>
-                                  <span className="text-muted"> ({row.service.split(' ')[0]})</span>
-                                </td>
-                                <td className="px-4 py-3">
-                                  <span className="font-display font-bold text-crimson-400">R{row.amount}</span>
-                                  {row.entryIds.length > 1 && (
-                                    <span className="ml-1 text-[10px] text-muted">({row.entryIds.length}x)</span>
-                                  )}
-                                </td>
-                                <td className="px-4 py-3">
-                                  <div className="flex items-center justify-end">
-                                    <button onClick={() => handleDeleteRow(row)} className="rounded-md border border-crimson-500/20 bg-crimson-900/20 p-1.5 text-crimson-300 hover:bg-crimson-900/40" title="Delete">
-                                      <Trash2 className="h-3.5 w-3.5" />
-                                    </button>
-                                  </div>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                      <div className="space-y-4 p-3 sm:p-4">
+                        {/* Section 1: Regular Cancellations */}
+                        {cancellationRows.length > 0 && (
+                          <div className="overflow-hidden rounded-xl border border-line/70 bg-bg/50">
+                            <div className="flex items-center justify-between border-b border-line/60 bg-card-2/40 px-3 py-2">
+                              <span className="text-xs font-bold uppercase tracking-wider text-ink/80">
+                                Cancellations ({cancellationRows.length})
+                              </span>
+                              <span className="font-display text-xs font-bold text-crimson-400">
+                                Subtotal: R{cancellationDebt}
+                              </span>
+                            </div>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-left text-sm">
+                                <thead>
+                                  <tr className="border-b border-line/60 bg-card-2/30 text-muted">
+                                    <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Date(s) & Service</th>
+                                    <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Passenger Name</th>
+                                    <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Amount Owing</th>
+                                    <th className="px-3.5 py-2.5 text-right font-display text-xs font-bold uppercase tracking-wider">Actions</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-line/40">
+                                  {cancellationRows.map((row) => (
+                                    <tr key={row.key} className="transition-colors hover:bg-card-2/20">
+                                      <td className="px-3.5 py-2.5 text-muted align-top">
+                                        <div className="flex flex-wrap gap-1.5 max-w-xs">
+                                          {row.instances.map((ins, idx) => (
+                                            <span
+                                              key={idx}
+                                              className="inline-flex items-center gap-1 rounded bg-card-2/80 px-2 py-0.5 text-xs text-ink font-mono border border-line/60"
+                                            >
+                                              <span>{ins.formatted}</span>
+                                              <span className="text-[10px] text-crimson-400 font-sans font-semibold">R{ins.amount}</span>
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </td>
+                                      <td className="px-3.5 py-2.5 align-top">
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                          <span className="font-semibold text-ink">{row.name}</span>
+                                          <span className="font-medium text-muted text-xs">
+                                            {row.formattedServices || `(${row.serviceCodes.join(', ') || row.service})`}
+                                          </span>
+                                          {row.serviceCodes.map((code) => (
+                                            <ServiceBadge key={code} code={code} />
+                                          ))}
+                                          {row.instances.some((i) => i.isFTV) && (
+                                            <span className="inline-flex items-center rounded px-1.5 py-0.2 text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/25">
+                                              FTV (R20)
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="px-3.5 py-2.5 align-top">
+                                        <div className="flex items-center gap-1.5">
+                                          <span className="font-display font-bold text-crimson-400 text-base">R{row.amount}</span>
+                                          {row.instances.length > 1 && (
+                                            <span className="text-[10px] text-muted rounded bg-card-2 px-1.5 py-0.5 border border-line/60">
+                                              {row.instances.length} missed
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="px-3.5 py-2.5 text-right align-top">
+                                        <button onClick={() => handleDeleteRow(row)} className="rounded-md border border-crimson-500/20 bg-crimson-900/20 p-1.5 text-crimson-300 hover:bg-crimson-900/40" title="Delete">
+                                          <Trash2 className="h-3.5 w-3.5" />
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Section 2: Unaccounted Sponsorships & Unpaid */}
+                        {sponsorshipRows.length > 0 && (
+                          <div className="overflow-hidden rounded-xl border border-amber-500/30 bg-amber-500/5">
+                            <div className="flex items-center justify-between border-b border-amber-500/25 bg-amber-500/10 px-3 py-2">
+                              <div className="flex items-center gap-2">
+                                <span className="h-2 w-2 rounded-full bg-amber-400"></span>
+                                <span className="text-xs font-bold uppercase tracking-wider text-amber-300">
+                                  Unaccounted Sponsorships & Unpaid Debt ({sponsorshipRows.length})
+                                </span>
+                              </div>
+                              <span className="font-display text-xs font-bold text-amber-300">
+                                Subtotal: R{sponsorshipDebt}
+                              </span>
+                            </div>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-left text-sm">
+                                <thead>
+                                  <tr className="border-b border-amber-500/20 bg-amber-500/5 text-amber-200/70">
+                                    <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Date(s) & Service</th>
+                                    <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Passenger Name</th>
+                                    <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Category / Note</th>
+                                    <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Amount Owing</th>
+                                    <th className="px-3.5 py-2.5 text-right font-display text-xs font-bold uppercase tracking-wider">Actions</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-amber-500/15">
+                                  {sponsorshipRows.map((row) => (
+                                    <tr key={row.key} className="transition-colors hover:bg-amber-500/10">
+                                      <td className="px-3.5 py-2.5 text-muted align-top">
+                                        <div className="flex flex-wrap gap-1.5 max-w-xs">
+                                          {row.instances.map((ins, idx) => (
+                                            <span
+                                              key={idx}
+                                              className="inline-flex items-center gap-1 rounded bg-card-2/80 px-2 py-0.5 text-xs text-ink font-mono border border-amber-500/30"
+                                            >
+                                              <span>{ins.formatted}</span>
+                                              <span className="text-[10px] text-amber-300 font-sans font-semibold">R{ins.amount}</span>
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </td>
+                                      <td className="px-3.5 py-2.5 align-top">
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                          <span className="font-semibold text-ink">{row.name}</span>
+                                          <span className="font-medium text-muted text-xs">
+                                            {row.formattedServices || `(${row.serviceCodes.join(', ') || row.service})`}
+                                          </span>
+                                          {row.serviceCodes.map((code) => (
+                                            <ServiceBadge key={code} code={code} />
+                                          ))}
+                                          {row.instances.some((i) => i.isFTV) && (
+                                            <span className="inline-flex items-center rounded px-1.5 py-0.2 text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/25">
+                                              FTV (R20)
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="px-3.5 py-2.5 align-top">
+                                        <span className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-amber-500/15 text-amber-200 border border-amber-500/30">
+                                          {row.notes || 'Unaccounted Sponsorship'}
+                                        </span>
+                                      </td>
+                                      <td className="px-3.5 py-2.5 align-top">
+                                        <div className="flex items-center gap-1.5">
+                                          <span className="font-display font-bold text-amber-300 text-base">R{row.amount}</span>
+                                          {row.instances.length > 1 && (
+                                            <span className="text-[10px] text-muted rounded bg-card-2 px-1.5 py-0.5 border border-line/60">
+                                              {row.instances.length}x
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="px-3.5 py-2.5 text-right align-top">
+                                        <button onClick={() => handleDeleteRow(row)} className="rounded-md border border-crimson-500/20 bg-crimson-900/20 p-1.5 text-crimson-300 hover:bg-crimson-900/40" title="Delete">
+                                          <Trash2 className="h-3.5 w-3.5" />
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -345,5 +478,63 @@ function SummaryStat({ label, value, accent }: { label: string; value: string | 
         <div className="text-[10px] font-medium uppercase tracking-wide text-muted">{label}</div>
       </div>
     </div>
+  );
+}
+
+function ServiceBadge({ code }: { code: string }) {
+  const c = code.toUpperCase();
+  if (c === 'LM') {
+    return (
+      <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/25" title="Leaders Meeting">
+        LM
+      </span>
+    );
+  }
+  if (c === 'WMP') {
+    return (
+      <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/25" title="Worship, Music & Prayer">
+        WMP
+      </span>
+    );
+  }
+  if (c === 'EF') {
+    return (
+      <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-rose-500/15 text-rose-300 border border-rose-500/25" title="Easter Friday">
+        EF
+      </span>
+    );
+  }
+  if (c === 'AD') {
+    return (
+      <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-orange-500/15 text-orange-300 border border-orange-500/25" title="Ascension Day">
+        AD
+      </span>
+    );
+  }
+  if (c === 'FW') {
+    return (
+      <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-violet-500/15 text-violet-300 border border-violet-500/25" title="Fast & Worship">
+        FW
+      </span>
+    );
+  }
+  if (c === 'AM') {
+    return (
+      <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/25" title="Morning Service">
+        AM
+      </span>
+    );
+  }
+  if (c === 'PM') {
+    return (
+      <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-indigo-500/15 text-indigo-300 border border-indigo-500/25" title="Evening Service">
+        PM
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-zinc-500/15 text-zinc-300 border border-zinc-500/25">
+      {code}
+    </span>
   );
 }

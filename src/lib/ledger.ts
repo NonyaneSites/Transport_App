@@ -38,6 +38,157 @@ interface AbsenteeInput extends Passenger {
   sponsorNote?: string;
 }
 
+/**
+ * Extracts a normalized service code (e.g. AM, PM, LM, WMP, EF, AD, FW, etc.)
+ * from a service string or embedded event description.
+ * Preserves special church event codes like LM (Leaders Meeting), WMP (Worship/Music/Prayer),
+ * EF (Easter Friday), AD (Ascension Day), FW (Fast & Worship).
+ */
+export function extractServiceCode(serviceStr: string): string {
+  if (!serviceStr) return '';
+  let clean = serviceStr.trim().replace(/\r?\n/g, ' ');
+
+  // If already in brackets e.g. "(PM)" or "(LM)", strip the parens
+  const bracketMatch = clean.match(/^\(([^)]+)\)$/);
+  if (bracketMatch) {
+    return extractServiceCode(bracketMatch[1]);
+  }
+
+  // Strip FTV prefix/suffix
+  clean = clean.replace(/FTV\s*\/?|\/?\s*FTV/gi, '').trim();
+  if (!clean) return 'PM';
+
+  // Exact known codes
+  const upper = clean.toUpperCase();
+  if (upper === 'AM' || upper.startsWith('AM_') || upper.startsWith('AM ') || upper.startsWith('AM-') || upper.startsWith('AM/')) return 'AM';
+  if (upper === 'PM' || upper.startsWith('PM_') || upper.startsWith('PM ') || upper.startsWith('PM-') || upper.startsWith('PM/')) return 'PM';
+  if (upper === 'LM' || upper.startsWith('LM_') || upper.startsWith('LM ') || upper.startsWith('LM-') || upper.startsWith('LM/')) return 'LM';
+  if (upper === 'WMP' || upper.startsWith('WMP_') || upper.startsWith('WMP ') || upper.startsWith('WMP-') || upper.startsWith('WMP/')) return 'WMP';
+  if (upper === 'EF' || upper.startsWith('EF_') || upper.startsWith('EF ') || upper.startsWith('EF-') || upper.startsWith('EF/')) return 'EF';
+  if (upper === 'AD' || upper.startsWith('AD_') || upper.startsWith('AD ') || upper.startsWith('AD-') || upper.startsWith('AD/')) return 'AD';
+  if (upper === 'FW' || upper.startsWith('FW_') || upper.startsWith('FW ') || upper.startsWith('FW-') || upper.startsWith('FW/')) return 'FW';
+
+  // Keyword searches
+  const lower = clean.toLowerCase();
+  if (lower.includes('leader')) return 'LM';
+  if ((lower.includes('worship') && lower.includes('prayer')) || lower.includes('wmp')) return 'WMP';
+  if (lower.includes('easter') || lower.includes('good friday') || lower === 'ef') return 'EF';
+  if (lower.includes('ascension') || lower === 'ad') return 'AD';
+  if ((lower.includes('fast') && lower.includes('worship')) || lower === 'fw') return 'FW';
+  if (lower.includes('pm') || lower.includes('evening') || lower.includes('afternoon')) return 'PM';
+  if (lower.includes('am') || lower.includes('morning')) return 'AM';
+
+  // Fallback: extract short alphanumeric acronym up to 6 characters (e.g. CAMP, YOUTH, CONF)
+  const token = clean.split(/[\s—_/-]+/)[0].toUpperCase();
+  return token.length <= 6 ? token : upper.slice(0, 4);
+}
+
+/**
+ * Parses raw structure cell text like "S1 - Nthabiseng, Nthabeleng" into a clean
+ * structure code ("S1") and optional associated rep names ("Nthabiseng, Nthabeleng").
+ */
+export function parseStructureCell(raw: string): { structure: string; repName: string } {
+  const str = (raw || '').trim().replace(/\r?\n/g, ' ');
+  if (!str) return { structure: '', repName: '' };
+
+  // E.g. "S1 - Nthabiseng, Nthabeleng", "S1 – Thuto", "S14 – Kgolaganyo/Nicole", "S1: Name"
+  const m = str.match(/^(S\d+|YZ\d+|Unidentified|No Structure)\s*[-–—:]\s*(.*)$/i);
+  if (m) {
+    return {
+      structure: m[1].trim().toUpperCase(),
+      repName: m[2].trim(),
+    };
+  }
+
+  // Exact code like "S1", "S15", "YZ1", "Unidentified"
+  const justCode = str.match(/^(S\d+|YZ\d+|Unidentified|No Structure)$/i);
+  if (justCode) {
+    return {
+      structure: justCode[1].trim().toUpperCase(),
+      repName: '',
+    };
+  }
+
+  // "Structure 1" or "Structure S1"
+  const structWord = str.match(/^Structure\s*(S?\d+)\s*[-–—:]?\s*(.*)$/i);
+  if (structWord) {
+    const code = structWord[1].toUpperCase().startsWith('S') ? structWord[1].toUpperCase() : `S${structWord[1]}`;
+    return {
+      structure: code,
+      repName: structWord[2].trim(),
+    };
+  }
+
+  return {
+    structure: str,
+    repName: '',
+  };
+}
+
+/**
+ * Extracts clean passenger name and service type from raw name text that may have
+ * service tags in brackets e.g. "Linathi Mpako(PM)", "Peaches Nguni(FTV)(PM)",
+ * "Thembi Qobo(LM)", "Nonkululeko Dhlamini(WMP)", "Roxy Ramoretli(EF)".
+ */
+export function extractNameAndService(
+  rawCell: string,
+  explicitService?: string
+): { cleanName: string; serviceCode: string; isFTV: boolean; extraNotes: string } {
+  let raw = (rawCell || '').trim().replace(/\r?\n/g, ' ');
+  if (!raw) {
+    const isFTV = !!explicitService && /\bFTV\b/i.test(explicitService);
+    return {
+      cleanName: '',
+      serviceCode: explicitService ? extractServiceCode(explicitService) : 'PM',
+      isFTV,
+      extraNotes: '',
+    };
+  }
+
+  const isFTV = /\bFTV\b/i.test(raw) || (!!explicitService && /\bFTV\b/i.test(explicitService));
+  let serviceCode = explicitService ? extractServiceCode(explicitService) : '';
+  const extraNotes = '';
+
+  // Look for service tags in parentheses like (PM), (AM), (LM), (WMP), (EF), (AD), (FW), (FTV), (PM/FTV)
+  const serviceParenRegex = /\(\s*(AM|PM|LM|WMP|EF|AD|FW|W&P|W\/P|FTV|FTV\/PM|PM\/FTV|SERVING|USHERS|NORMAL)\s*[,)]*/gi;
+  const matches = Array.from(raw.matchAll(serviceParenRegex));
+  if (matches.length > 0) {
+    const matchedCode = matches[0][1].toUpperCase();
+    if (!serviceCode || serviceCode === 'Unspecified' || serviceCode === 'PM') {
+      serviceCode = extractServiceCode(matchedCode);
+    }
+    raw = raw.replace(serviceParenRegex, ' ').trim();
+  }
+
+  // Complex patterns like "(PM- FTV R20)" or "(PM - R20)" or "(PM," or "(PM"
+  const complexMatch = raw.match(/\(\s*(AM|PM|LM|WMP|EF|AD|FW)\s*[-–—,]?\s*([^)]*)\)?/i);
+  if (complexMatch) {
+    if (!serviceCode || serviceCode === 'Unspecified' || serviceCode === 'PM') {
+      serviceCode = extractServiceCode(complexMatch[1]);
+    }
+    raw = raw.replace(complexMatch[0], ' ').trim();
+  }
+
+  // Clean trailing punctuation or empty parens
+  raw = raw.replace(/\bFTV\b/gi, '').trim();
+  raw = raw.replace(/\(\s*\)/g, '').trim();
+  raw = raw.replace(/[(),]+$/, '').trim();
+
+  // Normalize spacing
+  raw = raw.replace(/\s{2,}/g, ' ').trim();
+
+  if (!serviceCode) {
+    serviceCode = 'PM';
+  }
+
+  return {
+    cleanName: raw,
+    serviceCode,
+    isFTV,
+    extraNotes,
+  };
+}
+
 export async function insertAbsentees(
   manifestKey: string,
   date: string,
@@ -168,10 +319,12 @@ export async function updateLedgerEntry(id: string, updates: Partial<LedgerEntry
 /** A single row parsed from a "Cancellation History" import workbook, ready to insert into cancellation_ledger. */
 export interface HistoricalCancellationRow {
   structure: string;
-  date: string; // yyyy-mm-dd
+  rep_name?: string;
+  date: string; // yyyy-mm-dd or ''
   service: string;
   passenger_name: string;
   structure_debt: number;
+  general_notes?: string;
 }
 
 export interface HistoricalImportResult {
@@ -182,16 +335,19 @@ export interface HistoricalImportResult {
   warnings: string[];
 }
 
-const HISTORICAL_HEADER_ALIASES: Record<'structure' | 'date' | 'service' | 'passenger_name' | 'structure_debt', string[]> = {
-  structure: ['structure', 'struct', 'structure and rep', 'structure/rep'],
-  date: ['date', 'cancellation date'],
-  service: ['service', 'service type', 'service period', 'session'],
-  passenger_name: ['passenger name', 'name', 'passenger', 'full name'],
-  structure_debt: ['amount', 'amount owing', 'structure debt', 'debt', 'fee', 'amount owed'],
+const HISTORICAL_HEADER_ALIASES = {
+  structure: ['structure and rep', 'structure and reps', 'structure/rep', 'structure & rep', 'structure', 'struct', 'area rep', 'structure & reps'],
+  rep: ['rep', 'reps', 'representative', 'area rep', 'rep name', 'reps name'],
+  date: ['cancellation date', 'date', 'dates', 'missed date', 'service date'],
+  service: ['service type', 'service', 'service period', 'session', 'type', 'event'],
+  passenger_name: ['passenger name', 'name', 'passenger', 'full name', 'debtor', 'debtor name', 'rider name'],
+  structure_debt: ['amount owing', 'amount owed', 'amount', 'structure debt', 'debt', 'fee', 'amount due', 'owing', 'total debt'],
+  category: ['category', 'classification', 'entry type', 'section', 'status'],
+  notes: ['notes', 'note', 'general notes', 'general_notes', 'remarks', 'comment', 'comments', 'extra notes'],
 };
 
 function normalizeHeaderCell(h: unknown): string {
-  return String(h ?? '').trim().toLowerCase();
+  return String(h ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 function findHistoricalColumn(headerRow: unknown[], aliases: string[]): number {
@@ -213,9 +369,10 @@ function formatYMD(d: Date): string {
 /**
  * Parses a date cell that may be an Excel serial number, a JS Date (when
  * the sheet was read with cellDates), "yyyy-mm-dd", or "dd/mm/yyyy" into
- * a normalized "yyyy-mm-dd" string. Returns null if unparseable.
+ * a normalized "yyyy-mm-dd" string. Also heals OCR/typing errors like "23008/2026".
+ * Returns null if unparseable or blank.
  */
-function parseFlexibleHistoricalDate(value: unknown): string | null {
+export function parseFlexibleHistoricalDate(value: unknown): string | null {
   if (value == null || value === '') return null;
   if (value instanceof Date && !isNaN(value.getTime())) return formatYMD(value);
   if (typeof value === 'number') {
@@ -223,21 +380,29 @@ function parseFlexibleHistoricalDate(value: unknown): string | null {
     if (parsed) return formatYMD(new Date(parsed.y, parsed.m - 1, parsed.d));
     return null;
   }
-  const s = String(value).trim();
-  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  const s = String(value).trim().replace(/\s+/g, '');
+  // Heal typo like "23008/2026" or "2308/2026"
+  const cleaned = s.replace(/^(\d{1,2})0+(\d{1,2})\/(\d{4})$/, '$1/$2/$3');
+
+  let m = cleaned.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
   if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
-  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  m = cleaned.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
   if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  m = cleaned.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})$/);
+  if (m) return `20${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
   return null;
 }
 
 /**
- * Parses a bulk "Cancellation History" Excel/CSV export (columns:
- * Structure, Date, Service, Passenger Name, Amount — header names are
- * matched case-insensitively against common aliases) into rows ready for
- * importHistoricalCancellations. Rows missing a structure, a parseable
- * date, or a passenger name are skipped and reported in `warnings`.
- * Amount defaults to CANCELLATION_FEE (R40) when blank or non-numeric.
+ * Parses a bulk "Cancellation History" Excel/CSV export into rows ready for
+ * importHistoricalCancellations.
+ *
+ * Supports:
+ * - Table merged structure cells (forward fills structure and rep names across consecutive rows)
+ * - Automatic extraction of service types (AM, PM, LM, WMP, EF, AD, FW, etc.)
+ * - Automatic FTV rule: any entry with FTV owes R20 (First-Time Visitor half rate)
+ * - Automatic handling of section/category rows (e.g. "Unaccounted Sponsorship", "Unpaid Sponsorship", "Did not pay")
+ * - Does not discard undated entries; imports them cleanly.
  */
 export function parseHistoricalCancellationWorkbook(buffer: ArrayBuffer): HistoricalImportResult {
   const wb = XLSX.read(buffer, { type: 'array', cellDates: true });
@@ -248,58 +413,178 @@ export function parseHistoricalCancellationWorkbook(buffer: ArrayBuffer): Histor
     return { rows: [], totalRows: 0, imported: 0, skipped: 0, warnings: ['File appears to be empty.'] };
   }
 
-  const headerRow = aoa[0];
-  const structureCol = findHistoricalColumn(headerRow, HISTORICAL_HEADER_ALIASES.structure);
-  const dateCol = findHistoricalColumn(headerRow, HISTORICAL_HEADER_ALIASES.date);
-  const serviceCol = findHistoricalColumn(headerRow, HISTORICAL_HEADER_ALIASES.service);
-  const nameCol = findHistoricalColumn(headerRow, HISTORICAL_HEADER_ALIASES.passenger_name);
-  const debtCol = findHistoricalColumn(headerRow, HISTORICAL_HEADER_ALIASES.structure_debt);
+  // Find header row (might be row 0 or within the first 6 rows)
+  let headerRowIndex = -1;
+  let structureCol = -1;
+  let repCol = -1;
+  let dateCol = -1;
+  let nameCol = -1;
+  let serviceCol = -1;
+  let debtCol = -1;
+  let categoryCol = -1;
+  let notesCol = -1;
 
-  const dataRows = aoa.slice(1);
+  for (let i = 0; i < Math.min(aoa.length, 6); i++) {
+    const row = aoa[i];
+    const sCol = findHistoricalColumn(row, HISTORICAL_HEADER_ALIASES.structure);
+    const dCol = findHistoricalColumn(row, HISTORICAL_HEADER_ALIASES.date);
+    const nCol = findHistoricalColumn(row, HISTORICAL_HEADER_ALIASES.passenger_name);
 
-  if (structureCol === -1 || dateCol === -1 || nameCol === -1) {
-    return {
-      rows: [],
-      totalRows: dataRows.length,
-      imported: 0,
-      skipped: dataRows.length,
-      warnings: ['Could not find required columns (Structure, Date, Passenger Name). Check the header row and try again.'],
-    };
+    if (dCol !== -1 && nCol !== -1) {
+      headerRowIndex = i;
+      structureCol = sCol;
+      repCol = findHistoricalColumn(row, HISTORICAL_HEADER_ALIASES.rep);
+      dateCol = dCol;
+      nameCol = nCol;
+      serviceCol = findHistoricalColumn(row, HISTORICAL_HEADER_ALIASES.service);
+      debtCol = findHistoricalColumn(row, HISTORICAL_HEADER_ALIASES.structure_debt);
+      categoryCol = findHistoricalColumn(row, HISTORICAL_HEADER_ALIASES.category);
+      notesCol = findHistoricalColumn(row, HISTORICAL_HEADER_ALIASES.notes);
+      break;
+    }
   }
 
+  // If standard headers not found, fallback to positional columns
+  if (headerRowIndex === -1) {
+    headerRowIndex = 0;
+    structureCol = 0;
+    dateCol = 1;
+    nameCol = 2;
+    debtCol = 3;
+    serviceCol = -1;
+  }
+
+  const dataRows = aoa.slice(headerRowIndex + 1);
   const warnings: string[] = [];
   const rows: HistoricalCancellationRow[] = [];
   let skipped = 0;
 
+  let currentStructure = '';
+  let currentRep = '';
+  let currentSectionNote = '';
+
   dataRows.forEach((raw, i) => {
-    const rowNum = i + 2; // account for 1-indexing + header row
-    const structure = String(raw[structureCol] ?? '').trim();
-    const dateVal = parseFlexibleHistoricalDate(raw[dateCol]);
-    const passengerName = String(raw[nameCol] ?? '').trim();
-    const service = serviceCol !== -1 ? String(raw[serviceCol] ?? '').trim() : '';
-    const debtRaw = debtCol !== -1 ? raw[debtCol] : undefined;
-    const debtNum = Number(debtRaw);
-    const structureDebt = Number.isFinite(debtNum) && debtNum > 0 ? debtNum : CANCELLATION_FEE;
+    const rowNum = headerRowIndex + i + 2;
 
-    if (!structure && !dateVal && !passengerName) return; // fully blank row — silently skip
+    const cell0 = String(raw[0] ?? '').trim();
+    const cell1 = String(raw[1] ?? '').trim();
+    const allCellsStr = raw.map((c) => String(c ?? '').trim()).join(' ').toLowerCase();
 
-    if (!structure || !dateVal || !passengerName) {
-      const missing = [
-        !structure && 'structure',
-        !dateVal && 'a valid date',
-        !passengerName && 'passenger name',
-      ].filter(Boolean).join(', ');
-      warnings.push(`Row ${rowNum}: skipped — missing ${missing}.`);
+    // Check if entire row is empty
+    if (raw.every((c) => c == null || String(c).trim() === '')) {
+      return;
+    }
+
+    // Skip summary / grand total rows
+    if (allCellsStr.includes('grand total') || allCellsStr.includes('total amount')) {
+      return;
+    }
+
+    // Check for section headers inside the structure (e.g. "Unaccounted Sponsorships", "Unpaid Sponsorships")
+    if (
+      allCellsStr.includes('unaccounted sponsorship') ||
+      allCellsStr.includes('unpaid sponsorship') ||
+      allCellsStr.includes('unaccounted')
+    ) {
+      currentSectionNote = 'Unaccounted Sponsorship';
+      return;
+    }
+
+    // Check structure column
+    const rawStructureVal = structureCol !== -1 ? String(raw[structureCol] ?? '').trim() : '';
+    if (rawStructureVal) {
+      const parsedStruct = parseStructureCell(rawStructureVal);
+      if (parsedStruct.structure) {
+        currentStructure = parsedStruct.structure;
+        currentRep = parsedStruct.repName;
+        currentSectionNote = '';
+      }
+    }
+
+    // Check explicit rep column
+    const rawRepVal = repCol !== -1 ? String(raw[repCol] ?? '').trim() : '';
+    if (rawRepVal && !currentRep) {
+      currentRep = rawRepVal;
+    }
+
+    const rawDateVal = dateCol !== -1 ? raw[dateCol] : undefined;
+    const dateVal = parseFlexibleHistoricalDate(rawDateVal);
+
+    const rawNameVal = nameCol !== -1 ? String(raw[nameCol] ?? '').trim() : '';
+    const rawServiceVal = serviceCol !== -1 ? String(raw[serviceCol] ?? '').trim() : '';
+    const rawCategoryVal = categoryCol !== -1 ? String(raw[categoryCol] ?? '').trim() : '';
+    const rawNotesVal = notesCol !== -1 ? String(raw[notesCol] ?? '').trim() : '';
+
+    // If dateVal and rawNameVal are both missing, check if this is a structure header row
+    if (!dateVal && !rawNameVal) {
+      if (rawStructureVal) {
+        return;
+      }
+      return;
+    }
+
+    if (!rawNameVal) {
+      warnings.push(`Row ${rowNum}: skipped — missing passenger name.`);
       skipped++;
       return;
     }
 
+    const finalDate = dateVal || parseFlexibleHistoricalDate(cell0) || parseFlexibleHistoricalDate(cell1) || '';
+
+    // Extract clean name and service code
+    const { cleanName, serviceCode, isFTV: nameIsFTV } = extractNameAndService(rawNameVal, rawServiceVal);
+
+    // Rule: If it has FTV next to it, the person owes R20
+    const isFTV =
+      nameIsFTV ||
+      /\bFTV\b/i.test(rawServiceVal) ||
+      /\bFTV\b/i.test(rawNameVal) ||
+      /\bFTV\b/i.test(rawCategoryVal) ||
+      /\bFTV\b/i.test(rawNotesVal) ||
+      rawNameVal.includes('R20') ||
+      cleanName.includes('R20');
+
+    // Debt parsing
+    const debtRaw = debtCol !== -1 ? raw[debtCol] : undefined;
+    let structureDebt = isFTV ? 20 : CANCELLATION_FEE;
+    if (debtRaw != null && String(debtRaw).trim() !== '') {
+      const debtStr = String(debtRaw).replace(/[^\d.]/g, '');
+      const parsedDebt = Number(debtStr);
+      if (Number.isFinite(parsedDebt) && parsedDebt > 0) {
+        structureDebt = isFTV ? 20 : parsedDebt;
+      }
+    }
+
+    // Category and Notes parsing
+    let category = rawCategoryVal;
+    if (!category && currentSectionNote) {
+      category = currentSectionNote;
+    } else if (!category) {
+      category = 'Cancellation';
+    }
+
+    const noteParts: string[] = [];
+    if (category && category.toLowerCase() !== 'cancellation') {
+      noteParts.push(category);
+    }
+    if (rawNotesVal) {
+      noteParts.push(rawNotesVal);
+    }
+    if (isFTV && !noteParts.some((p) => p.includes('FTV'))) {
+      noteParts.push('FTV (R20)');
+    }
+
+    const generalNotes = noteParts.join(' — ');
+    const structureToUse = currentStructure || 'Unidentified';
+
     rows.push({
-      structure,
-      date: dateVal,
-      service: service || 'Unspecified',
-      passenger_name: passengerName,
+      structure: structureToUse,
+      rep_name: currentRep,
+      date: finalDate,
+      service: serviceCode || 'PM',
+      passenger_name: cleanName || rawNameVal,
       structure_debt: structureDebt,
+      general_notes: generalNotes,
     });
   });
 
@@ -310,29 +595,46 @@ export function parseHistoricalCancellationWorkbook(buffer: ArrayBuffer): Histor
  * Inserts pre-parsed historical cancellation rows directly into the
  * cancellation_ledger table. Unlike insertAbsentees (used for live
  * session submissions), this never deletes existing rows first —
- * historical backfills are purely additive. No rep is attached to these
- * entries since they predate the digital ledger.
+ * historical backfills are purely additive.
  */
 export async function importHistoricalCancellations(rows: HistoricalCancellationRow[]): Promise<void> {
   if (rows.length === 0) return;
-  const payload = rows.map((r) => ({
-    manifest_key: `historical_${r.date}_${r.service}`.replace(/\s+/g, '_'),
-    date: r.date,
-    service: r.service,
-    passenger_name: r.passenger_name,
-    stop: '',
-    structure: r.structure,
-    vehicle_name: 'Historical Import',
-    submitted_by: 'Historical Import',
-    rep_name: '',
-    license_plate: '',
-    sponsored: false,
-    sponsor_note: '',
-    structure_debt: r.structure_debt,
-    general_notes: '',
-  }));
+  const payload = rows.map((r) => {
+    const isSponsorship =
+      (r.general_notes || '').toLowerCase().includes('sponsorship') ||
+      (r.general_notes || '').toLowerCase().includes('unaccounted') ||
+      (r.general_notes || '').toLowerCase().includes('unpaid');
+
+    return {
+      manifest_key: `historical_${r.date || 'undated'}_${r.service}`.replace(/\s+/g, '_'),
+      date: r.date,
+      service: r.service,
+      passenger_name: r.passenger_name,
+      stop: '',
+      structure: r.structure,
+      vehicle_name: 'Historical Import',
+      submitted_by: 'Historical Import',
+      rep_name: r.rep_name || '',
+      license_plate: '',
+      sponsored: isSponsorship,
+      sponsor_note: isSponsorship ? r.general_notes || 'Unaccounted Sponsorship' : '',
+      structure_debt: r.structure_debt,
+      general_notes: r.general_notes || '',
+    };
+  });
   const { error } = await supabase.from(LEDGER_TABLE).insert(payload);
   if (error) throw error;
+}
+
+export interface AggregatedLedgerInstance {
+  id: string;
+  date: string;
+  service: string;
+  serviceCode: string;
+  amount: number;
+  formatted: string; // e.g. "23/08/26(PM)"
+  isFTV: boolean;
+  notes: string;
 }
 
 export interface AggregatedLedgerRow {
@@ -342,9 +644,15 @@ export interface AggregatedLedgerRow {
   vehicleName: string;
   name: string;
   service: string;
+  serviceCodes: string[];
+  formattedServices: string; // e.g. "(PM)" or "(LM, AM, PM)"
   latestDate: string; // yyyy-mm-dd, most recent
+  formattedDateList: string; // e.g. "23/08/26(PM), 16/08/26(AM)"
   amount: number;
   entryIds: string[];
+  instances: AggregatedLedgerInstance[];
+  isSponsorshipOrUnpaid: boolean;
+  notes: string;
 }
 
 export interface AggregatedLedgerGroup {
@@ -352,6 +660,10 @@ export interface AggregatedLedgerGroup {
   /** Distinct rep names who submitted debts for this structure, in first-seen order. */
   reps: string[];
   rows: AggregatedLedgerRow[];
+  cancellationRows: AggregatedLedgerRow[];
+  sponsorshipRows: AggregatedLedgerRow[];
+  cancellationDebt: number;
+  sponsorshipDebt: number;
   totalDebt: number;
 }
 
@@ -359,7 +671,12 @@ export interface AggregatedLedgerGroup {
  * Shared aggregation used by both the web Ledger page and the download:
  * groups raw ledger entries by structure (strict alphanumeric order —
  * S1, S2, S9, S13), then by passenger name within each structure so repeat
- * cancellations collapse into one row with cumulative debt (e.g. R80).
+ * cancellations collapse into one row with cumulative debt (e.g. R80 for Amo Nhlabathi).
+ *
+ * Accurately tracks each instance's service type (e.g. AM, PM, LM, WMP, EF, AD, FW)
+ * so special church event cancellations are clearly displayed in brackets.
+ *
+ * Segregates entries into regular Cancellations vs Unaccounted Sponsorships & Unpaid.
  */
 export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedgerGroup[] {
   const byStructure = new Map<string, LedgerEntry[]>();
@@ -379,9 +696,61 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
     }
 
     const rows: AggregatedLedgerRow[] = Array.from(byName.values()).map((group) => {
-      const sorted = [...group].sort((a, b) => (b.submitted_at || '').localeCompare(a.submitted_at || ''));
+      const sorted = [...group].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
       const latest = sorted[0];
       const amount = group.reduce((sum, e) => sum + Number(e.structure_debt), 0);
+
+      // Collect distinct service codes
+      const serviceCodesSet = new Set<string>();
+      const instances: AggregatedLedgerInstance[] = sorted.map((e) => {
+        const code = extractServiceCode(e.service) || 'PM';
+        serviceCodesSet.add(code);
+
+        // Format date into dd/mm/yy or 'Undated'
+        let dStr = e.date ? e.date : 'Undated';
+        if (e.date && e.date.includes('-')) {
+          const parts = e.date.split('-');
+          if (parts.length === 3) {
+            dStr = `${parts[2].slice(-2)}/${parts[1]}/${parts[0].slice(2)}`;
+          }
+        }
+        const isFTV = (e.general_notes || '').includes('FTV') || Number(e.structure_debt) === 20;
+
+        return {
+          id: e.id,
+          date: e.date,
+          service: e.service,
+          serviceCode: code,
+          amount: Number(e.structure_debt) || CANCELLATION_FEE,
+          formatted: `${dStr}(${code})`,
+          isFTV,
+          notes: e.general_notes || e.sponsor_note || '',
+        };
+      });
+
+      const serviceCodes = Array.from(serviceCodesSet);
+      const formattedServices = serviceCodes.length > 0 ? `(${serviceCodes.join(', ')})` : '';
+      const formattedDateList = instances.map((ins) => ins.formatted).join(', ');
+
+      const isSponsorshipOrUnpaid = group.some((e) => {
+        const gn = (e.general_notes || '').toLowerCase();
+        const sn = (e.sponsor_note || '').toLowerCase();
+        return (
+          e.sponsored ||
+          gn.includes('unaccounted') ||
+          gn.includes('unpaid') ||
+          gn.includes('did not pay') ||
+          gn.includes('sponsorship') ||
+          sn.includes('unaccounted') ||
+          sn.includes('unpaid') ||
+          sn.includes('sponsorship')
+        );
+      });
+
+      const combinedNotes = Array.from(
+        new Set(group.map((e) => e.general_notes || e.sponsor_note).filter(Boolean))
+      ).join('; ');
+
       return {
         key: `${structure}-${latest.passenger_name}`,
         structure,
@@ -389,22 +758,44 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
         vehicleName: latest.vehicle_name || '—',
         name: latest.passenger_name,
         service: latest.service,
+        serviceCodes,
+        formattedServices,
         latestDate: latest.date,
+        formattedDateList,
         amount,
         entryIds: group.map((e) => e.id),
+        instances,
+        isSponsorshipOrUnpaid,
+        notes: combinedNotes,
       };
-    }).sort((a, b) => a.name.localeCompare(b.name));
+    }).sort((a, b) => {
+      // Order by dates descending in each structure, with alphabetical tie-breaker
+      const dateDiff = (b.latestDate || '').localeCompare(a.latestDate || '');
+      if (dateDiff !== 0) return dateDiff;
+      return a.name.localeCompare(b.name);
+    });
 
     const reps: string[] = [];
     for (const row of rows) {
-      if (row.repName && row.repName !== '—' && !reps.includes(row.repName)) reps.push(row.repName);
+      if (row.repName && row.repName !== '—' && !reps.includes(row.repName)) {
+        reps.push(row.repName);
+      }
     }
+
+    const cancellationRows = rows.filter((r) => !r.isSponsorshipOrUnpaid);
+    const sponsorshipRows = rows.filter((r) => r.isSponsorshipOrUnpaid);
+    const cancellationDebt = cancellationRows.reduce((sum, r) => sum + r.amount, 0);
+    const sponsorshipDebt = sponsorshipRows.reduce((sum, r) => sum + r.amount, 0);
 
     groups.push({
       structure,
       reps,
       rows,
-      totalDebt: rows.reduce((sum, r) => sum + r.amount, 0),
+      cancellationRows,
+      sponsorshipRows,
+      cancellationDebt,
+      sponsorshipDebt,
+      totalDebt: cancellationDebt + sponsorshipDebt,
     });
   }
 
@@ -416,6 +807,9 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
  * the official "2026 SZ Cancellation List": a cover section with the
  * policy rules and ABSA banking details, followed by the strict 4-column
  * table (Structure and rep / Cancellation date / Name / Amount owing).
+ *
+ * Accurately formats the Name column with the service type in brackets e.g. "Linathi Mpako (PM)"
+ * or "Thembi Qobo (LM)" or "Nonkululeko Dhlamini (WMP)".
  */
 export function downloadLedgerExcel(entries: LedgerEntry[], fileName: string): void {
   const groups = aggregateLedgerEntries(entries);
@@ -438,22 +832,53 @@ export function downloadLedgerExcel(entries: LedgerEntry[], fileName: string): v
     [],
     [`Total Outstanding: R${grandTotal}`],
     [],
-    ['Structure', 'Cancellation date', 'Name', 'Amount owing'],
+    ['Structure and rep', 'Cancellation date', 'Name', 'Amount owing', 'Category / Notes'],
   ];
 
   for (const group of groups) {
-    for (const row of group.rows) {
+    const repSuffix = group.reps.length > 0 ? ` - ${group.reps.join(', ')}` : '';
+    const structureHeader = `${group.structure}${repSuffix}`;
+
+    // 1. Regular cancellations
+    for (const row of group.cancellationRows) {
+      const serviceDisplay = row.serviceCodes.length > 0 ? `(${row.serviceCodes.join(', ')})` : '';
+      const nameWithService = serviceDisplay ? `${row.name} ${serviceDisplay}` : row.name;
+
       aoa.push([
-        row.structure,
-        shortDate(row.latestDate),
-        `${row.name} (${row.service.split(' ')[0]})`,
+        structureHeader,
+        row.formattedDateList || shortDate(row.latestDate),
+        nameWithService,
         `R${row.amount}`,
+        row.notes || 'Cancellation',
       ]);
+    }
+
+    // 2. Unaccounted Sponsorships & Unpaid
+    if (group.sponsorshipRows.length > 0) {
+      aoa.push([
+        `${structureHeader} — Unaccounted Sponsorships / Unpaid`,
+        '',
+        '',
+        '',
+        '',
+      ]);
+      for (const row of group.sponsorshipRows) {
+        const serviceDisplay = row.serviceCodes.length > 0 ? `(${row.serviceCodes.join(', ')})` : '';
+        const nameWithService = serviceDisplay ? `${row.name} ${serviceDisplay}` : row.name;
+
+        aoa.push([
+          structureHeader,
+          row.formattedDateList || shortDate(row.latestDate),
+          nameWithService,
+          `R${row.amount}`,
+          row.notes || 'Unaccounted Sponsorship',
+        ]);
+      }
     }
   }
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [{ wch: 30 }, { wch: 18 }, { wch: 30 }, { wch: 14 }];
+  ws['!cols'] = [{ wch: 32 }, { wch: 28 }, { wch: 35 }, { wch: 14 }, { wch: 30 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'SZ Cancellation List');
   XLSX.writeFile(wb, fileName);
