@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BookOpen, Loader2, AlertTriangle, FileSpreadsheet, Search, Trash2, Filter, XCircle,
-  ChevronDown, ChevronRight, Upload, CheckCircle2, FileText,
+  ChevronDown, ChevronRight, Upload, CheckCircle2, FileText, Banknote, X, UserPlus, Plus,
 } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
 import {
   listLedgerEntries, deleteLedgerEntry, downloadLedgerExcel,
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
+  recordPartialPayment, addManualLedgerEntry,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
 } from '@/lib/ledger';
 import { downloadCancellationDebtPdf } from '@/lib/pdfExport';
@@ -19,7 +20,27 @@ export function LedgerPage() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [structureFilter, setStructureFilter] = useState('');
-  const [collapsedStructures, setCollapsedStructures] = useState<Set<string>>(new Set());
+  const [openStructures, setOpenStructures] = useState<Set<string>>(new Set());
+
+  // Partial Payment Modal State
+  const [paymentTarget, setPaymentTarget] = useState<AggregatedLedgerRow | null>(null);
+  const [paymentAmount, setPaymentAmount] = useState<string>('');
+  const [paying, setPaying] = useState(false);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+
+  // Manual Add Modal State
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [addFirstName, setAddFirstName] = useState('');
+  const [addSurname, setAddSurname] = useState('');
+  const [addStructure, setAddStructure] = useState('S1');
+  const [addService, setAddService] = useState('PM');
+  const [addAmount, setAddAmount] = useState('40');
+  const [addDate, setAddDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [addNotes, setAddNotes] = useState('');
+  const [addIsSponsored, setAddIsSponsored] = useState(false);
+  const [addingDebtor, setAddingDebtor] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+  const [addSuccessMessage, setAddSuccessMessage] = useState<string | null>(null);
 
   // Historical Cancellation Import
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -58,7 +79,7 @@ export function LedgerPage() {
       return (
         e.passenger_name.toLowerCase().includes(q) ||
         e.structure.toLowerCase().includes(q) ||
-        (e.rep_name || '').toLowerCase().includes(q)
+        (e.general_notes || '').toLowerCase().includes(q)
       );
     });
   }, [entries, search, structureFilter]);
@@ -97,12 +118,20 @@ export function LedgerPage() {
   }
 
   function toggleStructure(s: string) {
-    setCollapsedStructures((prev) => {
+    setOpenStructures((prev) => {
       const next = new Set(prev);
       if (next.has(s)) next.delete(s);
       else next.add(s);
       return next;
     });
+  }
+
+  function expandAllStructures() {
+    setOpenStructures(new Set(groupedByStructure.map((g) => g.structure)));
+  }
+
+  function collapseAllStructures() {
+    setOpenStructures(new Set());
   }
 
   async function handleDeleteRow(row: AggregatedLedgerRow) {
@@ -112,6 +141,113 @@ export function LedgerPage() {
       setEntries((prev) => prev.filter((e) => !idSet.has(e.id)));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function openPaymentModal(row: AggregatedLedgerRow) {
+    setPaymentTarget(row);
+    setPaymentAmount(String(row.amount));
+    setPaymentError(null);
+  }
+
+  function closePaymentModal() {
+    setPaymentTarget(null);
+    setPaymentAmount('');
+    setPaymentError(null);
+  }
+
+  function openAddModal() {
+    setAddFirstName('');
+    setAddSurname('');
+    setAddStructure(structureFilter || 'S1');
+    setAddService('PM');
+    setAddAmount('40');
+    setAddDate(new Date().toISOString().slice(0, 10));
+    setAddNotes('');
+    setAddIsSponsored(false);
+    setAddError(null);
+    setAddSuccessMessage(null);
+    setShowAddModal(true);
+  }
+
+  function closeAddModal() {
+    setShowAddModal(false);
+    setAddError(null);
+  }
+
+  async function handleAddDebtor() {
+    if (!addFirstName.trim()) {
+      setAddError('First name is required.');
+      return;
+    }
+    if (!addSurname.trim()) {
+      setAddError('Surname is required.');
+      return;
+    }
+    if (!addStructure.trim()) {
+      setAddError('Structure is required.');
+      return;
+    }
+    if (!addDate) {
+      setAddError('Date is required.');
+      return;
+    }
+    const amtNum = Number(addAmount);
+    if (!Number.isFinite(amtNum) || amtNum <= 0) {
+      setAddError('Please enter a valid positive amount.');
+      return;
+    }
+
+    setAddingDebtor(true);
+    setAddError(null);
+    try {
+      await addManualLedgerEntry({
+        firstName: addFirstName,
+        surname: addSurname,
+        structure: addStructure,
+        service: addService,
+        amount: amtNum,
+        date: addDate,
+        notes: addNotes,
+        isSponsored: addIsSponsored,
+      });
+
+      const refreshed = await listLedgerEntries();
+      setEntries(refreshed);
+      setAddSuccessMessage(`Added ${addFirstName.trim()} ${addSurname.trim()} (R${amtNum}) to ${addStructure.toUpperCase()}`);
+      setTimeout(() => {
+        closeAddModal();
+      }, 900);
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAddingDebtor(false);
+    }
+  }
+
+  async function handleConfirmPayment() {
+    if (!paymentTarget) return;
+    const amountNum = Number(paymentAmount);
+    if (!Number.isFinite(amountNum) || amountNum <= 0) {
+      setPaymentError('Please enter a valid positive payment amount (e.g. 20, 40, 80).');
+      return;
+    }
+    if (amountNum > paymentTarget.amount) {
+      setPaymentError(`Amount cannot exceed the total outstanding debt of R${paymentTarget.amount}.`);
+      return;
+    }
+
+    setPaying(true);
+    setPaymentError(null);
+    try {
+      await recordPartialPayment(paymentTarget.entryIds, amountNum);
+      const refreshed = await listLedgerEntries();
+      setEntries(refreshed);
+      closePaymentModal();
+    } catch (e) {
+      setPaymentError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPaying(false);
     }
   }
 
@@ -160,6 +296,15 @@ export function LedgerPage() {
                 <SummaryStat label="Total Debt" value={`R${totalDebt}`} accent="warning" />
               </div>
               <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={openAddModal}
+                  className="btn-primary flex items-center gap-2 shadow-sm"
+                  title="Add a new debtor manually (Name, Surname, Structure, Service, Amount, Date)"
+                >
+                  <UserPlus className="h-4 w-4" />
+                  <span>Add Debtor</span>
+                </button>
                 <input
                   ref={importInputRef}
                   type="file"
@@ -258,11 +403,33 @@ export function LedgerPage() {
               </div>
             </div>
 
+            {/* Expand / Collapse All Controls */}
+            <div className="mb-3 flex items-center justify-between px-1 text-xs text-muted">
+              <span>
+                {groupedByStructure.length} structure{groupedByStructure.length === 1 ? '' : 's'} · {openStructures.size} open
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={expandAllStructures}
+                  className="rounded-md border border-line/60 bg-card px-2.5 py-1 text-xs font-medium text-ink hover:bg-card-2 transition-colors"
+                >
+                  Expand All
+                </button>
+                <button
+                  type="button"
+                  onClick={collapseAllStructures}
+                  className="rounded-md border border-line/60 bg-card px-2.5 py-1 text-xs font-medium text-ink hover:bg-card-2 transition-colors"
+                >
+                  Collapse All
+                </button>
+              </div>
+            </div>
+
             {/* Grouped by structure — strict alphanumeric order (S1, S2, S9, S13) */}
             <div className="space-y-4">
-              {groupedByStructure.map(({ structure, reps, rows, cancellationRows, sponsorshipRows, cancellationDebt, sponsorshipDebt, totalDebt: structDebt }) => {
-                const isCollapsed = collapsedStructures.has(structure);
-                const repsText = reps && reps.length > 0 ? ` · Reps: ${reps.join(', ')}` : '';
+              {groupedByStructure.map(({ structure, rows, cancellationRows, sponsorshipRows, cancellationDebt, sponsorshipDebt, totalDebt: structDebt }) => {
+                const isOpen = openStructures.has(structure);
                 const structureLabel = structure === 'No Structure' ? structure : `Structure ${structure}`;
 
                 return (
@@ -272,9 +439,8 @@ export function LedgerPage() {
                       className="flex w-full items-center justify-between gap-2 border-b border-line/60 bg-card-2/60 px-4 py-3.5 text-left transition-colors hover:bg-card-2"
                     >
                       <div className="flex items-center gap-2 flex-wrap">
-                        {isCollapsed ? <ChevronRight className="h-4 w-4 text-muted" /> : <ChevronDown className="h-4 w-4 text-muted" />}
+                        {isOpen ? <ChevronDown className="h-4 w-4 text-muted" /> : <ChevronRight className="h-4 w-4 text-muted" />}
                         <span className="font-display text-sm font-bold text-ink">{structureLabel}</span>
-                        {repsText && <span className="text-xs text-muted font-normal">{repsText}</span>}
                         <span className="badge bg-bg/60 text-muted text-[10px]">{rows.length} total</span>
                         {sponsorshipRows.length > 0 && (
                           <span className="badge bg-amber-500/15 text-amber-300 border border-amber-500/25 text-[10px]">
@@ -287,7 +453,7 @@ export function LedgerPage() {
                       </div>
                     </button>
 
-                    {!isCollapsed && (
+                    {isOpen && (
                       <div className="space-y-4 p-3 sm:p-4">
                         {/* Section 1: Regular Cancellations */}
                         {cancellationRows.length > 0 && (
@@ -329,9 +495,6 @@ export function LedgerPage() {
                                       <td className="px-3.5 py-2.5 align-top">
                                         <div className="flex flex-wrap items-center gap-1.5">
                                           <span className="font-semibold text-ink">{row.name}</span>
-                                          <span className="font-medium text-muted text-xs">
-                                            {row.formattedServices || `(${row.serviceCodes.join(', ') || row.service})`}
-                                          </span>
                                           {row.serviceCodes.map((code) => (
                                             <ServiceBadge key={code} code={code} />
                                           ))}
@@ -353,9 +516,23 @@ export function LedgerPage() {
                                         </div>
                                       </td>
                                       <td className="px-3.5 py-2.5 text-right align-top">
-                                        <button onClick={() => handleDeleteRow(row)} className="rounded-md border border-crimson-500/20 bg-crimson-900/20 p-1.5 text-crimson-300 hover:bg-crimson-900/40" title="Delete">
-                                          <Trash2 className="h-3.5 w-3.5" />
-                                        </button>
+                                        <div className="flex items-center justify-end gap-1.5">
+                                          <button
+                                            onClick={() => openPaymentModal(row)}
+                                            className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/15 px-2.5 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25 transition-colors"
+                                            title="Record a payment or partial settlement from this debtor"
+                                          >
+                                            <Banknote className="h-3.5 w-3.5" />
+                                            <span>Record Payment</span>
+                                          </button>
+                                          <button
+                                            onClick={() => handleDeleteRow(row)}
+                                            className="rounded-md border border-crimson-500/20 bg-crimson-900/20 p-1.5 text-crimson-300 hover:bg-crimson-900/40"
+                                            title="Delete entry"
+                                          >
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                          </button>
+                                        </div>
                                       </td>
                                     </tr>
                                   ))}
@@ -409,9 +586,6 @@ export function LedgerPage() {
                                       <td className="px-3.5 py-2.5 align-top">
                                         <div className="flex flex-wrap items-center gap-1.5">
                                           <span className="font-semibold text-ink">{row.name}</span>
-                                          <span className="font-medium text-muted text-xs">
-                                            {row.formattedServices || `(${row.serviceCodes.join(', ') || row.service})`}
-                                          </span>
                                           {row.serviceCodes.map((code) => (
                                             <ServiceBadge key={code} code={code} />
                                           ))}
@@ -438,9 +612,23 @@ export function LedgerPage() {
                                         </div>
                                       </td>
                                       <td className="px-3.5 py-2.5 text-right align-top">
-                                        <button onClick={() => handleDeleteRow(row)} className="rounded-md border border-crimson-500/20 bg-crimson-900/20 p-1.5 text-crimson-300 hover:bg-crimson-900/40" title="Delete">
-                                          <Trash2 className="h-3.5 w-3.5" />
-                                        </button>
+                                        <div className="flex items-center justify-end gap-1.5">
+                                          <button
+                                            onClick={() => openPaymentModal(row)}
+                                            className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/15 px-2.5 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25 transition-colors"
+                                            title="Record a payment or partial settlement from this debtor"
+                                          >
+                                            <Banknote className="h-3.5 w-3.5" />
+                                            <span>Record Payment</span>
+                                          </button>
+                                          <button
+                                            onClick={() => handleDeleteRow(row)}
+                                            className="rounded-md border border-crimson-500/20 bg-crimson-900/20 p-1.5 text-crimson-300 hover:bg-crimson-900/40"
+                                            title="Delete entry"
+                                          >
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                          </button>
+                                        </div>
                                       </td>
                                     </tr>
                                   ))}
@@ -455,6 +643,354 @@ export function LedgerPage() {
                 );
               })}
             </div>
+
+            {/* Payment Modal */}
+            {paymentTarget && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 animate-fade-in backdrop-blur-sm">
+                <div className="w-full max-w-md rounded-2xl border border-line bg-card p-6 shadow-xl">
+                  <div className="flex items-center justify-between border-b border-line pb-3">
+                    <div className="flex items-center gap-2">
+                      <div className="rounded-lg bg-emerald-500/15 p-2 text-emerald-400">
+                        <Banknote className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <h3 className="font-display text-lg font-bold text-ink">Record Payment</h3>
+                        <p className="text-xs text-muted">Deduct full or partial amount from debt</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={closePaymentModal}
+                      disabled={paying}
+                      className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+
+                  <div className="mt-4 space-y-4">
+                    <div className="rounded-xl border border-line/60 bg-card-2/60 p-3.5">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-muted">Debtor:</span>
+                        <span className="font-bold text-ink">{paymentTarget.name}</span>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between text-sm">
+                        <span className="text-muted">Structure:</span>
+                        <span className="font-medium text-ink">{paymentTarget.structure}</span>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between text-sm">
+                        <span className="text-muted">Total Outstanding:</span>
+                        <span className="font-display text-base font-bold text-crimson-400">R{paymentTarget.amount}</span>
+                      </div>
+                      <div className="mt-2 text-xs text-muted">
+                        Missed sessions: <span className="font-mono text-ink/90">{paymentTarget.formattedDateList}</span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1.5">
+                        Amount Paid (R)
+                      </label>
+                      <div className="relative">
+                        <span className="absolute left-3.5 top-1/2 -translate-y-1/2 font-bold text-muted">R</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max={paymentTarget.amount}
+                          step="10"
+                          value={paymentAmount}
+                          onChange={(e) => setPaymentAmount(e.target.value)}
+                          placeholder="e.g. 40"
+                          className="input-field pl-8 font-mono text-lg font-bold text-ink"
+                          autoFocus
+                        />
+                      </div>
+                      {/* Quick preset chips */}
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {paymentTarget.amount >= 20 && (
+                          <button
+                            type="button"
+                            onClick={() => setPaymentAmount('20')}
+                            className="rounded bg-card-2 px-2 py-0.5 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60"
+                          >
+                            R20 (FTV)
+                          </button>
+                        )}
+                        {paymentTarget.amount >= 40 && (
+                          <button
+                            type="button"
+                            onClick={() => setPaymentAmount('40')}
+                            className="rounded bg-card-2 px-2 py-0.5 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60"
+                          >
+                            R40 (1 session)
+                          </button>
+                        )}
+                        {paymentTarget.amount >= 80 && (
+                          <button
+                            type="button"
+                            onClick={() => setPaymentAmount('80')}
+                            className="rounded bg-card-2 px-2 py-0.5 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60"
+                          >
+                            R80 (2 sessions)
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setPaymentAmount(String(paymentTarget.amount))}
+                          className="rounded bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-300 hover:bg-emerald-500/25 border border-emerald-500/30 font-semibold"
+                        >
+                          Full Debt (R{paymentTarget.amount})
+                        </button>
+                      </div>
+                    </div>
+
+                    {paymentError && (
+                      <div className="flex items-center gap-2 rounded-lg border border-crimson-500/30 bg-crimson-900/20 p-2.5 text-xs text-crimson-300">
+                        <AlertTriangle className="h-4 w-4 shrink-0" />
+                        <span>{paymentError}</span>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-end gap-2 pt-2 border-t border-line">
+                      <button
+                        type="button"
+                        onClick={closePaymentModal}
+                        disabled={paying}
+                        className="btn-ghost text-xs"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleConfirmPayment}
+                        disabled={paying || !paymentAmount}
+                        className="btn-success flex items-center gap-2 text-xs"
+                      >
+                        {paying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Banknote className="h-4 w-4" />}
+                        Confirm Payment of R{paymentAmount || 0}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Manual Add Debtor Modal */}
+            {showAddModal && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 animate-fade-in backdrop-blur-sm">
+                <div className="w-full max-w-lg rounded-2xl border border-line bg-card p-6 shadow-xl">
+                  <div className="flex items-center justify-between border-b border-line pb-3">
+                    <div className="flex items-center gap-2">
+                      <div className="rounded-lg bg-crimson-500/15 p-2 text-crimson-400">
+                        <UserPlus className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <h3 className="font-display text-lg font-bold text-ink">Add Debtor to Ledger</h3>
+                        <p className="text-xs text-muted">Directly record an absentee cancellation or debt</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={closeAddModal}
+                      disabled={addingDebtor}
+                      className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      handleAddDebtor();
+                    }}
+                    className="mt-4 space-y-4"
+                  >
+                    {/* First Name & Surname */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                          First Name <span className="text-crimson-400">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={addFirstName}
+                          onChange={(e) => setAddFirstName(e.target.value)}
+                          placeholder="e.g. Amo"
+                          className="input-field w-full text-sm"
+                          autoFocus
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                          Surname <span className="text-crimson-400">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={addSurname}
+                          onChange={(e) => setAddSurname(e.target.value)}
+                          placeholder="e.g. Nhlabathi"
+                          className="input-field w-full text-sm"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Structure & Service Type */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                          Structure <span className="text-crimson-400">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={addStructure}
+                          onChange={(e) => setAddStructure(e.target.value.toUpperCase())}
+                          placeholder="e.g. S1, S2, S13, YZ1"
+                          className="input-field w-full font-mono text-sm font-semibold uppercase"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                          Service Type <span className="text-crimson-400">*</span>
+                        </label>
+                        <select
+                          value={addService}
+                          onChange={(e) => setAddService(e.target.value)}
+                          className="input-field w-full text-sm"
+                        >
+                          <option value="PM">PM (Evening Service)</option>
+                          <option value="AM">AM (Morning Service)</option>
+                          <option value="LM">LM (Leaders Meeting)</option>
+                          <option value="WMP">WMP (Worship/Music/Prayer)</option>
+                          <option value="EF">EF (Easter Friday)</option>
+                          <option value="AD">AD (Ascension Day)</option>
+                          <option value="FW">FW (Fast & Worship)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Amount & Date */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                          Amount Owing (R) <span className="text-crimson-400">*</span>
+                        </label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-muted text-sm">R</span>
+                          <input
+                            type="number"
+                            min="1"
+                            step="10"
+                            required
+                            value={addAmount}
+                            onChange={(e) => setAddAmount(e.target.value)}
+                            className="input-field w-full pl-7 font-mono font-bold text-sm"
+                          />
+                        </div>
+                        <div className="mt-1 flex gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setAddAmount('40')}
+                            className="text-[10px] text-muted hover:text-ink underline"
+                          >
+                            R40 (Standard)
+                          </button>
+                          <span className="text-[10px] text-muted">·</span>
+                          <button
+                            type="button"
+                            onClick={() => setAddAmount('20')}
+                            className="text-[10px] text-muted hover:text-ink underline"
+                          >
+                            R20 (FTV)
+                          </button>
+                          <span className="text-[10px] text-muted">·</span>
+                          <button
+                            type="button"
+                            onClick={() => setAddAmount('80')}
+                            className="text-[10px] text-muted hover:text-ink underline"
+                          >
+                            R80 (2 trips)
+                          </button>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                          Date <span className="text-crimson-400">*</span>
+                        </label>
+                        <input
+                          type="date"
+                          required
+                          value={addDate}
+                          onChange={(e) => setAddDate(e.target.value)}
+                          className="input-field w-full text-sm font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Notes & Sponsorship Flag */}
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                        General Notes / FTV Indicator
+                      </label>
+                      <input
+                        type="text"
+                        value={addNotes}
+                        onChange={(e) => setAddNotes(e.target.value)}
+                        placeholder="e.g. FTV, Did not arrive at stop, Unaccounted"
+                        className="input-field w-full text-xs"
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-2 rounded-lg bg-card-2/60 p-2.5 border border-line/60">
+                      <input
+                        type="checkbox"
+                        id="isSponsoredCheckbox"
+                        checked={addIsSponsored}
+                        onChange={(e) => setAddIsSponsored(e.target.checked)}
+                        className="rounded border-line bg-card text-crimson-500 focus:ring-crimson-500"
+                      />
+                      <label htmlFor="isSponsoredCheckbox" className="text-xs text-ink cursor-pointer select-none">
+                        Mark as <span className="font-semibold text-amber-300">Unaccounted Sponsorship / Unpaid</span> (groups into structure sponsorship breakdown)
+                      </label>
+                    </div>
+
+                    {addError && (
+                      <div className="flex items-center gap-2 rounded-lg border border-crimson-500/30 bg-crimson-900/20 p-2.5 text-xs text-crimson-300">
+                        <AlertTriangle className="h-4 w-4 shrink-0" />
+                        <span>{addError}</span>
+                      </div>
+                    )}
+
+                    {addSuccessMessage && (
+                      <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-2.5 text-xs text-emerald-300">
+                        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                        <span>{addSuccessMessage}</span>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-end gap-2 pt-3 border-t border-line">
+                      <button
+                        type="button"
+                        onClick={closeAddModal}
+                        disabled={addingDebtor}
+                        className="btn-ghost text-xs"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={addingDebtor}
+                        className="btn-crimson flex items-center gap-2 text-xs font-semibold shadow-md"
+                      >
+                        {addingDebtor ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                        Add to Ledger
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
 
             {filtered.length === 0 && search && (
               <div className="mt-4 text-center text-sm text-muted">

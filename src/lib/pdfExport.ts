@@ -133,13 +133,14 @@ export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[
     const sponsorships: DebtorPersonSummary[] = [];
 
     for (const [name, data] of personMap.entries()) {
-      data.instances.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-      const latestDate = data.instances[0]?.date || '';
+      // Sort individual instances chronologically ascending (Jan 1 first, Dec 31 last)
+      data.instances.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+      const earliestDate = data.instances[0]?.date || '';
 
       const summary: DebtorPersonSummary = {
         name,
         structure,
-        latestDate,
+        latestDate: earliestDate,
         instances: data.instances.map((i) => i.formatted),
         totalDebt: data.totalDebt,
         isSponsorshipOrUnpaid: data.isSponsorship,
@@ -154,7 +155,12 @@ export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[
     }
 
     const sortFn = (a: DebtorPersonSummary, b: DebtorPersonSummary) => {
-      const dateDiff = (b.latestDate || '').localeCompare(a.latestDate || '');
+      // Highest debt at top
+      if (b.totalDebt !== a.totalDebt) {
+        return b.totalDebt - a.totalDebt;
+      }
+      // Earliest date ascending (Jan 1 first, Dec 31 last)
+      const dateDiff = (a.latestDate || '').localeCompare(b.latestDate || '');
       if (dateDiff !== 0) return dateDiff;
       return naturalCompare(a.name, b.name);
     };

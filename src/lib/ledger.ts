@@ -316,6 +316,94 @@ export async function updateLedgerEntry(id: string, updates: Partial<LedgerEntry
   if (error) throw error;
 }
 
+export interface ManualLedgerEntryInput {
+  firstName: string;
+  surname: string;
+  structure: string;
+  service: string;
+  amount: number;
+  date: string;
+  notes?: string;
+  isSponsored?: boolean;
+}
+
+/**
+ * Inserts a manually created cancellation/debt entry into the cancellation ledger.
+ */
+export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promise<LedgerEntry> {
+  const fullName = `${input.firstName.trim()} ${input.surname.trim()}`.trim();
+  const manifestKey = `manual-${input.date}-${input.service.toLowerCase()}-${Date.now()}`;
+  const structureCode = input.structure.trim().toUpperCase().startsWith('S') || input.structure.trim().toUpperCase().startsWith('YZ')
+    ? input.structure.trim().toUpperCase()
+    : input.structure.trim() ? `S${input.structure.trim()}` : 'No Structure';
+
+  const isFTV = (input.notes || '').toUpperCase().includes('FTV') || input.service.toUpperCase().includes('FTV') || input.amount === 20;
+
+  const row = {
+    manifest_key: manifestKey,
+    date: input.date,
+    service: input.service.trim().toUpperCase() || 'PM',
+    passenger_name: fullName,
+    stop: 'Manual Entry',
+    structure: structureCode,
+    vehicle_name: 'Manual Addition',
+    submitted_by: 'Cancellation Admin',
+    rep_name: '',
+    license_plate: '',
+    sponsored: !!input.isSponsored,
+    sponsor_note: input.isSponsored ? (input.notes || 'Sponsorship') : '',
+    structure_debt: Number(input.amount) || (isFTV ? 20 : CANCELLATION_FEE),
+    general_notes: input.notes || (isFTV ? 'FTV' : ''),
+  };
+
+  const { data, error } = await supabase
+    .from(LEDGER_TABLE)
+    .insert([row])
+    .select('*')
+    .single();
+
+  if (error) throw error;
+  return data as LedgerEntry;
+}
+
+/**
+ * Applies a partial or full payment against a debtor's aggregated entries.
+ * Deducts amountPaid from the oldest entries first. If an entry reaches R0 debt,
+ * it is removed/settled. If partially paid, its structure_debt is updated.
+ */
+export async function recordPartialPayment(entryIds: string[], amountPaid: number): Promise<void> {
+  if (entryIds.length === 0 || amountPaid <= 0) return;
+
+  const { data: entries, error } = await supabase
+    .from(LEDGER_TABLE)
+    .select('id, structure_debt, date')
+    .in('id', entryIds);
+
+  if (error) throw error;
+  if (!entries || entries.length === 0) return;
+
+  // Sort ascending by date (oldest debt settled first)
+  const sorted = [...entries].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+
+  let remainingToDeduct = amountPaid;
+
+  for (const entry of sorted) {
+    if (remainingToDeduct <= 0) break;
+    const currentDebt = Number(entry.structure_debt) || CANCELLATION_FEE;
+
+    if (remainingToDeduct >= currentDebt) {
+      // Entire entry is paid off
+      remainingToDeduct -= currentDebt;
+      await deleteLedgerEntry(entry.id);
+    } else {
+      // Partial deduction on this entry
+      const newDebt = currentDebt - remainingToDeduct;
+      remainingToDeduct = 0;
+      await updateLedgerEntry(entry.id, { structure_debt: newDebt });
+    }
+  }
+}
+
 /** A single row parsed from a "Cancellation History" import workbook, ready to insert into cancellation_ledger. */
 export interface HistoricalCancellationRow {
   structure: string;
@@ -696,8 +784,10 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
     }
 
     const rows: AggregatedLedgerRow[] = Array.from(byName.values()).map((group) => {
-      const sorted = [...group].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-      const latest = sorted[0];
+      // Sort individual instances in chronological order ascending (Jan 1 first, Dec 31 last)
+      const sorted = [...group].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+      const earliest = sorted[0];
+      const latest = sorted[sorted.length - 1];
       const amount = group.reduce((sum, e) => sum + Number(e.structure_debt), 0);
 
       // Collect distinct service codes
@@ -760,7 +850,7 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
         service: latest.service,
         serviceCodes,
         formattedServices,
-        latestDate: latest.date,
+        latestDate: earliest.date || latest.date,
         formattedDateList,
         amount,
         entryIds: group.map((e) => e.id),
@@ -769,8 +859,12 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
         notes: combinedNotes,
       };
     }).sort((a, b) => {
-      // Order by dates descending in each structure, with alphabetical tie-breaker
-      const dateDiff = (b.latestDate || '').localeCompare(a.latestDate || '');
+      // Order people with highest debt at the top (descending debt amount)
+      if (b.amount !== a.amount) {
+        return b.amount - a.amount;
+      }
+      // For tie-breaking debts: earliest date ascending (1st Jan first, 31st Dec last)
+      const dateDiff = (a.latestDate || '').localeCompare(b.latestDate || '');
       if (dateDiff !== 0) return dateDiff;
       return a.name.localeCompare(b.name);
     });
