@@ -25,8 +25,6 @@ const EOH = new Set([
   'Campus Central - EOH',
   'Campus Central -EOH',
   'EOH Campus Central',
-  'Charlotte',
-  'Charlotte Maxeke',
   'EOH',
 ]);
 
@@ -37,8 +35,6 @@ export const BUS_EOH_ALIASES = new Set([
   'Campus Central - EOH',
   'Campus Central -EOH',
   'EOH Campus Central',
-  'Charlotte',
-  'Charlotte Maxeke',
   'EOH',
 ]);
 
@@ -71,10 +67,14 @@ export function masterHubForStop(value: unknown): string {
   if (norm.includes('empire')) {
     return stop;
   }
+  // Charlotte Maxeke is separate, NOT EOH!
+  if (norm.includes('charlotte')) {
+    return 'Charlotte Maxeke';
+  }
   for (const s of EOH) {
     if (s.toLowerCase() === norm) return 'EOH';
   }
-  if ((norm.includes('campus central') && norm.includes('eoh')) || norm.includes('charlotte') || norm === 'eoh' || norm.includes('eoh')) {
+  if ((norm.includes('campus central') && norm.includes('eoh')) || norm === 'eoh' || norm.includes('eoh')) {
     return 'EOH';
   }
   return stop;

@@ -3,10 +3,10 @@ import {
   Bus, Car, Plus, Trash2, Users, ArrowRight, Undo2, X, UserCog, MoveRight,
   CheckCircle2, ChevronDown, ChevronRight, ChevronUp, MapPin,
   Check, Clock, StickyNote, Sparkles, ArrowUpDown, UserCheck, Download,
-  FileText, Copy, Eye, FileDown, Search, UserX
+  FileText, Copy, Eye, FileDown, Search, UserX, GitMerge, CornerDownRight
 } from 'lucide-react';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
-import { hubDisplayName, getPassengerStatusBadge } from '@/lib/types';
+import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { passengersByStop, passengersByPoolGroup, unassignedPassengers } from '@/lib/manifest';
 import { parseManifestKey } from '@/lib/dates';
@@ -226,7 +226,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     const groups: Record<string, Passenger[]> = {};
     for (const r of riders) {
       if (!r) continue;
-      const label = hubDisplayName(vehicle?.type || 'Taxi', r.stop);
+      const label = getEffectiveStop(vehicle, r.stop);
       if (!groups[label]) groups[label] = [];
       groups[label].push(r);
     }
@@ -413,6 +413,54 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       const updatedVehicles = prev.vehicles.map((v) =>
         v.id === vehicleId ? { ...v, generalNotes: note } : v
       );
+      return { ...prev, vehicles: updatedVehicles };
+    });
+  }
+
+  function addStopRedirect(vehicleId: string, fromStop: string, toStop: string, autoSetNote = true) {
+    const cleanFrom = fromStop.trim();
+    const cleanTo = toStop.trim();
+    if (!cleanFrom || !cleanTo || cleanFrom.toLowerCase() === cleanTo.toLowerCase()) return;
+
+    mutateAndSave((prev) => {
+      const updatedVehicles = prev.vehicles.map((v) => {
+        if (v.id !== vehicleId) return v;
+        const currentRedirects = { ...(v.stopRedirects ?? {}) };
+        currentRedirects[cleanFrom] = cleanTo;
+
+        // Clean up orderedStops if the redirected source stop was in orderedStops and now has 0 standalone riders
+        let nextOrderedStops = v.orderedStops ?? [];
+        if (nextOrderedStops.includes(cleanFrom) && !nextOrderedStops.includes(cleanTo)) {
+          nextOrderedStops = nextOrderedStops.map((s) => (s === cleanFrom ? cleanTo : s));
+        }
+
+        let note = v.generalNotes ?? '';
+        if (autoSetNote && (!note || note.includes('people please go to') || note.includes('Go to') || note.includes('redirected'))) {
+          note = `${cleanFrom} people please go to ${cleanTo}`;
+        }
+
+        return {
+          ...v,
+          stopRedirects: currentRedirects,
+          orderedStops: nextOrderedStops,
+          generalNotes: note || v.generalNotes,
+        };
+      });
+      return { ...prev, vehicles: updatedVehicles };
+    });
+  }
+
+  function removeStopRedirect(vehicleId: string, fromStop: string) {
+    mutateAndSave((prev) => {
+      const updatedVehicles = prev.vehicles.map((v) => {
+        if (v.id !== vehicleId) return v;
+        const currentRedirects = { ...(v.stopRedirects ?? {}) };
+        delete currentRedirects[fromStop];
+        return {
+          ...v,
+          stopRedirects: Object.keys(currentRedirects).length > 0 ? currentRedirects : undefined,
+        };
+      });
       return { ...prev, vehicles: updatedVehicles };
     });
   }
@@ -1612,16 +1660,24 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                     </div>
 
                     {/* Redirect / general note */}
-                    <div className="mb-4 flex items-center gap-2">
+                    <div className="mb-3 flex items-center gap-2">
                       <StickyNote className="h-4 w-4 text-muted" />
                       <label className="text-[10px] font-semibold uppercase tracking-wide text-muted whitespace-nowrap">Redirect Note</label>
                       <DebouncedInput
                         value={vehicle.generalNotes ?? ''}
                         onChange={(val) => setVehicleNote(vehicle.id, val)}
-                        placeholder="e.g. Student Digzz people please Go to YMCA"
+                        placeholder="e.g. Saratoga people please go to DFC"
                         className="input-field flex-1 py-1.5 text-xs"
                       />
                     </div>
+
+                    {/* Stop Redirect & Aggregation (Add stop into another stop) */}
+                    <VehicleStopRedirectSection
+                      vehicle={vehicle}
+                      allSignups={localManifest.signups}
+                      onAddRedirect={(fromStop, toStop) => addStopRedirect(vehicle.id, fromStop, toStop)}
+                      onRemoveRedirect={(fromStop) => removeStopRedirect(vehicle.id, fromStop)}
+                    />
 
                     {/* Assign controls with Atomic Sub-Stop Grouping */}
                     <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end">
@@ -1684,6 +1740,8 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                         {groups.map((group, groupIdx) => {
                           const isFirst = groupIdx === 0;
                           const isLast = groupIdx === groups.length - 1;
+                          const redirectedRiders = group.riders.filter((r) => hubDisplayName(vehicle.type, r.stop) !== group.label);
+                          const redirectedFrom = Array.from(new Set(redirectedRiders.map((r) => hubDisplayName(vehicle.type, r.stop))));
 
                           return (
                             <div key={group.label} className="rounded-xl border border-line bg-card/60 p-3">
@@ -1712,7 +1770,14 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
 
                                 <MapPin className="h-3.5 w-3.5 text-crimson-400" />
                                 <span className="text-xs font-bold uppercase tracking-wide text-crimson-300">{group.label}</span>
-                                <span className="text-[10px] text-muted">({group.riders.length} riders)</span>
+                                <span className="text-[10px] font-bold text-ink">({group.riders.length} riders)</span>
+
+                                {redirectedFrom.length > 0 && (
+                                  <span className="inline-flex items-center gap-1 rounded bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold text-amber-300 border border-amber-500/30">
+                                    <CornerDownRight className="h-3 w-3" />
+                                    incl. {redirectedRiders.length} from {redirectedFrom.join(', ')}
+                                  </span>
+                                )}
 
                                 <span className="ml-auto flex items-center gap-1">
                                   <Clock className="h-3 w-3 text-muted" />
@@ -1731,6 +1796,8 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                                   const isRepHighlight = highlightRep === p.fullName;
                                   const pOfficial = matchRiderToOfficialRep(p);
                                   const isVehicleRep = isPassengerRepOfVehicle(p, vehicle.repName);
+                                  const origStop = hubDisplayName(vehicle.type, p.stop);
+                                  const isRedirected = origStop !== group.label;
 
                                   const isPresent = Boolean(
                                     vehicle.draftState?.presentIds?.includes(p.id) ||
@@ -1806,7 +1873,15 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                                             </span>
                                           ) : null;
                                         })()}
-                                        <span className="badge bg-bg/60 text-muted text-[10px]">{p.stop}</span>
+                                        
+                                        {isRedirected ? (
+                                          <span className="badge bg-amber-500/20 text-amber-300 font-bold text-[10px] border border-amber-500/40" title={`Redirected from ${origStop}`}>
+                                            📍 From {origStop}
+                                          </span>
+                                        ) : (
+                                          <span className="badge bg-bg/60 text-muted text-[10px]">{p.stop}</span>
+                                        )}
+
                                         {isPresent && (
                                           <span className="badge bg-success/20 text-success-light font-bold text-[10px] border border-success/30">
                                             ✓ Present
@@ -2046,6 +2121,182 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                   </div>
                 );
               })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VehicleStopRedirectSection({
+  vehicle,
+  allSignups,
+  onAddRedirect,
+  onRemoveRedirect,
+}: {
+  vehicle: Vehicle;
+  allSignups: Passenger[];
+  onAddRedirect: (fromStop: string, toStop: string) => void;
+  onRemoveRedirect: (fromStop: string) => void;
+}) {
+  const activeRedirects = Object.entries(vehicle.stopRedirects ?? {});
+  const [isOpen, setIsOpen] = useState(activeRedirects.length > 0);
+  const [fromStop, setFromStop] = useState('');
+  const [toStop, setToStop] = useState('');
+
+  const riders = useMemo(() => {
+    return (vehicle.riders || [])
+      .map((id) => allSignups.find((p) => p && p.id === id))
+      .filter((p): p is Passenger => Boolean(p));
+  }, [vehicle.riders, allSignups]);
+
+  // Stops currently represented among riders (base hub display name)
+  const availableStops = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of riders) {
+      if (r && r.stop) {
+        set.add(hubDisplayName(vehicle.type, r.stop));
+      }
+    }
+    return Array.from(set).filter(Boolean);
+  }, [riders, vehicle.type]);
+
+  const handleAdd = () => {
+    if (!fromStop || !toStop || fromStop === toStop) return;
+    onAddRedirect(fromStop, toStop);
+    setFromStop('');
+    setToStop('');
+  };
+
+  return (
+    <div className="mb-3 rounded-xl border border-line bg-card/70 p-3 text-xs">
+      <div className="flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => setIsOpen(!isOpen)}
+          className="flex items-center gap-1.5 font-semibold text-ink hover:text-amber-300 transition-colors"
+        >
+          <GitMerge className="h-3.5 w-3.5 text-amber-400" />
+          <span>Stop Redirect & Aggregation</span>
+          {activeRedirects.length > 0 && (
+            <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/30">
+              {activeRedirects.length} redirected
+            </span>
+          )}
+          {isOpen ? <ChevronUp className="h-3.5 w-3.5 text-muted" /> : <ChevronDown className="h-3.5 w-3.5 text-muted" />}
+        </button>
+
+        {activeRedirects.length === 0 && !isOpen && (
+          <button
+            type="button"
+            onClick={() => setIsOpen(true)}
+            className="text-[11px] font-medium text-amber-400 hover:underline"
+          >
+            + Add Stop Redirect
+          </button>
+        )}
+      </div>
+
+      {isOpen && (
+        <div className="mt-3 space-y-2.5 animate-fade-in border-t border-line/60 pt-2.5">
+          <p className="text-[11px] text-muted leading-relaxed">
+            Add a stop's passenger count into another stop (e.g. merge <strong>Saratoga</strong> count into <strong>DFC bus stop</strong>). Reps and dispatch manifests will see the combined total, and individual passengers will remain flagged with their original stop.
+          </p>
+
+          {/* Active Redirects List */}
+          {activeRedirects.length > 0 && (
+            <div className="space-y-1.5">
+              {activeRedirects.map(([from, to]) => {
+                const countFrom = riders.filter((r) => hubDisplayName(vehicle.type, r.stop) === from).length;
+                return (
+                  <div
+                    key={from}
+                    className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-200"
+                  >
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="font-semibold text-ink">{from}</span>
+                      <CornerDownRight className="h-3.5 w-3.5 text-amber-400" />
+                      <span className="font-bold text-amber-300">{to}</span>
+                      <span className="text-[11px] text-muted">({countFrom} riders aggregated)</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onRemoveRedirect(from)}
+                      className="rounded p-1 text-muted hover:bg-crimson-900/30 hover:text-crimson-300 transition-colors"
+                      title="Remove redirect"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Add New Redirect Row */}
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="flex-1">
+              <label className="mb-0.5 block text-[10px] uppercase font-semibold text-muted">Redirect from (Source Stop)</label>
+              <select
+                value={fromStop}
+                onChange={(e) => setFromStop(e.target.value)}
+                className="input-field py-1 text-xs"
+              >
+                <option value="">Select source stop...</option>
+                {availableStops.map((s) => (
+                  <option key={s} value={s}>
+                    {s} ({riders.filter((r) => hubDisplayName(vehicle.type, r.stop) === s).length} riders)
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex items-center justify-center pt-3 text-muted">
+              <ArrowRight className="h-4 w-4" />
+            </div>
+
+            <div className="flex-1">
+              <label className="mb-0.5 block text-[10px] uppercase font-semibold text-muted">Into stop (Target Stop)</label>
+              <select
+                value={toStop}
+                onChange={(e) => setToStop(e.target.value)}
+                className="input-field py-1 text-xs"
+              >
+                <option value="">Select target stop...</option>
+                {availableStops.filter((s) => s !== fromStop).map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+                {/* Additional common hubs if not already present */}
+                {['DFC bus stop', 'DFC', 'YMCA', 'Gate 7', 'Braam', 'EOH', 'Solomon Mahlangu'].filter((s) => !availableStops.includes(s) && s !== fromStop).map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="pt-3">
+              <button
+                type="button"
+                onClick={handleAdd}
+                disabled={!fromStop || !toStop || fromStop === toStop}
+                className="btn-primary py-1.5 px-3 text-xs font-semibold whitespace-nowrap disabled:opacity-40"
+              >
+                + Redirect Count
+              </button>
+            </div>
+          </div>
+
+          {/* Quick preset suggestion if Saratoga is on this vehicle */}
+          {availableStops.includes('Saratoga') && !vehicle.stopRedirects?.['Saratoga'] && (
+            <div className="pt-1">
+              <button
+                type="button"
+                onClick={() => onAddRedirect('Saratoga', availableStops.includes('DFC bus stop') ? 'DFC bus stop' : 'DFC bus stop')}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500/15 border border-amber-500/30 px-2.5 py-1 text-[11px] font-semibold text-amber-300 hover:bg-amber-500/25 transition-all"
+              >
+                <CornerDownRight className="h-3 w-3" />
+                <span>⚡ Quick Redirect: Saratoga count → DFC bus stop</span>
+              </button>
             </div>
           )}
         </div>

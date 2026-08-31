@@ -1,5 +1,5 @@
 import { shortDate, parseManifestKey } from './dates';
-import { SERVICE_TYPES, hubDisplayName, type Manifest, type Vehicle, type Passenger, type ServiceType } from './types';
+import { SERVICE_TYPES, hubDisplayName, getEffectiveStop, type Manifest, type Vehicle, type Passenger, type ServiceType } from './types';
 import { sortVehiclesNatural } from './sort';
 import { isPassengerRepOfVehicle, matchRiderToOfficialRep, detectVehicleRep } from './officialReps';
 
@@ -31,7 +31,7 @@ export function getRidersGroupedByHub(manifest: Manifest, vehicle: Vehicle): { l
   const riders = getRiderPassengers(manifest, vehicle);
   const groups: Record<string, Passenger[]> = {};
   for (const r of riders) {
-    const label = hubDisplayName(vehicle.type, r.stop);
+    const label = getEffectiveStop(vehicle, r.stop);
     if (!groups[label]) groups[label] = [];
     groups[label].push(r);
   }
@@ -54,11 +54,7 @@ export function getRidersGroupedByHub(manifest: Manifest, vehicle: Vehicle): { l
  * 🛑 Braam - *06:30*
  * 
  *  *Taxi 2* 
- * 🛑 Braam - *06:30*
- * 
- *  *Taxi 3* 
- * 🛑 Braam - *06:30*
- * 🛑 Gate 7 - *06:35*
+ * 🛑 DFC bus stop (incl. Saratoga) - *06:30*
  */
 export function generateWhatsAppRouteManifest(manifest: Manifest, service: ServiceType): string {
   const lines: string[] = [];
@@ -81,7 +77,16 @@ export function generateWhatsAppRouteManifest(manifest: Manifest, service: Servi
     const groups = getRidersGroupedByHub(manifest, vehicle);
     for (const group of groups) {
       const time = vehicle.stopTimes?.[group.label];
-      lines.push(time ? `🛑 ${group.label} - *${time}*` : `🛑 ${group.label}`);
+      const redirectedFrom = Array.from(
+        new Set(
+          group.riders
+            .filter((r) => hubDisplayName(vehicle.type, r.stop) !== group.label)
+            .map((r) => hubDisplayName(vehicle.type, r.stop))
+        )
+      );
+
+      const inclSuffix = redirectedFrom.length > 0 ? ` (incl. ${redirectedFrom.join(', ')})` : '';
+      lines.push(time ? `🛑 ${group.label}${inclSuffix} - *${time}*` : `🛑 ${group.label}${inclSuffix}`);
     }
 
     const note = (vehicle.generalNotes ?? '').trim();
@@ -126,7 +131,12 @@ export function generateWhatsAppRepManifest(manifest: Manifest, service: Service
     const detectedRepName = detectVehicleRep(riders);
 
     for (const group of groups) {
-      lines.push(`🛑 ${group.label} (${group.riders.length})`);
+      const redirectedRiders = group.riders.filter((r) => hubDisplayName(vehicle.type, r.stop) !== group.label);
+      const redirectedFrom = Array.from(new Set(redirectedRiders.map((r) => hubDisplayName(vehicle.type, r.stop))));
+      
+      const inclText = redirectedFrom.length > 0 ? ` - (incl. ${redirectedRiders.length} from ${redirectedFrom.join(', ')})` : '';
+      lines.push(`🛑 ${group.label} (${group.riders.length})${inclText}`);
+
       for (const rider of group.riders) {
         let isRep = false;
         if (assignedRepRaw) {
@@ -139,7 +149,10 @@ export function generateWhatsAppRepManifest(manifest: Manifest, service: Service
 
         const cleanName = rider.fullName.trim().replace(/^\*+|\*+$/g, '');
         const displayName = isRep ? `*${cleanName}*` : cleanName;
-        lines.push(`${riderNumber}. ${displayName}`);
+        const origStop = hubDisplayName(vehicle.type, rider.stop);
+        const fromSuffix = origStop !== group.label ? ` (from ${origStop})` : '';
+
+        lines.push(`${riderNumber}. ${displayName}${fromSuffix}`);
         riderNumber++;
       }
     }

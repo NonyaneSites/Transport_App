@@ -278,21 +278,6 @@ export function AdminPage() {
           </div>
         )}
 
-        {/* Live Attendance, Sponsored & Notes Dispatch Hub (Bottom Drop Box) */}
-        {manifest && (
-          <div id="admin-attendance-notes-section" className="mt-8">
-            <AdminAttendanceNotesSection
-              manifest={manifest}
-              onLocateVehicle={(vehId) => {
-                const el = document.getElementById(`vehicle-card-${vehId}`);
-                if (el) {
-                  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }
-              }}
-            />
-          </div>
-        )}
-
         {/* History accordion — collapsed by default */}
         <div className="mt-8 overflow-hidden rounded-2xl border border-line bg-card">
           <button
@@ -512,6 +497,21 @@ export function AdminPage() {
             </div>
           )}
         </div>
+
+        {/* Live Attendance, Sponsored & Notes Dispatch Hub (Bottom Drop Box) */}
+        {manifest && (
+          <div id="admin-attendance-notes-section" className="mt-8">
+            <AdminAttendanceNotesSection
+              manifest={manifest}
+              onLocateVehicle={(vehId) => {
+                const el = document.getElementById(`vehicle-card-${vehId}`);
+                if (el) {
+                  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+              }}
+            />
+          </div>
+        )}
       </main>
 
       {/* Reset modal */}

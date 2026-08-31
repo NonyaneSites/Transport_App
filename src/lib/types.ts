@@ -156,6 +156,12 @@ export interface Vehicle {
    */
   stopTimes?: Record<string, string>;
   /**
+   * Stop Redirects: Maps source stop/hub names to target stop/hub names (e.g. { 'Saratoga': 'DFC bus stop' }).
+   * When configured, passengers originally from the source stop are aggregated into the target stop's count,
+   * while clearly retaining their source stop origin in rep checklists, vehicle cards, and WhatsApp exports.
+   */
+  stopRedirects?: Record<string, string>;
+  /**
    * In-progress, not-yet-submitted attendance for this vehicle, synced
    * live via Supabase Realtime so any device editing this vehicle's Rep
    * Portal session sees the same state. See VehicleDraftState. Undefined
@@ -224,6 +230,7 @@ export const TAXI_HUBS: { hub: string; stops: string[] }[] = [
       '56 Jorissen',
       'Amani',
       'Apex',
+      'Solomon Mahlangu',
       'Student Digzz',
       'YMCA',
     ],
@@ -245,8 +252,6 @@ export const TAXI_HUBS: { hub: string; stops: string[] }[] = [
       'Campus Central - EOH',
       'Campus Central -EOH',
       'EOH Campus Central',
-      'Charlotte',
-      'Charlotte Maxeke',
       'EOH',
     ],
   },
@@ -256,10 +261,8 @@ export const TAXI_HUBS: { hub: string; stops: string[] }[] = [
  * BUS-only spelling/name canonicalization. This is NOT route consolidation
  * (a Bus still drives to one physical address per stop) — it exists purely
  * because Microsoft Forms submissions have referred to the same EOH campus
- * address inconsistently across intakes ("Campus Central - EOH",
- * "Charlotte" / "Charlotte Maxeke"). All of these canonicalize to the
- * single stop name "EOH" for Buses so the sub-stop breakdown doesn't
- * fragment into duplicate rows for the same address.
+ * address inconsistently across intakes ("Campus Central - EOH").
+ * Charlotte Maxeke is kept completely separate and never merged into EOH.
  * Every other Bus stop (including Campus Central on Empire) remains untouched
  * and fully explicit.
  */
@@ -267,8 +270,6 @@ export const BUS_EOH_ALIASES = new Set([
   'Campus Central - EOH',
   'Campus Central -EOH',
   'EOH Campus Central',
-  'Charlotte',
-  'Charlotte Maxeke',
   'EOH',
 ]);
 
@@ -280,10 +281,14 @@ export function stopToBusHub(stop?: string | null): string | null {
   if (norm.includes('empire')) {
     return null;
   }
+  // Charlotte Maxeke is separate, NOT EOH!
+  if (norm.includes('charlotte')) {
+    return null;
+  }
   for (const alias of BUS_EOH_ALIASES) {
     if (alias.toLowerCase() === norm) return 'EOH';
   }
-  if ((norm.includes('campus central') && norm.includes('eoh')) || norm.includes('charlotte') || norm === 'eoh' || norm.includes('eoh')) {
+  if ((norm.includes('campus central') && norm.includes('eoh')) || norm === 'eoh' || norm.includes('eoh')) {
     return 'EOH';
   }
   return null;
@@ -294,6 +299,8 @@ export const INDIVIDUAL_STOPS = [
   'Focus 1', 'Maboneng', 'Urban Circle', 'DFC Bus Stop', 'DFC bus stop', 'The Fields',
   'Laborie', 'Richmond', 'Gate 2', 'Gate 4', "APK McDonald's", 'Westdene', 'Westdene Engen',
   'Junction', 'Education Campus', 'Education campus', 'Saratoga', 'Argyle', 'Arteria', 'Knockando',
+  'Charlotte Maxeke', 'Charlotte',
+  'Solomon Mahlangu',
   'Randburg Surrey Square',
   'Campus Central on empire', 'Campus Central (on Empire)', 'Campus Central (on empire)', 'Campus Central - Empire', 'Campus Central Empire',
 ] as const;
@@ -321,8 +328,12 @@ export function stopToHub(stop?: string | null): string | null {
   if (norm.includes('empire')) {
     return null;
   }
+  // Charlotte Maxeke is separate, NOT EOH!
+  if (norm.includes('charlotte')) {
+    return null;
+  }
   // EOH variations
-  if ((norm.includes('campus central') && norm.includes('eoh')) || norm.includes('charlotte') || norm === 'eoh' || norm.includes('eoh')) {
+  if ((norm.includes('campus central') && norm.includes('eoh')) || norm === 'eoh' || norm.includes('eoh')) {
     return 'EOH';
   }
   return null;
@@ -331,24 +342,69 @@ export function stopToHub(stop?: string | null): string | null {
 /**
  * Display grouping key for a passenger's stop, based on vehicle type.
  * - Taxi: consolidated Master Hub (falls back to the raw stop if it isn't
- *   part of any hub, e.g. "Yale", "Campus Central on empire").
+ *   part of any hub, e.g. "Yale", "Campus Central on empire", "Charlotte Maxeke").
  * - Bus: the raw, explicit sub-stop — buses physically drive to each
- *   individual address and are never route-consolidated — EXCEPT the known
- *   EOH spelling variants (see BUS_EOH_ALIASES), which canonicalize to a
- *   single "EOH" stop since they're the same physical address.
+ *   individual address and are never route-consolidated — EXCEPT:
+ *   1. Known EOH spelling variants (see BUS_EOH_ALIASES), which canonicalize to "EOH".
+ *   2. "Apex" which automatically names to "Solomon Mahlangu" in a Bus.
+ *   3. "Charlotte Maxeke" is kept separate from EOH.
  */
 export function hubDisplayName(vehicleType: 'Bus' | 'Taxi', stop?: string | null): string {
   if (!stop || stop.trim() === '' || stop.toLowerCase() === 'unknown' || stop.toLowerCase() === 'unspecified') {
     return 'Unassigned Stop';
   }
-  if (vehicleType === 'Taxi') {
-    const hub = stopToHub(stop);
-    if (hub) return hub;
-    return stop;
+  const norm = stop.trim().toLowerCase();
+
+  // In a Bus, Apex is automatically named Solomon Mahlangu
+  if (vehicleType === 'Bus') {
+    if (norm === 'apex' || norm.includes('apex') || norm === 'solomon mahlangu' || norm.includes('solomon mahlangu')) {
+      return 'Solomon Mahlangu';
+    }
+    if (norm.includes('charlotte')) {
+      return 'Charlotte Maxeke';
+    }
+    const busHub = stopToBusHub(stop);
+    if (busHub) return busHub;
+    return stop.trim();
   }
-  const busHub = stopToBusHub(stop);
-  if (busHub) return busHub;
-  return stop;
+
+  // Taxi
+  if (norm.includes('charlotte')) {
+    return 'Charlotte Maxeke';
+  }
+  const hub = stopToHub(stop);
+  if (hub) return hub;
+  return stop.trim();
+}
+
+/**
+ * Returns the effective stop label for a passenger in a vehicle,
+ * accounting for admin stop redirects/merges (e.g. Saratoga -> DFC bus stop).
+ */
+export function getEffectiveStop(vehicle?: Vehicle | null, rawStop?: string | null): string {
+  if (!rawStop) return 'Unassigned Stop';
+  const vehType = vehicle?.type || 'Taxi';
+  const baseLabel = hubDisplayName(vehType, rawStop);
+  if (!vehicle || !vehicle.stopRedirects) return baseLabel;
+
+  const redirects = vehicle.stopRedirects;
+  // Direct match on baseLabel
+  if (redirects[baseLabel] && redirects[baseLabel].trim()) {
+    return redirects[baseLabel].trim();
+  }
+  // Direct match on rawStop
+  if (redirects[rawStop] && redirects[rawStop].trim()) {
+    return redirects[rawStop].trim();
+  }
+  // Case-insensitive match
+  const lowerBase = baseLabel.toLowerCase();
+  const lowerRaw = rawStop.toLowerCase();
+  for (const [from, to] of Object.entries(redirects)) {
+    if (to && to.trim() && (from.toLowerCase() === lowerBase || from.toLowerCase() === lowerRaw)) {
+      return to.trim();
+    }
+  }
+  return baseLabel;
 }
 
 /**
@@ -361,11 +417,12 @@ export function hubDisplayName(vehicleType: 'Bus' | 'Taxi', stop?: string | null
  */
 export const ROUTE_SEQUENCE: string[] = [
   'Braam',
-  '56 Jorissen', 'Amani', 'Apex', 'Student Digzz', 'YMCA',
+  '56 Jorissen', 'Amani', 'Apex', 'Solomon Mahlangu', 'Student Digzz', 'YMCA',
   'Gate 7',
   'Amic Deck - David Webster', 'Barnato', "Amic Deck - Men's Res", 'Amic Deck - Sunnyside', 'Amic Deck - Jubilee',
   'EOH',
-  'Campus Central - EOH', 'EOH Campus Central', 'Charlotte', 'Charlotte Maxeke',
+  'Campus Central - EOH', 'EOH Campus Central',
+  'Charlotte Maxeke', 'Charlotte',
   'Campus Central on empire', 'Campus Central (on Empire)', 'Campus Central (on empire)', 'Campus Central - Empire', 'Campus Central Empire',
   ...INDIVIDUAL_STOPS,
 ];

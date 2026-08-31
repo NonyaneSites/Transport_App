@@ -9,9 +9,9 @@ import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey, shortDate } from '@/lib/dates';
 import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType, type Passenger, type Vehicle, type VehicleDraftState } from '@/lib/types';
-import { hubDisplayName, getPassengerStatusBadge } from '@/lib/types';
+import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
-import { vehicleRiders, passengersByPoolGroup } from '@/lib/manifest';
+import { vehicleRiders } from '@/lib/manifest';
 import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEntry } from '@/lib/ledger';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
 import { RepStatsCopyCard } from '@/components/RepStatsCopyCard';
@@ -1814,6 +1814,7 @@ export function RepPage() {
                     riders={filteredRiders}
                     vehicleType={selectedVehicle?.type ?? 'Taxi'}
                     orderedStops={selectedVehicle?.orderedStops}
+                    stopRedirects={selectedVehicle?.stopRedirects}
                     presentIds={presentIds}
                     absentIds={absentIds}
                     onSetPresent={handleSetPresent}
@@ -1828,6 +1829,8 @@ export function RepPage() {
                 ) : (
                   <AlphabeticalChecklist
                     riders={filteredRiders}
+                    vehicleType={selectedVehicle?.type ?? 'Taxi'}
+                    stopRedirects={selectedVehicle?.stopRedirects}
                     presentIds={presentIds}
                     absentIds={absentIds}
                     onSetPresent={handleSetPresent}
@@ -2447,11 +2450,12 @@ function CashCalculatorCard({
 }
 
 function StopGroupedChecklist({
-  riders, vehicleType, orderedStops, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
+  riders, vehicleType, orderedStops, stopRedirects, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
 }: {
   riders: Passenger[];
   vehicleType: 'Bus' | 'Taxi';
   orderedStops?: string[];
+  stopRedirects?: Record<string, string>;
   presentIds: Set<string>;
   absentIds: Set<string>;
   onSetPresent: (id: string, present: boolean) => void;
@@ -2463,7 +2467,17 @@ function StopGroupedChecklist({
   notes: Record<string, string>;
   disabled: boolean;
 }) {
-  const byStop = useMemo(() => passengersByPoolGroup(riders, vehicleType), [riders, vehicleType]);
+  const byStop = useMemo(() => {
+    const groups: Record<string, Passenger[]> = {};
+    for (const r of riders) {
+      if (!r) continue;
+      const label = getEffectiveStop({ type: vehicleType, stopRedirects }, r.stop);
+      if (!groups[label]) groups[label] = [];
+      groups[label].push(r);
+    }
+    return groups;
+  }, [riders, vehicleType, stopRedirects]);
+
   const stops = useMemo(() => {
     const activeKeys = Object.keys(byStop);
     if (!orderedStops || orderedStops.length === 0) {
@@ -2515,16 +2529,25 @@ function StopGroupedChecklist({
         const stopPresent = stopRiders.filter((r) => presentIds.has(r.id)).length;
         const stopTouched = stopRiders.filter((r) => presentIds.has(r.id) || absentIds.has(r.id)).length;
         const isExpanded = expandedStops.has(stop);
+
+        const redirectedRiders = stopRiders.filter((r) => hubDisplayName(vehicleType, r.stop) !== stop);
+        const redirectedFrom = Array.from(new Set(redirectedRiders.map((r) => hubDisplayName(vehicleType, r.stop))));
+
         return (
           <div key={stop} className="overflow-hidden rounded-xl border border-line bg-card">
             <button
               onClick={() => toggleStop(stop)}
               className="flex w-full items-center justify-between gap-2 border-b border-line bg-card-2/50 p-3.5 text-left transition-colors hover:bg-card-2/80"
             >
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 {isExpanded ? <ChevronDown className="h-4 w-4 text-muted" /> : <ChevronRight className="h-4 w-4 text-muted" />}
                 <MapPin className="h-4 w-4 text-crimson-400" />
                 <span className="text-sm font-semibold text-ink">{stop}</span>
+                {redirectedFrom.length > 0 && (
+                  <span className="inline-flex items-center gap-1 rounded bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold text-amber-300 border border-amber-500/30">
+                    incl. {redirectedRiders.length} from {redirectedFrom.join(', ')}
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-xs text-muted">{stopPresent}/{stopRiders.length} present · {stopTouched}/{stopRiders.length} checked</span>
@@ -2534,23 +2557,28 @@ function StopGroupedChecklist({
 
             {isExpanded && (
               <div className="divide-y divide-line/60 animate-fade-in">
-                {stopRiders.map((p) => (
-                  <PassengerRow
-                    key={p.id}
-                    passenger={p}
-                    isPresent={presentIds.has(p.id)}
-                    isAbsent={absentIds.has(p.id)}
-                    touched={presentIds.has(p.id) || absentIds.has(p.id)}
-                    onSetPresent={onSetPresent}
-                    onToggleSponsored={onToggleSponsored}
-                    onToggleUnpaid={onToggleUnpaid}
-                    onSetNote={onSetNote}
-                    isSponsored={sponsoredIds.has(p.id)}
-                    isUnpaid={unpaidIds.has(p.id)}
-                    noteText={notes[p.id] ?? ''}
-                    disabled={disabled}
-                  />
-                ))}
+                {stopRiders.map((p) => {
+                  const origStop = hubDisplayName(vehicleType, p.stop);
+                  const isRedirected = origStop !== stop;
+                  return (
+                    <PassengerRow
+                      key={p.id}
+                      passenger={p}
+                      isPresent={presentIds.has(p.id)}
+                      isAbsent={absentIds.has(p.id)}
+                      touched={presentIds.has(p.id) || absentIds.has(p.id)}
+                      onSetPresent={onSetPresent}
+                      onToggleSponsored={onToggleSponsored}
+                      onToggleUnpaid={onToggleUnpaid}
+                      onSetNote={onSetNote}
+                      isSponsored={sponsoredIds.has(p.id)}
+                      isUnpaid={unpaidIds.has(p.id)}
+                      noteText={notes[p.id] ?? ''}
+                      redirectedFrom={isRedirected ? origStop : undefined}
+                      disabled={disabled}
+                    />
+                  );
+                })}
               </div>
             )}
           </div>
@@ -2561,9 +2589,11 @@ function StopGroupedChecklist({
 }
 
 function AlphabeticalChecklist({
-  riders, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
+  riders, vehicleType, stopRedirects, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
 }: {
   riders: Passenger[];
+  vehicleType?: 'Bus' | 'Taxi';
+  stopRedirects?: Record<string, string>;
   presentIds: Set<string>;
   absentIds: Set<string>;
   onSetPresent: (id: string, present: boolean) => void;
@@ -2589,29 +2619,36 @@ function AlphabeticalChecklist({
 
   return (
     <div className="overflow-hidden rounded-xl border border-line bg-card divide-y divide-line/60">
-      {sorted.map((p) => (
-        <PassengerRow
-          key={p.id}
-          passenger={p}
-          isPresent={presentIds.has(p.id)}
-          isAbsent={absentIds.has(p.id)}
-          touched={presentIds.has(p.id) || absentIds.has(p.id)}
-          onSetPresent={onSetPresent}
-          onToggleSponsored={onToggleSponsored}
-          onToggleUnpaid={onToggleUnpaid}
-          onSetNote={onSetNote}
-          isSponsored={sponsoredIds.has(p.id)}
-          isUnpaid={unpaidIds.has(p.id)}
-          noteText={notes[p.id] ?? ''}
-          disabled={disabled}
-        />
-      ))}
+      {sorted.map((p) => {
+        const vType = vehicleType || 'Taxi';
+        const origStop = hubDisplayName(vType, p.stop);
+        const effStop = getEffectiveStop({ type: vType, stopRedirects }, p.stop);
+        const isRedirected = origStop !== effStop;
+        return (
+          <PassengerRow
+            key={p.id}
+            passenger={p}
+            isPresent={presentIds.has(p.id)}
+            isAbsent={absentIds.has(p.id)}
+            touched={presentIds.has(p.id) || absentIds.has(p.id)}
+            onSetPresent={onSetPresent}
+            onToggleSponsored={onToggleSponsored}
+            onToggleUnpaid={onToggleUnpaid}
+            onSetNote={onSetNote}
+            isSponsored={sponsoredIds.has(p.id)}
+            isUnpaid={unpaidIds.has(p.id)}
+            noteText={notes[p.id] ?? ''}
+            redirectedFrom={isRedirected ? origStop : undefined}
+            disabled={disabled}
+          />
+        );
+      })}
     </div>
   );
 }
 
 const PassengerRow = React.memo(function PassengerRow({
-  passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, isSponsored, isUnpaid, noteText, disabled,
+  passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, isSponsored, isUnpaid, noteText, redirectedFrom, disabled,
 }: {
   passenger: Passenger;
   isPresent: boolean;
@@ -2624,6 +2661,7 @@ const PassengerRow = React.memo(function PassengerRow({
   isSponsored: boolean;
   isUnpaid: boolean;
   noteText: string;
+  redirectedFrom?: string;
   disabled: boolean;
 }) {
   const [showNote, setShowNote] = useState(isSponsored || isUnpaid || !!noteText);
@@ -2657,11 +2695,15 @@ const PassengerRow = React.memo(function PassengerRow({
                 </span>
               ) : null;
             })()}
-            {passenger.stop && (
+            {redirectedFrom ? (
+              <span className="ml-1.5 inline-block rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/40">
+                📍 From {redirectedFrom}
+              </span>
+            ) : passenger.stop ? (
               <span className="ml-1.5 inline-block rounded bg-bg/60 px-1.5 py-0.5 text-[10px] text-muted">
                 {passenger.stop}
               </span>
-            )}
+            ) : null}
             {!touched && !disabled && (
               <span className="ml-2 inline-block rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold text-warning">
                 Needs check-in

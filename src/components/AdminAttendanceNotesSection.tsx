@@ -70,7 +70,7 @@ export function AdminAttendanceNotesSection({
   const [activeTab, setActiveTab] = useState<'sponsored' | 'unpaid' | 'absentees' | 'notes' | 'overview'>('sponsored');
   const [searchQuery, setSearchQuery] = useState('');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [isExpanded, setIsExpanded] = useState(true);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   // Helper to copy text to clipboard with fallback
   async function copyToClipboard(text: string, key: string) {
