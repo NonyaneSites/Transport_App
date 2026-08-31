@@ -498,6 +498,110 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
 }
 
 /**
+ * Updates a debtor person's details across their ledger entries (e.g. rename, change structure, adjust total debt, notes).
+ */
+export async function updateDebtorDetails(
+  entryIds: string[],
+  updates: {
+    name?: string;
+    structure?: string;
+    newTotalDebt?: number;
+    notes?: string;
+    isSponsored?: boolean;
+  }
+): Promise<void> {
+  if (entryIds.length === 0) return;
+
+  const { data: currentEntries, error: fetchErr } = await supabase
+    .from(LEDGER_TABLE)
+    .select('*')
+    .in('id', entryIds);
+
+  if (fetchErr) throw fetchErr;
+  if (!currentEntries || currentEntries.length === 0) return;
+
+  const structCode = updates.structure
+    ? (updates.structure.trim().toUpperCase().startsWith('S') || updates.structure.trim().toUpperCase().startsWith('YZ')
+        ? updates.structure.trim().toUpperCase()
+        : updates.structure.trim() ? `S${updates.structure.trim()}` : 'No Structure')
+    : undefined;
+
+  // If debt amount is updated
+  if (updates.newTotalDebt !== undefined) {
+    const targetDebt = Math.max(0, updates.newTotalDebt);
+
+    if (targetDebt === 0) {
+      // Remove all records if debt is set to 0
+      await supabase.from(LEDGER_TABLE).delete().in('id', entryIds);
+      return;
+    }
+
+    if (currentEntries.length === 1) {
+      // Single entry: update debt directly
+      await supabase
+        .from(LEDGER_TABLE)
+        .update({
+          passenger_name: updates.name ? updates.name.trim() : currentEntries[0].passenger_name,
+          structure: structCode ?? currentEntries[0].structure,
+          structure_debt: targetDebt,
+          general_notes: updates.notes !== undefined ? updates.notes : currentEntries[0].general_notes,
+          sponsored: updates.isSponsored !== undefined ? updates.isSponsored : currentEntries[0].sponsored,
+          sponsor_note: updates.isSponsored ? (updates.notes || 'Sponsorship') : (updates.isSponsored === false ? '' : currentEntries[0].sponsor_note),
+        })
+        .eq('id', entryIds[0]);
+    } else {
+      // Multiple entries: scale debt or apply to entries sequentially
+      // Sort oldest first
+      const sorted = [...currentEntries].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+      let debtPool = targetDebt;
+
+      for (let i = 0; i < sorted.length; i++) {
+        const ent = sorted[i];
+        const isLast = i === sorted.length - 1;
+        let rowDebt = 0;
+
+        if (isLast) {
+          rowDebt = debtPool;
+        } else {
+          const defaultDebt = Number(ent.structure_debt) || 40;
+          rowDebt = Math.min(debtPool, defaultDebt);
+          debtPool -= rowDebt;
+        }
+
+        await supabase
+          .from(LEDGER_TABLE)
+          .update({
+            passenger_name: updates.name ? updates.name.trim() : ent.passenger_name,
+            structure: structCode ?? ent.structure,
+            structure_debt: rowDebt,
+            general_notes: updates.notes !== undefined ? updates.notes : ent.general_notes,
+            sponsored: updates.isSponsored !== undefined ? updates.isSponsored : ent.sponsored,
+            sponsor_note: updates.isSponsored ? (updates.notes || 'Sponsorship') : (updates.isSponsored === false ? '' : ent.sponsor_note),
+          })
+          .eq('id', ent.id);
+      }
+    }
+  } else {
+    // Just update metadata across all entries
+    const patch: Record<string, unknown> = {};
+    if (updates.name) patch.passenger_name = updates.name.trim();
+    if (structCode) patch.structure = structCode;
+    if (updates.notes !== undefined) patch.general_notes = updates.notes;
+    if (updates.isSponsored !== undefined) {
+      patch.sponsored = updates.isSponsored;
+      if (updates.isSponsored) {
+        patch.sponsor_note = updates.notes || 'Sponsorship';
+      }
+    }
+
+    if (Object.keys(patch).length > 0) {
+      const { error } = await supabase.from(LEDGER_TABLE).update(patch).in('id', entryIds);
+      if (error) throw error;
+    }
+  }
+}
+
+/**
  * Applies a partial or full payment against a debtor's aggregated entries.
  * Deducts amountPaid from the oldest entries first. If an entry reaches R0 debt,
  * it is removed/settled. If partially paid, its structure_debt is updated.
@@ -588,7 +692,8 @@ function formatYMD(d: Date): string {
 /**
  * Parses a date cell that may be an Excel serial number, a JS Date (when
  * the sheet was read with cellDates), "yyyy-mm-dd", or "dd/mm/yyyy" into
- * a normalized "yyyy-mm-dd" string. Also heals OCR/typing errors like "23008/2026".
+ * a normalized "yyyy-mm-dd" string. Also heals OCR/typing errors like "23008/2026",
+ * multi-line text cells (e.g. S16 multiline dates), or date ranges.
  * Returns null if unparseable or blank.
  */
 export function parseFlexibleHistoricalDate(value: unknown): string | null {
@@ -599,16 +704,24 @@ export function parseFlexibleHistoricalDate(value: unknown): string | null {
     if (parsed) return formatYMD(new Date(parsed.y, parsed.m - 1, parsed.d));
     return null;
   }
-  const s = String(value).trim().replace(/\s+/g, '');
-  // Heal typo like "23008/2026" or "2308/2026"
-  const cleaned = s.replace(/^(\d{1,2})0+(\d{1,2})\/(\d{4})$/, '$1/$2/$3');
+  
+  // If multiline string, extract the first valid date line/segment
+  const lines = String(value).split(/\r?\n|[,;]/).map((l) => l.trim()).filter(Boolean);
+  for (const line of lines) {
+    const s = line.replace(/\s+/g, '');
+    // Heal typo like "23008/2026" or "2308/2026"
+    const cleaned不易 = s.replace(/^(\d{1,2})0+(\d{1,2})\/(\d{4})$/, '$1/$2/$3');
 
-  let m = cleaned.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
-  if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
-  m = cleaned.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
-  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
-  m = cleaned.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})$/);
-  if (m) return `20${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+    let m = cleaned不易.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+    if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+    
+    m = cleaned不易.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
+    if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+    
+    m = cleaned不易.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})/);
+    if (m) return `20${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  }
+
   return null;
 }
 

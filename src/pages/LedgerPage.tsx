@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BookOpen, Loader2, AlertTriangle, FileSpreadsheet, Search, Trash2, Filter, XCircle,
+  BookOpen, Loader2, AlertTriangle, FileSpreadsheet, Search, Filter, XCircle,
   ChevronDown, ChevronRight, Upload, CheckCircle2, FileText, Banknote, X, UserPlus, Plus,
+  Pencil, Trash2,
 } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
 import {
   listLedgerEntries, deleteLedgerEntry, downloadLedgerExcel,
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
-  recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch,
+  recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch, updateDebtorDetails,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
 } from '@/lib/ledger';
 import { downloadCancellationDebtPdf } from '@/lib/pdfExport';
@@ -50,6 +51,19 @@ export function LedgerPage() {
   const [paymentAmount, setPaymentAmount] = useState<string>('');
   const [paying, setPaying] = useState(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
+
+  // Edit Debtor Modal State
+  const [editTarget, setEditTarget] = useState<AggregatedLedgerRow | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editStructure, setEditStructure] = useState('');
+  const [editDebt, setEditDebt] = useState('');
+  const [editNotes, setEditNotes] = useState('');
+  const [editIsSponsored, setEditIsSponsored] = useState(false);
+  const [additionalDebtToAdd, setAdditionalDebtToAdd] = useState('');
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [deletingDebtor, setDeletingDebtor] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [editSuccessMessage, setEditSuccessMessage] = useState<string | null>(null);
 
   // Manual Add Modal State
   const [showAddModal, setShowAddModal] = useState(false);
@@ -226,6 +240,93 @@ export function LedgerPage() {
     setPaymentTarget(null);
     setPaymentAmount('');
     setPaymentError(null);
+  }
+
+  function openEditModal(row: AggregatedLedgerRow) {
+    setEditTarget(row);
+    setEditName(row.name);
+    setEditStructure(row.structure);
+    setEditDebt(String(row.amount));
+    setEditNotes(row.notes);
+    setEditIsSponsored(row.isSponsoredOrUnpaid);
+    setAdditionalDebtToAdd('');
+    setEditError(null);
+    setEditSuccessMessage(null);
+  }
+
+  function closeEditModal() {
+    setEditTarget(null);
+    setEditError(null);
+    setEditSuccessMessage(null);
+  }
+
+  async function handleSaveDebtorEdit() {
+    if (!editTarget) return;
+    if (!editName.trim()) {
+      setEditError('Passenger name cannot be empty.');
+      return;
+    }
+    if (!editStructure.trim()) {
+      setEditError('Structure cannot be empty.');
+      return;
+    }
+
+    let finalDebt = Number(editDebt);
+    if (!Number.isFinite(finalDebt) || finalDebt < 0) {
+      setEditError('Please enter a valid positive debt amount.');
+      return;
+    }
+
+    if (additionalDebtToAdd.trim()) {
+      const addAmt = Number(additionalDebtToAdd);
+      if (Number.isFinite(addAmt) && addAmt > 0) {
+        finalDebt += addAmt;
+      }
+    }
+
+    setSavingEdit(true);
+    setEditError(null);
+    try {
+      await updateDebtorDetails(editTarget.entryIds, {
+        name: editName.trim(),
+        structure: editStructure.trim(),
+        newTotalDebt: finalDebt,
+        notes: editNotes,
+        isSponsored: editIsSponsored,
+      });
+
+      const refreshed = await listLedgerEntries();
+      setEntries(refreshed);
+      setEditSuccessMessage('Debtor updated successfully.');
+      setTimeout(() => {
+        closeEditModal();
+      }, 700);
+    } catch (e) {
+      setEditError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingEdit(false);
+    }
+  }
+
+  async function handleDeleteEntireDebtor() {
+    if (!editTarget) return;
+    const confirmDelete = window.confirm(
+      `Are you sure you want to completely remove ${editTarget.name} (R${editTarget.amount}) from the ledger?`
+    );
+    if (!confirmDelete) return;
+
+    setDeletingDebtor(true);
+    setEditError(null);
+    try {
+      await Promise.all(editTarget.entryIds.map((id) => deleteLedgerEntry(id)));
+      const idSet = new Set(editTarget.entryIds);
+      setEntries((prev) => prev.filter((e) => !idSet.has(e.id)));
+      closeEditModal();
+    } catch (e) {
+      setEditError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeletingDebtor(false);
+    }
   }
 
   function openAddModal() {
@@ -567,8 +668,8 @@ export function LedgerPage() {
                               <table className="w-full text-left text-sm">
                                 <thead>
                                   <tr className="border-b border-line/60 bg-card-2/30 text-muted">
-                                    <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Date(s) & Service</th>
                                     <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Passenger Name</th>
+                                    <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Date(s) & Service</th>
                                     <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Amount Owing</th>
                                     <th className="px-3.5 py-2.5 text-right font-display text-xs font-bold uppercase tracking-wider">Actions</th>
                                   </tr>
@@ -576,6 +677,18 @@ export function LedgerPage() {
                                 <tbody className="divide-y divide-line/40">
                                   {cancellationRows.map((row) => (
                                     <tr key={row.key} className="transition-colors hover:bg-card-2/20">
+                                      <td className="px-3.5 py-2.5 align-top">
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                          <span className="font-semibold text-ink">
+                                            <HighlightMatch text={row.name} query={search} />
+                                          </span>
+                                          {row.instances.some((i) => i.isFTV) && (
+                                            <span className="inline-flex items-center rounded px-1.5 py-0.2 text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/25">
+                                              FTV (R20)
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
                                       <td className="px-3.5 py-2.5 text-muted align-top">
                                         <div className="flex flex-wrap gap-1.5 max-w-xs">
                                           {row.instances.map((ins, idx) => (
@@ -587,21 +700,6 @@ export function LedgerPage() {
                                               <span className="text-[10px] text-crimson-400 font-sans font-semibold">R{ins.amount}</span>
                                             </span>
                                           ))}
-                                        </div>
-                                      </td>
-                                      <td className="px-3.5 py-2.5 align-top">
-                                        <div className="flex flex-wrap items-center gap-1.5">
-                                          <span className="font-semibold text-ink">
-                                            <HighlightMatch text={row.name} query={search} />
-                                          </span>
-                                          {row.serviceCodes.map((code) => (
-                                            <ServiceBadge key={code} code={code} />
-                                          ))}
-                                          {row.instances.some((i) => i.isFTV) && (
-                                            <span className="inline-flex items-center rounded px-1.5 py-0.2 text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/25">
-                                              FTV (R20)
-                                            </span>
-                                          )}
                                         </div>
                                       </td>
                                       <td className="px-3.5 py-2.5 align-top">
@@ -625,11 +723,12 @@ export function LedgerPage() {
                                             <span>Record Payment</span>
                                           </button>
                                           <button
-                                            onClick={() => handleDeleteRow(row)}
-                                            className="rounded-md border border-crimson-500/20 bg-crimson-900/20 p-1.5 text-crimson-300 hover:bg-crimson-900/40"
-                                            title="Delete entry"
+                                            onClick={() => openEditModal(row)}
+                                            className="inline-flex items-center gap-1 rounded-md border border-line bg-card px-2.5 py-1 text-xs font-medium text-ink hover:bg-card-2 transition-colors"
+                                            title="Edit debtor details, add additional debt, or remove"
                                           >
-                                            <Trash2 className="h-3.5 w-3.5" />
+                                            <Pencil className="h-3.5 w-3.5 text-muted" />
+                                            <span>Edit</span>
                                           </button>
                                         </div>
                                       </td>
@@ -659,8 +758,8 @@ export function LedgerPage() {
                               <table className="w-full text-left text-sm">
                                 <thead>
                                   <tr className="border-b border-amber-500/20 bg-amber-500/5 text-amber-200/70">
-                                    <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Date(s) & Service</th>
                                     <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Passenger Name</th>
+                                    <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Date(s) & Service</th>
                                     <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Category / Note</th>
                                     <th className="px-3.5 py-2.5 font-display text-xs font-bold uppercase tracking-wider">Amount Owing</th>
                                     <th className="px-3.5 py-2.5 text-right font-display text-xs font-bold uppercase tracking-wider">Actions</th>
@@ -669,6 +768,18 @@ export function LedgerPage() {
                                 <tbody className="divide-y divide-amber-500/15">
                                   {sponsorshipRows.map((row) => (
                                     <tr key={row.key} className="transition-colors hover:bg-amber-500/10">
+                                      <td className="px-3.5 py-2.5 align-top">
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                          <span className="font-semibold text-ink">
+                                            <HighlightMatch text={row.name} query={search} />
+                                          </span>
+                                          {row.instances.some((i) => i.isFTV) && (
+                                            <span className="inline-flex items-center rounded px-1.5 py-0.2 text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/25">
+                                              FTV (R20)
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
                                       <td className="px-3.5 py-2.5 text-muted align-top">
                                         <div className="flex flex-wrap gap-1.5 max-w-xs">
                                           {row.instances.map((ins, idx) => (
@@ -680,21 +791,6 @@ export function LedgerPage() {
                                               <span className="text-[10px] text-amber-300 font-sans font-semibold">R{ins.amount}</span>
                                             </span>
                                           ))}
-                                        </div>
-                                      </td>
-                                      <td className="px-3.5 py-2.5 align-top">
-                                        <div className="flex flex-wrap items-center gap-1.5">
-                                          <span className="font-semibold text-ink">
-                                            <HighlightMatch text={row.name} query={search} />
-                                          </span>
-                                          {row.serviceCodes.map((code) => (
-                                            <ServiceBadge key={code} code={code} />
-                                          ))}
-                                          {row.instances.some((i) => i.isFTV) && (
-                                            <span className="inline-flex items-center rounded px-1.5 py-0.2 text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/25">
-                                              FTV (R20)
-                                            </span>
-                                          )}
                                         </div>
                                       </td>
                                       <td className="px-3.5 py-2.5 align-top">
@@ -723,11 +819,12 @@ export function LedgerPage() {
                                             <span>Record Payment</span>
                                           </button>
                                           <button
-                                            onClick={() => handleDeleteRow(row)}
-                                            className="rounded-md border border-crimson-500/20 bg-crimson-900/20 p-1.5 text-crimson-300 hover:bg-crimson-900/40"
-                                            title="Delete entry"
+                                            onClick={() => openEditModal(row)}
+                                            className="inline-flex items-center gap-1 rounded-md border border-line bg-card px-2.5 py-1 text-xs font-medium text-ink hover:bg-card-2 transition-colors"
+                                            title="Edit debtor details, add additional debt, or remove"
                                           >
-                                            <Trash2 className="h-3.5 w-3.5" />
+                                            <Pencil className="h-3.5 w-3.5 text-muted" />
+                                            <span>Edit</span>
                                           </button>
                                         </div>
                                       </td>
@@ -982,7 +1079,7 @@ export function LedgerPage() {
                           <input
                             type="number"
                             min="1"
-                            step="10"
+                            step="any"
                             required
                             value={addAmount}
                             onChange={(e) => setAddAmount(e.target.value)}
@@ -1093,6 +1190,211 @@ export function LedgerPage() {
               </div>
             )}
 
+            {/* Edit Debtor Modal */}
+            {editTarget && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+                <div className="card w-full max-w-lg overflow-hidden border border-line bg-card p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+                  <div className="flex items-center justify-between border-b border-line pb-3">
+                    <div className="flex items-center gap-2">
+                      <div className="rounded-lg bg-crimson-500/15 p-2 text-crimson-400">
+                        <Pencil className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <h3 className="font-display text-lg font-bold text-ink">Edit Debtor Details</h3>
+                        <p className="text-xs text-muted">Adjust debt amount, add additional debt, or remove debtor</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={closeEditModal}
+                      disabled={savingEdit || deletingDebtor}
+                      className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      handleSaveDebtorEdit();
+                    }}
+                    className="mt-4 space-y-4"
+                  >
+                    {/* Passenger Name & Structure */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                          Passenger Name <span className="text-crimson-400">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                          className="input-field w-full text-sm font-semibold"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                          Structure <span className="text-crimson-400">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={editStructure}
+                          onChange={(e) => setEditStructure(e.target.value.toUpperCase())}
+                          placeholder="e.g. S1"
+                          className="input-field w-full font-mono text-sm font-semibold uppercase"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Current Debt & Additional Debt */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                          Base / Current Debt (R) <span className="text-crimson-400">*</span>
+                        </label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-muted text-sm">R</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="any"
+                            required
+                            value={editDebt}
+                            onChange={(e) => setEditDebt(e.target.value)}
+                            className="input-field w-full pl-7 font-mono font-bold text-sm text-crimson-400"
+                          />
+                        </div>
+                        <p className="mt-1 text-[10px] text-muted">Directly override total debt amount</p>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                          Add Additional Debt (+R)
+                        </label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-emerald-400 text-sm">+R</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="any"
+                            value={additionalDebtToAdd}
+                            onChange={(e) => setAdditionalDebtToAdd(e.target.value)}
+                            placeholder="e.g. 40"
+                            className="input-field w-full pl-9 font-mono font-bold text-sm text-emerald-400 placeholder:text-muted"
+                          />
+                        </div>
+                        <div className="mt-1 flex gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setAdditionalDebtToAdd('40')}
+                            className="text-[10px] text-muted hover:text-ink underline"
+                          >
+                            +R40
+                          </button>
+                          <span className="text-[10px] text-muted">·</span>
+                          <button
+                            type="button"
+                            onClick={() => setAdditionalDebtToAdd('20')}
+                            className="text-[10px] text-muted hover:text-ink underline"
+                          >
+                            +R20 (FTV)
+                          </button>
+                          <span className="text-[10px] text-muted">·</span>
+                          <button
+                            type="button"
+                            onClick={() => setAdditionalDebtToAdd('80')}
+                            className="text-[10px] text-muted hover:text-ink underline"
+                          >
+                            +R80
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Notes & Sponsorship Flag */}
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                        Notes / Status
+                      </label>
+                      <input
+                        type="text"
+                        value={editNotes}
+                        onChange={(e) => setEditNotes(e.target.value)}
+                        placeholder="e.g. FTV, Did not pitch, Unaccounted"
+                        className="input-field w-full text-xs"
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-2 rounded-lg bg-card-2/60 p-2.5 border border-line/60">
+                      <input
+                        type="checkbox"
+                        id="editIsSponsoredCheckbox"
+                        checked={editIsSponsored}
+                        onChange={(e) => setEditIsSponsored(e.target.checked)}
+                        className="rounded border-line bg-card text-crimson-500 focus:ring-crimson-500"
+                      />
+                      <label htmlFor="editIsSponsoredCheckbox" className="text-xs text-ink cursor-pointer select-none">
+                        Mark as <span className="font-semibold text-amber-300">Unaccounted Sponsorship / Unpaid</span>
+                      </label>
+                    </div>
+
+                    {/* Linked Sessions Breakdown info */}
+                    <div className="rounded-lg bg-card-2/40 p-2.5 text-xs text-muted border border-line/40">
+                      <span className="font-semibold text-ink">Linked Record(s):</span> {editTarget.instances.length} instance(s) ({editTarget.instances.map((i) => i.formatted).join(', ')})
+                    </div>
+
+                    {editError && (
+                      <div className="flex items-center gap-2 rounded-lg border border-crimson-500/30 bg-crimson-900/20 p-2.5 text-xs text-crimson-300">
+                        <AlertTriangle className="h-4 w-4 shrink-0" />
+                        <span>{editError}</span>
+                      </div>
+                    )}
+
+                    {editSuccessMessage && (
+                      <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-2.5 text-xs text-emerald-300">
+                        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                        <span>{editSuccessMessage}</span>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between pt-3 border-t border-line">
+                      <button
+                        type="button"
+                        onClick={handleDeleteEntireDebtor}
+                        disabled={savingEdit || deletingDebtor}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-crimson-500/30 bg-crimson-950/30 px-3 py-1.5 text-xs font-semibold text-crimson-300 hover:bg-crimson-900/40 transition-colors"
+                        title="Remove debtor from ledger completely"
+                      >
+                        {deletingDebtor ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5 text-crimson-400" />}
+                        <span>Remove Debtor</span>
+                      </button>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={closeEditModal}
+                          disabled={savingEdit || deletingDebtor}
+                          className="btn-ghost text-xs"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={savingEdit || deletingDebtor}
+                          className="btn-crimson flex items-center gap-2 text-xs font-semibold shadow-md"
+                        >
+                          {savingEdit ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                          Save Changes
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+
             {filtered.length === 0 && search && (
               <div className="mt-4 text-center text-sm text-muted">
                 No entries match your search. Try different keywords or clear the filter.
@@ -1115,63 +1417,5 @@ function SummaryStat({ label, value, accent }: { label: string; value: string | 
         <div className="text-[10px] font-medium uppercase tracking-wide text-muted">{label}</div>
       </div>
     </div>
-  );
-}
-
-function ServiceBadge({ code }: { code: string }) {
-  const c = code.toUpperCase();
-  if (c === 'LM') {
-    return (
-      <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/25" title="Leaders Meeting">
-        LM
-      </span>
-    );
-  }
-  if (c === 'WMP') {
-    return (
-      <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/25" title="Worship, Music & Prayer">
-        WMP
-      </span>
-    );
-  }
-  if (c === 'EF') {
-    return (
-      <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-rose-500/15 text-rose-300 border border-rose-500/25" title="Easter Friday">
-        EF
-      </span>
-    );
-  }
-  if (c === 'AD') {
-    return (
-      <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-orange-500/15 text-orange-300 border border-orange-500/25" title="Ascension Day">
-        AD
-      </span>
-    );
-  }
-  if (c === 'FW') {
-    return (
-      <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-violet-500/15 text-violet-300 border border-violet-500/25" title="Fast & Worship">
-        FW
-      </span>
-    );
-  }
-  if (c === 'AM') {
-    return (
-      <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/25" title="Morning Service">
-        AM
-      </span>
-    );
-  }
-  if (c === 'PM') {
-    return (
-      <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-indigo-500/15 text-indigo-300 border border-indigo-500/25" title="Evening Service">
-        PM
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold bg-zinc-500/15 text-zinc-300 border border-zinc-500/25">
-      {code}
-    </span>
   );
 }

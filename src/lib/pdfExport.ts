@@ -17,7 +17,7 @@ export function formatCancellationInstance(dateStr: string, serviceStr: string):
   let y = '26';
 
   const cleanDate = (dateStr || '').trim().replace(/\s+/g, '');
-  // Heal typo like "23008/2026"
+  // Heal typos like "23008/2026" or "2308/2026"
   const fixedDate = cleanDate.replace(/^(\d{1,2})0+(\d{1,2})\//, '$1/$2/');
 
   if (fixedDate.includes('-')) {
@@ -78,8 +78,8 @@ export interface StructureDebtSummary {
 /**
  * Groups ledger entries into structures and persons, compiling all missed sessions
  * while accurately preserving individual church event service codes (AM, PM, LM, WMP, EF, AD, FW).
- * Orders debtors within each structure by cancellation date descending.
- * Separates regular cancellations from unaccounted sponsorships and unpaid debt.
+ * Ensures all sponsorships & unpaid items across all structures (S1, S3, S5, S6, S10, S16, S20, S26, etc.)
+ * are accurately parsed, attributed, and totaled.
  */
 export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[] {
   const byStructure = new Map<
@@ -124,6 +124,9 @@ export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[
     record.instances.push({ date: entry.date, formatted: instanceStr });
     record.totalDebt += amount;
     if (isSponsorship) record.isSponsorship = true;
+    if (!record.notes && (entry.general_notes || entry.sponsor_note)) {
+      record.notes = entry.general_notes || entry.sponsor_note || '';
+    }
   }
 
   const result: StructureDebtSummary[] = [];
@@ -133,7 +136,6 @@ export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[
     const sponsorships: DebtorPersonSummary[] = [];
 
     for (const [name, data] of personMap.entries()) {
-      // Sort individual instances chronologically ascending (Jan 1 first, Dec 31 last)
       data.instances.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
       const earliestDate = data.instances[0]?.date || '';
 
@@ -155,11 +157,9 @@ export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[
     }
 
     const sortFn = (a: DebtorPersonSummary, b: DebtorPersonSummary) => {
-      // Highest debt at top
       if (b.totalDebt !== a.totalDebt) {
         return b.totalDebt - a.totalDebt;
       }
-      // Earliest date ascending (Jan 1 first, Dec 31 last)
       const dateDiff = (a.latestDate || '').localeCompare(b.latestDate || '');
       if (dateDiff !== 0) return dateDiff;
       return naturalCompare(a.name, b.name);
@@ -186,11 +186,15 @@ export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[
 }
 
 /**
- * Generates and downloads the official CRC Cancellation Debt PDF in the exact format:
+ * Generates and downloads the official CRC Cancellation Debt PDF in a compact 5-page layout.
  *
- * S1 - (Debt)
- * Person 1 - 23/08/26(AM), 16/08/26(PM)                                                  - R80
- * Person 2 - 23/08/26(AM)                                                                - R40
+ * Page Geometry:
+ * - Margins: left: 10mm, right: 10mm, top: 14mm, bottom: 12mm
+ * - Compact typography (8pt body, 9pt bold structure banners, 2.5/4 cell padding)
+ * - Alternating row background fills (#F9FAFB and #FFFFFF)
+ * - Col 1 (Name): ~45mm
+ * - Col 2 (Missed Dates & Sessions): ~115mm
+ * - Col 3 (Amount Owing): ~25mm
  */
 export function downloadCancellationDebtPdf(
   entries: LedgerEntry[],
@@ -204,8 +208,13 @@ export function downloadCancellationDebtPdf(
 
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
-  const margin = 14;
-  let y = margin;
+  const leftMargin = 10;
+  const rightMargin = 10;
+  const topMargin = 14;
+  const bottomMargin = 12;
+  const usableWidth = pageWidth - leftMargin - rightMargin;
+
+  let y = topMargin;
 
   const report = compileDebtReport(entries);
   const grandTotal = report.reduce((sum, s) => sum + s.totalDebt, 0);
@@ -217,150 +226,84 @@ export function downloadCancellationDebtPdf(
     day: '2-digit',
   });
 
-  // --- Header ---
+  // --- Page 1 Compact Header Banner ---
   doc.setFillColor(185, 28, 28); // CRC Crimson (#B91C1C)
-  doc.rect(margin, y, pageWidth - margin * 2, 22, 'F');
+  doc.rect(leftMargin, y, usableWidth, 14, 'F');
 
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(14);
-  doc.text('CRC JOHANNESBURG — TRANSPORT MINISTRY', margin + 4, y + 8);
-
-  doc.setFontSize(10);
-  doc.setFont('helvetica', 'normal');
-  doc.text('2026 SZ CANCELLATION DEBT RECOVERY MANIFEST', margin + 4, y + 14);
+  doc.setFontSize(11);
+  doc.text('CRC JOHANNESBURG — TRANSPORT MINISTRY', leftMargin + 3.5, y + 5.5);
 
   doc.setFontSize(8);
-  doc.text(`Generated: ${todayStr} · 2026: The Year of Invasion`, margin + 4, y + 19);
-
-  y += 26;
-
-  // --- Summary Box ---
-  doc.setDrawColor(220, 38, 38);
-  doc.setFillColor(254, 242, 242);
-  doc.roundedRect(margin, y, pageWidth - margin * 2, 11, 2, 2, 'FD');
-
-  doc.setTextColor(185, 28, 28);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(10);
-  doc.text(`Total Outstanding Debt: R${grandTotal.toLocaleString()}`, margin + 4, y + 7.5);
-
-  doc.setTextColor(71, 85, 105);
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8.5);
-  doc.text(`Total Debtors: ${totalDebtors}`, pageWidth - margin - 40, y + 7.5);
+  doc.text(`2026 SZ CANCELLATION DEBT RECOVERY MANIFEST · Generated: ${todayStr}`, leftMargin + 3.5, y + 10.5);
 
-  y += 15;
+  // Total Outstanding on Top Right of Header
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.text(`Total: R${grandTotal.toLocaleString()}`, pageWidth - rightMargin - 3.5, y + 8, { align: 'right' });
 
-  // --- Official Bank & Policy Details ---
+  y += 16;
+
+  // --- Compact Settlement & Banking Bar ---
   doc.setDrawColor(203, 213, 225);
   doc.setFillColor(248, 250, 252);
-  doc.roundedRect(margin, y, pageWidth - margin * 2, 28, 2, 2, 'FD');
+  doc.roundedRect(leftMargin, y, usableWidth, 15, 1.5, 1.5, 'FD');
 
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9);
-  doc.setTextColor(185, 28, 28);
-  doc.text('CRC ABSA BANKING DETAILS & SETTLEMENT POLICY', margin + 4, y + 6);
-
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8);
-  doc.setTextColor(51, 65, 85);
-
-  doc.setFont('helvetica', 'bold');
-  doc.text('Bank:', margin + 4, y + 11);
-  doc.setFont('helvetica', 'normal');
-  doc.text(BANK_DETAILS.bank, margin + 14, y + 11);
-
-  doc.setFont('helvetica', 'bold');
-  doc.text('Account Name:', margin + 40, y + 11);
-  doc.setFont('helvetica', 'normal');
-  doc.text(BANK_DETAILS.accountName, margin + 65, y + 11);
-
-  doc.setFont('helvetica', 'bold');
-  doc.text('Account Number:', margin + 4, y + 16);
-  doc.setFont('helvetica', 'normal');
-  doc.text(BANK_DETAILS.accountNumber, margin + 30, y + 16);
-
-  doc.setFont('helvetica', 'bold');
-  doc.text('Branch Code:', margin + 60, y + 16);
-  doc.setFont('helvetica', 'normal');
-  doc.text(BANK_DETAILS.branchCode, margin + 82, y + 16);
-
-  doc.setFont('helvetica', 'bold');
-  doc.text('Reference:', margin + 105, y + 16);
-  doc.setFont('helvetica', 'normal');
-  doc.text('Name + Structure (e.g. John Doe S1)', margin + 122, y + 16);
-
-  doc.setFont('helvetica', 'normal');
   doc.setFontSize(7.5);
-  doc.setTextColor(71, 85, 105);
-  doc.text(
-    '• Unpaid cancellation fees must be settled within 3 weeks. Each structure is collectively liable for its members.',
-    margin + 4,
-    y + 20.5
-  );
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(185, 28, 28);
+  doc.text('ABSA BANKING DETAILS:', leftMargin + 3, y + 4.5);
 
-  const bulletPrefix = '• Cash may be paid to a transport rep on your next trip. ';
-  doc.setTextColor(71, 85, 105);
   doc.setFont('helvetica', 'normal');
-  doc.text(bulletPrefix, margin + 4, y + 25);
-
-  const bulletPrefixWidth = doc.getTextWidth(bulletPrefix);
-  const popText = 'Upload Proof of Payment (POP): ';
-  doc.setTextColor(15, 23, 42);
-  doc.setFont('helvetica', 'bold');
-  doc.text(popText, margin + 4 + bulletPrefixWidth, y + 25);
-
-  const popTextWidth = doc.getTextWidth(popText);
-  const linkUrl = 'https://forms.gle/HDvmuZywzNitWFpU6';
-  const linkDisplay = 'https://forms.gle/HDvmuZywzNitWFpU6';
-
-  // Make the link prominent Royal Blue and clickable
-  doc.setTextColor(29, 78, 216); // Royal Blue (#1D4ED8)
-  doc.setFont('helvetica', 'bold');
-  doc.textWithLink(linkDisplay, margin + 4 + bulletPrefixWidth + popTextWidth, y + 25, { url: linkUrl });
-
-  // Underline to make it immediately obvious it's interactive
-  const linkWidth = doc.getTextWidth(linkDisplay);
-  doc.setDrawColor(29, 78, 216);
-  doc.setLineWidth(0.25);
-  doc.line(
-    margin + 4 + bulletPrefixWidth + popTextWidth,
-    y + 25.5,
-    margin + 4 + bulletPrefixWidth + popTextWidth + linkWidth,
-    y + 25.5
+  doc.setTextColor(30, 41, 59);
+  doc.text(
+    `Acc: ${BANK_DETAILS.accountName} | Bank: ${BANK_DETAILS.bank} | Acc #: ${BANK_DETAILS.accountNumber} | Branch: ${BANK_DETAILS.branchCode} | Ref: Name + Structure`,
+    leftMargin + 38,
+    y + 4.5
   );
 
-  y += 32;
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(71, 85, 105);
+  doc.text('• Fees must be settled within 3 weeks. Cash accepted by Rep. Upload POP to:', leftMargin + 3, y + 10);
 
-  // --- Debt List Table formatted cleanly ---
+  const popPrefixWidth = doc.getTextWidth('• Fees must be settled within 3 weeks. Cash accepted by Rep. Upload POP to: ');
+  const linkUrl = 'https://forms.gle/HDvmuZywzNitWFpU6';
+  doc.setTextColor(29, 78, 216); // Royal Blue
+  doc.setFont('helvetica', 'bold');
+  doc.textWithLink(linkUrl, leftMargin + 3 + popPrefixWidth, y + 10, { url: linkUrl });
+
+  y += 18;
+
+  // --- Table Rows Compilation ---
   const tableRows: (string | { content: string; styles?: Record<string, unknown>; colSpan?: number })[][] = [];
 
   for (const structGroup of report) {
-    // Structure Section Header without rep info
     const structTitle = structGroup.structure;
 
+    // Compact Structure Banner
     tableRows.push([
       {
-        content: structTitle,
+        content: `${structTitle} — Total Outstanding: R${structGroup.totalDebt.toLocaleString()}`,
         colSpan: 2,
         styles: {
-          fillColor: [241, 245, 249],
+          fillColor: [226, 232, 240], // slate-200
           textColor: [15, 23, 42],
           fontStyle: 'bold',
-          fontSize: 9.5,
-          cellPadding: { top: 3.5, bottom: 3.5, left: 4, right: 4 },
+          fontSize: 9,
+          cellPadding: { top: 2.2, bottom: 2.2, left: 3.5, right: 3.5 },
         },
       },
       {
         content: `R${structGroup.totalDebt.toLocaleString()}`,
         styles: {
-          fillColor: [241, 245, 249],
+          fillColor: [226, 232, 240],
           textColor: [185, 28, 28],
           fontStyle: 'bold',
-          fontSize: 10,
+          fontSize: 9,
           halign: 'right',
-          cellPadding: { top: 3.5, bottom: 3.5, left: 4, right: 4 },
+          cellPadding: { top: 2.2, bottom: 2.2, left: 3.5, right: 3.5 },
         },
       },
     ]);
@@ -379,14 +322,14 @@ export function downloadCancellationDebtPdf(
     if (structGroup.sponsorships.length > 0) {
       tableRows.push([
         {
-          content: `${structTitle} — Unaccounted Sponsorships / Unpaid`,
+          content: `${structTitle} — Unaccounted Sponsorships / Unpaid (R${structGroup.sponsorshipTotal.toLocaleString()})`,
           colSpan: 2,
           styles: {
             fillColor: [254, 243, 199], // amber-100
             textColor: [146, 64, 14], // amber-800
             fontStyle: 'bold',
-            fontSize: 8.5,
-            cellPadding: { top: 2.5, bottom: 2.5, left: 4, right: 4 },
+            fontSize: 8,
+            cellPadding: { top: 1.8, bottom: 1.8, left: 3.5, right: 3.5 },
           },
         },
         {
@@ -395,9 +338,9 @@ export function downloadCancellationDebtPdf(
             fillColor: [254, 243, 199],
             textColor: [185, 28, 28],
             fontStyle: 'bold',
-            fontSize: 9,
+            fontSize: 8,
             halign: 'right',
-            cellPadding: { top: 2.5, bottom: 2.5, left: 4, right: 4 },
+            cellPadding: { top: 1.8, bottom: 1.8, left: 3.5, right: 3.5 },
           },
         },
       ]);
@@ -414,46 +357,66 @@ export function downloadCancellationDebtPdf(
     }
   }
 
+  // --- Render High-Density AutoTable ---
   autoTable(doc, {
     startY: y,
-    margin: { left: margin, right: margin, bottom: 16 },
-    theme: 'plain',
-    head: [['Debtor Name', 'Missed Service Dates & Sessions', 'Amount Owing']],
+    margin: { left: leftMargin, right: rightMargin, top: topMargin, bottom: bottomMargin },
+    theme: 'striped',
+    head: [['Debtor Name', 'Missed Dates & Sessions', 'Amount Owing']],
     body: tableRows as unknown[][],
     headStyles: {
-      fillColor: [30, 41, 59],
+      fillColor: [30, 41, 59], // slate-800
       textColor: [255, 255, 255],
       fontStyle: 'bold',
       fontSize: 8.5,
-      cellPadding: 3,
+      cellPadding: { top: 2.5, bottom: 2.5, left: 3.5, right: 3.5 },
     },
     bodyStyles: {
-      fontSize: 8.5,
-      textColor: [30, 41, 59],
-      cellPadding: 2.5,
+      fontSize: 8,
+      textColor: [15, 23, 42],
+      cellPadding: { top: 2.2, bottom: 2.2, left: 3.5, right: 3.5 },
       lineColor: [226, 232, 240],
-      lineWidth: 0.2,
+      lineWidth: 0.15,
+    },
+    alternateRowStyles: {
+      fillColor: [249, 250, 251], // #F9FAFB
     },
     columnStyles: {
-      0: { cellWidth: 55, fontStyle: 'bold' },
-      1: { cellWidth: 'auto', textColor: [71, 85, 105] },
-      2: { cellWidth: 30, halign: 'right', fontStyle: 'bold', textColor: [185, 28, 28] },
+      0: { cellWidth: 46, fontStyle: 'bold' },
+      1: { cellWidth: 114, textColor: [51, 65, 85] },
+      2: { cellWidth: 26, halign: 'right', fontStyle: 'bold', textColor: [185, 28, 28] },
     },
     didDrawPage: (data) => {
-      // Footer on every page
-      const pageNumber = data.pageNumber;
-      doc.setFontSize(7.5);
+      // 1-line Running Header (Pages 2+)
+      if (data.pageNumber > 1) {
+        doc.setFontSize(7.5);
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(185, 28, 28);
+        doc.text('CRC JOHANNESBURG — 2026 CANCELLATION DEBT MANIFEST', leftMargin, topMargin - 4);
+
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(100, 116, 139);
+        doc.text(`Total Outstanding: R${grandTotal.toLocaleString()}`, pageWidth - rightMargin, topMargin - 4, { align: 'right' });
+
+        doc.setDrawColor(226, 232, 240);
+        doc.setLineWidth(0.2);
+        doc.line(leftMargin, topMargin - 2.5, pageWidth - rightMargin, topMargin - 2.5);
+      }
+
+      // 1-line Running Footer (All Pages)
+      doc.setFontSize(7);
       doc.setFont('helvetica', 'normal');
       doc.setTextColor(148, 163, 184);
       doc.text(
-        `CRC Johannesburg Transport Ministry · Page ${pageNumber}`,
-        margin,
-        pageHeight - 8
+        `CRC Transport Ministry · Total Debtors: ${totalDebtors} · Total Outstanding: R${grandTotal.toLocaleString()}`,
+        leftMargin,
+        pageHeight - 6
       );
       doc.text(
-        `Total Outstanding: R${grandTotal.toLocaleString()}`,
-        pageWidth - margin - 40,
-        pageHeight - 8
+        `Page ${data.pageNumber}`,
+        pageWidth - rightMargin,
+        pageHeight - 6,
+        { align: 'right' }
       );
     },
   });

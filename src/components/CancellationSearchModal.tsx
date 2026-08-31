@@ -3,11 +3,34 @@ import {
   Search, X, Banknote, Plus, CheckCircle2,
   Calendar, MapPin, User, Car, Filter, Trash2, Check,
 } from 'lucide-react';
-import type { LedgerEntry } from '@/lib/ledger';
+import { type LedgerEntry, evaluateLedgerSearch } from '@/lib/ledger';
 import type { ManualCancellation } from '@/pages/RepPage';
 import type { Passenger } from '@/lib/types';
 import { shortDate } from '@/lib/dates';
 import { CANCELLATION_FEE } from '@/lib/types';
+
+function HighlightMatch({ text, query }: { text: string; query: string }) {
+  const q = query.trim();
+  if (!q || !text) return <span>{text}</span>;
+
+  const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(`(${escaped})`, 'gi');
+  const parts = text.split(regex);
+
+  return (
+    <span>
+      {parts.map((part, i) =>
+        part.toLowerCase() === q.toLowerCase() ? (
+          <mark key={i} className="bg-crimson-500/30 text-crimson-200 font-bold px-0.5 rounded">
+            {part}
+          </mark>
+        ) : (
+          <span key={i}>{part}</span>
+        )
+      )}
+    </span>
+  );
+}
 
 interface CancellationSearchModalProps {
   isOpen: boolean;
@@ -84,7 +107,7 @@ export function CancellationSearchModal({
 
   // Filtered cancellations list based on tab, query, structure
   const filteredCancellations = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
+    const q = searchQuery.trim();
 
     let list = pastCancellations;
     if (activeTab === 'vehicle') {
@@ -93,26 +116,58 @@ export function CancellationSearchModal({
       list = selectedEntries;
     }
 
-    return list.filter((e) => {
+    const filtered = list.filter((e) => {
       // Structure filter
       if (structureFilter !== 'ALL') {
         const entryStruct = (e.structure || '').trim().toUpperCase();
         if (entryStruct !== structureFilter) return false;
       }
 
-      // Text search match across name, structure, date, service, vehicle, rep, notes
-      if (q) {
-        const nameMatch = e.passenger_name.toLowerCase().includes(q);
-        const structMatch = (e.structure || '').toLowerCase().includes(q);
-        const dateMatch = (e.date || '').toLowerCase().includes(q);
-        const serviceMatch = (e.service || '').toLowerCase().includes(q);
-        const vehicleMatch = (e.vehicle_name || '').toLowerCase().includes(q);
-        const repMatch = (e.rep_name || '').toLowerCase().includes(q);
-        const noteMatch = (e.general_notes || '').toLowerCase().includes(q);
-        return nameMatch || structMatch || dateMatch || serviceMatch || vehicleMatch || repMatch || noteMatch;
-      }
+      if (!q) return true;
 
-      return true;
+      const { matched } = evaluateLedgerSearch(
+        {
+          passenger_name: e.passenger_name,
+          structure: e.structure,
+          general_notes: e.general_notes,
+          sponsor_note: e.sponsor_note,
+          date: e.date,
+          service: e.service,
+          rep_name: e.rep_name,
+        },
+        q
+      );
+      return matched;
+    });
+
+    if (!q) return filtered;
+
+    return [...filtered].sort((a, b) => {
+      const scoreA = evaluateLedgerSearch(
+        {
+          passenger_name: a.passenger_name,
+          structure: a.structure,
+          general_notes: a.general_notes,
+          sponsor_note: a.sponsor_note,
+          date: a.date,
+          service: a.service,
+          rep_name: a.rep_name,
+        },
+        q
+      ).score;
+      const scoreB = evaluateLedgerSearch(
+        {
+          passenger_name: b.passenger_name,
+          structure: b.structure,
+          general_notes: b.general_notes,
+          sponsor_note: b.sponsor_note,
+          date: b.date,
+          service: b.service,
+          rep_name: b.rep_name,
+        },
+        q
+      ).score;
+      return scoreB - scoreA;
     });
   }, [pastCancellations, vehicleCancellations, selectedEntries, activeTab, structureFilter, searchQuery]);
 
@@ -259,7 +314,7 @@ export function CancellationSearchModal({
                   <div className="min-w-0 flex-1 space-y-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className={`text-sm font-bold ${isSelected ? 'text-emerald-200' : 'text-ink'}`}>
-                        {entry.passenger_name}
+                        <HighlightMatch text={entry.passenger_name} query={searchQuery} />
                       </span>
                       {entry.structure && (
                         <span className="rounded bg-bg/70 px-1.5 py-0.5 font-mono text-[10px] font-bold text-muted border border-line/60">
