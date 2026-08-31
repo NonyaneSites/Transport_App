@@ -3,7 +3,7 @@ import {
   Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
   Smartphone, Wifi, ChevronDown, ChevronRight, MapPin, Send, Cross,
   HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus, Search, Banknote,
-  Sparkles, ArrowDownAZ, RotateCcw, Check,
+  Sparkles, ArrowDownAZ, RotateCcw, Check, AlertCircle,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
@@ -15,6 +15,7 @@ import { vehicleRiders, passengersByPoolGroup } from '@/lib/manifest';
 import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, type LedgerEntry } from '@/lib/ledger';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
 import { RepStatsCopyCard } from '@/components/RepStatsCopyCard';
+import { getServicePeriod, transferPassengerAcrossServices, crossCheckPassengerAcrossDate } from '@/lib/transfer';
 
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
 const SYNC_DEBOUNCE_MS = 2500; // 2500ms debounce to batch rapid taps on mobile and drastically reduce Supabase egress
@@ -78,6 +79,7 @@ export function RepPage() {
   const [presentIds, setPresentIds] = useState<Set<string>>(new Set());
   const [absentIds, setAbsentIds] = useState<Set<string>>(new Set());
   const [sponsoredIds, setSponsoredIds] = useState<Set<string>>(new Set());
+  const [unpaidIds, setUnpaidIds] = useState<Set<string>>(new Set());
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [generalNotes, setGeneralNotes] = useState('');
 
@@ -148,11 +150,22 @@ export function RepPage() {
     }
   }, [repName]);
 
-  // Walk-in
+  // Walk-in & Cross-Service Transfer
   const [walkInOpen, setWalkInOpen] = useState(false);
   const [walkInName, setWalkInName] = useState('');
   const [walkInStructure, setWalkInStructure] = useState('');
-  const [transferPrompt, setTransferPrompt] = useState<{ passenger: Passenger; fromVehicle: Vehicle } | null>(null);
+  const [transferPrompt, setTransferPrompt] = useState<{
+    passenger: Passenger;
+    fromVehicle?: Vehicle | null;
+    fromService: ServiceType;
+    fromServiceLabel: string;
+    isCrossService: boolean;
+    isCompatible: boolean;
+    incompatibleReason?: string;
+    statusDescription: string;
+  } | null>(null);
+  const [transferring, setTransferring] = useState(false);
+  const [isCheckingCrossService, setIsCheckingCrossService] = useState(false);
   const prevVehicleIdRef = useRef<string | null>(null);
 
   const serviceLabel = SERVICE_TYPES.find((s) => s.value === service)?.label ?? service;
@@ -206,6 +219,15 @@ export function RepPage() {
       }
       return changed ? next : prev;
     });
+    setUnpaidIds((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (currentRiderIdSet.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
   }, [selectedVehicle]);
 
   // Exact match vehicle when typing rep name if not yet selected (requires exact full name match)
@@ -248,6 +270,7 @@ export function RepPage() {
     setPresentIds(new Set());
     setAbsentIds(new Set());
     setSponsoredIds(new Set());
+    setUnpaidIds(new Set());
     setNotes({});
     setGeneralNotes('');
     setCoReps([]);
@@ -277,6 +300,7 @@ export function RepPage() {
     setPresentIds(pIds);
     setAbsentIds(aIds);
     setSponsoredIds(new Set(draft.sponsoredIds ?? []));
+    setUnpaidIds(new Set(draft.unpaidIds ?? []));
     setNotes(draft.notes ?? {});
     setGeneralNotes(draft.generalNotes ?? fallbackVehicle?.generalNotes ?? '');
     setCoReps(draft.coReps ?? fallbackVehicle?.coReps ?? []);
@@ -360,16 +384,25 @@ export function RepPage() {
       isApplyingDraftRef.current = true;
       const initialPresent = new Set<string>();
       const initialAbsent = new Set<string>();
+      const initialSponsored = new Set<string>();
+      const initialUnpaid = new Set<string>();
       currentRiders.forEach((r) => {
         if (r.present) {
           initialPresent.add(r.id);
         } else if (vehicle.submitted) {
           initialAbsent.add(r.id);
         }
+        if (r.sponsored) {
+          initialSponsored.add(r.id);
+        }
+        if (r.didNotPay) {
+          initialUnpaid.add(r.id);
+        }
       });
       setPresentIds(initialPresent);
       setAbsentIds(initialAbsent);
-      setSponsoredIds(new Set());
+      setSponsoredIds(initialSponsored);
+      setUnpaidIds(initialUnpaid);
       setNotes({});
       setGeneralNotes(vehicle.generalNotes ?? '');
       setCoReps(vehicle.coReps ?? []);
@@ -477,6 +510,7 @@ export function RepPage() {
       presentIds: pIdsArray,
       absentIds: aIdsArray,
       sponsoredIds: Array.from(sponsoredIds),
+      unpaidIds: Array.from(unpaidIds),
       notes,
       repName: repName.trim(),
       coReps: coReps.filter(Boolean),
@@ -523,7 +557,7 @@ export function RepPage() {
     };
   }, [
     selectedVehicleId, selectedVehicle, presentIds, absentIds,
-    sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
+    sponsoredIds, unpaidIds, notes, generalNotes, coReps, repName, licensePlate,
     externalSponsees, collectedCancellationIds, manualCancellations,
     baseCash, externalCash, pastCancellationCash,
     key, updateVehicleDraft,
@@ -537,6 +571,7 @@ export function RepPage() {
         presentIds: Array.from(presentIds),
         absentIds: Array.from(absentIds),
         sponsoredIds: Array.from(sponsoredIds),
+        unpaidIds: Array.from(unpaidIds),
         notes,
         repName: repName.trim(),
         coReps: coReps.filter(Boolean),
@@ -567,7 +602,7 @@ export function RepPage() {
     };
   }, [
     selectedVehicleId, selectedVehicle, presentIds, absentIds,
-    sponsoredIds, notes, generalNotes, coReps, repName, licensePlate,
+    sponsoredIds, unpaidIds, notes, generalNotes, coReps, repName, licensePlate,
     externalSponsees, collectedCancellationIds, manualCancellations,
     baseCash, externalCash, pastCancellationCash, key,
   ]);
@@ -605,6 +640,17 @@ export function RepPage() {
     lastLocalEditTimeRef.current = Date.now();
     isUserDirtyRef.current = true;
     setSponsoredIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(passengerId)) next.delete(passengerId);
+      else next.add(passengerId);
+      return next;
+    });
+  }, []);
+
+  const handleToggleUnpaid = useCallback((passengerId: string) => {
+    lastLocalEditTimeRef.current = Date.now();
+    isUserDirtyRef.current = true;
+    setUnpaidIds((prev) => {
       const next = new Set(prev);
       if (next.has(passengerId)) next.delete(passengerId);
       else next.add(passengerId);
@@ -752,8 +798,6 @@ export function RepPage() {
     setExternalSponsees((prev) => prev.filter((s) => s.id !== id));
   };
 
-  const [transferring, setTransferring] = useState(false);
-
   function findByName(name: string): Passenger | undefined {
     const q = name.trim().toLowerCase();
     if (!q || !manifest) return undefined;
@@ -775,85 +819,130 @@ export function RepPage() {
     return existing.includes(poolKey) ? existing : [...existing, poolKey];
   }
 
-  async function handleAddWalkIn() {
+  async function handleAddWalkIn(overrideCrossTransfer = false) {
     if (!manifest || !selectedVehicle || !walkInName.trim()) return;
-    const existing = findByName(walkInName);
+    const query = walkInName.trim();
 
-    if (existing) {
+    // 1. First check within current manifest (same service)
+    const existing = findByName(query);
+
+    if (existing && !overrideCrossTransfer) {
       const fromVehicle = findVehicleForPassenger(existing);
       if (fromVehicle && fromVehicle.id !== selectedVehicle.id) {
-        setTransferPrompt({ passenger: existing, fromVehicle });
+        setTransferPrompt({
+          passenger: existing,
+          fromVehicle,
+          fromService: service,
+          fromServiceLabel: serviceLabel,
+          isCrossService: false,
+          isCompatible: true,
+          statusDescription: `Allocated to ${fromVehicle.name} (${serviceLabel})`,
+        });
         return;
       }
       await assignWalkIn(existing, fromVehicle?.id ?? existing.assignedTo ?? null);
-    } else {
-      if (pendingSyncTimerRef.current) {
-        clearTimeout(pendingSyncTimerRef.current);
-        pendingSyncTimerRef.current = null;
-      }
-      lastLocalEditTimeRef.current = Date.now();
-
-      const newPassenger: Passenger = {
-        id: `walkin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        fullName: walkInName.trim(),
-        stop: 'Walk-In',
-        structure: walkInStructure.trim(),
-        assignedTo: selectedVehicle.id,
-        present: true,
-        cancellationFeeOwed: false,
-      };
-      const poolKey = hubDisplayName(selectedVehicle.type, newPassenger.stop);
-      const updatedVehicles = manifest.vehicles.map((v) => {
-        if (v.id !== selectedVehicle.id) return v;
-        const nextRiders = [...v.riders, newPassenger.id];
-        const nextOrderedStops = orderedStopsWith(v, poolKey);
-        const existingDraftPresent = v.draftState?.presentIds ?? [];
-        const nextDraftPresent = existingDraftPresent.includes(newPassenger.id)
-          ? existingDraftPresent
-          : [...existingDraftPresent, newPassenger.id];
-
-        const nextDraft: VehicleDraftState = {
-          presentIds: nextDraftPresent,
-          absentIds: v.draftState?.absentIds ?? [],
-          sponsoredIds: v.draftState?.sponsoredIds ?? Array.from(sponsoredIds),
-          notes: v.draftState?.notes ?? notes,
-          repName: repName.trim() || v.repName || '',
-          coReps: coReps.filter(Boolean),
-          licensePlate: licensePlate.trim() || v.licensePlate || '',
-          generalNotes: generalNotes.trim() || v.generalNotes || '',
-          cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
-          settledLedgerIds: Array.from(collectedCancellationIds),
-          manualCancellations,
-          externalSponsees,
-          updatedAt: new Date().toISOString(),
-          updatedBy: clientIdRef.current,
-        };
-
-        return {
-          ...v,
-          riders: nextRiders,
-          orderedStops: nextOrderedStops,
-          draftState: nextDraft,
-        };
-      });
-
-      const nextManifest: Manifest = {
-        ...manifest,
-        signups: [...manifest.signups, newPassenger],
-        vehicles: updatedVehicles,
-      };
-
-      manifestRef.current = nextManifest;
-      setPresentIds((prev) => new Set(prev).add(newPassenger.id));
-      setAbsentIds((prev) => {
-        if (!prev.has(newPassenger.id)) return prev;
-        const next = new Set(prev);
-        next.delete(newPassenger.id);
-        return next;
-      });
-
-      await save(nextManifest);
+      setWalkInName('');
+      setWalkInStructure('');
+      setWalkInOpen(false);
+      return;
     }
+
+    // 2. If not found in current service and not overriding, cross-check other services for this date
+    if (!overrideCrossTransfer) {
+      setIsCheckingCrossService(true);
+      try {
+        const crossMatches = await crossCheckPassengerAcrossDate(date, service, query);
+        if (crossMatches.length > 0) {
+          const match = crossMatches[0];
+          setTransferPrompt({
+            passenger: match.passenger,
+            fromVehicle: match.vehicle,
+            fromService: match.service,
+            fromServiceLabel: match.serviceLabel,
+            isCrossService: true,
+            isCompatible: match.isCompatible,
+            incompatibleReason: match.isCompatible
+              ? undefined
+              : `Transfers are only allowed within the same service time window:\n• AM Service: Serving Only, Ushers (early), Normal only\n• PM Service: Serving Only, Normal only\n\n${match.passenger.fullName} is registered for ${match.serviceLabel} (${match.period} Service), but this vehicle is in ${serviceLabel} (${getServicePeriod(service)} Service).`,
+            statusDescription: match.statusLabel,
+          });
+          setIsCheckingCrossService(false);
+          return;
+        }
+      } catch (err) {
+        console.error('Cross-check error:', err);
+      } finally {
+        setIsCheckingCrossService(false);
+      }
+    }
+
+    // 3. Not found in any service or confirmed as new walk-in: create fresh walk-in
+    if (pendingSyncTimerRef.current) {
+      clearTimeout(pendingSyncTimerRef.current);
+      pendingSyncTimerRef.current = null;
+    }
+    lastLocalEditTimeRef.current = Date.now();
+
+    const newPassenger: Passenger = {
+      id: `walkin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      fullName: query,
+      stop: 'Walk-In',
+      structure: walkInStructure.trim(),
+      assignedTo: selectedVehicle.id,
+      present: true,
+      cancellationFeeOwed: false,
+    };
+    const poolKey = hubDisplayName(selectedVehicle.type, newPassenger.stop);
+    const updatedVehicles = manifest.vehicles.map((v) => {
+      if (v.id !== selectedVehicle.id) return v;
+      const nextRiders = [...v.riders, newPassenger.id];
+      const nextOrderedStops = orderedStopsWith(v, poolKey);
+      const existingDraftPresent = v.draftState?.presentIds ?? [];
+      const nextDraftPresent = existingDraftPresent.includes(newPassenger.id)
+        ? existingDraftPresent
+        : [...existingDraftPresent, newPassenger.id];
+
+      const nextDraft: VehicleDraftState = {
+        presentIds: nextDraftPresent,
+        absentIds: v.draftState?.absentIds ?? [],
+        sponsoredIds: v.draftState?.sponsoredIds ?? Array.from(sponsoredIds),
+        notes: v.draftState?.notes ?? notes,
+        repName: repName.trim() || v.repName || '',
+        coReps: coReps.filter(Boolean),
+        licensePlate: licensePlate.trim() || v.licensePlate || '',
+        generalNotes: generalNotes.trim() || v.generalNotes || '',
+        cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+        settledLedgerIds: Array.from(collectedCancellationIds),
+        manualCancellations,
+        externalSponsees,
+        updatedAt: new Date().toISOString(),
+        updatedBy: clientIdRef.current,
+      };
+
+      return {
+        ...v,
+        riders: nextRiders,
+        orderedStops: nextOrderedStops,
+        draftState: nextDraft,
+      };
+    });
+
+    const nextManifest: Manifest = {
+      ...manifest,
+      signups: [...manifest.signups, newPassenger],
+      vehicles: updatedVehicles,
+    };
+
+    manifestRef.current = nextManifest;
+    setPresentIds((prev) => new Set(prev).add(newPassenger.id));
+    setAbsentIds((prev) => {
+      if (!prev.has(newPassenger.id)) return prev;
+      const next = new Set(prev);
+      next.delete(newPassenger.id);
+      return next;
+    });
+
+    await save(nextManifest);
     setWalkInName('');
     setWalkInStructure('');
     setWalkInOpen(false);
@@ -957,16 +1046,48 @@ export function RepPage() {
   }
 
   async function confirmTransfer() {
-    if (!transferPrompt || transferring) return;
+    if (!transferPrompt || transferring || !selectedVehicle) return;
     setTransferring(true);
     try {
-      await assignWalkIn(transferPrompt.passenger, transferPrompt.fromVehicle.id);
+      if (transferPrompt.isCrossService) {
+        const res = await transferPassengerAcrossServices({
+          date,
+          fromService: transferPrompt.fromService,
+          toService: service,
+          passengerId: transferPrompt.passenger.id,
+          toVehicleId: selectedVehicle.id,
+          repName,
+          licensePlate,
+        });
+
+        if (!res.success) {
+          alert(res.error || 'Failed to transfer passenger.');
+          return;
+        }
+
+        setPresentIds((prev) => new Set(prev).add(transferPrompt.passenger.id));
+        setAbsentIds((prev) => {
+          if (!prev.has(transferPrompt.passenger.id)) return prev;
+          const next = new Set(prev);
+          next.delete(transferPrompt.passenger.id);
+          return next;
+        });
+
+        setBatchActionMsg(`✓ Successfully transferred ${transferPrompt.passenger.fullName} into ${selectedVehicle.name}`);
+        setTimeout(() => setBatchActionMsg(null), 5000);
+      } else {
+        await assignWalkIn(transferPrompt.passenger, transferPrompt.fromVehicle?.id ?? null);
+        setBatchActionMsg(`✓ Assigned ${transferPrompt.passenger.fullName} into ${selectedVehicle.name}`);
+        setTimeout(() => setBatchActionMsg(null), 4000);
+      }
+
       setTransferPrompt(null);
       setWalkInName('');
       setWalkInStructure('');
       setWalkInOpen(false);
     } catch (e) {
       console.error('Walk-in transfer error:', e);
+      alert('Error performing transfer: ' + String(e));
     } finally {
       setTransferring(false);
     }
@@ -1042,6 +1163,7 @@ export function RepPage() {
         presentIds: Array.from(presentIds),
         absentIds: Array.from(absentIds),
         sponsoredIds: Array.from(sponsoredIds),
+        unpaidIds: Array.from(unpaidIds),
         notes,
         repName: repName.trim(),
         coReps: coReps.map((c) => c.trim()).filter(Boolean),
@@ -1056,8 +1178,25 @@ export function RepPage() {
       };
 
       const updatedSignups = manifest.signups.map((p) => {
-        if (presentIds.has(p.id)) return { ...p, present: true };
-        if (absentIds.has(p.id)) return { ...p, present: false };
+        if (presentIds.has(p.id)) {
+          return {
+            ...p,
+            present: true,
+            sponsored: sponsoredIds.has(p.id),
+            sponsorNote: notes[p.id] || p.sponsorNote || '',
+            didNotPay: unpaidIds.has(p.id),
+            unpaidNote: notes[p.id] || p.unpaidNote || '',
+          };
+        }
+        if (absentIds.has(p.id)) {
+          return {
+            ...p,
+            present: false,
+            sponsored: false,
+            didNotPay: false,
+            sponsorNote: notes[p.id] || p.sponsorNote || '',
+          };
+        }
         return p;
       });
 
@@ -1496,11 +1635,12 @@ export function RepPage() {
                           <div className="flex gap-1.5">
                             <button
                               type="button"
-                              onClick={handleAddWalkIn}
-                              disabled={!walkInName.trim()}
-                              className="btn-crimson px-3 py-2 text-xs font-bold whitespace-nowrap shadow-sm disabled:opacity-40"
+                              onClick={() => handleAddWalkIn()}
+                              disabled={!walkInName.trim() || isCheckingCrossService}
+                              className="btn-crimson px-3 py-2 text-xs font-bold whitespace-nowrap shadow-sm disabled:opacity-40 flex items-center gap-1.5"
                             >
-                              Add Walk-In
+                              {isCheckingCrossService && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                              <span>{isCheckingCrossService ? 'Cross-checking…' : 'Add Walk-In'}</span>
                             </button>
                             <button
                               type="button"
@@ -1678,8 +1818,10 @@ export function RepPage() {
                     absentIds={absentIds}
                     onSetPresent={handleSetPresent}
                     onToggleSponsored={handleToggleSponsored}
+                    onToggleUnpaid={handleToggleUnpaid}
                     onSetNote={handleSetNote}
                     sponsoredIds={sponsoredIds}
+                    unpaidIds={unpaidIds}
                     notes={notes}
                     disabled={isSubmitted || submitting}
                   />
@@ -1690,8 +1832,10 @@ export function RepPage() {
                     absentIds={absentIds}
                     onSetPresent={handleSetPresent}
                     onToggleSponsored={handleToggleSponsored}
+                    onToggleUnpaid={handleToggleUnpaid}
                     onSetNote={handleSetNote}
                     sponsoredIds={sponsoredIds}
+                    unpaidIds={unpaidIds}
                     notes={notes}
                     disabled={isSubmitted || submitting}
                   />
@@ -1830,6 +1974,7 @@ export function RepPage() {
                   presentIds={presentIds}
                   absentIds={absentIds}
                   sponsoredIds={sponsoredIds}
+                  unpaidIds={unpaidIds}
                   notes={notes}
                   vehicleName={selectedVehicle.name}
                   repName={repName}
@@ -1861,50 +2006,113 @@ export function RepPage() {
           onClick={() => { if (!transferring) setTransferPrompt(null); }}
         >
           <div
-            className="w-full max-w-sm rounded-2xl border border-line bg-card p-6 shadow-crimson animate-slide-up"
+            className="w-full max-w-md rounded-2xl border border-line bg-card p-6 shadow-crimson animate-slide-up"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-4 flex items-start gap-3">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-warning/15 border border-warning/30">
-                <AlertTriangle className="h-5 w-5 text-warning" />
+              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border ${
+                transferPrompt.isCompatible
+                  ? 'bg-warning/15 border-warning/30 text-warning'
+                  : 'bg-crimson-500/15 border-crimson-500/30 text-crimson-400'
+              }`}>
+                <AlertTriangle className="h-5 w-5" />
               </div>
-              <div>
-                <h3 className="font-display text-base font-bold text-ink">Transfer Passenger</h3>
+              <div className="flex-1 min-w-0">
+                <h3 className="font-display text-base font-bold text-ink">
+                  {transferPrompt.isCompatible ? 'Transfer Passenger' : 'Cross-Service Time Mismatch'}
+                </h3>
                 <p className="mt-1 text-xs text-muted">
-                  <span className="font-semibold text-ink">{transferPrompt.passenger.fullName}</span> is currently allocated to <span className="font-semibold text-crimson-400">{transferPrompt.fromVehicle.name}</span>.
+                  <span className="font-semibold text-ink">{transferPrompt.passenger.fullName}</span> is registered in{' '}
+                  <span className="font-semibold text-crimson-400">{transferPrompt.fromServiceLabel}</span>
+                  {transferPrompt.fromVehicle ? ` (${transferPrompt.fromVehicle.name})` : ''}.
                 </p>
-                <div className="mt-2 rounded-lg border border-line bg-card-2 p-2.5 text-[11px] text-muted space-y-1">
-                  <div>From: <span className="font-semibold text-ink">{transferPrompt.fromVehicle.name}</span></div>
-                  <div>To: <span className="font-semibold text-success-light">{selectedVehicle?.name}</span></div>
-                  {transferPrompt.passenger.stop && <div>Stop: <span className="font-medium text-ink">{transferPrompt.passenger.stop}</span></div>}
-                  {transferPrompt.passenger.structure && <div>Structure: <span className="font-medium text-ink">{transferPrompt.passenger.structure}</span></div>}
+
+                {/* Status Box */}
+                <div className="mt-3 rounded-xl border border-line bg-card-2 p-3 text-xs space-y-1.5">
+                  <div className="flex items-center justify-between text-muted">
+                    <span>Origin:</span>
+                    <span className="font-semibold text-ink">
+                      {transferPrompt.fromServiceLabel} {transferPrompt.fromVehicle ? `— ${transferPrompt.fromVehicle.name}` : ''}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-muted">
+                    <span>Destination:</span>
+                    <span className="font-semibold text-success-light">
+                      {serviceLabel} — {selectedVehicle?.name}
+                    </span>
+                  </div>
+                  {transferPrompt.passenger.stop && (
+                    <div className="flex items-center justify-between text-muted">
+                      <span>Pickup Stop:</span>
+                      <span className="font-medium text-ink">{transferPrompt.passenger.stop}</span>
+                    </div>
+                  )}
+                  {transferPrompt.passenger.structure && (
+                    <div className="flex items-center justify-between text-muted">
+                      <span>Structure:</span>
+                      <span className="font-mono font-semibold text-ink">{transferPrompt.passenger.structure}</span>
+                    </div>
+                  )}
                 </div>
+
+                {/* Compatibility Warning if incompatible */}
+                {!transferPrompt.isCompatible && (
+                  <div className="mt-3 rounded-lg border border-crimson-500/30 bg-crimson-500/10 p-2.5 text-xs text-crimson-200">
+                    <p className="font-semibold mb-1">Different Service Time Window:</p>
+                    <p className="text-[11px] leading-relaxed text-crimson-300 whitespace-pre-line">
+                      {transferPrompt.incompatibleReason ||
+                        'Transfers can only occur between matching service times (AM Service with AM Service, PM Service with PM Service).'}
+                    </p>
+                  </div>
+                )}
+
+                {transferPrompt.isCompatible && transferPrompt.isCrossService && (
+                  <p className="mt-2 text-[11px] text-muted leading-relaxed">
+                    Confirming will remove them from <strong>{transferPrompt.fromServiceLabel}</strong> and add them directly to <strong>{selectedVehicle?.name}</strong> as Present.
+                  </p>
+                )}
               </div>
             </div>
+
             <div className="flex gap-2">
               <button
                 type="button"
                 onClick={() => setTransferPrompt(null)}
                 disabled={transferring}
-                className="btn-ghost flex-1 disabled:opacity-50"
+                className="btn-ghost flex-1 disabled:opacity-50 text-xs"
               >
                 Cancel
               </button>
-              <button
-                type="button"
-                onClick={confirmTransfer}
-                disabled={transferring}
-                className="btn-crimson flex-1 flex items-center justify-center gap-1.5 disabled:opacity-50"
-              >
-                {transferring ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    <span>Transferring…</span>
-                  </>
-                ) : (
-                  <span>Confirm Transfer</span>
-                )}
-              </button>
+
+              {transferPrompt.isCompatible ? (
+                <button
+                  type="button"
+                  onClick={confirmTransfer}
+                  disabled={transferring}
+                  className="btn-crimson flex-1 flex items-center justify-center gap-1.5 disabled:opacity-50 text-xs font-bold"
+                >
+                  {transferring ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <span>Transferring…</span>
+                    </>
+                  ) : (
+                    <span>Confirm Transfer</span>
+                  )}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTransferPrompt(null);
+                    handleAddWalkIn(true);
+                  }}
+                  disabled={transferring}
+                  className="btn-crimson flex-1 flex items-center justify-center gap-1.5 disabled:opacity-50 text-xs font-bold"
+                >
+                  Add as New Walk-In Anyway
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -2239,7 +2447,7 @@ function CashCalculatorCard({
 }
 
 function StopGroupedChecklist({
-  riders, vehicleType, orderedStops, presentIds, absentIds, onSetPresent, onToggleSponsored, onSetNote, sponsoredIds, notes, disabled,
+  riders, vehicleType, orderedStops, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
 }: {
   riders: Passenger[];
   vehicleType: 'Bus' | 'Taxi';
@@ -2248,8 +2456,10 @@ function StopGroupedChecklist({
   absentIds: Set<string>;
   onSetPresent: (id: string, present: boolean) => void;
   onToggleSponsored: (id: string) => void;
+  onToggleUnpaid: (id: string) => void;
   onSetNote: (id: string, text: string) => void;
   sponsoredIds: Set<string>;
+  unpaidIds: Set<string>;
   notes: Record<string, string>;
   disabled: boolean;
 }) {
@@ -2333,8 +2543,10 @@ function StopGroupedChecklist({
                     touched={presentIds.has(p.id) || absentIds.has(p.id)}
                     onSetPresent={onSetPresent}
                     onToggleSponsored={onToggleSponsored}
+                    onToggleUnpaid={onToggleUnpaid}
                     onSetNote={onSetNote}
                     isSponsored={sponsoredIds.has(p.id)}
+                    isUnpaid={unpaidIds.has(p.id)}
                     noteText={notes[p.id] ?? ''}
                     disabled={disabled}
                   />
@@ -2349,15 +2561,17 @@ function StopGroupedChecklist({
 }
 
 function AlphabeticalChecklist({
-  riders, presentIds, absentIds, onSetPresent, onToggleSponsored, onSetNote, sponsoredIds, notes, disabled,
+  riders, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
 }: {
   riders: Passenger[];
   presentIds: Set<string>;
   absentIds: Set<string>;
   onSetPresent: (id: string, present: boolean) => void;
   onToggleSponsored: (id: string) => void;
+  onToggleUnpaid: (id: string) => void;
   onSetNote: (id: string, text: string) => void;
   sponsoredIds: Set<string>;
+  unpaidIds: Set<string>;
   notes: Record<string, string>;
   disabled: boolean;
 }) {
@@ -2384,8 +2598,10 @@ function AlphabeticalChecklist({
           touched={presentIds.has(p.id) || absentIds.has(p.id)}
           onSetPresent={onSetPresent}
           onToggleSponsored={onToggleSponsored}
+          onToggleUnpaid={onToggleUnpaid}
           onSetNote={onSetNote}
           isSponsored={sponsoredIds.has(p.id)}
+          isUnpaid={unpaidIds.has(p.id)}
           noteText={notes[p.id] ?? ''}
           disabled={disabled}
         />
@@ -2395,7 +2611,7 @@ function AlphabeticalChecklist({
 }
 
 const PassengerRow = React.memo(function PassengerRow({
-  passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onSetNote, isSponsored, noteText, disabled,
+  passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, isSponsored, isUnpaid, noteText, disabled,
 }: {
   passenger: Passenger;
   isPresent: boolean;
@@ -2403,16 +2619,23 @@ const PassengerRow = React.memo(function PassengerRow({
   touched: boolean;
   onSetPresent: (id: string, present: boolean) => void;
   onToggleSponsored: (id: string) => void;
+  onToggleUnpaid: (id: string) => void;
   onSetNote: (id: string, text: string) => void;
   isSponsored: boolean;
+  isUnpaid: boolean;
   noteText: string;
   disabled: boolean;
 }) {
-  const [showNote, setShowNote] = useState(isSponsored);
+  const [showNote, setShowNote] = useState(isSponsored || isUnpaid || !!noteText);
 
   function handleSponsoredToggle() {
     onToggleSponsored(passenger.id);
     if (!isSponsored) setShowNote(true);
+  }
+
+  function handleUnpaidToggle() {
+    onToggleUnpaid(passenger.id);
+    if (!isUnpaid) setShowNote(true);
   }
 
   return (
@@ -2482,27 +2705,49 @@ const PassengerRow = React.memo(function PassengerRow({
         </div>
       </div>
 
-      {/* Sponsored toggle */}
-      <div className="mt-2 flex items-center gap-3">
+      {/* Action Toggles: Sponsored, Didn't Pay, and Note */}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {/* Sponsored Toggle */}
         <button
           type="button"
           onClick={handleSponsoredToggle}
           disabled={disabled}
           className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all active:scale-95 ${
             isSponsored
-              ? 'bg-warning/15 text-warning border border-warning/40'
-              : 'bg-card-2 text-muted border border-line'
+              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold'
+              : 'bg-card-2 text-muted border border-line hover:text-ink'
           }`}
+          title="Mark if someone else is paying for this passenger"
         >
-          <HeartHandshake className="h-3.5 w-3.5" />
-          {isSponsored ? 'Sponsored / Didn\'t Pay' : 'Mark Sponsored'}
+          <HeartHandshake className="h-3.5 w-3.5 text-amber-400" />
+          {isSponsored ? '★ Sponsored' : 'Sponsored'}
         </button>
-        {isSponsored && (
+
+        {/* Didn't Pay Toggle */}
+        <button
+          type="button"
+          onClick={handleUnpaidToggle}
+          disabled={disabled}
+          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all active:scale-95 ${
+            isUnpaid
+              ? 'bg-crimson-500/20 text-crimson-300 border border-crimson-500/50 font-semibold'
+              : 'bg-card-2 text-muted border border-line hover:text-ink'
+          }`}
+          title="Flag that this passenger attended but did not pay fare"
+        >
+          <AlertCircle className="h-3.5 w-3.5 text-crimson-400" />
+          {isUnpaid ? "⚠️ Didn't Pay" : "Didn't Pay"}
+        </button>
+
+        {/* Note button */}
+        {(isSponsored || isUnpaid || showNote || noteText) && (
           <button
             type="button"
             onClick={() => setShowNote(!showNote)}
             disabled={disabled}
-            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted border border-line bg-card-2 transition-all hover:text-ink"
+            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium border border-line bg-card-2 transition-all ${
+              showNote ? 'text-ink border-line-bright' : 'text-muted hover:text-ink'
+            }`}
           >
             <StickyNote className="h-3.5 w-3.5" />
             {showNote ? 'Hide Note' : 'Add Note'}
@@ -2510,19 +2755,29 @@ const PassengerRow = React.memo(function PassengerRow({
         )}
       </div>
 
-      {/* Sponsor note input */}
-      {isSponsored && showNote && (
+      {/* Note input */}
+      {showNote && (
         <div className="mt-2 animate-fade-in">
           <input
             type="text"
             value={noteText}
             onChange={(e) => onSetNote(passenger.id, e.target.value)}
             disabled={disabled}
-            placeholder="Required: Who is paying for this person? (e.g. Person A in Taxi 1)"
+            placeholder={
+              isSponsored
+                ? 'Required: Who is paying for this person? (e.g. Person A in Taxi 1)'
+                : isUnpaid
+                ? 'Note on unpaid fare (e.g. forgot cash, will pay next Sunday)'
+                : 'Note for this passenger...'
+            }
             className="input-field text-xs"
           />
           <p className="mt-1 text-[10px] text-muted">
-            This note is included in the stats and cancellation ledger so we know who covers the cost.
+            {isSponsored
+              ? 'This note is included in the stats and cancellation ledger so we know who covers the cost.'
+              : isUnpaid
+              ? "Flagged for admin visibility under unpaid attendance records."
+              : 'Note visible to reps and admin.'}
           </p>
         </div>
       )}

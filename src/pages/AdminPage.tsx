@@ -10,10 +10,11 @@ import { listAllManifests } from '@/lib/manifest';
 import { listLedgerEntries } from '@/lib/ledger';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey as parseKey } from '@/lib/dates';
 import { SERVICE_TYPES, RESET_PASSWORD, type ServiceType, type Passenger, type Manifest } from '@/lib/types';
-import { isSamePassenger } from '@/lib/importer';
+import { isSamePassenger, getSubmissionTimestampEpoch } from '@/lib/importer';
 import { generateWhatsAppRouteManifest, generateWhatsAppRepManifest, downloadTextFile } from '@/lib/whatsappManifest';
 import { downloadTaxiStatsExcel, downloadTaxiStatsCSV } from '@/lib/statsExport';
 import { AdminStatsExportModal } from '@/components/AdminStatsExportModal';
+import { AdminAttendanceNotesSection } from '@/components/AdminAttendanceNotesSection';
 
 export function AdminPage() {
   const [date, setDate] = useState(() => {
@@ -118,20 +119,46 @@ export function AdminPage() {
       return;
     }
 
-    // Discard any incoming passenger who matches an existing signup (keeping live state untouched)
-    // and also prevent adding duplicates within the incoming batch itself
+    // Merge incoming passengers into existing manifest signups:
+    // If an incoming passenger matches an existing signup:
+    //   - Compare timestamps. If incoming is more recent (or equal), update their profile details (stop, structure, phone, email, etc.)
+    //     while strictly preserving live assignment and attendance states.
+    // If incoming passenger is entirely new:
+    //   - Add them as a fresh signup.
+    const updatedSignups = [...manifest.signups];
     const fresh: Passenger[] = [];
+
     for (const incoming of passengers) {
-      const alreadyInManifest = manifest.signups.some((existing) => isSamePassenger(existing, incoming));
-      const alreadyInFresh = fresh.some((p) => isSamePassenger(p, incoming));
-      if (!alreadyInManifest && !alreadyInFresh) {
-        fresh.push(incoming);
+      const existingIdx = updatedSignups.findIndex((existing) => isSamePassenger(existing, incoming));
+      if (existingIdx >= 0) {
+        const existing = updatedSignups[existingIdx];
+        const existingEpoch = getSubmissionTimestampEpoch(existing.timestamp);
+        const incomingEpoch = getSubmissionTimestampEpoch(incoming.timestamp);
+
+        if (incomingEpoch >= existingEpoch) {
+          // Update profile details with latest submission info
+          updatedSignups[existingIdx] = {
+            ...existing,
+            stop: incoming.stop,
+            structure: incoming.structure,
+            phone: incoming.phone || existing.phone,
+            userEmail: incoming.userEmail || existing.userEmail,
+            timestamp: incoming.timestamp || existing.timestamp,
+            hub: incoming.hub || existing.hub,
+            category: incoming.category || existing.category,
+            ministry: incoming.ministry || existing.ministry,
+            memberType: incoming.memberType || existing.memberType,
+          };
+        }
+      } else {
+        const alreadyInFresh = fresh.some((p) => isSamePassenger(p, incoming));
+        if (!alreadyInFresh) {
+          fresh.push(incoming);
+        }
       }
     }
 
-    if (fresh.length > 0) {
-      await save({ ...manifest, signups: [...manifest.signups, ...fresh] });
-    }
+    await save({ ...manifest, signups: [...updatedSignups, ...fresh] });
   }
 
   async function handleReset() {
@@ -247,6 +274,21 @@ export function AdminPage() {
               }
               service={service}
               onSave={save}
+            />
+          </div>
+        )}
+
+        {/* Live Attendance, Sponsored & Notes Dispatch Hub (Bottom Drop Box) */}
+        {manifest && (
+          <div id="admin-attendance-notes-section" className="mt-8">
+            <AdminAttendanceNotesSection
+              manifest={manifest}
+              onLocateVehicle={(vehId) => {
+                const el = document.getElementById(`vehicle-card-${vehId}`);
+                if (el) {
+                  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+              }}
             />
           </div>
         )}

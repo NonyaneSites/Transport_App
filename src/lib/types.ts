@@ -16,6 +16,8 @@ export interface Passenger {
   cancellationFeeOwed: boolean;
   sponsored?: boolean;
   sponsorNote?: string;
+  didNotPay?: boolean;
+  unpaidNote?: string;
 }
 
 /**
@@ -103,6 +105,7 @@ export interface VehicleDraftState {
   presentIds?: string[];
   absentIds?: string[];
   sponsoredIds?: string[];
+  unpaidIds?: string[]; // IDs of riders who rode but did not pay (unpaid fare)
   notes?: Record<string, string>; // passengerId -> note string
   repName?: string;
   coReps?: string[];

@@ -3,7 +3,7 @@ import {
   Bus, Car, Plus, Trash2, Users, ArrowRight, Undo2, X, UserCog, MoveRight,
   CheckCircle2, ChevronDown, ChevronRight, ChevronUp, MapPin,
   Check, Clock, StickyNote, Sparkles, ArrowUpDown, UserCheck, Download,
-  FileText, Copy, Eye, FileDown, Search
+  FileText, Copy, Eye, FileDown, Search, UserX
 } from 'lucide-react';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
 import { hubDisplayName, getPassengerStatusBadge } from '@/lib/types';
@@ -147,7 +147,9 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
 
   // Search functionality for admins to find and move passengers
   const [adminSearchQuery, setAdminSearchQuery] = useState('');
-  const [adminSearchFilter, setAdminSearchFilter] = useState<'all' | 'unassigned' | 'assigned' | 'reps' | 'ushers'>('all');
+  const [adminSearchFilter, setAdminSearchFilter] = useState<
+    'all' | 'unassigned' | 'assigned' | 'present' | 'absent' | 'sponsored' | 'notes' | 'reps' | 'ushers' | 'ftv' | 'visitors' | 'members'
+  >('all');
   const [searchMoveTarget, setSearchMoveTarget] = useState<Record<string, string>>({});
   const [moveNotification, setMoveNotification] = useState<{ text: string; timestamp: number } | null>(null);
 
@@ -516,12 +518,25 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     const vehicles = localManifest?.vehicles || [];
     return signups.filter((p) => {
       if (!p) return false;
+
+      const assignedVeh = p.assignedTo ? vehicles.find((v) => v?.id === p.assignedTo) : null;
+      const isPresent = Boolean(assignedVeh?.draftState?.presentIds?.includes(p.id) || (assignedVeh?.submitted && p.present));
+      const isAbsent = Boolean(
+        assignedVeh?.draftState?.absentIds?.includes(p.id) ||
+        (assignedVeh?.submitted && !p.present && !assignedVeh?.draftState?.presentIds?.includes(p.id))
+      );
+      const isSponsored = Boolean(p.sponsored || assignedVeh?.draftState?.sponsoredIds?.includes(p.id));
+      const riderNote = (assignedVeh?.draftState?.notes?.[p.id] || p.sponsorNote || '').trim();
+
       // 1. Role / status filter tab
       if (adminSearchFilter === 'unassigned' && p.assignedTo) return false;
       if (adminSearchFilter === 'assigned' && !p.assignedTo) return false;
+      if (adminSearchFilter === 'present' && !isPresent) return false;
+      if (adminSearchFilter === 'absent' && !isAbsent) return false;
+      if (adminSearchFilter === 'sponsored' && !isSponsored) return false;
+      if (adminSearchFilter === 'notes' && !riderNote) return false;
       if (adminSearchFilter === 'reps') {
         const isOfficial = matchRiderToOfficialRep(p);
-        const assignedVeh = p.assignedTo ? vehicles.find((v) => v?.id === p.assignedTo) : null;
         const isActiveRep = assignedVeh ? isPassengerRepOfVehicle(p, assignedVeh.repName) : false;
         if (!isOfficial && !isActiveRep) return false;
       }
@@ -538,15 +553,15 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       const structMatch = (p.structure || '').toLowerCase().includes(q);
       const phoneMatch = (p.phone || '').includes(q);
       const ministryMatch = (p.ministry || '').toLowerCase().includes(q);
+      const noteMatch = riderNote.toLowerCase().includes(q);
       const memberTypeMatch = p.memberType ? (
         (p.memberType === 'FTV' && (q === 'ftv' || q.includes('first') || q.includes('visitor'))) ||
         (p.memberType === 'V' && (q === 'v' || q.includes('visitor') || q.includes('guest'))) ||
         (p.memberType === 'M' && (q === 'm' || q.includes('member')))
       ) : false;
-      const assignedVeh = p.assignedTo ? vehicles.find((v) => v?.id === p.assignedTo) : null;
       const vehMatch = assignedVeh ? (assignedVeh.name || '').toLowerCase().includes(q) : false;
 
-      return nameMatch || stopMatch || structMatch || phoneMatch || ministryMatch || memberTypeMatch || vehMatch;
+      return nameMatch || stopMatch || structMatch || phoneMatch || ministryMatch || memberTypeMatch || vehMatch || noteMatch;
     });
   }, [localManifest?.signups, localManifest?.vehicles, adminSearchQuery, adminSearchFilter]);
 
@@ -895,7 +910,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
             type="text"
             value={adminSearchQuery}
             onChange={(e) => setAdminSearchQuery(e.target.value)}
-            placeholder="Search by name, status (FTV/V/M), structure (e.g. S3), pickup stop, phone, or assigned vehicle..."
+            placeholder="Search by name, notes, status (FTV/V/M), structure (e.g. S3), pickup stop, or assigned vehicle..."
             className="input-field pl-9 text-xs"
           />
           {adminSearchQuery && (
@@ -909,89 +924,170 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
         </div>
 
         {/* Filter category tabs */}
-        <div className="flex flex-wrap gap-1.5 mb-3 text-xs">
-          <button
-            type="button"
-            onClick={() => setAdminSearchFilter('all')}
-            className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
-              adminSearchFilter === 'all'
-                ? 'bg-crimson-600 text-white font-semibold shadow-xs'
-                : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
-            }`}
-          >
-            All ({localManifest.signups.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setAdminSearchFilter('unassigned')}
-            className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
-              adminSearchFilter === 'unassigned'
-                ? 'bg-crimson-600 text-white font-semibold shadow-xs'
-                : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
-            }`}
-          >
-            Unassigned ({unassigned.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setAdminSearchFilter('assigned')}
-            className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
-              adminSearchFilter === 'assigned'
-                ? 'bg-crimson-600 text-white font-semibold shadow-xs'
-                : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
-            }`}
-          >
-            Assigned ({localManifest.signups.length - unassigned.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setAdminSearchFilter('reps')}
-            className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
-              adminSearchFilter === 'reps'
-                ? 'bg-amber-600 text-white font-semibold shadow-xs'
-                : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
-            }`}
-          >
-            ⭐ Official Reps
-          </button>
-          <button
-            type="button"
-            onClick={() => setAdminSearchFilter('ushers')}
-            className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
-              adminSearchFilter === 'ushers'
-                ? 'bg-amber-600 text-white font-semibold shadow-xs'
-                : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
-            }`}
-          >
-            Ushers
-          </button>
-          {localManifest.signups.some((p) => p.memberType === 'FTV') && (
-            <button
-              type="button"
-              onClick={() => setAdminSearchFilter('ftv')}
-              className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
-                adminSearchFilter === 'ftv'
-                  ? 'bg-emerald-600 text-white font-semibold shadow-xs'
-                  : 'bg-card-2 text-emerald-400 hover:bg-card-2/80 hover:text-emerald-300'
-              }`}
-            >
-              🌟 FTV ({localManifest.signups.filter((p) => p.memberType === 'FTV').length})
-            </button>
-          )}
-          {localManifest.signups.some((p) => p.memberType === 'V') && (
-            <button
-              type="button"
-              onClick={() => setAdminSearchFilter('visitors')}
-              className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
-                adminSearchFilter === 'visitors'
-                  ? 'bg-purple-600 text-white font-semibold shadow-xs'
-                  : 'bg-card-2 text-purple-400 hover:bg-card-2/80 hover:text-purple-300'
-              }`}
-            >
-              👥 Visitors ({localManifest.signups.filter((p) => p.memberType === 'V').length})
-            </button>
-          )}
-        </div>
+        {(() => {
+          const vehMap = new Map<string, Vehicle>();
+          for (const v of localManifest.vehicles || []) {
+            vehMap.set(v.id, v);
+          }
+          const allSignups = localManifest.signups || [];
+          const presentCount = allSignups.filter((p) => {
+            const v = p.assignedTo ? vehMap.get(p.assignedTo) : null;
+            return v?.draftState?.presentIds?.includes(p.id) || (v?.submitted && p.present);
+          }).length;
+
+          const absentCount = allSignups.filter((p) => {
+            const v = p.assignedTo ? vehMap.get(p.assignedTo) : null;
+            return v?.draftState?.absentIds?.includes(p.id) || (v?.submitted && !p.present && !v?.draftState?.presentIds?.includes(p.id));
+          }).length;
+
+          const sponsoredCount = allSignups.filter((p) => {
+            const v = p.assignedTo ? vehMap.get(p.assignedTo) : null;
+            return p.sponsored || v?.draftState?.sponsoredIds?.includes(p.id);
+          }).length;
+
+          const notesCount = allSignups.filter((p) => {
+            const v = p.assignedTo ? vehMap.get(p.assignedTo) : null;
+            return Boolean((v?.draftState?.notes?.[p.id] || p.sponsorNote || '').trim());
+          }).length;
+
+          return (
+            <div className="flex flex-wrap gap-1.5 mb-3 text-xs">
+              <button
+                type="button"
+                onClick={() => setAdminSearchFilter('all')}
+                className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+                  adminSearchFilter === 'all'
+                    ? 'bg-crimson-600 text-white font-semibold shadow-xs'
+                    : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
+                }`}
+              >
+                All ({allSignups.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setAdminSearchFilter('unassigned')}
+                className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+                  adminSearchFilter === 'unassigned'
+                    ? 'bg-crimson-600 text-white font-semibold shadow-xs'
+                    : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
+                }`}
+              >
+                Unassigned ({unassigned.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setAdminSearchFilter('assigned')}
+                className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+                  adminSearchFilter === 'assigned'
+                    ? 'bg-crimson-600 text-white font-semibold shadow-xs'
+                    : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
+                }`}
+              >
+                Assigned ({allSignups.length - unassigned.length})
+              </button>
+              {presentCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setAdminSearchFilter('present')}
+                  className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+                    adminSearchFilter === 'present'
+                      ? 'bg-success text-black font-semibold shadow-xs'
+                      : 'bg-card-2 text-success-light hover:bg-card-2/80'
+                  }`}
+                >
+                  ✓ Present ({presentCount})
+                </button>
+              )}
+              {absentCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setAdminSearchFilter('absent')}
+                  className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+                    adminSearchFilter === 'absent'
+                      ? 'bg-crimson-600 text-white font-semibold shadow-xs'
+                      : 'bg-card-2 text-crimson-300 hover:bg-card-2/80'
+                  }`}
+                >
+                  ✗ Absent ({absentCount})
+                </button>
+              )}
+              {sponsoredCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setAdminSearchFilter('sponsored')}
+                  className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+                    adminSearchFilter === 'sponsored'
+                      ? 'bg-amber-600 text-white font-semibold shadow-xs'
+                      : 'bg-card-2 text-amber-300 hover:bg-card-2/80'
+                  }`}
+                >
+                  ★ Sponsored ({sponsoredCount})
+                </button>
+              )}
+              {notesCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setAdminSearchFilter('notes')}
+                  className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+                    adminSearchFilter === 'notes'
+                      ? 'bg-sky-600 text-white font-semibold shadow-xs'
+                      : 'bg-card-2 text-sky-300 hover:bg-card-2/80'
+                  }`}
+                >
+                  💬 Notes ({notesCount})
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setAdminSearchFilter('reps')}
+                className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+                  adminSearchFilter === 'reps'
+                    ? 'bg-amber-600 text-white font-semibold shadow-xs'
+                    : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
+                }`}
+              >
+                ⭐ Official Reps
+              </button>
+              <button
+                type="button"
+                onClick={() => setAdminSearchFilter('ushers')}
+                className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+                  adminSearchFilter === 'ushers'
+                    ? 'bg-amber-600 text-white font-semibold shadow-xs'
+                    : 'bg-card-2 text-muted hover:bg-card-2/80 hover:text-ink'
+                }`}
+              >
+                Ushers
+              </button>
+              {allSignups.some((p) => p.memberType === 'FTV') && (
+                <button
+                  type="button"
+                  onClick={() => setAdminSearchFilter('ftv')}
+                  className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+                    adminSearchFilter === 'ftv'
+                      ? 'bg-emerald-600 text-white font-semibold shadow-xs'
+                      : 'bg-card-2 text-emerald-400 hover:bg-card-2/80 hover:text-emerald-300'
+                  }`}
+                >
+                  🌟 FTV ({allSignups.filter((p) => p.memberType === 'FTV').length})
+                </button>
+              )}
+              {allSignups.some((p) => p.memberType === 'V') && (
+                <button
+                  type="button"
+                  onClick={() => setAdminSearchFilter('visitors')}
+                  className={`rounded-lg px-2.5 py-1 font-medium transition-all ${
+                    adminSearchFilter === 'visitors'
+                      ? 'bg-purple-600 text-white font-semibold shadow-xs'
+                      : 'bg-card-2 text-purple-400 hover:bg-card-2/80 hover:text-purple-300'
+                  }`}
+                >
+                  👥 Visitors ({allSignups.filter((p) => p.memberType === 'V').length})
+                </button>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Live Search Results List */}
         {(adminSearchQuery.trim() !== '' || adminSearchFilter !== 'all') && (
@@ -1015,6 +1111,17 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                 const isOfficialRep = matchRiderToOfficialRep(p);
                 const isActiveRep = assignedVehicle ? isPassengerRepOfVehicle(p, assignedVehicle.repName) : false;
                 const targetVeh = searchMoveTarget[p.id] !== undefined ? searchMoveTarget[p.id] : '';
+
+                const isPresent = Boolean(
+                  assignedVehicle?.draftState?.presentIds?.includes(p.id) ||
+                  (assignedVehicle?.submitted && p.present)
+                );
+                const isAbsent = Boolean(
+                  assignedVehicle?.draftState?.absentIds?.includes(p.id) ||
+                  (assignedVehicle?.submitted && !p.present && !assignedVehicle?.draftState?.presentIds?.includes(p.id))
+                );
+                const isSponsored = Boolean(p.sponsored || assignedVehicle?.draftState?.sponsoredIds?.includes(p.id));
+                const riderNote = (assignedVehicle?.draftState?.notes?.[p.id] || p.sponsorNote || '').trim();
 
                 return (
                   <div
@@ -1048,6 +1155,24 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                             </span>
                           ) : null;
                         })()}
+                        {isPresent && (
+                          <span className="badge bg-success/20 text-success-light font-bold text-[10px] border border-success/30">
+                            ✓ Present
+                          </span>
+                        )}
+                        {isAbsent && (
+                          <span className="badge bg-crimson-500/20 text-crimson-300 font-bold text-[10px] border border-crimson-500/40">
+                            ✗ Absent
+                          </span>
+                        )}
+                        {isSponsored && (
+                          <span
+                            className="badge bg-amber-500/20 text-amber-300 font-bold text-[10px] border border-amber-500/40"
+                            title={riderNote ? `Sponsored (${riderNote})` : 'Sponsored by vehicle rep'}
+                          >
+                            ★ Sponsored{riderNote ? ` · ${riderNote}` : ''}
+                          </span>
+                        )}
                       </div>
                       <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted flex-wrap">
                         <span className="flex items-center gap-1">
@@ -1066,6 +1191,12 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                           )}
                         </span>
                       </div>
+                      {riderNote && !isSponsored && (
+                        <div className="mt-1 text-[11px] text-sky-300">
+                          <span className="font-semibold text-sky-400">Note: </span>
+                          "{riderNote}"
+                        </div>
+                      )}
                     </div>
 
                     {/* Quick Move Action */}
@@ -1300,9 +1431,22 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
               : (selectedRepObj ? selectedRepObj.rep.structure : (detectedOfficialRep ? getRepStructure(detectedOfficialRep) : null));
             const groups = ridersGroupedByHub(vehicle);
 
+            // Attendance & Sponsorship metrics
+            const vPresent = vehicle.submitted
+              ? riders.filter((r) => r.present).length
+              : riders.filter((r) => vehicle.draftState?.presentIds?.includes(r.id)).length;
+            const vAbsent = vehicle.submitted
+              ? riders.filter((r) => !r.present).length
+              : riders.filter((r) => vehicle.draftState?.absentIds?.includes(r.id)).length;
+            const vSponsored = riders.filter((r) => r.sponsored || vehicle.draftState?.sponsoredIds?.includes(r.id)).length;
+            const vUnpaid = riders.filter((r) => r.didNotPay || vehicle.draftState?.unpaidIds?.includes(r.id)).length;
+            const vRiderNotesCount = vehicle.draftState?.notes ? Object.keys(vehicle.draftState.notes).length : 0;
+            const vGeneralNote = vehicle.generalNotes || vehicle.draftState?.generalNotes || '';
+
             return (
               <div
                 key={vehicle.id}
+                id={`vehicle-card-${vehicle.id}`}
                 className={`overflow-hidden rounded-xl border transition-all hover:border-crimson-500/30 ${
                   vehicle.submitted ? 'border-success/30 bg-success/5' : 'border-line bg-card-2'
                 }`}
@@ -1317,7 +1461,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                     }`}>
                       <Icon className="h-5 w-5" />
                     </div>
-                    <div>
+                    <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-semibold text-ink">{vehicle.name}</span>
                         {vehicle.submitted && (
@@ -1334,12 +1478,45 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                             {vehicle.repName === detectedOfficialRep ? 'Rep:' : 'Official Rep:'} {detectedOfficialRep} {repStruct ? `(${repStruct})` : ''}
                           </span>
                         ) : null}
+
+                        {/* Live Dispatch Attendance Badges */}
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="badge bg-success/15 text-success-light text-[10px] font-semibold border border-success/20">
+                            {vPresent}/{riders.length} Present
+                          </span>
+                          {vAbsent > 0 && (
+                            <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px] font-semibold border border-crimson-500/20">
+                              {vAbsent} Absent
+                            </span>
+                          )}
+                          {vSponsored > 0 && (
+                            <span className="badge bg-amber-500/15 text-amber-300 text-[10px] font-semibold border border-amber-500/20">
+                              ★ {vSponsored} Sponsored
+                            </span>
+                          )}
+                          {vUnpaid > 0 && (
+                            <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px] font-semibold border border-crimson-500/20">
+                              ⚠️ {vUnpaid} Didn't Pay
+                            </span>
+                          )}
+                          {vRiderNotesCount > 0 && (
+                            <span className="badge bg-sky-500/15 text-sky-300 text-[10px] font-semibold border border-sky-500/20">
+                              💬 {vRiderNotesCount} Note{vRiderNotesCount !== 1 ? 's' : ''}
+                            </span>
+                          )}
+                        </div>
                       </div>
-                      <div className="text-xs text-muted">
+                      <div className="text-xs text-muted mt-0.5">
                         {vehicle.type} · {riders.length} passenger{riders.length !== 1 ? 's' : ''}
                         {vehicle.repName ? ` · Rep: ${vehicle.repName}${repStruct ? ` (${repStruct})` : ''}` : ''}
                         {vehicle.licensePlate ? ` · Plate: ${vehicle.licensePlate}` : ''}
                       </div>
+                      {vGeneralNote && !isExpanded && (
+                        <div className="mt-1 text-[11px] text-sky-300 line-clamp-1 flex items-center gap-1">
+                          <StickyNote className="h-3 w-3 text-sky-400 shrink-0" />
+                          <span>Note: "{vGeneralNote}"</span>
+                        </div>
+                      )}
                     </div>
                   </button>
                   <div className="flex items-center gap-2">
@@ -1364,6 +1541,19 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
 
                 {isExpanded && (
                   <div className="border-t border-line bg-bg/40 p-4 animate-fade-in">
+                    {/* General / Dispatch note banner */}
+                    {vGeneralNote && (
+                      <div className="mb-4 rounded-lg border border-sky-500/30 bg-sky-500/10 p-3 text-xs text-sky-200 shadow-xs">
+                        <div className="flex items-center gap-1.5 font-bold text-[10px] text-sky-300 uppercase tracking-wider">
+                          <StickyNote className="h-3.5 w-3.5" />
+                          <span>Vehicle Dispatch Note</span>
+                        </div>
+                        <p className="mt-1 font-medium text-ink">
+                          "{vGeneralNote}"
+                        </p>
+                      </div>
+                    )}
+
                     {/* Rep assignment & Smart Auto-Allocation */}
                     <div className="mb-4 space-y-2">
                       <div className="flex items-center gap-2">
@@ -1542,20 +1732,40 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                                   const pOfficial = matchRiderToOfficialRep(p);
                                   const isVehicleRep = isPassengerRepOfVehicle(p, vehicle.repName);
 
+                                  const isPresent = Boolean(
+                                    vehicle.draftState?.presentIds?.includes(p.id) ||
+                                    (vehicle.submitted && p.present)
+                                  );
+                                  const isAbsent = Boolean(
+                                    vehicle.draftState?.absentIds?.includes(p.id) ||
+                                    (vehicle.submitted && !p.present && !vehicle.draftState?.presentIds?.includes(p.id))
+                                  );
+                                  const isSponsored = Boolean(
+                                    p.sponsored ||
+                                    vehicle.draftState?.sponsoredIds?.includes(p.id)
+                                  );
+                                  const isUnpaid = Boolean(
+                                    p.didNotPay ||
+                                    vehicle.draftState?.unpaidIds?.includes(p.id)
+                                  );
+                                  const riderNote = (vehicle.draftState?.notes?.[p.id] || p.unpaidNote || p.sponsorNote || '').trim();
+
                                   return (
                                     <div
                                       key={p.id}
                                       className={`flex items-center justify-between gap-2 rounded-lg px-3 py-2 transition-all cursor-pointer ${
                                         isVehicleRep
                                           ? 'border border-crimson-500/40 bg-crimson-500/10'
-                                          : p.present
-                                          ? 'bg-success/10'
+                                          : isPresent
+                                          ? 'bg-success/10 border border-success/20'
+                                          : isAbsent
+                                          ? 'bg-crimson-500/10 border border-crimson-500/20'
                                           : 'bg-card-2/80'
                                       } ${isRepHighlight ? 'ring-2 ring-amber-400 shadow-md' : ''}`}
                                       onClick={() => setHighlightRep(highlightRep === p.fullName ? null : p.fullName)}
                                     >
                                       <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0">
-                                        <span className={`text-sm font-medium ${p.present ? 'text-success-light' : 'text-ink'}`}>
+                                        <span className={`text-sm font-medium ${isPresent ? 'text-success-light' : isAbsent ? 'text-crimson-300 line-through opacity-80' : 'text-ink'}`}>
                                           {p.fullName}
                                         </span>
 
@@ -1597,11 +1807,36 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                                           ) : null;
                                         })()}
                                         <span className="badge bg-bg/60 text-muted text-[10px]">{p.stop}</span>
-                                        {p.present && (
-                                          <span className="badge bg-success/15 text-success-light text-[10px]">Present</span>
+                                        {isPresent && (
+                                          <span className="badge bg-success/20 text-success-light font-bold text-[10px] border border-success/30">
+                                            ✓ Present
+                                          </span>
                                         )}
-                                        {p.sponsored && (
-                                          <span className="badge bg-warning/15 text-warning text-[10px]">Sponsored</span>
+                                        {isAbsent && (
+                                          <span className="badge bg-crimson-500/20 text-crimson-300 font-bold text-[10px] border border-crimson-500/40">
+                                            ✗ Absent
+                                          </span>
+                                        )}
+                                        {isSponsored && (
+                                          <span
+                                            className="badge bg-amber-500/20 text-amber-300 font-bold text-[10px] border border-amber-500/40"
+                                            title={riderNote ? `Sponsored (${riderNote})` : 'Sponsored by vehicle rep'}
+                                          >
+                                            ★ Sponsored{riderNote ? ` · ${riderNote}` : ''}
+                                          </span>
+                                        )}
+                                        {isUnpaid && (
+                                          <span
+                                            className="badge bg-crimson-500/20 text-crimson-300 font-bold text-[10px] border border-crimson-500/40"
+                                            title={riderNote ? `Didn't Pay (${riderNote})` : "Didn't Pay"}
+                                          >
+                                            ⚠️ Didn't Pay{riderNote && !isSponsored ? ` · ${riderNote}` : ''}
+                                          </span>
+                                        )}
+                                        {riderNote && !isSponsored && !isUnpaid && (
+                                          <span className="badge bg-sky-500/20 text-sky-300 text-[10px] border border-sky-500/30" title={riderNote}>
+                                            💬 "{riderNote}"
+                                          </span>
                                         )}
                                       </div>
 
@@ -1690,33 +1925,124 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
             <div className="divide-y divide-line/60 border-t border-success/20 animate-fade-in">
               {submittedVehicles.map((v) => {
                 const vRiders = riderPassengers(v);
-                const vPresent = vRiders.filter((r) => r.present).length;
+                const presentRiders = vRiders.filter((r) => r.present);
+                const absentRiders = vRiders.filter((r) => !r.present);
+                const sponsoredRiders = vRiders.filter((r) => r.sponsored || v.draftState?.sponsoredIds?.includes(r.id));
+                const unpaidRiders = vRiders.filter((r) => r.didNotPay || v.draftState?.unpaidIds?.includes(r.id));
+                const draftNotes = v.draftState?.notes || {};
+                const generalNote = v.generalNotes || v.draftState?.generalNotes;
+
                 return (
-                  <div key={v.id} className="p-4">
-                    <div className="flex items-center gap-3">
-                      <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${
-                        v.type === 'Bus' ? 'bg-crimson-500/15 text-crimson-400' : 'bg-success/15 text-success-light'
-                      }`}>
-                        {v.type === 'Bus' ? <Bus className="h-4 w-4" /> : <Car className="h-4 w-4" />}
-                      </div>
-                      <div className="flex-1">
-                        <div className="text-sm font-semibold text-ink">{v.name}</div>
-                        <div className="text-xs text-muted">
-                          {'Rep: ' + (v.repName || v.submittedBy || '—')}
-                          {v.licensePlate ? ' · Plate: ' + v.licensePlate : ''}
-                          {v.submittedAt ? ' · ' + new Date(v.submittedAt).toLocaleString('en-ZA', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' }) : ''}
+                  <div key={v.id} className="p-4 space-y-3">
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <div className="flex items-center gap-3">
+                        <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${
+                          v.type === 'Bus' ? 'bg-crimson-500/15 text-crimson-400' : 'bg-success/15 text-success-light'
+                        }`}>
+                          {v.type === 'Bus' ? <Bus className="h-4 w-4" /> : <Car className="h-4 w-4" />}
+                        </div>
+                        <div>
+                          <div className="text-sm font-semibold text-ink flex items-center gap-2">
+                            <span>{v.name}</span>
+                            <span className="badge bg-success/20 text-success-light text-[10px]">Submitted</span>
+                          </div>
+                          <div className="text-xs text-muted">
+                            {'Rep: ' + (v.repName || v.submittedBy || '—')}
+                            {v.coReps && v.coReps.length > 0 ? ` · Co-Reps: ${v.coReps.join(', ')}` : ''}
+                            {v.licensePlate ? ' · Plate: ' + v.licensePlate : ''}
+                            {v.submittedAt ? ' · ' + new Date(v.submittedAt).toLocaleString('en-ZA', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' }) : ''}
+                          </div>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <div className="font-display text-sm font-bold text-success-light">{vPresent}/{vRiders.length}</div>
-                        <div className="text-[10px] text-muted">present</div>
+                      <div className="flex items-center gap-2 text-xs flex-wrap">
+                        <span className="badge bg-success/15 text-success-light font-bold">
+                          {presentRiders.length}/{vRiders.length} Present
+                        </span>
+                        {absentRiders.length > 0 && (
+                          <span className="badge bg-crimson-500/15 text-crimson-300 font-bold">
+                            {absentRiders.length} Absent
+                          </span>
+                        )}
+                        {sponsoredRiders.length > 0 && (
+                          <span className="badge bg-amber-500/15 text-amber-300 font-bold">
+                            ★ {sponsoredRiders.length} Sponsored
+                          </span>
+                        )}
+                        {unpaidRiders.length > 0 && (
+                          <span className="badge bg-crimson-500/15 text-crimson-300 font-bold">
+                            ⚠️ {unpaidRiders.length} Didn't Pay
+                          </span>
+                        )}
                       </div>
                     </div>
-                    {v.generalNotes && (
-                      <div className="mt-2 rounded-lg bg-card-2/60 px-3 py-2 text-xs text-muted">
-                        <span className="font-semibold text-ink">Notes: </span>{v.generalNotes}
+
+                    {generalNote && (
+                      <div className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-200">
+                        <span className="font-bold text-sky-300 uppercase tracking-wide text-[10px]">Dispatch Note: </span>
+                        "{generalNote}"
                       </div>
                     )}
+
+                    {/* Absent riders callout if any */}
+                    {absentRiders.length > 0 && (
+                      <div className="rounded-lg border border-crimson-500/30 bg-crimson-500/10 p-2.5">
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-crimson-300 mb-1.5 flex items-center gap-1">
+                          <UserX className="h-3.5 w-3.5" />
+                          <span>Absent Passengers ({absentRiders.length})</span>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {absentRiders.map((r) => {
+                            const rNote = draftNotes[r.id] || r.sponsorNote;
+                            return (
+                              <span
+                                key={r.id}
+                                className="inline-flex items-center gap-1 rounded bg-bg/80 border border-crimson-500/30 px-2 py-0.5 text-xs text-crimson-300"
+                                title={rNote ? `Note: ${rNote}` : undefined}
+                              >
+                                <span className="line-through">{r.fullName}</span>
+                                <span className="text-[10px] text-muted">({r.stop})</span>
+                                {rNote && <span className="text-[10px] text-sky-300">💬</span>}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Present & Sponsored breakdown */}
+                    <div className="text-xs space-y-1">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1 flex items-center gap-1">
+                        <UserCheck className="h-3.5 w-3.5 text-success" />
+                        <span>Present Passengers ({presentRiders.length})</span>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {presentRiders.map((r) => {
+                          const isSponsored = r.sponsored || v.draftState?.sponsoredIds?.includes(r.id);
+                          const isUnpaid = r.didNotPay || v.draftState?.unpaidIds?.includes(r.id);
+                          const rNote = draftNotes[r.id] || r.unpaidNote || r.sponsorNote;
+                          return (
+                            <span
+                              key={r.id}
+                              className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs border ${
+                                isSponsored
+                                  ? 'bg-amber-500/15 border-amber-500/30 text-amber-200'
+                                  : isUnpaid
+                                  ? 'bg-crimson-500/15 border-crimson-500/30 text-crimson-200'
+                                  : 'bg-card border-line text-ink'
+                              }`}
+                              title={rNote ? `Note: ${rNote}` : undefined}
+                            >
+                              <span>{r.fullName}</span>
+                              {r.structure && <span className="text-[10px] opacity-75 font-mono">({r.structure})</span>}
+                              <span className="text-[10px] text-muted">· {r.stop}</span>
+                              {isSponsored && <span className="text-[10px] font-bold text-amber-300">★ Sponsored</span>}
+                              {isUnpaid && <span className="text-[10px] font-bold text-crimson-300">⚠️ Didn't Pay</span>}
+                              {rNote && <span className="text-[10px] text-sky-300">💬 "{rNote}"</span>}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
                 );
               })}
