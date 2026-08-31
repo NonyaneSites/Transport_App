@@ -8,11 +8,34 @@ import { Footer } from '@/components/Footer';
 import {
   listLedgerEntries, deleteLedgerEntry, downloadLedgerExcel,
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
-  recordPartialPayment, addManualLedgerEntry,
+  recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
 } from '@/lib/ledger';
 import { downloadCancellationDebtPdf } from '@/lib/pdfExport';
 import { naturalCompare } from '@/lib/sort';
+
+function HighlightMatch({ text, query }: { text: string; query: string }) {
+  const q = query.trim();
+  if (!q || !text) return <span>{text}</span>;
+
+  const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(`(${escaped})`, 'gi');
+  const parts = text.split(regex);
+
+  return (
+    <span>
+      {parts.map((part, i) =>
+        part.toLowerCase() === q.toLowerCase() ? (
+          <mark key={i} className="bg-crimson-500/30 text-crimson-200 font-bold px-0.5 rounded">
+            {part}
+          </mark>
+        ) : (
+          <span key={i}>{part}</span>
+        )
+      )}
+    </span>
+  );
+}
 
 export function LedgerPage() {
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
@@ -72,15 +95,25 @@ export function LedgerPage() {
   }, [entries]);
 
   const filtered = useMemo(() => {
-    const q = search.toLowerCase().trim();
+    const q = search.trim();
+    if (!q && !structureFilter) return entries;
+
     return entries.filter((e) => {
       if (structureFilter && e.structure !== structureFilter) return false;
       if (!q) return true;
-      return (
-        e.passenger_name.toLowerCase().includes(q) ||
-        e.structure.toLowerCase().includes(q) ||
-        (e.general_notes || '').toLowerCase().includes(q)
+      const { matched } = evaluateLedgerSearch(
+        {
+          passenger_name: e.passenger_name,
+          structure: e.structure,
+          general_notes: e.general_notes,
+          sponsor_note: e.sponsor_note,
+          date: e.date,
+          service: e.service,
+          rep_name: e.rep_name,
+        },
+        q
       );
+      return matched;
     });
   }, [entries, search, structureFilter]);
 
@@ -88,7 +121,46 @@ export function LedgerPage() {
 
   // Shared with the download (see aggregateLedgerEntries in lib/ledger) so
   // the web view and the exported "SZ Cancellation List" never drift apart.
-  const groupedByStructure = useMemo(() => aggregateLedgerEntries(filtered), [filtered]);
+  const groupedByStructure = useMemo(() => {
+    const groups = aggregateLedgerEntries(filtered);
+    const q = search.trim();
+    if (!q) return groups;
+
+    // When searching, sort the aggregated rows within each structure by search score
+    // so prefix matches (e.g. names starting with "amo") appear at the top
+    return groups.map((g) => {
+      const scoreMap = new Map<string, number>();
+      for (const row of g.rows) {
+        const { score } = evaluateLedgerSearch(
+          {
+            name: row.name,
+            structure: row.structure,
+            notes: row.notes,
+            formattedDateList: row.formattedDateList,
+            serviceCodes: row.serviceCodes,
+            repName: row.repName,
+          },
+          q
+        );
+        scoreMap.set(row.key, score);
+      }
+
+      const sortRows = (rows: AggregatedLedgerRow[]) =>
+        [...rows].sort((a, b) => {
+          const scoreA = scoreMap.get(a.key) ?? 0;
+          const scoreB = scoreMap.get(b.key) ?? 0;
+          if (scoreB !== scoreA) return scoreB - scoreA;
+          return b.amount - a.amount;
+        });
+
+      return {
+        ...g,
+        rows: sortRows(g.rows),
+        cancellationRows: sortRows(g.cancellationRows),
+        sponsorshipRows: sortRows(g.sponsorshipRows),
+      };
+    });
+  }, [filtered, search]);
 
   async function handleImportFile(file: File) {
     setImporting(true);
@@ -384,9 +456,19 @@ export function LedgerPage() {
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search by name, structure, or rep…"
-                  className="input-field pl-10"
+                  placeholder="Search by first name, surname, or structure (e.g. 'amo', 'amo nhlabathi')…"
+                  className="input-field pl-10 pr-9"
                 />
+                {search && (
+                  <button
+                    type="button"
+                    onClick={() => setSearch('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-ink hover:bg-card-2"
+                    title="Clear search"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                )}
               </div>
               <div className="relative sm:w-56">
                 <Filter className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
@@ -403,10 +485,25 @@ export function LedgerPage() {
               </div>
             </div>
 
+            {search.trim() && (
+              <div className="mb-3 flex items-center justify-between rounded-lg border border-crimson-500/30 bg-crimson-500/10 px-3 py-1.5 text-xs text-crimson-300">
+                <span>
+                  Filtering by: <strong>"{search.trim()}"</strong> · Found <strong>{filtered.length}</strong> debtor record{filtered.length === 1 ? '' : 's'} across <strong>{groupedByStructure.length}</strong> structure{groupedByStructure.length === 1 ? '' : 's'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSearch('')}
+                  className="text-xs font-semibold underline hover:text-crimson-200"
+                >
+                  Clear filter
+                </button>
+              </div>
+            )}
+
             {/* Expand / Collapse All Controls */}
             <div className="mb-3 flex items-center justify-between px-1 text-xs text-muted">
               <span>
-                {groupedByStructure.length} structure{groupedByStructure.length === 1 ? '' : 's'} · {openStructures.size} open
+                {groupedByStructure.length} structure{groupedByStructure.length === 1 ? '' : 's'} · {search.trim() ? `${groupedByStructure.length} matching` : `${openStructures.size} open`}
               </span>
               <div className="flex items-center gap-2">
                 <button
@@ -429,7 +526,7 @@ export function LedgerPage() {
             {/* Grouped by structure — strict alphanumeric order (S1, S2, S9, S13) */}
             <div className="space-y-4">
               {groupedByStructure.map(({ structure, rows, cancellationRows, sponsorshipRows, cancellationDebt, sponsorshipDebt, totalDebt: structDebt }) => {
-                const isOpen = openStructures.has(structure);
+                const isOpen = Boolean(search.trim()) || openStructures.has(structure);
                 const structureLabel = structure === 'No Structure' ? structure : `Structure ${structure}`;
 
                 return (
@@ -494,7 +591,9 @@ export function LedgerPage() {
                                       </td>
                                       <td className="px-3.5 py-2.5 align-top">
                                         <div className="flex flex-wrap items-center gap-1.5">
-                                          <span className="font-semibold text-ink">{row.name}</span>
+                                          <span className="font-semibold text-ink">
+                                            <HighlightMatch text={row.name} query={search} />
+                                          </span>
                                           {row.serviceCodes.map((code) => (
                                             <ServiceBadge key={code} code={code} />
                                           ))}
@@ -585,7 +684,9 @@ export function LedgerPage() {
                                       </td>
                                       <td className="px-3.5 py-2.5 align-top">
                                         <div className="flex flex-wrap items-center gap-1.5">
-                                          <span className="font-semibold text-ink">{row.name}</span>
+                                          <span className="font-semibold text-ink">
+                                            <HighlightMatch text={row.name} query={search} />
+                                          </span>
                                           {row.serviceCodes.map((code) => (
                                             <ServiceBadge key={code} code={code} />
                                           ))}

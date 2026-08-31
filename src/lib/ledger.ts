@@ -91,6 +91,15 @@ export function parseStructureCell(raw: string): { structure: string; repName: s
   const str = (raw || '').trim().replace(/\r?\n/g, ' ');
   if (!str) return { structure: '', repName: '' };
 
+  // FTV or FTV 20 structures e.g. "FTV 20", "FTV-20", "FTV 20 - Rep", "FTV"
+  const ftvMatch = str.match(/^(FTV\s*20|FTV20|FTV)\s*[-–—:]?\s*(.*)$/i);
+  if (ftvMatch) {
+    return {
+      structure: 'FTV 20',
+      repName: ftvMatch[2].trim(),
+    };
+  }
+
   // E.g. "S1 - Nthabiseng, Nthabeleng", "S1 – Thuto", "S14 – Kgolaganyo/Nicole", "S1: Name"
   const m = str.match(/^(S\d+|YZ\d+|Unidentified|No Structure)\s*[-–—:]\s*(.*)$/i);
   if (m) {
@@ -145,7 +154,13 @@ export function extractNameAndService(
     };
   }
 
-  const isFTV = /\bFTV\b/i.test(raw) || (!!explicitService && /\bFTV\b/i.test(explicitService));
+  const isFTV =
+    /\bFTV\b/i.test(raw) ||
+    /\bFTV\s*20\b/i.test(raw) ||
+    /\bFTV20\b/i.test(raw) ||
+    /\bR20\b/i.test(raw) ||
+    (!!explicitService && /\bFTV\b/i.test(explicitService));
+
   let serviceCode = explicitService ? extractServiceCode(explicitService) : '';
   const extraNotes = '';
 
@@ -170,7 +185,7 @@ export function extractNameAndService(
   }
 
   // Clean trailing punctuation or empty parens
-  raw = raw.replace(/\bFTV\b/gi, '').trim();
+  raw = raw.replace(/\bFTV\s*20\b|\bFTV20\b|\bFTV\b/gi, '').trim();
   raw = raw.replace(/\(\s*\)/g, '').trim();
   raw = raw.replace(/[(),]+$/, '').trim();
 
@@ -187,6 +202,90 @@ export function extractNameAndService(
     isFTV,
     extraNotes,
   };
+}
+
+/**
+ * Robust search evaluator that provides accurate prefix, full-name, token,
+ * structure, notes, and substring matching with intuitive priority scoring.
+ */
+export function evaluateLedgerSearch(
+  item: {
+    passenger_name?: string;
+    name?: string;
+    structure?: string;
+    service?: string;
+    serviceCodes?: string[];
+    general_notes?: string;
+    sponsor_note?: string;
+    notes?: string;
+    date?: string;
+    formattedDateList?: string;
+    rep_name?: string;
+    repName?: string;
+  },
+  searchQuery: string
+): { matched: boolean; score: number } {
+  const q = searchQuery.trim().toLowerCase();
+  if (!q) return { matched: true, score: 0 };
+
+  const fullName = (item.name || item.passenger_name || '').toLowerCase().trim();
+  const structure = (item.structure || '').toLowerCase().trim();
+  const notes = `${item.general_notes || ''} ${item.sponsor_note || ''} ${item.notes || ''}`.toLowerCase().trim();
+  const dateStr = `${item.date || ''} ${item.formattedDateList || ''}`.toLowerCase().trim();
+  const rep = (item.repName || item.rep_name || '').toLowerCase().trim();
+  const service = `${item.service || ''} ${(item.serviceCodes || []).join(' ')}`.toLowerCase().trim();
+
+  const nameWords = fullName.split(/\s+/).filter(Boolean);
+  const qTokens = q.split(/\s+/).filter(Boolean);
+
+  // 1. Exact full name match (highest possible match)
+  if (fullName === q) {
+    return { matched: true, score: 1000 };
+  }
+
+  // 2. Full name starts with exact query string (e.g. "amo" -> "Amo Nhlabathi", "Amogelang...")
+  if (fullName.startsWith(q)) {
+    return { matched: true, score: 900 };
+  }
+
+  // 3. First name or surname starts with exact query string (e.g. "amo" -> "Nonyane Amo", "Amo Sithole")
+  const wordStartsWithQ = nameWords.some((w) => w.startsWith(q));
+  if (wordStartsWithQ) {
+    return { matched: true, score: 800 };
+  }
+
+  // 4. Multi-token match across name: User typed full/partial name e.g. "amo nhla" or "nhlabathi amo"
+  if (qTokens.length > 1) {
+    const allTokensMatchName = qTokens.every((token) =>
+      nameWords.some((w) => w.startsWith(token) || w.includes(token))
+    );
+    if (allTokensMatchName) {
+      return { matched: true, score: 750 };
+    }
+  }
+
+  // 5. Name contains entire query as continuous substring
+  if (fullName.includes(q)) {
+    return { matched: true, score: 600 };
+  }
+
+  // 6. Any individual word in name contains query substring
+  const wordContainsQ = nameWords.some((w) => w.includes(q));
+  if (wordContainsQ) {
+    return { matched: true, score: 500 };
+  }
+
+  // 7. Multi-token match across all fields (name + structure + notes + dates + service)
+  const combinedAll = `${fullName} ${structure} ${notes} ${dateStr} ${rep} ${service}`;
+  const allTokensInCombined = qTokens.every((token) => combinedAll.includes(token));
+  if (allTokensInCombined) {
+    let score = 300;
+    if (structure.includes(q)) score += 80;
+    if (notes.includes(q)) score += 40;
+    return { matched: true, score };
+  }
+
+  return { matched: false, score: 0 };
 }
 
 export async function insertAbsentees(
@@ -218,22 +317,34 @@ export async function insertAbsentees(
 
   if (absentees.length === 0) return;
 
-  const rows = absentees.map((p) => ({
-    manifest_key: manifestKey,
-    date,
-    service: serviceLabel,
-    passenger_name: p.fullName,
-    stop: p.stop,
-    structure: p.structure || '',
-    vehicle_name: vehicleName,
-    submitted_by: submittedBy,
-    rep_name: repName,
-    license_plate: licensePlate,
-    sponsored: p.sponsored ?? false,
-    sponsor_note: p.sponsorNote ?? '',
-    structure_debt: CANCELLATION_FEE,
-    general_notes: generalNotes,
-  }));
+  const rows = absentees.map((p) => {
+    const structUpper = (p.structure || '').toUpperCase();
+    const noteUpper = (p.sponsorNote || '').toUpperCase();
+    const genUpper = (generalNotes || '').toUpperCase();
+    const isFTV =
+      structUpper.includes('FTV') ||
+      noteUpper.includes('FTV') ||
+      genUpper.includes('FTV') ||
+      p.memberType === 'FTV' ||
+      /\bFTV\b/i.test(p.fullName);
+
+    return {
+      manifest_key: manifestKey,
+      date,
+      service: serviceLabel,
+      passenger_name: p.fullName,
+      stop: p.stop,
+      structure: p.structure || '',
+      vehicle_name: vehicleName,
+      submitted_by: submittedBy,
+      rep_name: repName,
+      license_plate: licensePlate,
+      sponsored: p.sponsored ?? false,
+      sponsor_note: p.sponsorNote ?? '',
+      structure_debt: isFTV ? 20 : CANCELLATION_FEE,
+      general_notes: generalNotes,
+    };
+  });
 
   const { error } = await supabase.from(LEDGER_TABLE).insert(rows);
   if (error) throw error;
@@ -267,7 +378,27 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
       console.warn('[Ledger] Failed to fetch remote ledger, reading local store:', error);
     }
     if (data && Array.isArray(data)) {
-      return data as LedgerEntry[];
+      // Normalize FTV entries so that if an entry is FTV / FTV 20, debt is strictly R20
+      return (data as LedgerEntry[]).map((e) => {
+        const isFTV =
+          (e.structure || '').toUpperCase().includes('FTV') ||
+          (e.general_notes || '').toUpperCase().includes('FTV') ||
+          (e.sponsor_note || '').toUpperCase().includes('FTV') ||
+          (e.service || '').toUpperCase().includes('FTV') ||
+          (e.passenger_name || '').toUpperCase().includes('FTV') ||
+          Number(e.structure_debt) === 20;
+
+        if (isFTV) {
+          const currentDebt = Number(e.structure_debt);
+          // If debt was default 40 or unset, ensure it's R20
+          const debt = (!currentDebt || currentDebt === 40) ? 20 : currentDebt;
+          return {
+            ...e,
+            structure_debt: debt,
+          };
+        }
+        return e;
+      });
     }
   } catch (err) {
     console.warn('[Ledger] Exception fetching ledger entries:', err);

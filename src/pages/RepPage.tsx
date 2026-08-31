@@ -15,6 +15,7 @@ import { vehicleRiders } from '@/lib/manifest';
 import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, type LedgerEntry } from '@/lib/ledger';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
 import { RepStatsCopyCard } from '@/components/RepStatsCopyCard';
+import { CancellationSearchModal } from '@/components/CancellationSearchModal';
 import { getServicePeriod, transferPassengerAcrossServices, crossCheckPassengerAcrossDate } from '@/lib/transfer';
 
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
@@ -99,6 +100,7 @@ export function RepPage() {
   const [collectedCancellationIds, setCollectedCancellationIds] = useState<Set<string>>(new Set());
   const [manualCancellations, setManualCancellations] = useState<ManualCancellation[]>([]);
   const [cancellationSearch, setCancellationSearch] = useState('');
+  const [showCancellationModal, setShowCancellationModal] = useState(false);
 
   // Sync locks & conflict prevention
   const [draftRestored, setDraftRestored] = useState(false);
@@ -431,7 +433,7 @@ export function RepPage() {
     return () => clearTimeout(t);
   }, [selectedVehicle?.draftState, selectedVehicle, riders, applyDraftState]);
 
-  // Load past cancellations on demand when user accesses settlement tools (saves mobile bandwidth)
+  // Load past cancellations so reps have instant live search of church debtors
   const ensurePastCancellationsLoaded = useCallback(async () => {
     if (hasLoadedPastCancellations || loadingPastCancellations) return;
     setLoadingPastCancellations(true);
@@ -445,6 +447,25 @@ export function RepPage() {
       setLoadingPastCancellations(false);
     }
   }, [hasLoadedPastCancellations, loadingPastCancellations]);
+
+  // Eagerly prefetch past cancellation ledger when vehicle is selected
+  useEffect(() => {
+    ensurePastCancellationsLoaded();
+  }, [ensurePastCancellationsLoaded, selectedVehicleId]);
+
+  // Map each rider in the current vehicle to any unpaid debt entries in the cancellation ledger
+  const riderDebtsMap = useMemo(() => {
+    const map: Record<string, LedgerEntry[]> = {};
+    if (!pastCancellations || pastCancellations.length === 0) return map;
+    for (const r of riders) {
+      const norm = r.fullName.trim().toLowerCase();
+      const matches = pastCancellations.filter((e) => e.passenger_name.trim().toLowerCase() === norm);
+      if (matches.length > 0) {
+        map[r.id] = matches;
+      }
+    }
+    return map;
+  }, [riders, pastCancellations]);
 
   // Stats calculation
   const presentCount = useMemo(() => {
@@ -487,7 +508,11 @@ export function RepPage() {
   const sponsoredDeduction = presentSponsoredCount * FARE;
   const baseCash = grossPresentCash - sponsoredDeduction;
   const externalCash = externalSponsees.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
-  const selectedLedgerCash = collectedCancellationIds.size * FARE;
+  const selectedLedgerCash = useMemo(() => {
+    return pastCancellations
+      .filter((e) => collectedCancellationIds.has(e.id))
+      .reduce((sum, e) => sum + (Number(e.structure_debt) || FARE), 0);
+  }, [pastCancellations, collectedCancellationIds]);
   const manualCancellationCash = manualCancellations.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
   const pastCancellationCash = selectedLedgerCash + manualCancellationCash;
   const totalCash = baseCash + externalCash + pastCancellationCash;
@@ -1587,72 +1612,95 @@ export function RepPage() {
                   </div>
                 )}
 
-                {/* Walk-in */}
+                {/* Quick Actions: Walk-in & Settle Cancellation */}
                 {!isSubmitted && (
-                  <div className="card border-line bg-card">
-                    {!walkInOpen ? (
-                      <button
-                        type="button"
-                        onClick={() => setWalkInOpen(true)}
-                        className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-crimson-500/40 bg-crimson-500/5 py-2.5 text-xs font-bold text-crimson-300 hover:bg-crimson-500/10 hover:border-crimson-500 transition-all shadow-sm"
-                      >
-                        <UserPlus className="h-4 w-4 text-crimson-400" />
-                        + Add Walk-In Passenger
-                      </button>
-                    ) : (
-                      <div className="space-y-3 animate-fade-in">
-                        <div className="flex items-center justify-between">
-                          <label className="block text-xs font-bold uppercase tracking-wide text-ink flex items-center gap-1.5">
-                            <UserPlus className="h-3.5 w-3.5 text-crimson-400" />
-                            Add Walk-In to {selectedVehicle.name}
-                          </label>
-                          <button
-                            type="button"
-                            onClick={() => { setWalkInOpen(false); setWalkInName(''); setWalkInStructure(''); }}
-                            className="rounded p-1 text-muted hover:bg-card-2 hover:text-ink text-xs"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                        <div className="flex flex-col gap-2 sm:flex-row">
-                          <input
-                            type="text"
-                            value={walkInName}
-                            onChange={(e) => setWalkInName(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && handleAddWalkIn()}
-                            placeholder="Full name (e.g. Sipho Dlamini)"
-                            className="input-field text-xs font-medium flex-1"
-                            autoFocus
-                          />
-                          <input
-                            type="text"
-                            value={walkInStructure}
-                            onChange={(e) => setWalkInStructure(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && handleAddWalkIn()}
-                            placeholder="Structure / FTV (optional, e.g. S3)"
-                            className="input-field text-xs sm:w-36"
-                          />
-                          <div className="flex gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => handleAddWalkIn()}
-                              disabled={!walkInName.trim() || isCheckingCrossService}
-                              className="btn-crimson px-3 py-2 text-xs font-bold whitespace-nowrap shadow-sm disabled:opacity-40 flex items-center gap-1.5"
-                            >
-                              {isCheckingCrossService && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                              <span>{isCheckingCrossService ? 'Cross-checking…' : 'Add Walk-In'}</span>
-                            </button>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {/* Walk-in card */}
+                    <div className="card border-line bg-card p-3">
+                      {!walkInOpen ? (
+                        <button
+                          type="button"
+                          onClick={() => setWalkInOpen(true)}
+                          className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-crimson-500/40 bg-crimson-500/5 py-2.5 text-xs font-bold text-crimson-300 hover:bg-crimson-500/10 hover:border-crimson-500 transition-all shadow-sm"
+                        >
+                          <UserPlus className="h-4 w-4 text-crimson-400" />
+                          + Add Walk-In Passenger
+                        </button>
+                      ) : (
+                        <div className="space-y-3 animate-fade-in">
+                          <div className="flex items-center justify-between">
+                            <label className="block text-xs font-bold uppercase tracking-wide text-ink flex items-center gap-1.5">
+                              <UserPlus className="h-3.5 w-3.5 text-crimson-400" />
+                              Add Walk-In to {selectedVehicle.name}
+                            </label>
                             <button
                               type="button"
                               onClick={() => { setWalkInOpen(false); setWalkInName(''); setWalkInStructure(''); }}
-                              className="btn-ghost px-3 py-2 text-xs"
+                              className="rounded p-1 text-muted hover:bg-card-2 hover:text-ink text-xs"
                             >
                               Cancel
                             </button>
                           </div>
+                          <div className="flex flex-col gap-2">
+                            <input
+                              type="text"
+                              value={walkInName}
+                              onChange={(e) => setWalkInName(e.target.value)}
+                              onKeyDown={(e) => e.key === 'Enter' && handleAddWalkIn()}
+                              placeholder="Full name (e.g. Sipho Dlamini)"
+                              className="input-field text-xs font-medium"
+                              autoFocus
+                            />
+                            <div className="flex gap-2">
+                              <input
+                                type="text"
+                                value={walkInStructure}
+                                onChange={(e) => setWalkInStructure(e.target.value)}
+                                onKeyDown={(e) => e.key === 'Enter' && handleAddWalkIn()}
+                                placeholder="Structure (e.g. S3)"
+                                className="input-field text-xs flex-1 uppercase"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => handleAddWalkIn()}
+                                disabled={!walkInName.trim() || isCheckingCrossService}
+                                className="btn-crimson px-3 py-2 text-xs font-bold whitespace-nowrap shadow-sm disabled:opacity-40 flex items-center gap-1.5"
+                              >
+                                {isCheckingCrossService && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                                <span>{isCheckingCrossService ? 'Checking…' : 'Add'}</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => { setWalkInOpen(false); setWalkInName(''); setWalkInStructure(''); }}
+                                className="btn-ghost px-2.5 py-2 text-xs"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
+                    </div>
+
+                    {/* Find & Settle Cancellation Button */}
+                    <div className="card border-line bg-card p-3 flex flex-col justify-center">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          ensurePastCancellationsLoaded();
+                          setShowCancellationModal(true);
+                        }}
+                        className="flex w-full items-center justify-center gap-2 rounded-lg border border-line bg-card-2 py-2.5 px-3 text-xs font-bold text-ink hover:border-crimson-500/50 hover:bg-card-2/80 transition-all shadow-sm"
+                      >
+                        <Banknote className="h-4 w-4 text-emerald-400" />
+                        <span className="flex-1 text-left sm:text-center">Find & Settle Cancellation</span>
+                        {(collectedCancellationIds.size > 0 || manualCancellations.length > 0) && (
+                          <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300 border border-emerald-500/40">
+                            +{collectedCancellationIds.size + manualCancellations.length} (+R{pastCancellationCash})
+                          </span>
+                        )}
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -1825,6 +1873,9 @@ export function RepPage() {
                     unpaidIds={unpaidIds}
                     notes={notes}
                     disabled={isSubmitted || submitting}
+                    riderDebtsMap={riderDebtsMap}
+                    collectedCancellationIds={collectedCancellationIds}
+                    onToggleCancellation={toggleCollectedCancellation}
                   />
                 ) : (
                   <AlphabeticalChecklist
@@ -1841,6 +1892,9 @@ export function RepPage() {
                     unpaidIds={unpaidIds}
                     notes={notes}
                     disabled={isSubmitted || submitting}
+                    riderDebtsMap={riderDebtsMap}
+                    collectedCancellationIds={collectedCancellationIds}
+                    onToggleCancellation={toggleCollectedCancellation}
                   />
                 )}
 
@@ -1890,6 +1944,10 @@ export function RepPage() {
                         ensurePastCancellationsLoaded();
                       }}
                       onEnsureLoaded={ensurePastCancellationsLoaded}
+                      onOpenModal={() => {
+                        ensurePastCancellationsLoaded();
+                        setShowCancellationModal(true);
+                      }}
                       baseCash={baseCash}
                       totalCash={totalCash}
                     />
@@ -2120,6 +2178,20 @@ export function RepPage() {
           </div>
         </div>
       )}
+
+      {/* Cancellation & Debt Search / Settlement Modal */}
+      <CancellationSearchModal
+        isOpen={showCancellationModal}
+        onClose={() => setShowCancellationModal(false)}
+        pastCancellations={pastCancellations}
+        loading={loadingPastCancellations}
+        collectedCancellationIds={collectedCancellationIds}
+        onToggleCancellation={toggleCollectedCancellation}
+        manualCancellations={manualCancellations}
+        onAddManualCancellation={addManualCancellation}
+        onRemoveManualCancellation={removeManualCancellation}
+        fare={FARE}
+      />
     </div>
   );
 }
@@ -2165,7 +2237,7 @@ function CashCalculatorCard({
   externalSponsees, onAddSponsee, onUpdateSponsee, onRemoveSponsee, externalCash,
   pastCancellations, loadingPastCancellations, collectedCancellationIds, onToggleCancellation,
   manualCancellations, onAddManualCancellation, onUpdateManualCancellation, onRemoveManualCancellation,
-  pastCancellationCash, search, onSearchChange, onEnsureLoaded,
+  pastCancellationCash, search, onSearchChange, onEnsureLoaded, onOpenModal,
   baseCash, totalCash,
 }: {
   presentCount: number;
@@ -2190,6 +2262,7 @@ function CashCalculatorCard({
   search: string;
   onSearchChange: (v: string) => void;
   onEnsureLoaded: () => void;
+  onOpenModal?: () => void;
   baseCash: number;
   totalCash: number;
 }) {
@@ -2208,6 +2281,16 @@ function CashCalculatorCard({
           <Wallet className="h-4 w-4 text-crimson-400" />
           <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">Physical Cash Calculator</h2>
         </div>
+        {onOpenModal && (
+          <button
+            type="button"
+            onClick={onOpenModal}
+            className="flex items-center gap-1 text-xs font-semibold text-crimson-400 hover:text-crimson-300"
+          >
+            <Search className="h-3.5 w-3.5" />
+            Full Search Modal
+          </button>
+        )}
       </div>
 
       <div className="space-y-1.5 rounded-lg bg-card-2/60 p-3 text-xs">
@@ -2278,17 +2361,29 @@ function CashCalculatorCard({
               </span>
             )}
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              onEnsureLoaded();
-              onAddManualCancellation();
-            }}
-            className="flex items-center gap-1 rounded-md bg-crimson-600 px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-crimson-500 transition-colors"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            + Add Cancellation Payment
-          </button>
+          <div className="flex items-center gap-2">
+            {onOpenModal && (
+              <button
+                type="button"
+                onClick={onOpenModal}
+                className="flex items-center gap-1 rounded-md border border-line bg-card-2 px-2 py-1 text-xs font-semibold text-ink hover:bg-card hover:border-crimson-500/40"
+              >
+                <Search className="h-3 w-3" />
+                Search Ledger
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                onEnsureLoaded();
+                onAddManualCancellation();
+              }}
+              className="flex items-center gap-1 rounded-md bg-crimson-600 px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-crimson-500 transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              + Add Payment
+            </button>
+          </div>
         </div>
 
         {/* Manual cancellation payments list */}
@@ -2414,7 +2509,7 @@ function CashCalculatorCard({
                       {e.structure && ` · ${e.structure}`}
                     </span>
                   </span>
-                  <span className="shrink-0 font-mono text-[10px] text-muted">R{fare}</span>
+                  <span className="shrink-0 font-mono text-[10px] text-muted">R{e.structure_debt || fare}</span>
                 </button>
               ))
             ) : null}
@@ -2454,6 +2549,7 @@ function CashCalculatorCard({
 
 function StopGroupedChecklist({
   riders, vehicleType, orderedStops, stopRedirects, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
+  riderDebtsMap, collectedCancellationIds, onToggleCancellation,
 }: {
   riders: Passenger[];
   vehicleType: 'Bus' | 'Taxi';
@@ -2469,6 +2565,9 @@ function StopGroupedChecklist({
   unpaidIds: Set<string>;
   notes: Record<string, string>;
   disabled: boolean;
+  riderDebtsMap?: Record<string, LedgerEntry[]>;
+  collectedCancellationIds?: Set<string>;
+  onToggleCancellation?: (id: string) => void;
 }) {
   const byStop = useMemo(() => {
     const groups: Record<string, Passenger[]> = {};
@@ -2579,6 +2678,9 @@ function StopGroupedChecklist({
                       noteText={notes[p.id] ?? ''}
                       redirectedFrom={isRedirected ? origStop : undefined}
                       disabled={disabled}
+                      outstandingDebts={riderDebtsMap?.[p.id]}
+                      collectedCancellationIds={collectedCancellationIds}
+                      onToggleCancellation={onToggleCancellation}
                     />
                   );
                 })}
@@ -2593,6 +2695,7 @@ function StopGroupedChecklist({
 
 function AlphabeticalChecklist({
   riders, vehicleType, stopRedirects, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
+  riderDebtsMap, collectedCancellationIds, onToggleCancellation,
 }: {
   riders: Passenger[];
   vehicleType?: 'Bus' | 'Taxi';
@@ -2607,6 +2710,9 @@ function AlphabeticalChecklist({
   unpaidIds: Set<string>;
   notes: Record<string, string>;
   disabled: boolean;
+  riderDebtsMap?: Record<string, LedgerEntry[]>;
+  collectedCancellationIds?: Set<string>;
+  onToggleCancellation?: (id: string) => void;
 }) {
   const sorted = useMemo(() => {
     return [...riders].sort((a, b) => naturalCompare(a.fullName, b.fullName));
@@ -2643,6 +2749,9 @@ function AlphabeticalChecklist({
             noteText={notes[p.id] ?? ''}
             redirectedFrom={isRedirected ? origStop : undefined}
             disabled={disabled}
+            outstandingDebts={riderDebtsMap?.[p.id]}
+            collectedCancellationIds={collectedCancellationIds}
+            onToggleCancellation={onToggleCancellation}
           />
         );
       })}
@@ -2652,6 +2761,7 @@ function AlphabeticalChecklist({
 
 const PassengerRow = React.memo(function PassengerRow({
   passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, isSponsored, isUnpaid, noteText, redirectedFrom, disabled,
+  outstandingDebts, collectedCancellationIds, onToggleCancellation,
 }: {
   passenger: Passenger;
   isPresent: boolean;
@@ -2666,6 +2776,9 @@ const PassengerRow = React.memo(function PassengerRow({
   noteText: string;
   redirectedFrom?: string;
   disabled: boolean;
+  outstandingDebts?: LedgerEntry[];
+  collectedCancellationIds?: Set<string>;
+  onToggleCancellation?: (id: string) => void;
 }) {
   const [showNote, setShowNote] = useState(isSponsored || isUnpaid || !!noteText);
 
@@ -2749,6 +2862,53 @@ const PassengerRow = React.memo(function PassengerRow({
           </button>
         </div>
       </div>
+
+      {/* Outstanding Cancellation / Debt Quick-Settle Notification */}
+      {outstandingDebts && outstandingDebts.length > 0 && (
+        <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200 animate-fade-in">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+              <span className="font-semibold">
+                Unpaid Debt: R{outstandingDebts.reduce((sum, d) => sum + (Number(d.structure_debt) || FARE), 0)}
+              </span>
+              <span className="text-muted text-[11px]">
+                ({outstandingDebts.map(d => `${shortDate(d.date)} ${d.service}`).join(', ')})
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {outstandingDebts.map(d => {
+                const isSettled = collectedCancellationIds?.has(d.id);
+                return (
+                  <button
+                    key={d.id}
+                    type="button"
+                    onClick={() => onToggleCancellation?.(d.id)}
+                    disabled={disabled}
+                    className={`px-2 py-1 text-[11px] font-bold rounded transition-all flex items-center gap-1 ${
+                      isSettled
+                        ? 'bg-emerald-500 text-slate-950 shadow-sm'
+                        : 'bg-amber-500/20 text-amber-300 border border-amber-500/50 hover:bg-amber-500/30'
+                    }`}
+                  >
+                    {isSettled ? (
+                      <>
+                        <Check className="h-3 w-3" />
+                        <span>Paid R{d.structure_debt || FARE} ({shortDate(d.date)})</span>
+                      </>
+                    ) : (
+                      <>
+                        <Banknote className="h-3 w-3" />
+                        <span>Settle R{d.structure_debt || FARE} ({shortDate(d.date)})</span>
+                      </>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Action Toggles: Sponsored, Didn't Pay, and Note */}
       <div className="mt-2 flex flex-wrap items-center gap-2">
