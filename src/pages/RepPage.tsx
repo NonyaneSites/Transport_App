@@ -3,7 +3,7 @@ import {
   Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
   Smartphone, Wifi, ChevronDown, ChevronRight, MapPin, Send, Cross,
   HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus, Search, Banknote,
-  Sparkles, ArrowDownAZ, RotateCcw, Check, AlertCircle,
+  Sparkles, ArrowDownAZ, RotateCcw, Check, AlertCircle, Calendar,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
@@ -1616,15 +1616,15 @@ export function RepPage() {
                 {!isSubmitted && (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     {/* Walk-in card */}
-                    <div className="card border-line bg-card p-3">
+                    <div className="card border-line bg-card p-2.5">
                       {!walkInOpen ? (
                         <button
                           type="button"
                           onClick={() => setWalkInOpen(true)}
-                          className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-crimson-500/40 bg-crimson-500/5 py-2.5 text-xs font-bold text-crimson-300 hover:bg-crimson-500/10 hover:border-crimson-500 transition-all shadow-sm"
+                          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-crimson-500/30 bg-crimson-500/5 py-1.5 px-2.5 text-xs font-semibold text-crimson-300 hover:bg-crimson-500/10 hover:border-crimson-500/50 transition-all"
                         >
-                          <UserPlus className="h-4 w-4 text-crimson-400" />
-                          + Add Walk-In Passenger
+                          <UserPlus className="h-3.5 w-3.5 text-crimson-400 shrink-0" />
+                          <span>+ Add Walk-In</span>
                         </button>
                       ) : (
                         <div className="space-y-3 animate-fade-in">
@@ -1683,19 +1683,19 @@ export function RepPage() {
                     </div>
 
                     {/* Find & Settle Cancellation Button */}
-                    <div className="card border-line bg-card p-3 flex flex-col justify-center">
+                    <div className="card border-line bg-card p-2.5 flex flex-col justify-center">
                       <button
                         type="button"
                         onClick={() => {
                           ensurePastCancellationsLoaded();
                           setShowCancellationModal(true);
                         }}
-                        className="flex w-full items-center justify-center gap-2 rounded-lg border border-line bg-card-2 py-2.5 px-3 text-xs font-bold text-ink hover:border-crimson-500/50 hover:bg-card-2/80 transition-all shadow-sm"
+                        className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-line bg-card-2 py-1.5 px-2.5 text-xs font-medium text-ink hover:border-crimson-500/40 hover:bg-card-2/80 transition-all"
                       >
-                        <Banknote className="h-4 w-4 text-emerald-400" />
-                        <span className="flex-1 text-left sm:text-center">Find & Settle Cancellation</span>
+                        <Banknote className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+                        <span className="truncate">Settle Past Debt</span>
                         {(collectedCancellationIds.size > 0 || manualCancellations.length > 0) && (
-                          <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300 border border-emerald-500/40">
+                          <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300 border border-emerald-500/30">
                             +{collectedCancellationIds.size + manualCancellations.length} (+R{pastCancellationCash})
                           </span>
                         )}
@@ -2190,6 +2190,7 @@ export function RepPage() {
         manualCancellations={manualCancellations}
         onAddManualCancellation={addManualCancellation}
         onRemoveManualCancellation={removeManualCancellation}
+        vehicleRiders={riders}
         fare={FARE}
       />
     </div>
@@ -2236,7 +2237,7 @@ function CashCalculatorCard({
   presentCount, presentSponsoredCount, fare, grossPresentCash, sponsoredDeduction,
   externalSponsees, onAddSponsee, onUpdateSponsee, onRemoveSponsee, externalCash,
   pastCancellations, loadingPastCancellations, collectedCancellationIds, onToggleCancellation,
-  manualCancellations, onAddManualCancellation, onUpdateManualCancellation, onRemoveManualCancellation,
+  manualCancellations,
   pastCancellationCash, search, onSearchChange, onEnsureLoaded, onOpenModal,
   baseCash, totalCash,
 }: {
@@ -2255,9 +2256,9 @@ function CashCalculatorCard({
   collectedCancellationIds: Set<string>;
   onToggleCancellation: (id: string) => void;
   manualCancellations: ManualCancellation[];
-  onAddManualCancellation: (initialName?: string) => void;
-  onUpdateManualCancellation: (id: string, patch: Partial<ManualCancellation>) => void;
-  onRemoveManualCancellation: (id: string) => void;
+  onAddManualCancellation?: (initialName?: string) => void;
+  onUpdateManualCancellation?: (id: string, patch: Partial<ManualCancellation>) => void;
+  onRemoveManualCancellation?: (id: string) => void;
   pastCancellationCash: number;
   search: string;
   onSearchChange: (v: string) => void;
@@ -2361,80 +2362,17 @@ function CashCalculatorCard({
               </span>
             )}
           </div>
-          <div className="flex items-center gap-2">
-            {onOpenModal && (
-              <button
-                type="button"
-                onClick={onOpenModal}
-                className="flex items-center gap-1 rounded-md border border-line bg-card-2 px-2 py-1 text-xs font-semibold text-ink hover:bg-card hover:border-crimson-500/40"
-              >
-                <Search className="h-3 w-3" />
-                Search Ledger
-              </button>
-            )}
+          {onOpenModal && (
             <button
               type="button"
-              onClick={() => {
-                onEnsureLoaded();
-                onAddManualCancellation();
-              }}
-              className="flex items-center gap-1 rounded-md bg-crimson-600 px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-crimson-500 transition-colors"
+              onClick={onOpenModal}
+              className="flex items-center gap-1.5 rounded-lg border border-line bg-card-2 px-2.5 py-1 text-xs font-semibold text-ink hover:bg-card hover:border-crimson-500/40 hover:text-crimson-300 transition-colors shadow-xs"
             >
-              <Plus className="h-3.5 w-3.5" />
-              + Add Payment
+              <Search className="h-3.5 w-3.5 text-crimson-400" />
+              <span>Find & Settle Debtors</span>
             </button>
-          </div>
+          )}
         </div>
-
-        {/* Manual cancellation payments list */}
-        {manualCancellations.length > 0 && (
-          <div className="mb-2.5 space-y-2">
-            {manualCancellations.map((c) => (
-              <div
-                key={c.id}
-                className="flex flex-col gap-1.5 rounded-lg border border-crimson-500/30 bg-crimson-500/5 p-2.5 sm:flex-row sm:items-center"
-              >
-                <input
-                  type="text"
-                  value={c.passengerName}
-                  onChange={(e) => onUpdateManualCancellation(c.id, { passengerName: e.target.value })}
-                  placeholder="Passenger Name (e.g. Garainaya Mnisi)"
-                  className="input-field py-1.5 text-xs sm:flex-1 font-medium"
-                />
-                <input
-                  type="text"
-                  value={c.structure ?? ''}
-                  onChange={(e) => onUpdateManualCancellation(c.id, { structure: e.target.value })}
-                  placeholder="Structure / Note (optional)"
-                  className="input-field py-1.5 text-xs sm:w-44"
-                />
-                <div className="flex items-center gap-1 text-xs text-muted">
-                  R
-                  <input
-                    type="number"
-                    min="0"
-                    step="10"
-                    value={c.amount}
-                    onChange={(e) =>
-                      onUpdateManualCancellation(c.id, {
-                        amount: Math.max(0, parseInt(e.target.value, 10) || 0),
-                      })
-                    }
-                    className="input-field w-16 py-1 text-center text-xs font-mono font-bold"
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={() => onRemoveManualCancellation(c.id)}
-                  className="rounded-md p-1.5 text-muted hover:bg-crimson-900/30 hover:text-crimson-300"
-                  title="Remove"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
 
         {/* Selected ledger items */}
         {selectedCancellations.length > 0 && (
@@ -2442,18 +2380,19 @@ function CashCalculatorCard({
             {selectedCancellations.map((e) => (
               <div
                 key={e.id}
-                className="flex items-center justify-between gap-2 rounded-md border border-crimson-500/40 bg-crimson-500/10 px-2.5 py-1.5 text-xs"
+                className="flex items-center justify-between gap-2 rounded-md border border-emerald-500/40 bg-emerald-950/20 px-2.5 py-1.5 text-xs"
               >
-                <span className="min-w-0 truncate text-crimson-200">
+                <span className="min-w-0 truncate text-emerald-200">
                   <span className="font-semibold">{e.passenger_name}</span>
                   <span className="text-muted"> — {shortDate(e.date)} · {formatServicePeriodMode(e.service)}</span>
                   {e.structure && <span className="text-muted"> ({e.structure})</span>}
+                  <span className="ml-1.5 font-bold font-mono text-emerald-300">+R{e.structure_debt || fare}</span>
                 </span>
                 <button
                   type="button"
                   onClick={() => onToggleCancellation(e.id)}
                   className="shrink-0 rounded p-1 text-muted hover:bg-crimson-900/30 hover:text-crimson-300"
-                  title="Remove"
+                  title="Remove from settled cash"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
@@ -2462,7 +2401,7 @@ function CashCalculatorCard({
           </div>
         )}
 
-        {/* Search bar & quick-add */}
+        {/* Search bar */}
         <div className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
           <input
@@ -2470,49 +2409,56 @@ function CashCalculatorCard({
             value={search}
             onFocus={onEnsureLoaded}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search past cancellation debt list, or type name to add payment…"
-            className="input-field py-1.5 pl-8 text-xs"
+            placeholder="Quick search debtor name to settle (e.g. Sipho, Mnisi)..."
+            className="input-field py-1.5 pl-8 text-xs font-medium"
           />
+          {search && (
+            <button
+              type="button"
+              onClick={() => onSearchChange('')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted hover:text-ink"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
         </div>
 
         {search.trim().length > 0 && (
           <div className="mt-2 max-h-56 space-y-1.5 overflow-y-auto rounded-lg border border-line bg-card-2/40 p-2 animate-fade-in">
-            <button
-              type="button"
-              onClick={() => {
-                onAddManualCancellation(search.trim());
-                onSearchChange('');
-              }}
-              className="flex w-full items-center justify-between gap-2 rounded-md border border-dashed border-crimson-500/50 bg-crimson-900/20 px-2.5 py-2 text-left text-xs text-crimson-300 transition-colors hover:bg-crimson-900/40"
-            >
-              <span className="flex items-center gap-1.5">
-                <Plus className="h-3.5 w-3.5 shrink-0" />
-                <span>Add &ldquo;<strong>{search.trim()}</strong>&rdquo; as cancellation payment</span>
-              </span>
-              <span className="shrink-0 font-mono font-bold text-xs text-crimson-200">+R{fare}</span>
-            </button>
-
             {loadingPastCancellations ? (
               <p className="py-2 text-center text-[11px] text-muted">Loading debt entries…</p>
             ) : searchResults.length > 0 ? (
-              searchResults.map((e) => (
-                <button
-                  key={e.id}
-                  type="button"
-                  onClick={() => onToggleCancellation(e.id)}
-                  className="flex w-full items-center justify-between gap-2 rounded-md border border-line bg-card px-2.5 py-2 text-left text-xs transition-colors hover:border-crimson-500/40 hover:bg-card-2/60"
-                >
-                  <span className="min-w-0">
-                    <span className="block truncate font-semibold text-ink">{e.passenger_name}</span>
-                    <span className="mt-0.5 block text-[10px] text-muted">
-                      {shortDate(e.date)} · {formatServicePeriodMode(e.service)}
-                      {e.structure && ` · ${e.structure}`}
+              searchResults.map((e) => {
+                const isSettled = selectedCancellations.some((sc) => sc.id === e.id);
+                return (
+                  <button
+                    key={e.id}
+                    type="button"
+                    onClick={() => onToggleCancellation(e.id)}
+                    className={`flex w-full items-center justify-between gap-2 rounded-md border px-2.5 py-2 text-left text-xs transition-colors ${
+                      isSettled
+                        ? 'border-emerald-500/50 bg-emerald-950/25 text-emerald-200'
+                        : 'border-line bg-card hover:border-crimson-500/40 hover:bg-card-2/60 text-ink'
+                    }`}
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate font-semibold">{e.passenger_name}</span>
+                      <span className="mt-0.5 block text-[10px] text-muted">
+                        {shortDate(e.date)} · {formatServicePeriodMode(e.service)}
+                        {e.structure && ` · ${e.structure}`}
+                      </span>
                     </span>
-                  </span>
-                  <span className="shrink-0 font-mono text-[10px] text-muted">R{e.structure_debt || fare}</span>
-                </button>
-              ))
-            ) : null}
+                    <span className="shrink-0 flex items-center gap-1 font-mono text-[11px] font-bold text-crimson-400">
+                      {isSettled ? '✓ Settled' : `+ Settle R${e.structure_debt || fare}`}
+                    </span>
+                  </button>
+                );
+              })
+            ) : (
+              <p className="py-2 text-center text-[11px] text-muted">
+                No matching cancellation found for &ldquo;{search.trim()}&rdquo;. Use &ldquo;Find & Settle Debtors&rdquo; for full list.
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -2781,6 +2727,22 @@ const PassengerRow = React.memo(function PassengerRow({
   onToggleCancellation?: (id: string) => void;
 }) {
   const [showNote, setShowNote] = useState(isSponsored || isUnpaid || !!noteText);
+  const [showDebtBreakdown, setShowDebtBreakdown] = useState(false);
+
+  const totalDebtAmount = useMemo(() => {
+    if (!outstandingDebts || outstandingDebts.length === 0) return 0;
+    return outstandingDebts.reduce((sum, d) => sum + (Number(d.structure_debt) || FARE), 0);
+  }, [outstandingDebts]);
+
+  const settledDebtEntries = useMemo(() => {
+    if (!outstandingDebts || !collectedCancellationIds) return [];
+    return outstandingDebts.filter((d) => collectedCancellationIds.has(d.id));
+  }, [outstandingDebts, collectedCancellationIds]);
+
+  const settledDebtCount = settledDebtEntries.length;
+  const settledDebtAmount = useMemo(() => {
+    return settledDebtEntries.reduce((sum, d) => sum + (Number(d.structure_debt) || FARE), 0);
+  }, [settledDebtEntries]);
 
   function handleSponsoredToggle() {
     onToggleSponsored(passenger.id);
@@ -2863,55 +2825,8 @@ const PassengerRow = React.memo(function PassengerRow({
         </div>
       </div>
 
-      {/* Outstanding Cancellation / Debt Quick-Settle Notification */}
-      {outstandingDebts && outstandingDebts.length > 0 && (
-        <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200 animate-fade-in">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-1.5">
-              <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-400" />
-              <span className="font-semibold">
-                Unpaid Debt: R{outstandingDebts.reduce((sum, d) => sum + (Number(d.structure_debt) || FARE), 0)}
-              </span>
-              <span className="text-muted text-[11px]">
-                ({outstandingDebts.map(d => `${shortDate(d.date)} ${d.service}`).join(', ')})
-              </span>
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {outstandingDebts.map(d => {
-                const isSettled = collectedCancellationIds?.has(d.id);
-                return (
-                  <button
-                    key={d.id}
-                    type="button"
-                    onClick={() => onToggleCancellation?.(d.id)}
-                    disabled={disabled}
-                    className={`px-2 py-1 text-[11px] font-bold rounded transition-all flex items-center gap-1 ${
-                      isSettled
-                        ? 'bg-emerald-500 text-slate-950 shadow-sm'
-                        : 'bg-amber-500/20 text-amber-300 border border-amber-500/50 hover:bg-amber-500/30'
-                    }`}
-                  >
-                    {isSettled ? (
-                      <>
-                        <Check className="h-3 w-3" />
-                        <span>Paid R{d.structure_debt || FARE} ({shortDate(d.date)})</span>
-                      </>
-                    ) : (
-                      <>
-                        <Banknote className="h-3 w-3" />
-                        <span>Settle R{d.structure_debt || FARE} ({shortDate(d.date)})</span>
-                      </>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Action Toggles: Sponsored, Didn't Pay, and Note */}
-      <div className="mt-2 flex flex-wrap items-center gap-2">
+      {/* Action Toggles: Sponsored, Didn't Pay, Settle Debt, and Note */}
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
         {/* Sponsored Toggle */}
         <button
           type="button"
@@ -2944,6 +2859,35 @@ const PassengerRow = React.memo(function PassengerRow({
           {isUnpaid ? "⚠️ Didn't Pay" : "Didn't Pay"}
         </button>
 
+        {/* Settle Debt Button (Reveals breakdown on tap) */}
+        {outstandingDebts && outstandingDebts.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowDebtBreakdown(!showDebtBreakdown)}
+            disabled={disabled}
+            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-all active:scale-95 border ${
+              settledDebtCount === outstandingDebts.length
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                : settledDebtCount > 0
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                : 'bg-crimson-500/15 text-crimson-300 border-crimson-500/30 hover:bg-crimson-500/25'
+            }`}
+            title="View and settle past unpaid cancellation trips"
+          >
+            <Banknote className={`h-3.5 w-3.5 ${settledDebtCount > 0 ? 'text-emerald-400' : 'text-crimson-400'}`} />
+            <span>
+              {settledDebtCount === outstandingDebts.length
+                ? `Settled All (+R${totalDebtAmount})`
+                : settledDebtCount > 0
+                ? `Settling R${settledDebtAmount} of R${totalDebtAmount}`
+                : `Settle Debt (R${totalDebtAmount})`}
+            </span>
+            <span className="text-[10px] opacity-75 ml-0.5">
+              {showDebtBreakdown ? '▴' : '▾'}
+            </span>
+          </button>
+        )}
+
         {/* Note button */}
         {(isSponsored || isUnpaid || showNote || noteText) && (
           <button
@@ -2959,6 +2903,116 @@ const PassengerRow = React.memo(function PassengerRow({
           </button>
         )}
       </div>
+
+      {/* Settle Debt Breakdown Dropdown Panel */}
+      {showDebtBreakdown && outstandingDebts && outstandingDebts.length > 0 && (
+        <div className="mt-2.5 rounded-xl border border-line bg-card-2/85 p-3 text-xs animate-fade-in space-y-2">
+          <div className="flex items-center justify-between border-b border-line/60 pb-2">
+            <div className="flex items-center gap-1.5">
+              <Banknote className="h-4 w-4 text-crimson-400" />
+              <span className="font-bold text-ink text-xs">Past Unpaid Trips for {passenger.fullName}</span>
+              <span className="text-[11px] text-muted">
+                ({outstandingDebts.length} total • R{totalDebtAmount} debt)
+              </span>
+            </div>
+            {outstandingDebts.length > 1 && (
+              <button
+                type="button"
+                onClick={() => {
+                  const allSettled = settledDebtCount === outstandingDebts.length;
+                  outstandingDebts.forEach((d) => {
+                    const isSettled = collectedCancellationIds?.has(d.id);
+                    if (allSettled && isSettled) {
+                      onToggleCancellation?.(d.id);
+                    } else if (!allSettled && !isSettled) {
+                      onToggleCancellation?.(d.id);
+                    }
+                  });
+                }}
+                className="text-[11px] font-bold text-crimson-400 hover:text-crimson-300 underline"
+              >
+                {settledDebtCount === outstandingDebts.length ? 'Clear All' : `Settle All (R${totalDebtAmount})`}
+              </button>
+            )}
+          </div>
+
+          <div className="space-y-1.5">
+            {outstandingDebts.map((d) => {
+              const isSettled = collectedCancellationIds?.has(d.id);
+              const debtAmount = Number(d.structure_debt) || FARE;
+              return (
+                <div
+                  key={d.id}
+                  onClick={() => onToggleCancellation?.(d.id)}
+                  className={`flex items-center justify-between gap-2.5 rounded-lg p-2 transition-all cursor-pointer border select-none ${
+                    isSettled
+                      ? 'border-emerald-500/50 bg-emerald-950/25'
+                      : 'border-line/70 bg-card hover:border-crimson-500/40 hover:bg-card-2'
+                  }`}
+                >
+                  <div className="min-w-0 flex-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                    <span className="font-mono font-bold text-ink flex items-center gap-1">
+                      <Calendar className="h-3 w-3 text-crimson-400" />
+                      {d.date ? shortDate(d.date) : 'Undated'}
+                    </span>
+                    <span className="rounded bg-bg/80 px-1.5 py-0.5 font-mono text-[10px] font-bold text-muted border border-line/60">
+                      {d.service || 'PM'}
+                    </span>
+                    {d.vehicle_name && (
+                      <span className="text-muted text-[11px] flex items-center gap-1">
+                        <Car className="h-3 w-3 text-muted/80" />
+                        {d.vehicle_name}
+                      </span>
+                    )}
+                    {d.stop && (
+                      <span className="text-muted text-[11px] flex items-center gap-1">
+                        <MapPin className="h-3 w-3 text-muted/80" />
+                        {d.stop}
+                      </span>
+                    )}
+                    {d.general_notes && (
+                      <span className="text-muted italic text-[10px] truncate max-w-xs">
+                        ({d.general_notes})
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="font-mono text-xs font-bold text-crimson-400">
+                      R{debtAmount}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleCancellation?.(d.id);
+                      }}
+                      disabled={disabled}
+                      className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-all shadow-xs flex items-center gap-1 ${
+                        isSettled
+                          ? 'bg-emerald-600 text-white hover:bg-emerald-500'
+                          : 'bg-crimson-600 text-white hover:bg-crimson-500'
+                      }`}
+                    >
+                      {isSettled ? (
+                        <>
+                          <Check className="h-3 w-3" />
+                          <span>Settled</span>
+                        </>
+                      ) : (
+                        <>
+                          <Plus className="h-3 w-3" />
+                          <span>Pay R{debtAmount}</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Note input */}
       {showNote && (

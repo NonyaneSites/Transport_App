@@ -142,30 +142,21 @@ export function parseStructureCell(raw: string): { structure: string; repName: s
 export function extractNameAndService(
   rawCell: string,
   explicitService?: string
-): { cleanName: string; serviceCode: string; isFTV: boolean; extraNotes: string } {
+): { cleanName: string; serviceCode: string; extraNotes: string } {
   let raw = (rawCell || '').trim().replace(/\r?\n/g, ' ');
   if (!raw) {
-    const isFTV = !!explicitService && /\bFTV\b/i.test(explicitService);
     return {
       cleanName: '',
       serviceCode: explicitService ? extractServiceCode(explicitService) : 'PM',
-      isFTV,
       extraNotes: '',
     };
   }
 
-  const isFTV =
-    /\bFTV\b/i.test(raw) ||
-    /\bFTV\s*20\b/i.test(raw) ||
-    /\bFTV20\b/i.test(raw) ||
-    /\bR20\b/i.test(raw) ||
-    (!!explicitService && /\bFTV\b/i.test(explicitService));
-
   let serviceCode = explicitService ? extractServiceCode(explicitService) : '';
   const extraNotes = '';
 
-  // Look for service tags in parentheses like (PM), (AM), (LM), (WMP), (EF), (AD), (FW), (FTV), (PM/FTV)
-  const serviceParenRegex = /\(\s*(AM|PM|LM|WMP|EF|AD|FW|W&P|W\/P|FTV|FTV\/PM|PM\/FTV|SERVING|USHERS|NORMAL)\s*[,)]*/gi;
+  // Look for service tags in parentheses like (PM), (AM), (LM), (WMP), (EF), (AD), (FW)
+  const serviceParenRegex = /\(\s*(AM|PM|LM|WMP|EF|AD|FW|W&P|W\/P|SERVING|USHERS|NORMAL)\s*[,)]*/gi;
   const matches = Array.from(raw.matchAll(serviceParenRegex));
   if (matches.length > 0) {
     const matchedCode = matches[0][1].toUpperCase();
@@ -175,7 +166,7 @@ export function extractNameAndService(
     raw = raw.replace(serviceParenRegex, ' ').trim();
   }
 
-  // Complex patterns like "(PM- FTV R20)" or "(PM - R20)" or "(PM," or "(PM"
+  // Complex patterns like "(PM - R20)" or "(PM," or "(PM"
   const complexMatch = raw.match(/\(\s*(AM|PM|LM|WMP|EF|AD|FW)\s*[-–—,]?\s*([^)]*)\)?/i);
   if (complexMatch) {
     if (!serviceCode || serviceCode === 'Unspecified' || serviceCode === 'PM') {
@@ -184,8 +175,8 @@ export function extractNameAndService(
     raw = raw.replace(complexMatch[0], ' ').trim();
   }
 
-  // Clean trailing punctuation or empty parens
-  raw = raw.replace(/\bFTV\s*20\b|\bFTV20\b|\bFTV\b/gi, '').trim();
+  // Clean any trailing FTV/R20 tags, punctuation, or empty parens
+  raw = raw.replace(/\bFTV\s*20\b|\bFTV20\b|\bFTV\b|\bR20\b/gi, '').trim();
   raw = raw.replace(/\(\s*\)/g, '').trim();
   raw = raw.replace(/[(),]+$/, '').trim();
 
@@ -199,7 +190,6 @@ export function extractNameAndService(
   return {
     cleanName: raw,
     serviceCode,
-    isFTV,
     extraNotes,
   };
 }
@@ -318,16 +308,6 @@ export async function insertAbsentees(
   if (absentees.length === 0) return;
 
   const rows = absentees.map((p) => {
-    const structUpper = (p.structure || '').toUpperCase();
-    const noteUpper = (p.sponsorNote || '').toUpperCase();
-    const genUpper = (generalNotes || '').toUpperCase();
-    const isFTV =
-      structUpper.includes('FTV') ||
-      noteUpper.includes('FTV') ||
-      genUpper.includes('FTV') ||
-      p.memberType === 'FTV' ||
-      /\bFTV\b/i.test(p.fullName);
-
     return {
       manifest_key: manifestKey,
       date,
@@ -341,7 +321,7 @@ export async function insertAbsentees(
       license_plate: licensePlate,
       sponsored: p.sponsored ?? false,
       sponsor_note: p.sponsorNote ?? '',
-      structure_debt: isFTV ? 20 : CANCELLATION_FEE,
+      structure_debt: CANCELLATION_FEE,
       general_notes: generalNotes,
     };
   });
@@ -378,27 +358,7 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
       console.warn('[Ledger] Failed to fetch remote ledger, reading local store:', error);
     }
     if (data && Array.isArray(data)) {
-      // Normalize FTV entries so that if an entry is FTV / FTV 20, debt is strictly R20
-      return (data as LedgerEntry[]).map((e) => {
-        const isFTV =
-          (e.structure || '').toUpperCase().includes('FTV') ||
-          (e.general_notes || '').toUpperCase().includes('FTV') ||
-          (e.sponsor_note || '').toUpperCase().includes('FTV') ||
-          (e.service || '').toUpperCase().includes('FTV') ||
-          (e.passenger_name || '').toUpperCase().includes('FTV') ||
-          Number(e.structure_debt) === 20;
-
-        if (isFTV) {
-          const currentDebt = Number(e.structure_debt);
-          // If debt was default 40 or unset, ensure it's R20
-          const debt = (!currentDebt || currentDebt === 40) ? 20 : currentDebt;
-          return {
-            ...e,
-            structure_debt: debt,
-          };
-        }
-        return e;
-      });
+      return data as LedgerEntry[];
     }
   } catch (err) {
     console.warn('[Ledger] Exception fetching ledger entries:', err);
@@ -459,6 +419,17 @@ export interface ManualLedgerEntryInput {
 }
 
 /**
+ * Converts various date formats (e.g. YYYY-MM-DD, DD/MM/YYYY, DD/MM/YY) into a normalized YYYY-MM-DD string for date pickers.
+ */
+export function normalizeDateToYMD(dateStr?: string | null): string {
+  if (!dateStr) return '';
+  const trimmed = String(dateStr).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  const parsed = parseFlexibleHistoricalDate(trimmed);
+  return parsed || trimmed;
+}
+
+/**
  * Inserts a manually created cancellation/debt entry into the cancellation ledger.
  */
 export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promise<LedgerEntry> {
@@ -468,14 +439,12 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
     ? input.structure.trim().toUpperCase()
     : input.structure.trim() ? `S${input.structure.trim()}` : 'No Structure';
 
-  const isFTV = (input.notes || '').toUpperCase().includes('FTV') || input.service.toUpperCase().includes('FTV');
-
   const rawAmt = Number(input.amount);
   const debtAmt = Number.isFinite(rawAmt) && rawAmt >= 0 ? rawAmt : CANCELLATION_FEE;
 
   const row = {
     manifest_key: manifestKey,
-    date: input.date,
+    date: normalizeDateToYMD(input.date) || input.date,
     service: input.service.trim().toUpperCase() || 'PM',
     passenger_name: fullName,
     stop: 'Manual Entry',
@@ -487,7 +456,7 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
     sponsored: !!input.isSponsored,
     sponsor_note: input.isSponsored ? (input.notes || 'Sponsorship') : '',
     structure_debt: debtAmt,
-    general_notes: input.notes || (isFTV ? 'FTV' : ''),
+    general_notes: input.notes || '',
   };
 
   const { data, error } = await supabase
@@ -498,6 +467,116 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
 
   if (error) throw error;
   return data as LedgerEntry;
+}
+
+export interface DebtorInstanceUpdateItem {
+  id?: string;
+  date: string;
+  service: string;
+  amount: number;
+}
+
+/**
+ * Updates a debtor and synchronizes their individual cancellation instances (dates, services, amounts, and deletions).
+ * Allows admin to edit dates, remove a specific date in-between, add new missed dates, or update per-instance debts.
+ */
+export async function updateDebtorWithInstances(
+  existingEntryIds: string[],
+  updates: {
+    name: string;
+    structure: string;
+    isSponsored?: boolean;
+    notes?: string;
+    instances: DebtorInstanceUpdateItem[];
+  }
+): Promise<void> {
+  const structCode = updates.structure
+    ? (updates.structure.trim().toUpperCase().startsWith('S') || updates.structure.trim().toUpperCase().startsWith('YZ')
+        ? updates.structure.trim().toUpperCase()
+        : updates.structure.trim() ? `S${updates.structure.trim()}` : 'No Structure')
+    : 'No Structure';
+
+  const cleanName = updates.name.trim();
+  const isSponsored = !!updates.isSponsored;
+  const noteText = isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '';
+
+  // If no instances remain, remove all debtor entries completely
+  if (!updates.instances || updates.instances.length === 0) {
+    if (existingEntryIds.length > 0) {
+      await supabase.from(LEDGER_TABLE).delete().in('id', existingEntryIds);
+    }
+    return;
+  }
+
+  // Fetch current entries for template fields (manifest_key, vehicle_name, etc.)
+  let templateEntry: LedgerEntry | null = null;
+  if (existingEntryIds.length > 0) {
+    const { data } = await supabase.from(LEDGER_TABLE).select('*').in('id', existingEntryIds);
+    if (data && data.length > 0) {
+      templateEntry = data[0] as LedgerEntry;
+    }
+  }
+
+  const updatedIds = new Set<string>();
+
+  // Process each instance in the update payload
+  for (const inst of updates.instances) {
+    const validAmount = Number.isFinite(inst.amount) && inst.amount >= 0 ? inst.amount : 40;
+    const validDate = inst.date ? inst.date.trim() : '';
+    const validService = inst.service ? inst.service.trim() : 'PM';
+
+    if (inst.id && existingEntryIds.includes(inst.id)) {
+      // Existing instance: update date, service, debt amount, passenger name, structure, etc.
+      updatedIds.add(inst.id);
+      await supabase
+        .from(LEDGER_TABLE)
+        .update({
+          date: validDate,
+          service: validService,
+          passenger_name: cleanName,
+          structure: structCode,
+          structure_debt: validAmount,
+          sponsored: isSponsored,
+          sponsor_note: noteText,
+          general_notes: noteText,
+        })
+        .eq('id', inst.id);
+    } else {
+      // New instance added during edit: insert fresh entry
+      const insertPayload: Record<string, unknown> = {
+        manifest_key: templateEntry?.manifest_key || `manual-${Date.now()}`,
+        date: validDate,
+        service: validService,
+        passenger_name: cleanName,
+        stop: templateEntry?.stop || 'Structure Stop',
+        structure: structCode,
+        vehicle_name: templateEntry?.vehicle_name || '—',
+        submitted_by: templateEntry?.submitted_by || 'Admin Manual Edit',
+        rep_name: templateEntry?.rep_name || '',
+        license_plate: templateEntry?.license_plate || '',
+        sponsored: isSponsored,
+        sponsor_note: noteText,
+        structure_debt: validAmount,
+        general_notes: noteText,
+      };
+
+      const { data: newEntry } = await supabase
+        .from(LEDGER_TABLE)
+        .insert([insertPayload])
+        .select('id')
+        .single();
+
+      if (newEntry?.id) {
+        updatedIds.add(newEntry.id);
+      }
+    }
+  }
+
+  // Delete any instances that were removed by the admin (e.g. date removed in between)
+  const idsToDelete = existingEntryIds.filter((id) => !updatedIds.has(id));
+  if (idsToDelete.length > 0) {
+    await supabase.from(LEDGER_TABLE).delete().in('id', idsToDelete);
+  }
 }
 
 /**
@@ -547,9 +626,9 @@ export async function updateDebtorDetails(
           passenger_name: updates.name ? updates.name.trim() : currentEntries[0].passenger_name,
           structure: structCode ?? currentEntries[0].structure,
           structure_debt: targetDebt,
-          general_notes: updates.notes !== undefined ? updates.notes : currentEntries[0].general_notes,
-          sponsored: updates.isSponsored !== undefined ? updates.isSponsored : currentEntries[0].sponsored,
-          sponsor_note: updates.isSponsored ? (updates.notes || 'Sponsorship') : (updates.isSponsored === false ? '' : currentEntries[0].sponsor_note),
+          general_notes: updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '',
+          sponsored: !!updates.isSponsored,
+          sponsor_note: updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '',
         })
         .eq('id', entryIds[0]);
     } else {
@@ -577,9 +656,9 @@ export async function updateDebtorDetails(
             passenger_name: updates.name ? updates.name.trim() : ent.passenger_name,
             structure: structCode ?? ent.structure,
             structure_debt: rowDebt,
-            general_notes: updates.notes !== undefined ? updates.notes : ent.general_notes,
-            sponsored: updates.isSponsored !== undefined ? updates.isSponsored : ent.sponsored,
-            sponsor_note: updates.isSponsored ? (updates.notes || 'Sponsorship') : (updates.isSponsored === false ? '' : ent.sponsor_note),
+            general_notes: updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '',
+            sponsored: !!updates.isSponsored,
+            sponsor_note: updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '',
           })
           .eq('id', ent.id);
       }
@@ -589,12 +668,12 @@ export async function updateDebtorDetails(
     const patch: Record<string, unknown> = {};
     if (updates.name) patch.passenger_name = updates.name.trim();
     if (structCode) patch.structure = structCode;
-    if (updates.notes !== undefined) patch.general_notes = updates.notes;
     if (updates.isSponsored !== undefined) {
       patch.sponsored = updates.isSponsored;
-      if (updates.isSponsored) {
-        patch.sponsor_note = updates.notes || 'Sponsorship';
-      }
+      patch.general_notes = updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '';
+      patch.sponsor_note = updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '';
+    } else if (updates.notes !== undefined) {
+      patch.general_notes = updates.notes;
     }
 
     if (Object.keys(patch).length > 0) {
@@ -867,15 +946,7 @@ export function parseHistoricalCancellationWorkbook(buffer: ArrayBuffer): Histor
     const finalDate = dateVal || parseFlexibleHistoricalDate(cell0) || parseFlexibleHistoricalDate(cell1) || '';
 
     // Extract clean name and service code
-    const { cleanName, serviceCode, isFTV: nameIsFTV } = extractNameAndService(rawNameVal, rawServiceVal);
-
-    // Check for FTV tag for note recording
-    const isFTV =
-      nameIsFTV ||
-      /\bFTV\b/i.test(rawServiceVal) ||
-      /\bFTV\b/i.test(rawNameVal) ||
-      /\bFTV\b/i.test(rawCategoryVal) ||
-      /\bFTV\b/i.test(rawNotesVal);
+    const { cleanName, serviceCode } = extractNameAndService(rawNameVal, rawServiceVal);
 
     // Debt parsing: Read the explicit debt column or fallback to standard cancellation fee.
     // The cancellation admin determines and adjusts debt amounts directly.
@@ -903,9 +974,6 @@ export function parseHistoricalCancellationWorkbook(buffer: ArrayBuffer): Histor
     }
     if (rawNotesVal) {
       noteParts.push(rawNotesVal);
-    }
-    if (isFTV && !noteParts.some((p) => p.includes('FTV'))) {
-      noteParts.push('FTV');
     }
 
     const generalNotes = noteParts.join(' — ');
@@ -967,7 +1035,6 @@ export interface AggregatedLedgerInstance {
   serviceCode: string;
   amount: number;
   formatted: string; // e.g. "23/08/26(PM)"
-  isFTV: boolean;
   notes: string;
 }
 
@@ -1053,7 +1120,6 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
             dStr = `${parts[2].slice(-2)}/${parts[1]}/${parts[0].slice(2)}`;
           }
         }
-        const isFTV = (e.general_notes || '').includes('FTV') || (e.sponsor_note || '').includes('FTV');
         const rawD = Number(e.structure_debt);
         const instDebt = Number.isFinite(rawD) ? rawD : CANCELLATION_FEE;
 
@@ -1064,7 +1130,6 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
           serviceCode: code,
           amount: instDebt,
           formatted: `${dStr}(${code})`,
-          isFTV,
           notes: e.general_notes || e.sponsor_note || '',
         };
       });

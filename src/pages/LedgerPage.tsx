@@ -9,7 +9,8 @@ import { Footer } from '@/components/Footer';
 import {
   listLedgerEntries, deleteLedgerEntry, downloadLedgerExcel,
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
-  recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch, updateDebtorDetails,
+  recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch,
+  updateDebtorWithInstances, normalizeDateToYMD, type DebtorInstanceUpdateItem,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
 } from '@/lib/ledger';
 import { downloadCancellationDebtPdf } from '@/lib/pdfExport';
@@ -59,6 +60,7 @@ export function LedgerPage() {
   const [editDebt, setEditDebt] = useState('');
   const [editNotes, setEditNotes] = useState('');
   const [editIsSponsored, setEditIsSponsored] = useState(false);
+  const [editInstances, setEditInstances] = useState<DebtorInstanceUpdateItem[]>([]);
   const [savingEdit, setSavingEdit] = useState(false);
   const [deletingDebtor, setDeletingDebtor] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
@@ -238,14 +240,86 @@ export function LedgerPage() {
     setEditDebt(String(row.amount));
     setEditNotes(row.notes);
     setEditIsSponsored(row.isSponsoredOrUnpaid);
+    // Initialize editable instances list from row.instances with normalized dates
+    const initialInstances: DebtorInstanceUpdateItem[] = row.instances.map((inst) => ({
+      id: inst.id,
+      date: normalizeDateToYMD(inst.date) || inst.date || '',
+      service: inst.serviceCode || inst.service || 'PM',
+      amount: inst.amount,
+    }));
+    setEditInstances(initialInstances);
     setEditError(null);
     setEditSuccessMessage(null);
   }
 
   function closeEditModal() {
     setEditTarget(null);
+    setEditInstances([]);
     setEditError(null);
     setEditSuccessMessage(null);
+  }
+
+  function handleUpdateInstanceDate(index: number, newDate: string) {
+    setEditInstances((prev) => {
+      const next = [...prev];
+      if (next[index]) {
+        next[index] = { ...next[index], date: newDate };
+      }
+      return next;
+    });
+  }
+
+  function handleUpdateInstanceService(index: number, newService: string) {
+    setEditInstances((prev) => {
+      const next = [...prev];
+      if (next[index]) {
+        next[index] = { ...next[index], service: newService };
+      }
+      return next;
+    });
+  }
+
+  function handleTotalDebtChange(newTotalStr: string) {
+    setEditDebt(newTotalStr);
+    const target = Number(newTotalStr);
+    if (!Number.isFinite(target) || target < 0) return;
+
+    setEditInstances((prev) => {
+      if (prev.length === 0) return prev;
+      if (prev.length === 1) {
+        return [{ ...prev[0], amount: target }];
+      }
+      // Distribute sequentially among instances
+      let remaining = target;
+      return prev.map((inst, i) => {
+        const isLast = i === prev.length - 1;
+        if (isLast) {
+          return { ...inst, amount: remaining };
+        }
+        const assigned = Math.min(remaining, inst.amount || 40);
+        remaining -= assigned;
+        return { ...inst, amount: assigned };
+      });
+    });
+  }
+
+  function handleRemoveSpecificInstance(index: number) {
+    setEditInstances((prev) => {
+      const next = prev.filter((_, i) => i !== index);
+      const total = next.reduce((sum, item) => sum + item.amount, 0);
+      setEditDebt(String(total));
+      return next;
+    });
+  }
+
+  function handleAddNewInstance() {
+    const today = new Date().toISOString().slice(0, 10);
+    setEditInstances((prev) => {
+      const next = [...prev, { date: today, service: 'PM', amount: 40 }];
+      const total = next.reduce((sum, item) => sum + item.amount, 0);
+      setEditDebt(String(total));
+      return next;
+    });
   }
 
   async function handleSaveDebtorEdit(e?: React.FormEvent) {
@@ -265,22 +339,32 @@ export function LedgerPage() {
       setEditError('Please enter a valid non-negative debt amount (e.g. 0, 20, 40).');
       return;
     }
-    const finalDebt = Math.round(rawDebt * 100) / 100;
 
     setSavingEdit(true);
     setEditError(null);
     try {
-      await updateDebtorDetails(editTarget.entryIds, {
-        name: editName.trim(),
-        structure: editStructure.trim(),
-        newTotalDebt: finalDebt,
-        notes: editNotes,
-        isSponsored: editIsSponsored,
-      });
+      if (editInstances.length === 0 || rawDebt === 0) {
+        // If user deleted all date instances or set debt to 0, completely settle/remove debtor
+        await updateDebtorWithInstances(editTarget.entryIds, {
+          name: editName.trim(),
+          structure: editStructure.trim(),
+          isSponsored: editIsSponsored,
+          notes: editIsSponsored ? editNotes.trim() : '',
+          instances: [],
+        });
+      } else {
+        await updateDebtorWithInstances(editTarget.entryIds, {
+          name: editName.trim(),
+          structure: editStructure.trim(),
+          isSponsored: editIsSponsored,
+          notes: editIsSponsored ? editNotes.trim() : '',
+          instances: editInstances,
+        });
+      }
 
       const refreshed = await listLedgerEntries();
       setEntries(refreshed);
-      setEditSuccessMessage('Debtor and amount updated successfully.');
+      setEditSuccessMessage('Debtor dates, structure, and amount updated successfully.');
       setTimeout(() => {
         closeEditModal();
       }, 500);
@@ -364,7 +448,7 @@ export function LedgerPage() {
         service: addService,
         amount: amtNum,
         date: addDate,
-        notes: addNotes,
+        notes: addIsSponsored ? (addNotes.trim() || 'Unaccounted Sponsorship') : '',
         isSponsored: addIsSponsored,
       });
 
@@ -665,23 +749,22 @@ export function LedgerPage() {
                                           <span className="font-semibold text-ink">
                                             <HighlightMatch text={row.name} query={search} />
                                           </span>
-                                          {row.instances.some((i) => i.isFTV) && (
-                                            <span className="inline-flex items-center rounded px-1.5 py-0.2 text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/25">
-                                              FTV
-                                            </span>
-                                          )}
                                         </div>
                                       </td>
                                       <td className="px-3.5 py-2.5 text-muted align-top">
                                         <div className="flex flex-wrap gap-1.5 max-w-xs">
                                           {row.instances.map((ins, idx) => (
-                                            <span
+                                            <button
                                               key={idx}
-                                              className="inline-flex items-center gap-1 rounded bg-card-2/80 px-2 py-0.5 text-xs text-ink font-mono border border-line/60"
+                                              type="button"
+                                              onClick={() => openEditModal(row)}
+                                              className="group/pill inline-flex items-center gap-1 rounded bg-card-2/80 px-2 py-0.5 text-xs text-ink font-mono border border-line/60 hover:border-crimson-400/60 hover:bg-card transition-all cursor-pointer text-left"
+                                              title={`Click to edit date, service, or amount for ${ins.formatted}`}
                                             >
                                               <span>{ins.formatted}</span>
                                               <span className="text-[10px] text-crimson-400 font-sans font-semibold">R{ins.amount}</span>
-                                            </span>
+                                              <Pencil className="h-2.5 w-2.5 text-muted/50 opacity-0 group-hover/pill:opacity-100 transition-opacity ml-0.5" />
+                                            </button>
                                           ))}
                                         </div>
                                       </td>
@@ -766,23 +849,22 @@ export function LedgerPage() {
                                           <span className="font-semibold text-ink">
                                             <HighlightMatch text={row.name} query={search} />
                                           </span>
-                                          {row.instances.some((i) => i.isFTV) && (
-                                            <span className="inline-flex items-center rounded px-1.5 py-0.2 text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/25">
-                                              FTV
-                                            </span>
-                                          )}
                                         </div>
                                       </td>
                                       <td className="px-3.5 py-2.5 text-muted align-top">
                                         <div className="flex flex-wrap gap-1.5 max-w-xs">
                                           {row.instances.map((ins, idx) => (
-                                            <span
+                                            <button
                                               key={idx}
-                                              className="inline-flex items-center gap-1 rounded bg-card-2/80 px-2 py-0.5 text-xs text-ink font-mono border border-amber-500/30"
+                                              type="button"
+                                              onClick={() => openEditModal(row)}
+                                              className="group/pill inline-flex items-center gap-1 rounded bg-card-2/80 px-2 py-0.5 text-xs text-ink font-mono border border-amber-500/30 hover:border-amber-400 hover:bg-card transition-all cursor-pointer text-left"
+                                              title={`Click to edit date, service, or amount for ${ins.formatted}`}
                                             >
                                               <span>{ins.formatted}</span>
                                               <span className="text-[10px] text-amber-300 font-sans font-semibold">R{ins.amount}</span>
-                                            </span>
+                                              <Pencil className="h-2.5 w-2.5 text-amber-400/50 opacity-0 group-hover/pill:opacity-100 transition-opacity ml-0.5" />
+                                            </button>
                                           ))}
                                         </div>
                                       </td>
@@ -1129,20 +1211,6 @@ export function LedgerPage() {
                       </div>
                     </div>
 
-                    {/* Notes & Sponsorship Flag */}
-                    <div>
-                      <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
-                        General Notes / Remarks
-                      </label>
-                      <input
-                        type="text"
-                        value={addNotes}
-                        onChange={(e) => setAddNotes(e.target.value)}
-                        placeholder="e.g. FTV, Did not arrive at stop, Unaccounted"
-                        className="input-field w-full text-xs"
-                      />
-                    </div>
-
                     <div className="flex items-center gap-2 rounded-lg bg-card-2/60 p-2.5 border border-line/60">
                       <input
                         type="checkbox"
@@ -1152,9 +1220,30 @@ export function LedgerPage() {
                         className="rounded border-line bg-card text-crimson-500 focus:ring-crimson-500"
                       />
                       <label htmlFor="isSponsoredCheckbox" className="text-xs text-ink cursor-pointer select-none">
-                        Mark as <span className="font-semibold text-amber-300">Unaccounted Sponsorship / Unpaid</span> (groups into structure sponsorship breakdown)
+                        Mark as <span className="font-semibold text-amber-300">Unaccounted Sponsorship / Unpaid</span>
                       </label>
                     </div>
+
+                    {/* Only show reason/notes if marked as Unaccounted Sponsorship / Unpaid */}
+                    {addIsSponsored && (
+                      <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 space-y-1.5 animate-in fade-in duration-150">
+                        <label className="block text-xs font-bold uppercase tracking-wider text-amber-300">
+                          Sponsorship / Unpaid Reason <span className="text-crimson-400">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={addNotes}
+                          onChange={(e) => setAddNotes(e.target.value)}
+                          placeholder="e.g. Unaccounted Sponsorship, Did not pay, Unpaid"
+                          className="input-field w-full text-xs"
+                          required={addIsSponsored}
+                          autoFocus
+                        />
+                        <p className="text-[10px] text-amber-200/70">
+                          Reason or note for grouping this person under unaccounted sponsorship / unpaid debt.
+                        </p>
+                      </div>
+                    )}
 
                     {addError && (
                       <div className="flex items-center gap-2 rounded-lg border border-crimson-500/30 bg-crimson-900/20 p-2.5 text-xs text-crimson-300">
@@ -1282,7 +1371,7 @@ export function LedgerPage() {
                           step="any"
                           required
                           value={editDebt}
-                          onChange={(e) => setEditDebt(e.target.value)}
+                          onChange={(e) => handleTotalDebtChange(e.target.value)}
                           className="input-field w-full pl-9 pr-4 py-2 font-display text-xl font-bold text-crimson-400 focus:text-crimson-300"
                           placeholder="e.g. 40"
                           autoFocus
@@ -1297,7 +1386,7 @@ export function LedgerPage() {
                               <button
                                 key={preset}
                                 type="button"
-                                onClick={() => setEditDebt(String(preset))}
+                                onClick={() => handleTotalDebtChange(String(preset))}
                                 className={`rounded-md px-2.5 py-1 text-xs font-semibold font-mono transition-colors border ${
                                   Number(editDebt) === preset
                                     ? 'bg-crimson-500 text-white border-crimson-500 shadow-sm'
@@ -1312,7 +1401,7 @@ export function LedgerPage() {
                           <div className="flex items-center gap-1">
                             <button
                               type="button"
-                              onClick={() => setEditDebt(String(Math.max(0, (Number(editDebt) || 0) - 20)))}
+                              onClick={() => handleTotalDebtChange(String(Math.max(0, (Number(editDebt) || 0) - 20)))}
                               className="rounded-md border border-line bg-card px-2 py-1 text-xs font-semibold text-muted hover:text-ink hover:bg-card-2 transition-colors"
                               title="Subtract R20"
                             >
@@ -1320,7 +1409,7 @@ export function LedgerPage() {
                             </button>
                             <button
                               type="button"
-                              onClick={() => setEditDebt(String((Number(editDebt) || 0) + 20))}
+                              onClick={() => handleTotalDebtChange(String((Number(editDebt) || 0) + 20))}
                               className="rounded-md border border-line bg-card px-2 py-1 text-xs font-semibold text-emerald-400 hover:bg-card-2 transition-colors"
                               title="Add R20"
                             >
@@ -1328,7 +1417,7 @@ export function LedgerPage() {
                             </button>
                             <button
                               type="button"
-                              onClick={() => setEditDebt(String((Number(editDebt) || 0) + 40))}
+                              onClick={() => handleTotalDebtChange(String((Number(editDebt) || 0) + 40))}
                               className="rounded-md border border-line bg-card px-2 py-1 text-xs font-semibold text-emerald-400 hover:bg-card-2 transition-colors"
                               title="Add R40"
                             >
@@ -1345,20 +1434,6 @@ export function LedgerPage() {
                       )}
                     </div>
 
-                    {/* Notes & Sponsorship Flag */}
-                    <div>
-                      <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
-                        Notes / Status
-                      </label>
-                      <input
-                        type="text"
-                        value={editNotes}
-                        onChange={(e) => setEditNotes(e.target.value)}
-                        placeholder="e.g. FTV, Did not pitch, Unaccounted"
-                        className="input-field w-full text-xs"
-                      />
-                    </div>
-
                     <div className="flex items-center gap-2 rounded-lg bg-card-2/60 p-2.5 border border-line/60">
                       <input
                         type="checkbox"
@@ -1372,9 +1447,122 @@ export function LedgerPage() {
                       </label>
                     </div>
 
-                    {/* Linked Sessions Breakdown info */}
-                    <div className="rounded-lg bg-card-2/40 p-2.5 text-xs text-muted border border-line/40">
-                      <span className="font-semibold text-ink">Linked Record(s):</span> {editTarget.instances.length} instance(s) ({editTarget.instances.map((i) => i.formatted).join(', ')})
+                    {/* Only show reason/notes if marked as Unaccounted Sponsorship / Unpaid */}
+                    {editIsSponsored && (
+                      <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 space-y-1.5 animate-in fade-in duration-150">
+                        <label className="block text-xs font-bold uppercase tracking-wider text-amber-300">
+                          Sponsorship / Unpaid Reason <span className="text-crimson-400">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={editNotes}
+                          onChange={(e) => setEditNotes(e.target.value)}
+                          placeholder="e.g. Unaccounted Sponsorship, Did not pay, Unpaid"
+                          className="input-field w-full text-xs"
+                          required={editIsSponsored}
+                          autoFocus
+                        />
+                        <p className="text-[10px] text-amber-200/70">
+                          Reason or remarks for this unaccounted sponsorship or unpaid entry.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Linked Cancellation Dates & Instances Manager */}
+                    <div className="rounded-xl border border-line bg-card-2/40 p-3 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <span className="text-xs font-bold uppercase tracking-wider text-ink block">
+                            Cancellation Dates & Trips ({editInstances.length})
+                          </span>
+                          <p className="text-[11px] text-muted">
+                            Modify any date, adjust service types, or remove a specific date in-between.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleAddNewInstance}
+                          className="inline-flex items-center gap-1 rounded-md border border-line bg-card px-2 py-1 text-[11px] font-semibold text-ink hover:bg-card-2 transition-colors"
+                          title="Add an extra missed date for this passenger"
+                        >
+                          <Plus className="h-3 w-3 text-crimson-400" />
+                          <span>Add Date</span>
+                        </button>
+                      </div>
+
+                      {editInstances.length === 0 ? (
+                        <div className="rounded-lg border border-dashed border-line/80 p-3 text-center text-xs text-muted">
+                          All dates removed. Saving will clear this debtor from the ledger.
+                        </div>
+                      ) : (
+                        <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                          {editInstances.map((inst, idx) => (
+                            <div
+                              key={inst.id || `new-inst-${idx}`}
+                              className="flex items-center gap-2 rounded-lg bg-card p-2 border border-line/60 shadow-xs"
+                            >
+                              <span className="text-[11px] font-mono font-semibold text-muted/80 w-5 shrink-0 text-center">
+                                #{idx + 1}
+                              </span>
+
+                              {/* Date picker */}
+                              <div className="flex-1 min-w-[120px]">
+                                <input
+                                  type="date"
+                                  value={inst.date}
+                                  onChange={(e) => handleUpdateInstanceDate(idx, e.target.value)}
+                                  className="input-field w-full text-xs py-1 px-2 font-mono"
+                                  title={`Edit date for instance #${idx + 1}`}
+                                />
+                              </div>
+
+                              {/* Service selection */}
+                              <div className="w-20 shrink-0">
+                                <select
+                                  value={inst.service}
+                                  onChange={(e) => handleUpdateInstanceService(idx, e.target.value)}
+                                  className="input-field w-full text-xs py-1 px-1.5 font-bold text-center"
+                                  title="Service code"
+                                >
+                                  <option value="PM">PM</option>
+                                  <option value="AM">AM</option>
+                                  <option value="LM">LM</option>
+                                  <option value="WMP">WMP</option>
+                                  <option value="EF">EF</option>
+                                  <option value="AD">AD</option>
+                                  <option value="FW">FW</option>
+                                </select>
+                              </div>
+
+                              {/* Debt amount for this specific date */}
+                              <div className="w-18 shrink-0 relative">
+                                <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[10px] font-bold text-muted">
+                                  R
+                                </span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="5"
+                                  value={inst.amount}
+                                  onChange={(e) => handleUpdateInstanceAmount(idx, e.target.value)}
+                                  className="input-field w-full text-xs py-1 pl-4 pr-1 text-right font-mono font-bold text-crimson-400"
+                                  title="Fee for this specific cancellation date"
+                                />
+                              </div>
+
+                              {/* Delete this specific date */}
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveSpecificInstance(idx)}
+                                className="rounded p-1 text-muted hover:text-crimson-400 hover:bg-crimson-500/10 transition-colors shrink-0"
+                                title={`Remove this specific date (${inst.date || 'Undated'}) from debtor`}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
 
                     {editError && (
