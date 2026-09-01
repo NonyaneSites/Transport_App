@@ -279,6 +279,21 @@ export function LedgerPage() {
     });
   }
 
+  function handleUpdateInstanceAmount(index: number, newAmountStr: string) {
+    const rawVal = newAmountStr.trim();
+    const parsed = rawVal === '' ? 0 : Number(rawVal);
+    const amountVal = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+    setEditInstances((prev) => {
+      const next = [...prev];
+      if (next[index]) {
+        next[index] = { ...next[index], amount: amountVal };
+      }
+      const total = next.reduce((sum, item) => sum + item.amount, 0);
+      setEditDebt(String(total));
+      return next;
+    });
+  }
+
   function handleTotalDebtChange(newTotalStr: string) {
     setEditDebt(newTotalStr);
     const target = Number(newTotalStr);
