@@ -468,7 +468,10 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
     ? input.structure.trim().toUpperCase()
     : input.structure.trim() ? `S${input.structure.trim()}` : 'No Structure';
 
-  const isFTV = (input.notes || '').toUpperCase().includes('FTV') || input.service.toUpperCase().includes('FTV') || input.amount === 20;
+  const isFTV = (input.notes || '').toUpperCase().includes('FTV') || input.service.toUpperCase().includes('FTV');
+
+  const rawAmt = Number(input.amount);
+  const debtAmt = Number.isFinite(rawAmt) && rawAmt >= 0 ? rawAmt : CANCELLATION_FEE;
 
   const row = {
     manifest_key: manifestKey,
@@ -483,7 +486,7 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
     license_plate: '',
     sponsored: !!input.isSponsored,
     sponsor_note: input.isSponsored ? (input.notes || 'Sponsorship') : '',
-    structure_debt: Number(input.amount) || (isFTV ? 20 : CANCELLATION_FEE),
+    structure_debt: debtAmt,
     general_notes: input.notes || (isFTV ? 'FTV' : ''),
   };
 
@@ -1031,7 +1034,10 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
       const sorted = [...group].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
       const earliest = sorted[0];
       const latest = sorted[sorted.length - 1];
-      const amount = group.reduce((sum, e) => sum + Number(e.structure_debt), 0);
+      const amount = group.reduce((sum, e) => {
+        const d = Number(e.structure_debt);
+        return sum + (Number.isFinite(d) ? d : CANCELLATION_FEE);
+      }, 0);
 
       // Collect distinct service codes
       const serviceCodesSet = new Set<string>();
@@ -1048,13 +1054,15 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
           }
         }
         const isFTV = (e.general_notes || '').includes('FTV') || (e.sponsor_note || '').includes('FTV');
+        const rawD = Number(e.structure_debt);
+        const instDebt = Number.isFinite(rawD) ? rawD : CANCELLATION_FEE;
 
         return {
           id: e.id,
           date: e.date,
           service: e.service,
           serviceCode: code,
-          amount: Number(e.structure_debt) || CANCELLATION_FEE,
+          amount: instDebt,
           formatted: `${dStr}(${code})`,
           isFTV,
           notes: e.general_notes || e.sponsor_note || '',

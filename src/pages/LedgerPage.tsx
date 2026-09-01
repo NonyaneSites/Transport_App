@@ -59,7 +59,6 @@ export function LedgerPage() {
   const [editDebt, setEditDebt] = useState('');
   const [editNotes, setEditNotes] = useState('');
   const [editIsSponsored, setEditIsSponsored] = useState(false);
-  const [additionalDebtToAdd, setAdditionalDebtToAdd] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
   const [deletingDebtor, setDeletingDebtor] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
@@ -239,7 +238,6 @@ export function LedgerPage() {
     setEditDebt(String(row.amount));
     setEditNotes(row.notes);
     setEditIsSponsored(row.isSponsoredOrUnpaid);
-    setAdditionalDebtToAdd('');
     setEditError(null);
     setEditSuccessMessage(null);
   }
@@ -250,7 +248,8 @@ export function LedgerPage() {
     setEditSuccessMessage(null);
   }
 
-  async function handleSaveDebtorEdit() {
+  async function handleSaveDebtorEdit(e?: React.FormEvent) {
+    if (e) e.preventDefault();
     if (!editTarget) return;
     if (!editName.trim()) {
       setEditError('Passenger name cannot be empty.');
@@ -261,18 +260,12 @@ export function LedgerPage() {
       return;
     }
 
-    let finalDebt = Number(editDebt);
-    if (!Number.isFinite(finalDebt) || finalDebt < 0) {
-      setEditError('Please enter a valid positive debt amount.');
+    const rawDebt = Number(editDebt);
+    if (!Number.isFinite(rawDebt) || rawDebt < 0) {
+      setEditError('Please enter a valid non-negative debt amount (e.g. 0, 20, 40).');
       return;
     }
-
-    if (additionalDebtToAdd.trim()) {
-      const addAmt = Number(additionalDebtToAdd);
-      if (Number.isFinite(addAmt) && addAmt > 0) {
-        finalDebt += addAmt;
-      }
-    }
+    const finalDebt = Math.round(rawDebt * 100) / 100;
 
     setSavingEdit(true);
     setEditError(null);
@@ -287,10 +280,10 @@ export function LedgerPage() {
 
       const refreshed = await listLedgerEntries();
       setEntries(refreshed);
-      setEditSuccessMessage('Debtor updated successfully.');
+      setEditSuccessMessage('Debtor and amount updated successfully.');
       setTimeout(() => {
         closeEditModal();
-      }, 700);
+      }, 500);
     } catch (e) {
       setEditError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -694,7 +687,17 @@ export function LedgerPage() {
                                       </td>
                                       <td className="px-3.5 py-2.5 align-top">
                                         <div className="flex items-center gap-1.5">
-                                          <span className="font-display font-bold text-crimson-400 text-base">R{row.amount}</span>
+                                          <button
+                                            type="button"
+                                            onClick={() => openEditModal(row)}
+                                            className="group inline-flex items-center gap-1.5 rounded-lg px-2 py-1 transition-all hover:bg-card-2 border border-transparent hover:border-line/60 text-left"
+                                            title={`Click to edit amount owing for ${row.name} (Current: R${row.amount})`}
+                                          >
+                                            <span className="font-display font-bold text-crimson-400 text-base group-hover:underline">
+                                              R{row.amount}
+                                            </span>
+                                            <Pencil className="h-3 w-3 text-muted/60 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                          </button>
                                           {row.instances.length > 1 && (
                                             <span className="text-[10px] text-muted rounded bg-card-2 px-1.5 py-0.5 border border-line/60">
                                               {row.instances.length} missed
@@ -790,7 +793,17 @@ export function LedgerPage() {
                                       </td>
                                       <td className="px-3.5 py-2.5 align-top">
                                         <div className="flex items-center gap-1.5">
-                                          <span className="font-display font-bold text-amber-300 text-base">R{row.amount}</span>
+                                          <button
+                                            type="button"
+                                            onClick={() => openEditModal(row)}
+                                            className="group inline-flex items-center gap-1.5 rounded-lg px-2 py-1 transition-all hover:bg-card-2 border border-transparent hover:border-amber-500/30 text-left"
+                                            title={`Click to edit amount owing for ${row.name} (Current: R${row.amount})`}
+                                          >
+                                            <span className="font-display font-bold text-amber-300 text-base group-hover:underline">
+                                              R{row.amount}
+                                            </span>
+                                            <Pencil className="h-3 w-3 text-amber-300/60 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                          </button>
                                           {row.instances.length > 1 && (
                                             <span className="text-[10px] text-muted rounded bg-card-2 px-1.5 py-0.5 border border-line/60">
                                               {row.instances.length}x
@@ -1239,68 +1252,97 @@ export function LedgerPage() {
                       </div>
                     </div>
 
-                    {/* Current Debt & Additional Debt */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
-                          Base / Current Debt (R) <span className="text-crimson-400">*</span>
+                    {/* Amount Owing Section */}
+                    <div className="rounded-xl border border-line bg-card-2/50 p-3.5 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <label className="block text-xs font-bold uppercase tracking-wider text-ink">
+                          Amount Owing (R) <span className="text-crimson-400">*</span>
                         </label>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-muted text-sm">R</span>
-                          <input
-                            type="number"
-                            min="0"
-                            step="any"
-                            required
-                            value={editDebt}
-                            onChange={(e) => setEditDebt(e.target.value)}
-                            className="input-field w-full pl-7 font-mono font-bold text-sm text-crimson-400"
-                          />
-                        </div>
-                        <p className="mt-1 text-[10px] text-muted">Directly override total debt amount</p>
+                        {Number(editDebt) !== editTarget.amount && Number.isFinite(Number(editDebt)) && (
+                          <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
+                            Number(editDebt) > editTarget.amount
+                              ? 'bg-crimson-500/15 text-crimson-400 border border-crimson-500/30'
+                              : 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                          }`}>
+                            {Number(editDebt) > editTarget.amount
+                              ? `+R${Math.round((Number(editDebt) - editTarget.amount) * 100) / 100}`
+                              : `-R${Math.round((editTarget.amount - Number(editDebt)) * 100) / 100}`}
+                          </span>
+                        )}
                       </div>
-                      <div>
-                        <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
-                          Add Additional Debt (+R)
-                        </label>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-emerald-400 text-sm">+R</span>
-                          <input
-                            type="number"
-                            min="0"
-                            step="any"
-                            value={additionalDebtToAdd}
-                            onChange={(e) => setAdditionalDebtToAdd(e.target.value)}
-                            placeholder="e.g. 40"
-                            className="input-field w-full pl-9 font-mono font-bold text-sm text-emerald-400 placeholder:text-muted"
-                          />
-                        </div>
-                        <div className="mt-1 flex gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => setAdditionalDebtToAdd('40')}
-                            className="text-[10px] text-muted hover:text-ink underline"
-                          >
-                            +R40
-                          </button>
-                          <span className="text-[10px] text-muted">·</span>
-                          <button
-                            type="button"
-                            onClick={() => setAdditionalDebtToAdd('20')}
-                            className="text-[10px] text-muted hover:text-ink underline"
-                          >
-                            +R20
-                          </button>
-                          <span className="text-[10px] text-muted">·</span>
-                          <button
-                            type="button"
-                            onClick={() => setAdditionalDebtToAdd('80')}
-                            className="text-[10px] text-muted hover:text-ink underline"
-                          >
-                            +R80
-                          </button>
+
+                      {/* Main Amount Input */}
+                      <div className="relative">
+                        <span className="absolute left-3.5 top-1/2 -translate-y-1/2 font-display text-lg font-bold text-muted">
+                          R
+                        </span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          required
+                          value={editDebt}
+                          onChange={(e) => setEditDebt(e.target.value)}
+                          className="input-field w-full pl-9 pr-4 py-2 font-display text-xl font-bold text-crimson-400 focus:text-crimson-300"
+                          placeholder="e.g. 40"
+                          autoFocus
+                        />
+                      </div>
+
+                      {/* Quick Presets & Modifiers */}
+                      <div className="space-y-2 pt-2 border-t border-line/60">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {[0, 20, 40, 60, 80, 120].map((preset) => (
+                              <button
+                                key={preset}
+                                type="button"
+                                onClick={() => setEditDebt(String(preset))}
+                                className={`rounded-md px-2.5 py-1 text-xs font-semibold font-mono transition-colors border ${
+                                  Number(editDebt) === preset
+                                    ? 'bg-crimson-500 text-white border-crimson-500 shadow-sm'
+                                    : 'bg-card border-line text-ink hover:bg-card-2 hover:border-line/80'
+                                }`}
+                              >
+                                {preset === 0 ? 'R0 (Clear)' : `R${preset}`}
+                              </button>
+                            ))}
+                          </div>
+
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setEditDebt(String(Math.max(0, (Number(editDebt) || 0) - 20)))}
+                              className="rounded-md border border-line bg-card px-2 py-1 text-xs font-semibold text-muted hover:text-ink hover:bg-card-2 transition-colors"
+                              title="Subtract R20"
+                            >
+                              -R20
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditDebt(String((Number(editDebt) || 0) + 20))}
+                              className="rounded-md border border-line bg-card px-2 py-1 text-xs font-semibold text-emerald-400 hover:bg-card-2 transition-colors"
+                              title="Add R20"
+                            >
+                              +R20
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditDebt(String((Number(editDebt) || 0) + 40))}
+                              className="rounded-md border border-line bg-card px-2 py-1 text-xs font-semibold text-emerald-400 hover:bg-card-2 transition-colors"
+                              title="Add R40"
+                            >
+                              +R40
+                            </button>
+                          </div>
                         </div>
                       </div>
+
+                      {Number(editDebt) === 0 && (
+                        <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/25 p-2 text-xs text-emerald-300">
+                          Saving R0 will mark this debtor as fully settled and clear the record from the active ledger.
+                        </div>
+                      )}
                     </div>
 
                     {/* Notes & Sponsorship Flag */}
