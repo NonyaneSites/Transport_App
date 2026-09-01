@@ -57,6 +57,7 @@ export function LedgerPage() {
   const [editName, setEditName] = useState('');
   const [editStructure, setEditStructure] = useState('');
   const [editDebt, setEditDebt] = useState('');
+  const [editNotes, setEditNotes] = useState('');
   const [editIsSponsored, setEditIsSponsored] = useState(false);
   const [additionalDebtToAdd, setAdditionalDebtToAdd] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
@@ -236,6 +237,7 @@ export function LedgerPage() {
     setEditName(row.name);
     setEditStructure(row.structure);
     setEditDebt(String(row.amount));
+    setEditNotes(row.notes);
     setEditIsSponsored(row.isSponsoredOrUnpaid);
     setAdditionalDebtToAdd('');
     setEditError(null);
@@ -279,6 +281,7 @@ export function LedgerPage() {
         name: editName.trim(),
         structure: editStructure.trim(),
         newTotalDebt: finalDebt,
+        notes: editNotes,
         isSponsored: editIsSponsored,
       });
 
@@ -671,7 +674,7 @@ export function LedgerPage() {
                                           </span>
                                           {row.instances.some((i) => i.isFTV) && (
                                             <span className="inline-flex items-center rounded px-1.5 py-0.2 text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/25">
-                                              FTV (R20)
+                                              FTV
                                             </span>
                                           )}
                                         </div>
@@ -762,7 +765,7 @@ export function LedgerPage() {
                                           </span>
                                           {row.instances.some((i) => i.isFTV) && (
                                             <span className="inline-flex items-center rounded px-1.5 py-0.2 text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/25">
-                                              FTV (R20)
+                                              FTV
                                             </span>
                                           )}
                                         </div>
@@ -897,7 +900,7 @@ export function LedgerPage() {
                             onClick={() => setPaymentAmount('20')}
                             className="rounded bg-card-2 px-2 py-0.5 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60"
                           >
-                            R20 (FTV)
+                            R20
                           </button>
                         )}
                         {paymentTarget.amount >= 40 && (
@@ -1087,7 +1090,7 @@ export function LedgerPage() {
                             onClick={() => setAddAmount('20')}
                             className="text-[10px] text-muted hover:text-ink underline"
                           >
-                            R20 (FTV)
+                            R20
                           </button>
                           <span className="text-[10px] text-muted">·</span>
                           <button
@@ -1116,7 +1119,7 @@ export function LedgerPage() {
                     {/* Notes & Sponsorship Flag */}
                     <div>
                       <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
-                        General Notes / FTV Indicator
+                        General Notes / Remarks
                       </label>
                       <input
                         type="text"
@@ -1286,7 +1289,7 @@ export function LedgerPage() {
                             onClick={() => setAdditionalDebtToAdd('20')}
                             className="text-[10px] text-muted hover:text-ink underline"
                           >
-                            +R20 (FTV)
+                            +R20
                           </button>
                           <span className="text-[10px] text-muted">·</span>
                           <button
@@ -1300,7 +1303,20 @@ export function LedgerPage() {
                       </div>
                     </div>
 
-                    {/* Sponsorship Flag */}
+                    {/* Notes & Sponsorship Flag */}
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                        Notes / Status
+                      </label>
+                      <input
+                        type="text"
+                        value={editNotes}
+                        onChange={(e) => setEditNotes(e.target.value)}
+                        placeholder="e.g. FTV, Did not pitch, Unaccounted"
+                        className="input-field w-full text-xs"
+                      />
+                    </div>
+
                     <div className="flex items-center gap-2 rounded-lg bg-card-2/60 p-2.5 border border-line/60">
                       <input
                         type="checkbox"

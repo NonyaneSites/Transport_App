@@ -91,9 +91,10 @@ export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[
     const struct = (entry.structure || 'Unassigned Structure').trim();
     const { cleanName, serviceCode, isFTV: nameFTV } = extractNameAndService(entry.passenger_name, entry.service);
     const person = cleanName || entry.passenger_name || 'Unknown';
-    const isFTV = nameFTV || (entry.general_notes || '').includes('FTV') || Number(entry.structure_debt) === 20;
+    const isFTV = nameFTV || (entry.general_notes || '').includes('FTV') || (entry.sponsor_note || '').includes('FTV');
     const instanceStr = formatCancellationInstance(entry.date, serviceCode || entry.service) + (isFTV ? ' (FTV)' : '');
-    const amount = isFTV ? 20 : (Number(entry.structure_debt) || 40);
+    const rawDebt = Number(entry.structure_debt);
+    const amount = Number.isFinite(rawDebt) && rawDebt >= 0 ? rawDebt : 40;
 
     const gn = (entry.general_notes || '').toLowerCase();
     const sn = (entry.sponsor_note || '').toLowerCase();

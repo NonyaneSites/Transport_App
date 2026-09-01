@@ -232,6 +232,7 @@ export function evaluateLedgerSearch(
   const structure = (item.structure || '').toLowerCase().trim();
   const notes = `${item.general_notes || ''} ${item.sponsor_note || ''} ${item.notes || ''}`.toLowerCase().trim();
   const dateStr = `${item.date || ''} ${item.formattedDateList || ''}`.toLowerCase().trim();
+  const rep = (item.repName || item.rep_name || '').toLowerCase().trim();
   const service = `${item.service || ''} ${(item.serviceCodes || []).join(' ')}`.toLowerCase().trim();
 
   const nameWords = fullName.split(/\s+/).filter(Boolean);
@@ -274,9 +275,8 @@ export function evaluateLedgerSearch(
     return { matched: true, score: 500 };
   }
 
-  // 7. Multi-token match across passenger details (name + structure + notes + dates + service)
-  // Note: rep name is intentionally excluded so searching a person's name doesn't return everyone in that rep's structure
-  const combinedAll = `${fullName} ${structure} ${notes} ${dateStr} ${service}`;
+  // 7. Multi-token match across all fields (name + structure + notes + dates + service)
+  const combinedAll = `${fullName} ${structure} ${notes} ${dateStr} ${rep} ${service}`;
   const allTokensInCombined = qTokens.every((token) => combinedAll.includes(token));
   if (allTokensInCombined) {
     let score = 300;
@@ -732,7 +732,7 @@ export function parseFlexibleHistoricalDate(value: unknown): string | null {
  * Supports:
  * - Table merged structure cells (forward fills structure and rep names across consecutive rows)
  * - Automatic extraction of service types (AM, PM, LM, WMP, EF, AD, FW, etc.)
- * - Automatic FTV rule: any entry with FTV owes R20 (First-Time Visitor half rate)
+ * - Automatic extraction of FTV / section notes (debt amounts are indicated by the file or admin)
  * - Automatic handling of section/category rows (e.g. "Unaccounted Sponsorship", "Unpaid Sponsorship", "Did not pay")
  * - Does not discard undated entries; imports them cleanly.
  */
@@ -866,24 +866,23 @@ export function parseHistoricalCancellationWorkbook(buffer: ArrayBuffer): Histor
     // Extract clean name and service code
     const { cleanName, serviceCode, isFTV: nameIsFTV } = extractNameAndService(rawNameVal, rawServiceVal);
 
-    // Rule: If it has FTV next to it, the person owes R20
+    // Check for FTV tag for note recording
     const isFTV =
       nameIsFTV ||
       /\bFTV\b/i.test(rawServiceVal) ||
       /\bFTV\b/i.test(rawNameVal) ||
       /\bFTV\b/i.test(rawCategoryVal) ||
-      /\bFTV\b/i.test(rawNotesVal) ||
-      rawNameVal.includes('R20') ||
-      cleanName.includes('R20');
+      /\bFTV\b/i.test(rawNotesVal);
 
-    // Debt parsing
+    // Debt parsing: Read the explicit debt column or fallback to standard cancellation fee.
+    // The cancellation admin determines and adjusts debt amounts directly.
     const debtRaw = debtCol !== -1 ? raw[debtCol] : undefined;
-    let structureDebt = isFTV ? 20 : CANCELLATION_FEE;
+    let structureDebt = CANCELLATION_FEE;
     if (debtRaw != null && String(debtRaw).trim() !== '') {
       const debtStr = String(debtRaw).replace(/[^\d.]/g, '');
       const parsedDebt = Number(debtStr);
-      if (Number.isFinite(parsedDebt) && parsedDebt > 0) {
-        structureDebt = isFTV ? 20 : parsedDebt;
+      if (Number.isFinite(parsedDebt) && parsedDebt >= 0) {
+        structureDebt = parsedDebt;
       }
     }
 
@@ -903,7 +902,7 @@ export function parseHistoricalCancellationWorkbook(buffer: ArrayBuffer): Histor
       noteParts.push(rawNotesVal);
     }
     if (isFTV && !noteParts.some((p) => p.includes('FTV'))) {
-      noteParts.push('FTV (R20)');
+      noteParts.push('FTV');
     }
 
     const generalNotes = noteParts.join(' — ');
@@ -1048,7 +1047,7 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
             dStr = `${parts[2].slice(-2)}/${parts[1]}/${parts[0].slice(2)}`;
           }
         }
-        const isFTV = (e.general_notes || '').includes('FTV') || Number(e.structure_debt) === 20;
+        const isFTV = (e.general_notes || '').includes('FTV') || (e.sponsor_note || '').includes('FTV');
 
         return {
           id: e.id,
