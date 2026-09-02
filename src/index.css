@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -13,64 +13,57 @@ html, body, #root {
 }
 
 body {
-  background-color: #0a0a0a;
-  color: #F1FAEE;
+  background-color: #0d0f14;
+  color: #f8fafc;
   font-family: 'Inter', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: #0a0a0a;
+  background: #0d0f14;
 }
 ::-webkit-scrollbar-thumb {
-  background: #262626;
-  border-radius: 6px;
+  background: #202636;
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #3a3a3a;
+  background: #2e374d;
 }
 
 @layer components {
   .btn-crimson {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-crimson-500 px-4 py-2.5 text-sm font-semibold text-white transition-all hover:bg-crimson-600 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-crimson-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-all hover:bg-crimson-500 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40;
   }
   .btn-success {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-success px-4 py-2.5 text-sm font-semibold text-white transition-all hover:bg-success-dark active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-success-dark px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-all hover:bg-success active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40;
   }
   .btn-ghost {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-line bg-card-2 px-4 py-2.5 text-sm font-medium text-ink transition-all hover:border-crimson-500/40 hover:bg-card active:scale-[0.98];
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-line bg-card-2 px-3.5 py-2 text-sm font-medium text-ink transition-all hover:border-line-bright hover:bg-card-3 active:scale-[0.99];
   }
   .btn-danger {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-crimson-500/30 bg-crimson-900/20 px-4 py-2.5 text-sm font-semibold text-crimson-300 transition-all hover:border-crimson-500 hover:bg-crimson-900/40 active:scale-[0.98];
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-crimson-500/20 bg-crimson-950/30 px-3.5 py-2 text-sm font-medium text-crimson-300 transition-all hover:border-crimson-500/40 hover:bg-crimson-950/50 active:scale-[0.99];
   }
   .input-field {
-    @apply w-full rounded-lg border border-line bg-card-2 px-3.5 py-2.5 text-sm text-ink placeholder-muted transition-all focus:border-crimson-500/60 focus:outline-none focus:ring-2 focus:ring-crimson-500/20;
+    @apply w-full rounded-xl border border-line bg-card-2 px-3.5 py-2.5 text-sm text-ink placeholder-muted/80 transition-all focus:border-crimson-500/50 focus:bg-card focus:outline-none focus:ring-2 focus:ring-crimson-500/15;
   }
   .card {
     @apply rounded-2xl border border-line bg-card p-5 shadow-card;
   }
   .badge {
-    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold;
+    @apply inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-semibold;
   }
   .nav-link {
-    @apply inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-all;
+    @apply inline-flex items-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium transition-all;
   }
   .nav-link-inactive {
     @apply text-muted hover:text-ink hover:bg-card-2;
   }
   .nav-link-active {
-    @apply bg-crimson-500/10 text-crimson-300;
+    @apply bg-card-2 text-ink font-semibold border border-line-bright;
   }
-}
-
-.bg-grid {
-  background-image:
-    linear-gradient(rgba(230,57,70,0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(230,57,70,0.04) 1px, transparent 1px);
-  background-size: 40px 40px;
 }

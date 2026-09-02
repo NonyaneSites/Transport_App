@@ -3,7 +3,6 @@ import type { Manifest, Passenger, Vehicle, ServiceType } from './types';
 import { manifestKey, parseManifestKey } from './dates';
 import { hubDisplayName } from './types';
 import { loadManifest, upsertManifest } from './manifest';
-import { normalizePassengerText } from './importer';
 
 export type ServicePeriod = 'AM' | 'PM';
 
@@ -35,6 +34,154 @@ export function areServicesTransferCompatible(serviceA: ServiceType | string, se
   return getServicePeriod(serviceA) === getServicePeriod(serviceB);
 }
 
+/**
+ * Standard Levenshtein distance for fuzzy string comparison.
+ */
+export function levenshteinDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1];
+      } else {
+        dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      }
+    }
+  }
+  return dp[m][n];
+}
+
+/**
+ * Normalizes structure codes (e.g. "S9", "s9", "Structure 9", "9", "S9A") into a canonical value (e.g. "9", "9A").
+ */
+export function normalizeStructure(s?: string | null): string {
+  if (!s) return '';
+  const trimmed = s.trim().toUpperCase();
+  const numMatch = trimmed.match(/^(?:STRUCTURE|STRUCT|S)?\s*([0-9]+[A-Z]?)$/i);
+  if (numMatch) {
+    return numMatch[1].toUpperCase();
+  }
+  return trimmed.replace(/[^A-Z0-9]/g, '');
+}
+
+/**
+ * Extracts embedded structure tags from text (e.g. "Amo Nhlabathi (S9)" -> name: "Amo Nhlabathi", structure: "S9").
+ */
+export function extractStructureFromText(text: string): { cleanText: string; structure?: string } {
+  if (!text) return { cleanText: '' };
+  
+  const bracketMatch = text.match(/([([{])\s*(?:structure|struct|s)?\s*([0-9]+[a-z]?|[a-z0-9]+)\s*([)\]}])/i);
+  if (bracketMatch) {
+    const rawVal = bracketMatch[1].toUpperCase();
+    const structVal = rawVal.startsWith('S') ? rawVal : `S${rawVal}`;
+    const clean = text.replace(bracketMatch[0], '').trim().replace(/\s+/g, ' ');
+    return { cleanText: clean, structure: structVal };
+  }
+
+  const trailingMatch = text.match(/\b(?:structure|struct|s)\s*([0-9]+[a-z]?)\b$/i);
+  if (trailingMatch) {
+    const rawVal = trailingMatch[1].toUpperCase();
+    const clean = text.substring(0, trailingMatch.index).trim();
+    return { cleanText: clean, structure: `S${rawVal}` };
+  }
+
+  return { cleanText: text.trim().replace(/\s+/g, ' ') };
+}
+
+/**
+ * Compares surnames: must be identical or at most 1 char typo for length >= 5.
+ */
+function isSurnameMatch(s1: string, s2: string): boolean {
+  if (s1 === s2) return true;
+  if (Math.min(s1.length, s2.length) >= 5 && levenshteinDistance(s1, s2) <= 1) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Compares first names: matches exact, nickname / prefix (e.g. Amo -> Amogelang, Chris -> Christopher),
+ * or minor typo (distance <= 1).
+ */
+function isFirstNameMatch(f1: string, f2: string): boolean {
+  if (f1 === f2) return true;
+  // Prefix / nickname abbreviation (e.g. "amo" for "amogelang", "dan" for "daniel")
+  if (f1.length >= 3 && f2.startsWith(f1)) return true;
+  if (f2.length >= 3 && f1.startsWith(f2)) return true;
+  // Minor typo for longer names
+  if (Math.min(f1.length, f2.length) >= 4 && levenshteinDistance(f1, f2) <= 1) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Checks if a walk-in entry matches an existing passenger for a transfer:
+ * 1. Requires structure to match when both are present (e.g. S9 === S9). Conflicting structures never transfer.
+ * 2. Requires both first name and surname to be almost identical (e.g. Amogelang Nhlabathi vs Amo Nhlabathi).
+ * 3. Prevents ambiguous single-token substring matches from hijacking transfers.
+ */
+export function isPassengerTransferMatch(
+  walkIn: { fullName: string; structure?: string | null },
+  candidate: { fullName: string; structure?: string | null }
+): { isMatch: boolean; score: number } {
+  const walkInExtracted = extractStructureFromText(walkIn.fullName);
+  const candExtracted = extractStructureFromText(candidate.fullName);
+
+  const cleanWalkIn = walkInExtracted.cleanText.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim();
+  const cleanCand = candExtracted.cleanText.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim();
+
+  const walkInStruct = normalizeStructure(walkIn.structure || walkInExtracted.structure);
+  const candStruct = normalizeStructure(candidate.structure || candExtracted.structure);
+
+  // Structural constraint: if both specify a structure, they MUST match.
+  if (walkInStruct && candStruct && walkInStruct !== candStruct) {
+    return { isMatch: false, score: 0 };
+  }
+
+  const tokens1 = cleanWalkIn.split(/\s+/).filter(Boolean);
+  const tokens2 = cleanCand.split(/\s+/).filter(Boolean);
+
+  if (tokens1.length === 0 || tokens2.length === 0) {
+    return { isMatch: false, score: 0 };
+  }
+
+  // Single-word input constraint: must be exact match and have structure match
+  if (tokens1.length === 1 || tokens2.length === 1) {
+    if (tokens1.join(' ') === tokens2.join(' ')) {
+      if (walkInStruct && candStruct && walkInStruct === candStruct) {
+        return { isMatch: true, score: 0.9 };
+      }
+    }
+    return { isMatch: false, score: 0 };
+  }
+
+  // Surnames (last word)
+  const surname1 = tokens1[tokens1.length - 1];
+  const surname2 = tokens2[tokens2.length - 1];
+  if (!isSurnameMatch(surname1, surname2)) {
+    return { isMatch: false, score: 0 };
+  }
+
+  // First names (preceding words)
+  const first1 = tokens1.slice(0, -1).join(' ');
+  const first2 = tokens2.slice(0, -1).join(' ');
+  if (!isFirstNameMatch(first1, first2)) {
+    return { isMatch: false, score: 0 };
+  }
+
+  let score = 0.9;
+  if (walkInStruct && candStruct && walkInStruct === candStruct) {
+    score = 1.0;
+  }
+
+  return { isMatch: true, score };
+}
+
 export interface CrossCheckCandidate {
   passenger: Passenger;
   service: ServiceType;
@@ -46,18 +193,20 @@ export interface CrossCheckCandidate {
 }
 
 /**
- * Searches across all services for a specific date to find a passenger by name.
- * Uses a single lightweight query to minimize egress.
+ * Searches across compatible services for a specific date to find a passenger by name and structure.
+ * EXCLUDES all cross-period services (e.g. AM <-> PM) so incompatible time slots never show a transfer popup.
  */
 export async function crossCheckPassengerAcrossDate(
   date: string,
   currentService: ServiceType,
-  queryName: string
+  queryName: string,
+  queryStructure?: string
 ): Promise<CrossCheckCandidate[]> {
-  const cleanQ = normalizePassengerText(queryName);
+  const cleanQ = queryName.trim();
   if (!cleanQ || cleanQ.length < 2) return [];
 
   const currentPeriod = getServicePeriod(currentService);
+  const walkInInfo = { fullName: cleanQ, structure: queryStructure?.trim() || null };
   const results: CrossCheckCandidate[] = [];
 
   try {
@@ -89,11 +238,25 @@ export async function crossCheckPassengerAcrossDate(
       const { service: mService } = parseManifestKey(m.date);
       const sType = mService as ServiceType;
       const mPeriod = getServicePeriod(sType);
-      const isCompatible = mPeriod === currentPeriod;
+
+      // EXCLUSION: If it's AM to PM (or PM to AM), that is NOT a valid transfer.
+      // Exclude completely so no popups or modals appear.
+      if (mPeriod !== currentPeriod) {
+        continue;
+      }
+
+      // Skip current service (same-manifest checks are handled directly in RepPage)
+      if (sType === currentService) {
+        continue;
+      }
 
       for (const p of m.signups || []) {
-        const normP = normalizePassengerText(p.fullName);
-        if (normP.includes(cleanQ) || cleanQ.includes(normP)) {
+        const match = isPassengerTransferMatch(walkInInfo, {
+          fullName: p.fullName,
+          structure: p.structure,
+        });
+
+        if (match.isMatch) {
           // Find if assigned to a vehicle in this manifest
           const assignedVeh = (m.vehicles || []).find(
             (v) => (v.riders || []).includes(p.id) || v.id === p.assignedTo
@@ -115,7 +278,7 @@ export async function crossCheckPassengerAcrossDate(
             service: sType,
             serviceLabel: serviceName,
             period: mPeriod,
-            isCompatible,
+            isCompatible: true,
             vehicle: assignedVeh,
             statusLabel,
           });

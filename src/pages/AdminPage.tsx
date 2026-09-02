@@ -186,25 +186,27 @@ export function AdminPage() {
   return (
     <div className="min-h-screen">
       <Header current="admin" />
-      <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
-        {/* Hero */}
-        <div className="mb-8 overflow-hidden rounded-2xl border border-line bg-gradient-to-br from-card to-bg p-6 sm:p-8">
-          <div className="bg-grid absolute inset-0 opacity-30 pointer-events-none" />
-          <div className="relative">
-            <span className="badge bg-crimson-500/15 text-crimson-300">
-              <span className="h-1.5 w-1.5 rounded-full bg-crimson-500 animate-pulse-dot" />
-              Admin Dispatch Portal
-            </span>
-            <h1 className="mt-3 font-display text-3xl font-bold tracking-tight text-ink sm:text-4xl">
-              Transport Dispatch Control
-            </h1>
-            <p className="mt-2 max-w-2xl text-sm text-muted">
-              Upload Microsoft Forms exports, allocate passengers to vehicles, and coordinate CRC Johannesburg
-              transport across all service types. All data syncs live to the cloud.
+      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+        {/* Clean Header */}
+        <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-line pb-5">
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="font-display text-xl font-bold tracking-tight text-ink sm:text-2xl">
+                Transport Dispatch Control
+              </h1>
+              <span className="badge bg-card-2 text-ink-muted border border-line text-[11px]">
+                Admin
+              </span>
+            </div>
+            <p className="mt-1 text-xs sm:text-sm text-muted">
+              Allocate passengers to vehicles, manage routes, and coordinate Johannesburg transport.
             </p>
-            <p className="mt-3 font-display text-sm font-semibold text-crimson-400">
-              2026 — The Year of Invasion, the Second Wave of Love
-            </p>
+          </div>
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+            <button onClick={() => setResetOpen(true)} className="btn-danger text-xs py-1.5 px-3">
+              <Trash2 className="h-3.5 w-3.5" />
+              <span>Reset Manifest</span>
+            </button>
           </div>
         </div>
 
@@ -224,19 +226,22 @@ export function AdminPage() {
         </div>
 
         {/* Session banner */}
-        <div className="mt-5 flex flex-col gap-3 rounded-xl border border-crimson-500/20 bg-crimson-900/10 p-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wide text-muted">Active Session</div>
-            <div className="font-display text-lg font-bold text-ink">
-              {prettyDate(date)} · {serviceLabel}
+        <div className="mt-5 flex flex-col gap-2 rounded-xl border border-line bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-card-2 border border-line text-ink">
+              <Calendar className="h-5 w-5 text-muted" />
             </div>
-            <div className="text-xs text-muted font-mono">{key}</div>
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-muted">Active Session</div>
+              <div className="font-display text-base font-bold text-ink">
+                {prettyDate(date)} · {serviceLabel}
+              </div>
+            </div>
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <button onClick={() => setResetOpen(true)} className="btn-danger">
-              <Trash2 className="h-4 w-4" />
-              Reset Manifests
-            </button>
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-xs text-muted bg-card-2 px-2.5 py-1 rounded-md border border-line">
+              {key}
+            </span>
           </div>
         </div>
 

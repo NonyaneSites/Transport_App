@@ -3,7 +3,7 @@ import {
   Search, X, Banknote, Plus, CheckCircle2,
   Calendar, MapPin, Car, Filter, Check, ChevronDown, ChevronUp,
 } from 'lucide-react';
-import { type LedgerEntry, evaluateLedgerSearch } from '@/lib/ledger';
+import { type LedgerEntry, evaluateLedgerSearch, isEntrySponsorshipOrUnpaid } from '@/lib/ledger';
 import type { ManualCancellation } from '@/pages/RepPage';
 import type { Passenger } from '@/lib/types';
 import { shortDate } from '@/lib/dates';
@@ -508,6 +508,11 @@ export function CancellationSearchModal({
                                 <span className="text-muted text-[11px] flex items-center gap-1">
                                   <MapPin className="h-3 w-3 text-muted/80" />
                                   {entry.stop}
+                                </span>
+                              )}
+                              {isEntrySponsorshipOrUnpaid(entry) && (
+                                <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/30">
+                                  Unaccounted / Unpaid
                                 </span>
                               )}
                               {entry.general_notes && (

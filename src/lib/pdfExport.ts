@@ -1,6 +1,6 @@
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { type LedgerEntry, BANK_DETAILS, extractServiceCode, extractNameAndService } from './ledger';
+import { type LedgerEntry, BANK_DETAILS, extractServiceCode, extractNameAndService, isEntrySponsorshipOrUnpaid } from './ledger';
 import { naturalCompare } from './sort';
 
 /**
@@ -84,7 +84,7 @@ export interface StructureDebtSummary {
 export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[] {
   const byStructure = new Map<
     string,
-    Map<string, { instances: { date: string; formatted: string }[]; totalDebt: number; isSponsorship: boolean; notes: string }>
+    Map<string, { name: string; instances: { date: string; formatted: string }[]; totalDebt: number; isSponsorship: boolean; notes: string }>
   >();
 
   for (const entry of entries) {
@@ -95,35 +95,26 @@ export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[
     const rawDebt = Number(entry.structure_debt);
     const amount = Number.isFinite(rawDebt) && rawDebt >= 0 ? rawDebt : 40;
 
-    const gn = (entry.general_notes || '').toLowerCase();
-    const sn = (entry.sponsor_note || '').toLowerCase();
-    const isSponsorship =
-      entry.sponsored ||
-      gn.includes('unaccounted') ||
-      gn.includes('unpaid') ||
-      gn.includes('did not pay') ||
-      gn.includes('sponsorship') ||
-      sn.includes('unaccounted') ||
-      sn.includes('unpaid') ||
-      sn.includes('sponsorship');
+    const isSponsorship = isEntrySponsorshipOrUnpaid(entry);
+    const personCategoryKey = `${person.toLowerCase()}:::${isSponsorship ? 'sponsorship' : 'cancellation'}`;
 
     if (!byStructure.has(struct)) {
       byStructure.set(struct, new Map());
     }
     const structMap = byStructure.get(struct)!;
 
-    if (!structMap.has(person)) {
-      structMap.set(person, {
+    if (!structMap.has(personCategoryKey)) {
+      structMap.set(personCategoryKey, {
+        name: person,
         instances: [],
         totalDebt: 0,
         isSponsorship,
         notes: entry.general_notes || entry.sponsor_note || '',
       });
     }
-    const record = structMap.get(person)!;
+    const record = structMap.get(personCategoryKey)!;
     record.instances.push({ date: entry.date, formatted: instanceStr });
     record.totalDebt += amount;
-    if (isSponsorship) record.isSponsorship = true;
     if (!record.notes && (entry.general_notes || entry.sponsor_note)) {
       record.notes = entry.general_notes || entry.sponsor_note || '';
     }
@@ -135,12 +126,12 @@ export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[
     const cancellations: DebtorPersonSummary[] = [];
     const sponsorships: DebtorPersonSummary[] = [];
 
-    for (const [name, data] of personMap.entries()) {
+    for (const [, data] of personMap.entries()) {
       data.instances.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
       const earliestDate = data.instances[0]?.date || '';
 
       const summary: DebtorPersonSummary = {
-        name,
+        name: data.name,
         structure,
         latestDate: earliestDate,
         instances: data.instances.map((i) => i.formatted),

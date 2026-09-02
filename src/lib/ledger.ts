@@ -1069,10 +1069,34 @@ export interface AggregatedLedgerGroup {
 }
 
 /**
+ * Determines whether a ledger entry represents an unaccounted sponsorship / unpaid debt
+ * or a standard cancellation debt.
+ */
+export function isEntrySponsorshipOrUnpaid(e: {
+  sponsored?: boolean | null;
+  general_notes?: string | null;
+  sponsor_note?: string | null;
+}): boolean {
+  const gn = (e.general_notes || '').toLowerCase();
+  const sn = (e.sponsor_note || '').toLowerCase();
+  return (
+    Boolean(e.sponsored) ||
+    gn.includes('unaccounted') ||
+    gn.includes('unpaid') ||
+    gn.includes('did not pay') ||
+    gn.includes('sponsorship') ||
+    sn.includes('unaccounted') ||
+    sn.includes('unpaid') ||
+    sn.includes('sponsorship')
+  );
+}
+
+/**
  * Shared aggregation used by both the web Ledger page and the download:
  * groups raw ledger entries by structure (strict alphanumeric order —
- * S1, S2, S9, S13), then by passenger name within each structure so repeat
- * cancellations collapse into one row with cumulative debt (e.g. R80 for Amo Nhlabathi).
+ * S1, S2, S9, S13), then by passenger name and category (normal cancellation vs unpaid sponsorship)
+ * within each structure. If a person has both normal cancellations and unaccounted sponsorships,
+ * they appear separately in both sections so debt types are never erroneously conflated.
  *
  * Accurately tracks each instance's service type (e.g. AM, PM, LM, WMP, EF, AD, FW)
  * so special church event cancellations are clearly displayed in brackets.
@@ -1089,14 +1113,18 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
 
   const groups: AggregatedLedgerGroup[] = [];
   for (const [structure, structEntries] of byStructure.entries()) {
-    const byName = new Map<string, LedgerEntry[]>();
+    // Segregate entries by passenger name AND category (cancellation vs sponsorship/unpaid)
+    // so a person with debts in both categories is listed separately in each section.
+    const byCategoryAndName = new Map<string, LedgerEntry[]>();
     for (const e of structEntries) {
-      const nameKey = e.passenger_name.trim().toLowerCase();
-      if (!byName.has(nameKey)) byName.set(nameKey, []);
-      byName.get(nameKey)!.push(e);
+      const isSponsorship = isEntrySponsorshipOrUnpaid(e);
+      const catKey = isSponsorship ? 'sponsorship' : 'cancellation';
+      const nameKey = `${e.passenger_name.trim().toLowerCase()}:::${catKey}`;
+      if (!byCategoryAndName.has(nameKey)) byCategoryAndName.set(nameKey, []);
+      byCategoryAndName.get(nameKey)!.push(e);
     }
 
-    const rows: AggregatedLedgerRow[] = Array.from(byName.values()).map((group) => {
+    const rows: AggregatedLedgerRow[] = Array.from(byCategoryAndName.values()).map((group) => {
       // Sort individual instances in chronological order ascending (Jan 1 first, Dec 31 last)
       const sorted = [...group].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
       const earliest = sorted[0];
@@ -1138,27 +1166,14 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
       const formattedServices = serviceCodes.length > 0 ? `(${serviceCodes.join(', ')})` : '';
       const formattedDateList = instances.map((ins) => ins.formatted).join(', ');
 
-      const isSponsorshipOrUnpaid = group.some((e) => {
-        const gn = (e.general_notes || '').toLowerCase();
-        const sn = (e.sponsor_note || '').toLowerCase();
-        return (
-          e.sponsored ||
-          gn.includes('unaccounted') ||
-          gn.includes('unpaid') ||
-          gn.includes('did not pay') ||
-          gn.includes('sponsorship') ||
-          sn.includes('unaccounted') ||
-          sn.includes('unpaid') ||
-          sn.includes('sponsorship')
-        );
-      });
+      const isSponsorshipOrUnpaid = group.some((e) => isEntrySponsorshipOrUnpaid(e));
 
       const combinedNotes = Array.from(
         new Set(group.map((e) => e.general_notes || e.sponsor_note).filter(Boolean))
       ).join('; ');
 
       return {
-        key: `${structure}-${latest.passenger_name}`,
+        key: `${structure}-${latest.passenger_name}-${isSponsorshipOrUnpaid ? 'sponsorship' : 'cancellation'}`,
         structure,
         repName: latest.rep_name || latest.submitted_by || '—',
         vehicleName: latest.vehicle_name || '—',

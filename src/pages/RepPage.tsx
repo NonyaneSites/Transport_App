@@ -16,7 +16,12 @@ import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntr
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
 import { RepStatsCopyCard } from '@/components/RepStatsCopyCard';
 import { CancellationSearchModal } from '@/components/CancellationSearchModal';
-import { getServicePeriod, transferPassengerAcrossServices, crossCheckPassengerAcrossDate } from '@/lib/transfer';
+import {
+  transferPassengerAcrossServices,
+  crossCheckPassengerAcrossDate,
+  isPassengerTransferMatch,
+  extractStructureFromText,
+} from '@/lib/transfer';
 
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
 const SYNC_DEBOUNCE_MS = 2500; // 2500ms debounce to batch rapid taps on mobile and drastically reduce Supabase egress
@@ -823,11 +828,22 @@ export function RepPage() {
     setExternalSponsees((prev) => prev.filter((s) => s.id !== id));
   };
 
-  function findByName(name: string): Passenger | undefined {
-    const q = name.trim().toLowerCase();
-    if (!q || !manifest) return undefined;
-    return manifest.signups.find((p) => p.fullName.trim().toLowerCase() === q)
-      ?? manifest.signups.find((p) => p.fullName.trim().toLowerCase().includes(q));
+  function findPassengerForTransfer(name: string, structure: string, passengers: Passenger[]): Passenger | undefined {
+    if (!name.trim() || !passengers || passengers.length === 0) return undefined;
+    const walkInInfo = { fullName: name.trim(), structure: structure.trim() || null };
+
+    let bestMatch: Passenger | undefined = undefined;
+    let bestScore = 0;
+
+    for (const p of passengers) {
+      const res = isPassengerTransferMatch(walkInInfo, { fullName: p.fullName, structure: p.structure });
+      if (res.isMatch && res.score > bestScore) {
+        bestMatch = p;
+        bestScore = res.score;
+      }
+    }
+
+    return bestMatch;
   }
 
   function findVehicleForPassenger(p: Passenger): Vehicle | undefined {
@@ -847,9 +863,10 @@ export function RepPage() {
   async function handleAddWalkIn(overrideCrossTransfer = false) {
     if (!manifest || !selectedVehicle || !walkInName.trim()) return;
     const query = walkInName.trim();
+    const effectiveStruct = walkInStructure.trim();
 
-    // 1. First check within current manifest (same service)
-    const existing = findByName(query);
+    // 1. First check within current manifest (same service, different vehicle)
+    const existing = findPassengerForTransfer(query, effectiveStruct, manifest.signups);
 
     if (existing && !overrideCrossTransfer) {
       const fromVehicle = findVehicleForPassenger(existing);
@@ -873,10 +890,11 @@ export function RepPage() {
     }
 
     // 2. If not found in current service and not overriding, cross-check other services for this date
+    // Note: AM <-> PM is strictly excluded in crossCheckPassengerAcrossDate so no modal/popup appears for cross-period.
     if (!overrideCrossTransfer) {
       setIsCheckingCrossService(true);
       try {
-        const crossMatches = await crossCheckPassengerAcrossDate(date, service, query);
+        const crossMatches = await crossCheckPassengerAcrossDate(date, service, query, effectiveStruct);
         if (crossMatches.length > 0) {
           const match = crossMatches[0];
           setTransferPrompt({
@@ -885,10 +903,7 @@ export function RepPage() {
             fromService: match.service,
             fromServiceLabel: match.serviceLabel,
             isCrossService: true,
-            isCompatible: match.isCompatible,
-            incompatibleReason: match.isCompatible
-              ? undefined
-              : `Transfers are only allowed within the same service time window:\n• AM Service: Serving Only, Ushers (early), Normal only\n• PM Service: Serving Only, Normal only\n\n${match.passenger.fullName} is registered for ${match.serviceLabel} (${match.period} Service), but this vehicle is in ${serviceLabel} (${getServicePeriod(service)} Service).`,
+            isCompatible: true,
             statusDescription: match.statusLabel,
           });
           setIsCheckingCrossService(false);
@@ -901,18 +916,22 @@ export function RepPage() {
       }
     }
 
-    // 3. Not found in any service or confirmed as new walk-in: create fresh walk-in
+    // 3. Not found in any compatible service or confirmed as new walk-in: create fresh walk-in
     if (pendingSyncTimerRef.current) {
       clearTimeout(pendingSyncTimerRef.current);
       pendingSyncTimerRef.current = null;
     }
     lastLocalEditTimeRef.current = Date.now();
 
+    const extracted = extractStructureFromText(query);
+    const finalName = extracted.cleanText || query;
+    const finalStructure = (effectiveStruct || extracted.structure || '').toUpperCase();
+
     const newPassenger: Passenger = {
       id: `walkin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      fullName: query,
+      fullName: finalName,
       stop: 'Walk-In',
-      structure: walkInStructure.trim(),
+      structure: finalStructure,
       assignedTo: selectedVehicle.id,
       present: true,
       cancellationFeeOwed: false,
@@ -1086,7 +1105,8 @@ export function RepPage() {
         });
 
         if (!res.success) {
-          alert(res.error || 'Failed to transfer passenger.');
+          setBatchActionMsg(`⚠️ Transfer failed: ${res.error || 'Unable to transfer passenger.'}`);
+          setTimeout(() => setBatchActionMsg(null), 6000);
           return;
         }
 
@@ -1112,7 +1132,8 @@ export function RepPage() {
       setWalkInOpen(false);
     } catch (e) {
       console.error('Walk-in transfer error:', e);
-      alert('Error performing transfer: ' + String(e));
+      setBatchActionMsg(`⚠️ Error performing transfer: ${e instanceof Error ? e.message : String(e)}`);
+      setTimeout(() => setBatchActionMsg(null), 6000);
     } finally {
       setTransferring(false);
     }
@@ -1380,17 +1401,18 @@ export function RepPage() {
       </header>
 
       <main className="mx-auto max-w-lg px-4 py-5">
-        <div className="mb-5 overflow-hidden rounded-2xl border border-line bg-gradient-to-br from-card to-bg p-5">
-          <span className="badge bg-success/15 text-success-light">
-            <Smartphone className="h-3 w-3" />
-            Mobile Check-in
+        <div className="mb-4 flex items-center justify-between border-b border-line pb-3">
+          <div>
+            <h1 className="font-display text-lg font-bold tracking-tight text-ink">
+              Transport Rep Portal
+            </h1>
+            <p className="text-xs text-muted">
+              Check in passengers and record vehicle attendance.
+            </p>
+          </div>
+          <span className="badge bg-card-2 text-ink-muted border border-line text-[10px]">
+            Rep
           </span>
-          <h1 className="mt-2 font-display text-xl font-bold tracking-tight text-ink">
-            Transport Rep Portal
-          </h1>
-          <p className="mt-1.5 text-sm text-muted">
-            Find your assigned vehicle, search riders person-by-person, tick them off, and quickly mark remaining absentees.
-          </p>
         </div>
 
         <ServiceDateSelector
@@ -2207,14 +2229,14 @@ function StatCard({
 }) {
   const accentClass =
     accent === 'success'
-      ? 'border-success/30 bg-success/5 text-success-light'
+      ? 'border-line bg-card text-success-light'
       : accent === 'crimson'
-      ? 'border-crimson-500/30 bg-crimson-500/5 text-crimson-300'
+      ? 'border-line bg-card text-crimson-300'
       : 'border-line bg-card text-ink';
 
   return (
     <div className={`rounded-xl border p-3 text-center ${accentClass}`}>
-      <div className="flex items-center justify-center gap-1 text-xs text-muted mb-1">
+      <div className="flex items-center justify-center gap-1 text-[11px] font-medium text-muted mb-0.5">
         {icon}
         <span>{label}</span>
       </div>
@@ -2755,54 +2777,56 @@ const PassengerRow = React.memo(function PassengerRow({
   }
 
   return (
-    <div className={`p-3.5 transition-colors ${disabled ? 'opacity-60' : 'hover:bg-card-2/30'} ${!touched && !disabled ? 'bg-warning/5' : ''}`}>
+    <div className={`p-3 transition-colors border-b border-line/40 last:border-b-0 ${disabled ? 'opacity-60' : 'hover:bg-card-2/20'} ${!touched && !disabled ? 'border-l-2 border-l-amber-500/60' : ''}`}>
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className={`text-sm font-medium ${isPresent ? 'text-success-light' : isAbsent ? 'text-crimson-300' : 'text-ink'}`}>
-            {passenger.fullName}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className={`text-sm font-semibold ${isPresent ? 'text-success-light' : isAbsent ? 'text-crimson-300' : 'text-ink'}`}>
+              {passenger.fullName}
+            </span>
             {passenger.structure && (
-              <span className="ml-2 inline-block rounded bg-bg/60 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-muted">
+              <span className="rounded bg-card-2 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-muted border border-line">
                 {passenger.structure}
               </span>
             )}
             {(() => {
               const statusBadge = getPassengerStatusBadge(passenger);
               return statusBadge ? (
-                <span className={`ml-1.5 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold ${statusBadge.colorClass}`} title={statusBadge.title}>
+                <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${statusBadge.colorClass}`} title={statusBadge.title}>
                   {statusBadge.label}
                 </span>
               ) : null;
             })()}
             {redirectedFrom ? (
-              <span className="ml-1.5 inline-block rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/40">
-                📍 From {redirectedFrom}
+              <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/30">
+                From {redirectedFrom}
               </span>
             ) : passenger.stop ? (
-              <span className="ml-1.5 inline-block rounded bg-bg/60 px-1.5 py-0.5 text-[10px] text-muted">
-                {passenger.stop}
+              <span className="text-[11px] text-muted truncate max-w-[140px]" title={passenger.stop}>
+                · {passenger.stop}
               </span>
             ) : null}
             {!touched && !disabled && (
-              <span className="ml-2 inline-block rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold text-warning">
-                Needs check-in
+              <span className="text-[10px] text-amber-400/80 font-medium">
+                (unmarked)
               </span>
             )}
           </div>
         </div>
 
         {/* Optimistic Instant Present / Absent Buttons */}
-        <div className="flex shrink-0 gap-1.5">
+        <div className="flex shrink-0 gap-1">
           <button
             type="button"
             onClick={() => onSetPresent(passenger.id, true)}
             disabled={disabled}
-            className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all active:scale-95 ${
+            className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-all active:scale-95 ${
               isPresent
                 ? 'bg-success/20 text-success-light border border-success/50'
-                : 'bg-card-2 text-muted border border-line hover:border-success/40 hover:text-success-light'
+                : 'bg-card-2 text-muted border border-line hover:border-line-bright hover:text-ink'
             }`}
           >
-            <span className="flex items-center gap-1.5">
+            <span className="flex items-center gap-1">
               <CheckCircle2 className="h-3.5 w-3.5" />
               Present
             </span>
@@ -2811,13 +2835,13 @@ const PassengerRow = React.memo(function PassengerRow({
             type="button"
             onClick={() => onSetPresent(passenger.id, false)}
             disabled={disabled}
-            className={`rounded-lg px-3 py-2 text-xs font-semibold transition-all active:scale-95 ${
+            className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-all active:scale-95 ${
               isAbsent
                 ? 'bg-crimson-500/20 text-crimson-300 border border-crimson-500/50'
-                : 'bg-card-2 text-muted border border-line hover:border-crimson-500/40 hover:text-crimson-300'
+                : 'bg-card-2 text-muted border border-line hover:border-line-bright hover:text-ink'
             }`}
           >
-            <span className="flex items-center gap-1.5">
+            <span className="flex items-center gap-1">
               <XCircle className="h-3.5 w-3.5" />
               Absent
             </span>
@@ -2832,15 +2856,15 @@ const PassengerRow = React.memo(function PassengerRow({
           type="button"
           onClick={handleSponsoredToggle}
           disabled={disabled}
-          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all active:scale-95 ${
+          className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-all active:scale-95 ${
             isSponsored
               ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold'
-              : 'bg-card-2 text-muted border border-line hover:text-ink'
+              : 'bg-card-2/60 text-muted border border-line hover:text-ink'
           }`}
           title="Mark if someone else is paying for this passenger"
         >
-          <HeartHandshake className="h-3.5 w-3.5 text-amber-400" />
-          {isSponsored ? '★ Sponsored' : 'Sponsored'}
+          <HeartHandshake className="h-3 w-3 text-amber-400" />
+          {isSponsored ? 'Sponsored' : 'Sponsored'}
         </button>
 
         {/* Didn't Pay Toggle */}
@@ -2848,15 +2872,15 @@ const PassengerRow = React.memo(function PassengerRow({
           type="button"
           onClick={handleUnpaidToggle}
           disabled={disabled}
-          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all active:scale-95 ${
+          className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-all active:scale-95 ${
             isUnpaid
               ? 'bg-crimson-500/20 text-crimson-300 border border-crimson-500/50 font-semibold'
-              : 'bg-card-2 text-muted border border-line hover:text-ink'
+              : 'bg-card-2/60 text-muted border border-line hover:text-ink'
           }`}
           title="Flag that this passenger attended but did not pay fare"
         >
-          <AlertCircle className="h-3.5 w-3.5 text-crimson-400" />
-          {isUnpaid ? "⚠️ Didn't Pay" : "Didn't Pay"}
+          <AlertCircle className="h-3 w-3 text-crimson-400" />
+          {isUnpaid ? "Didn't Pay" : "Didn't Pay"}
         </button>
 
         {/* Settle Debt Button (Reveals breakdown on tap) */}
@@ -2865,16 +2889,16 @@ const PassengerRow = React.memo(function PassengerRow({
             type="button"
             onClick={() => setShowDebtBreakdown(!showDebtBreakdown)}
             disabled={disabled}
-            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-all active:scale-95 border ${
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold transition-all active:scale-95 border ${
               settledDebtCount === outstandingDebts.length
                 ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
                 : settledDebtCount > 0
                 ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                : 'bg-crimson-500/15 text-crimson-300 border-crimson-500/30 hover:bg-crimson-500/25'
+                : 'bg-card-2 text-crimson-300 border-line hover:border-crimson-500/30'
             }`}
             title="View and settle past unpaid cancellation trips"
           >
-            <Banknote className={`h-3.5 w-3.5 ${settledDebtCount > 0 ? 'text-emerald-400' : 'text-crimson-400'}`} />
+            <Banknote className={`h-3 w-3 ${settledDebtCount > 0 ? 'text-emerald-400' : 'text-crimson-400'}`} />
             <span>
               {settledDebtCount === outstandingDebts.length
                 ? `Settled All (+R${totalDebtAmount})`
@@ -2882,7 +2906,7 @@ const PassengerRow = React.memo(function PassengerRow({
                 ? `Settling R${settledDebtAmount} of R${totalDebtAmount}`
                 : `Settle Debt (R${totalDebtAmount})`}
             </span>
-            <span className="text-[10px] opacity-75 ml-0.5">
+            <span className="text-[9px] opacity-75 ml-0.5">
               {showDebtBreakdown ? '▴' : '▾'}
             </span>
           </button>
@@ -2894,12 +2918,12 @@ const PassengerRow = React.memo(function PassengerRow({
             type="button"
             onClick={() => setShowNote(!showNote)}
             disabled={disabled}
-            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium border border-line bg-card-2 transition-all ${
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium border border-line bg-card-2/60 transition-all ${
               showNote ? 'text-ink border-line-bright' : 'text-muted hover:text-ink'
             }`}
           >
-            <StickyNote className="h-3.5 w-3.5" />
-            {showNote ? 'Hide Note' : 'Add Note'}
+            <StickyNote className="h-3 w-3" />
+            {showNote ? 'Hide Note' : 'Note'}
           </button>
         )}
       </div>

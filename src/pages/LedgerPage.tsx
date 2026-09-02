@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BookOpen, Loader2, AlertTriangle, FileSpreadsheet, Search, Filter, XCircle,
+  Loader2, AlertTriangle, FileSpreadsheet, Search, Filter, XCircle,
   ChevronDown, ChevronRight, Upload, CheckCircle2, FileText, Banknote, X, UserPlus, Plus,
   Pencil, Trash2,
 } from 'lucide-react';
@@ -239,7 +239,7 @@ export function LedgerPage() {
     setEditStructure(row.structure);
     setEditDebt(String(row.amount));
     setEditNotes(row.notes);
-    setEditIsSponsored(row.isSponsoredOrUnpaid);
+    setEditIsSponsored(row.isSponsorshipOrUnpaid);
     // Initialize editable instances list from row.instances with normalized dates
     const initialInstances: DebtorInstanceUpdateItem[] = row.instances.map((inst) => ({
       id: inst.id,
@@ -509,20 +509,22 @@ export function LedgerPage() {
   return (
     <div className="min-h-screen">
       <Header current="ledger" />
-      <main className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
-        {/* Hero */}
-        <div className="mb-6 overflow-hidden rounded-2xl border border-line bg-gradient-to-br from-card to-bg p-6 sm:p-8">
-          <span className="badge bg-crimson-500/15 text-crimson-300">
-            <BookOpen className="h-3 w-3" />
-            Master Ledger
-          </span>
-          <h1 className="mt-3 font-display text-3xl font-bold tracking-tight text-ink sm:text-4xl">
-            Cancellation Ledger
-          </h1>
-          <p className="mt-2 max-w-2xl text-sm text-muted">
-            Structure and rep, cancellation date, name, and amount owing — the complete record of transport
-            cancellation debt across every session. Download official PDFs in structure format or export spreadsheets.
-          </p>
+      <main className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
+        {/* Clean Header */}
+        <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-line pb-5">
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="font-display text-xl font-bold tracking-tight text-ink sm:text-2xl">
+                Cancellation Ledger
+              </h1>
+              <span className="badge bg-card-2 text-ink-muted border border-line text-[11px]">
+                Debtors & Sponsees
+              </span>
+            </div>
+            <p className="mt-1 text-xs sm:text-sm text-muted">
+              Official record of transport cancellation debt, structure groupings, and payment tracking.
+            </p>
+          </div>
         </div>
 
         {loading ? (
