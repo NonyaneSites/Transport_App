@@ -164,7 +164,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   const [copiedRoute, setCopiedRoute] = useState(false);
   const [copiedRep, setCopiedRep] = useState(false);
   const [previewManifestType, setPreviewManifestType] = useState<'route' | 'rep' | null>(null);
-  const [whatsAppNotice, setWhatsAppNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [whatsAppNotice, setWhatsAppNotice] = useState<{ type: 'success' | 'error'; text: string; url?: string } | null>(null);
 
   /**
    * Performs an immediate synchronous mutation on the local manifest,
@@ -685,10 +685,15 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     const repPortalUrl = `${window.location.origin}/rep`;
     const message = generateWhatsAppVehicleRepMessage(localManifest, vehicle, service, repPortalUrl);
     const whatsAppUrl = `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
-    window.open(whatsAppUrl, '_blank', 'noopener,noreferrer');
+    try {
+      window.open(whatsAppUrl, '_blank', 'noopener,noreferrer');
+    } catch {
+      // Ignored if window.open is restricted
+    }
     setWhatsAppNotice({
       type: 'success',
-      text: `WhatsApp opened for ${repPassenger.fullName}. Review the list, then tap Send.`,
+      text: `WhatsApp opened for ${repPassenger.fullName}. If it did not open automatically:`,
+      url: whatsAppUrl,
     });
   }
 
@@ -1505,7 +1510,19 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
               : 'border-red-400/25 bg-red-400/5 text-red-200'
           }`}
         >
-          <span>{whatsAppNotice.text}</span>
+          <div>
+            <span>{whatsAppNotice.text}</span>
+            {whatsAppNotice.url && (
+              <a
+                href={whatsAppNotice.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="ml-1.5 underline font-semibold text-success-light hover:text-white"
+              >
+                Open WhatsApp Chat ↗
+              </a>
+            )}
+          </div>
           <button
             type="button"
             onClick={() => setWhatsAppNotice(null)}

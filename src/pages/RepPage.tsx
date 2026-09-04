@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
-  Smartphone, Wifi, ChevronDown, ChevronRight, MapPin, Send, Cross,
+  Smartphone, ChevronDown, ChevronRight, MapPin, Send,
   HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus, Search, Banknote,
   Sparkles, ArrowDownAZ, RotateCcw, Check, AlertCircle, Calendar,
 } from 'lucide-react';
@@ -24,7 +24,7 @@ import {
 } from '@/lib/transfer';
 
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
-const SYNC_DEBOUNCE_MS = 2500; // 2500ms debounce to batch rapid taps on mobile and drastically reduce Supabase egress
+const SYNC_DEBOUNCE_MS = 500; // 500ms debounce: ultra-fast multi-device synchronization while batching bursts of taps
 
 interface ExternalSponsee {
   id: string;
@@ -65,7 +65,7 @@ export function RepPage() {
     }
   });
   const key = manifestKey(date, service);
-  const { manifest, loading, error, save, updateVehicleDraft } = useManifest(key);
+  const { manifest, loading, error, isSyncing, refresh, save, updateVehicleDraft } = useManifest(key);
 
   const [selectedVehicleId, setSelectedVehicleId] = useState<string>(() => {
     try {
@@ -109,6 +109,7 @@ export function RepPage() {
 
   // Sync locks & conflict prevention
   const [draftRestored, setDraftRestored] = useState(false);
+  const [remoteSyncNotice, setRemoteSyncNotice] = useState<string | null>(null);
   const clientIdRef = useRef<string>(makeClientId());
   const pendingSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAppliedDraftAtRef = useRef<string | null>(null);
@@ -116,6 +117,8 @@ export function RepPage() {
   const isUserDirtyRef = useRef(false);
   const lastLocalEditTimeRef = useRef<number>(0);
   const initializedKeyRef = useRef<string>('');
+  const recentlyEditedRidersRef = useRef<Map<string, number>>(new Map());
+  const prevVehicleSubmittedRef = useRef<boolean | undefined>(undefined);
 
   const manifestRef = useRef(manifest);
   useEffect(() => { manifestRef.current = manifest; }, [manifest]);
@@ -318,6 +321,104 @@ export function RepPage() {
     setLicensePlate(draft.licensePlate !== undefined ? draft.licensePlate : (fallbackVehicle?.licensePlate || ''));
   }, []);
 
+  /**
+   * Conflict-free merge of remote draft states from other devices/reps:
+   * 1. Preserves riders that the local rep touched recently (<1500ms).
+   * 2. Seamlessly brings in remote check-ins (present/absent) without overwriting ongoing local work.
+   * 3. Merges notes, sponsorships, unpaid flags, co-reps, and cancellation collections.
+   */
+  const mergeRemoteDraftState = useCallback((draft: VehicleDraftState, vehicleRidersList: Passenger[]) => {
+    isApplyingDraftRef.current = true;
+    const now = Date.now();
+
+    // 1. Merge Present and Absent IDs without overriding riders the local user clicked in the last 1500ms
+    setPresentIds((prevPresent) => {
+      const nextPresent = new Set(prevPresent);
+      const remotePresent = new Set(draft.presentIds ?? []);
+      const remoteAbsent = new Set(draft.absentIds ?? []);
+
+      for (const rider of vehicleRidersList) {
+        const lastEdit = recentlyEditedRidersRef.current.get(rider.id) ?? 0;
+        if (now - lastEdit < 1500) {
+          // Local user explicitly touched this rider recently — prioritize local action
+          continue;
+        }
+        if (remotePresent.has(rider.id)) {
+          nextPresent.add(rider.id);
+        } else if (remoteAbsent.has(rider.id)) {
+          nextPresent.delete(rider.id);
+        }
+      }
+      return nextPresent;
+    });
+
+    setAbsentIds((prevAbsent) => {
+      const nextAbsent = new Set(prevAbsent);
+      const remotePresent = new Set(draft.presentIds ?? []);
+      const remoteAbsent = new Set(draft.absentIds ?? []);
+
+      for (const rider of vehicleRidersList) {
+        const lastEdit = recentlyEditedRidersRef.current.get(rider.id) ?? 0;
+        if (now - lastEdit < 1500) {
+          // Local user explicitly touched this rider recently — prioritize local action
+          continue;
+        }
+        if (remoteAbsent.has(rider.id)) {
+          nextAbsent.add(rider.id);
+        } else if (remotePresent.has(rider.id)) {
+          nextAbsent.delete(rider.id);
+        }
+      }
+      return nextAbsent;
+    });
+
+    // 2. Merge sponsored, unpaid, and notes
+    if (draft.sponsoredIds) {
+      setSponsoredIds((prev) => {
+        const next = new Set(prev);
+        draft.sponsoredIds!.forEach((id) => next.add(id));
+        return next;
+      });
+    }
+
+    if (draft.unpaidIds) {
+      setUnpaidIds((prev) => {
+        const next = new Set(prev);
+        draft.unpaidIds!.forEach((id) => next.add(id));
+        return next;
+      });
+    }
+
+    if (draft.notes) {
+      setNotes((prev) => ({ ...draft.notes, ...prev }));
+    }
+
+    // 3. Vehicle metadata fields (repName, licensePlate, generalNotes)
+    if (draft.repName && !repName.trim()) {
+      setRepName(draft.repName);
+    }
+    if (draft.licensePlate && !licensePlate.trim()) {
+      setLicensePlate(draft.licensePlate);
+    }
+    if (draft.generalNotes && !generalNotes.trim()) {
+      setGeneralNotes(draft.generalNotes);
+    }
+
+    // 4. Co-reps, sponsees, cancellations
+    if (draft.coReps && draft.coReps.length > 0) {
+      setCoReps((prev) => Array.from(new Set([...prev, ...(draft.coReps || [])])).filter(Boolean));
+    }
+    if (draft.externalSponsees && draft.externalSponsees.length > 0) {
+      setExternalSponsees(draft.externalSponsees);
+    }
+    if (draft.settledLedgerIds) {
+      setCollectedCancellationIds(new Set(draft.settledLedgerIds));
+    }
+    if (draft.manualCancellations) {
+      setManualCancellations(draft.manualCancellations);
+    }
+  }, [repName, licensePlate, generalNotes]);
+
   // Initialize/restore state when manifest loads or vehicle is selected
   useEffect(() => {
     if (!selectedVehicleId) {
@@ -428,15 +529,46 @@ export function RepPage() {
     const draft = selectedVehicle.draftState;
     if (!draft) return;
     if (draft.updatedBy === clientIdRef.current) return;
-    if (Date.now() - lastLocalEditTimeRef.current < 2500) return;
     if (draft.updatedAt && draft.updatedAt === lastAppliedDraftAtRef.current) return;
 
-    applyDraftState(draft, riders, selectedVehicle);
+    mergeRemoteDraftState(draft, riders);
     lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
-    setDraftRestored(true);
-    const t = setTimeout(() => setDraftRestored(false), 2500);
+    const author = draft.repName || 'another device';
+    setRemoteSyncNotice(`Updated by ${author}`);
+    const t = setTimeout(() => setRemoteSyncNotice(null), 3000);
     return () => clearTimeout(t);
-  }, [selectedVehicle?.draftState, selectedVehicle, riders, applyDraftState]);
+  }, [selectedVehicle?.draftState, selectedVehicle, riders, mergeRemoteDraftState]);
+
+  // Sync submission status changes from other devices / admin in real time
+  useEffect(() => {
+    if (!selectedVehicle) return;
+    if (prevVehicleSubmittedRef.current !== undefined && prevVehicleSubmittedRef.current !== selectedVehicle.submitted) {
+      prevVehicleSubmittedRef.current = selectedVehicle.submitted;
+      if (selectedVehicle.submitted && selectedVehicle.draftState) {
+        applyDraftState(selectedVehicle.draftState, riders, selectedVehicle);
+      }
+    } else {
+      prevVehicleSubmittedRef.current = selectedVehicle.submitted;
+    }
+  }, [selectedVehicle?.submitted, selectedVehicle?.draftState, selectedVehicle, riders, applyDraftState]);
+
+  // Sync passengers marked present in manifest.signups by Admin
+  useEffect(() => {
+    if (!selectedVehicle || riders.length === 0) return;
+    const toAddAsPresent: string[] = [];
+    riders.forEach((r) => {
+      if (r.present && !presentIds.has(r.id) && !absentIds.has(r.id)) {
+        toAddAsPresent.push(r.id);
+      }
+    });
+    if (toAddAsPresent.length > 0) {
+      setPresentIds((prev) => {
+        const next = new Set(prev);
+        toAddAsPresent.forEach((id) => next.add(id));
+        return next;
+      });
+    }
+  }, [riders, selectedVehicle, presentIds, absentIds]);
 
   // Load past cancellations so reps have instant live search of church debtors
   const ensurePastCancellationsLoaded = useCallback(async () => {
@@ -640,6 +772,7 @@ export function RepPage() {
   // Instant local toggle handlers (Zero lag, pure React state, deterministic single click)
   const handleSetPresent = useCallback((passengerId: string, wantPresent: boolean) => {
     lastLocalEditTimeRef.current = Date.now();
+    recentlyEditedRidersRef.current.set(passengerId, Date.now());
     isUserDirtyRef.current = true;
     if (wantPresent) {
       setPresentIds((prev) => {
@@ -668,6 +801,7 @@ export function RepPage() {
 
   const handleToggleSponsored = useCallback((passengerId: string) => {
     lastLocalEditTimeRef.current = Date.now();
+    recentlyEditedRidersRef.current.set(passengerId, Date.now());
     isUserDirtyRef.current = true;
     setSponsoredIds((prev) => {
       const next = new Set(prev);
@@ -679,6 +813,7 @@ export function RepPage() {
 
   const handleToggleUnpaid = useCallback((passengerId: string) => {
     lastLocalEditTimeRef.current = Date.now();
+    recentlyEditedRidersRef.current.set(passengerId, Date.now());
     isUserDirtyRef.current = true;
     setUnpaidIds((prev) => {
       const next = new Set(prev);
@@ -690,6 +825,7 @@ export function RepPage() {
 
   const handleSetNote = useCallback((passengerId: string, text: string) => {
     lastLocalEditTimeRef.current = Date.now();
+    recentlyEditedRidersRef.current.set(passengerId, Date.now());
     isUserDirtyRef.current = true;
     setNotes((prev) => ({ ...prev, [passengerId]: text }));
   }, []);
@@ -697,7 +833,8 @@ export function RepPage() {
   // Attendance Check: Mark all unticked riders as Absent
   const handleMarkUntickedAsAbsent = useCallback(() => {
     if (!riders.length) return;
-    lastLocalEditTimeRef.current = Date.now();
+    const now = Date.now();
+    lastLocalEditTimeRef.current = now;
     isUserDirtyRef.current = true;
 
     const untickedRiderIds = riders
@@ -705,6 +842,8 @@ export function RepPage() {
       .map((r) => r.id);
 
     if (untickedRiderIds.length === 0) return;
+
+    untickedRiderIds.forEach((id) => recentlyEditedRidersRef.current.set(id, now));
 
     setAbsentIds((prev) => {
       const next = new Set(prev);
@@ -720,7 +859,8 @@ export function RepPage() {
   // Attendance Check: Mark all unticked riders as Present
   const handleMarkUntickedAsPresent = useCallback(() => {
     if (!riders.length) return;
-    lastLocalEditTimeRef.current = Date.now();
+    const now = Date.now();
+    lastLocalEditTimeRef.current = now;
     isUserDirtyRef.current = true;
 
     const untickedRiderIds = riders
@@ -728,6 +868,8 @@ export function RepPage() {
       .map((r) => r.id);
 
     if (untickedRiderIds.length === 0) return;
+
+    untickedRiderIds.forEach((id) => recentlyEditedRidersRef.current.set(id, now));
 
     setPresentIds((prev) => {
       const next = new Set(prev);
@@ -743,9 +885,11 @@ export function RepPage() {
   // Attendance Check: Reset all attendance marks
   const handleResetAllTicks = useCallback(() => {
     if (!riders.length) return;
-    lastLocalEditTimeRef.current = Date.now();
+    const now = Date.now();
+    lastLocalEditTimeRef.current = now;
     isUserDirtyRef.current = true;
     const riderIdSet = new Set(riders.map((r) => r.id));
+    riderIdSet.forEach((id) => recentlyEditedRidersRef.current.set(id, now));
 
     setPresentIds((prev) => {
       const next = new Set(prev);
@@ -1391,12 +1535,21 @@ export function RepPage() {
             <div className="font-display text-sm font-bold tracking-tight text-ink">
               CRC <span className="text-crimson-400">Rep Portal</span>
             </div>
-            <div className="flex items-center gap-1 text-[11px] text-muted">
-              <Wifi className="h-3 w-3 text-success" />
-              <span>Low-data mobile check-in</span>
+            <div className="flex items-center gap-1.5 text-[11px] text-muted">
+              <span className={`inline-block h-2 w-2 rounded-full ${isSyncing ? 'bg-amber-400 animate-ping' : 'bg-success'}`} />
+              <span>{isSyncing ? 'Syncing…' : 'Live Synced'}</span>
             </div>
           </div>
-          <Cross className="h-5 w-5 text-muted" strokeWidth={2} />
+          <button
+            type="button"
+            onClick={() => refresh()}
+            disabled={isSyncing}
+            title="Force instant sync from cloud"
+            className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg border border-line bg-card/80 hover:bg-card-2 text-ink-muted hover:text-ink transition active:scale-95 disabled:opacity-50"
+          >
+            <RotateCcw className={`h-3 w-3 text-crimson-400 ${isSyncing ? 'animate-spin' : ''}`} />
+            <span className="text-[11px] font-semibold">Sync</span>
+          </button>
         </div>
       </header>
 
@@ -1594,19 +1747,35 @@ export function RepPage() {
               )}
             </div>
 
-            {selectedVehicle && draftRestored && (
+            {selectedVehicle && remoteSyncNotice && (
+              <div className="flex items-center gap-2 rounded-lg border border-sky-500/40 bg-sky-950/40 p-2.5 text-xs text-sky-200 animate-fade-in">
+                <Sparkles className="h-4 w-4 shrink-0 text-sky-400" />
+                <span>⚡ {remoteSyncNotice}</span>
+              </div>
+            )}
+
+            {selectedVehicle && draftRestored && !remoteSyncNotice && (
               <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-2.5 text-xs text-success-light animate-fade-in">
                 <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
                 <span>Working draft restored — your progress is preserved.</span>
               </div>
             )}
 
-            {selectedVehicle && !isSubmitted && !draftRestored && (
+            {selectedVehicle && !isSubmitted && !draftRestored && !remoteSyncNotice && (
               <div className="flex items-center justify-between rounded-lg border border-line bg-card/60 px-3 py-1.5 text-[11px] text-muted">
                 <span className="flex items-center gap-1.5">
-                  <span className="inline-block h-2 w-2 rounded-full bg-success animate-pulse" />
-                  Auto-saved on device & cloud — safe against refresh & exit
+                  <span className={`inline-block h-2 w-2 rounded-full ${isSyncing ? 'bg-amber-400 animate-ping' : 'bg-success'}`} />
+                  {isSyncing ? 'Syncing across devices…' : 'Live synced across all devices & reps'}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => refresh()}
+                  disabled={isSyncing}
+                  className="flex items-center gap-1 text-[11px] font-semibold text-crimson-400 hover:text-crimson-300 transition"
+                >
+                  <RotateCcw className={`h-2.5 w-2.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                  <span>Sync now</span>
+                </button>
               </div>
             )}
 
