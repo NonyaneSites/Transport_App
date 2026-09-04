@@ -65,6 +65,7 @@ export function RepPage() {
     }
   });
   const key = manifestKey(date, service);
+  const { manifest, loading, error, isSyncing, refresh, save, updateVehicleDraft } = useManifest(key);
 
   const [selectedVehicleId, setSelectedVehicleId] = useState<string>(() => {
     try {
@@ -73,8 +74,6 @@ export function RepPage() {
       return '';
     }
   });
-
-  const { manifest, loading, error, isSyncing, refresh, save, updateVehicleDraft } = useManifest(key, selectedVehicleId);
 
   const [repName, setRepName] = useState('');
   const [coReps, setCoReps] = useState<string[]>([]);
@@ -332,7 +331,7 @@ export function RepPage() {
     isApplyingDraftRef.current = true;
     const now = Date.now();
 
-    // 1. Merge Present and Absent IDs without overriding riders the local user clicked in the last 3500ms
+    // 1. Merge Present and Absent IDs without overriding riders the local user clicked in the last 1500ms
     setPresentIds((prevPresent) => {
       const nextPresent = new Set(prevPresent);
       const remotePresent = new Set(draft.presentIds ?? []);
@@ -340,7 +339,7 @@ export function RepPage() {
 
       for (const rider of vehicleRidersList) {
         const lastEdit = recentlyEditedRidersRef.current.get(rider.id) ?? 0;
-        if (now - lastEdit < 3500) {
+        if (now - lastEdit < 1500) {
           // Local user explicitly touched this rider recently — prioritize local action
           continue;
         }
@@ -360,7 +359,7 @@ export function RepPage() {
 
       for (const rider of vehicleRidersList) {
         const lastEdit = recentlyEditedRidersRef.current.get(rider.id) ?? 0;
-        if (now - lastEdit < 3500) {
+        if (now - lastEdit < 1500) {
           // Local user explicitly touched this rider recently — prioritize local action
           continue;
         }
@@ -552,6 +551,24 @@ export function RepPage() {
       prevVehicleSubmittedRef.current = selectedVehicle.submitted;
     }
   }, [selectedVehicle?.submitted, selectedVehicle?.draftState, selectedVehicle, riders, applyDraftState]);
+
+  // Sync passengers marked present in manifest.signups by Admin
+  useEffect(() => {
+    if (!selectedVehicle || riders.length === 0) return;
+    const toAddAsPresent: string[] = [];
+    riders.forEach((r) => {
+      if (r.present && !presentIds.has(r.id) && !absentIds.has(r.id)) {
+        toAddAsPresent.push(r.id);
+      }
+    });
+    if (toAddAsPresent.length > 0) {
+      setPresentIds((prev) => {
+        const next = new Set(prev);
+        toAddAsPresent.forEach((id) => next.add(id));
+        return next;
+      });
+    }
+  }, [riders, selectedVehicle, presentIds, absentIds]);
 
   // Load past cancellations so reps have instant live search of church debtors
   const ensurePastCancellationsLoaded = useCallback(async () => {
