@@ -165,6 +165,80 @@ export function generateWhatsAppRepManifest(manifest: Manifest, service: Service
 }
 
 /**
+ * Returns the passenger record for the primary rep assigned to a vehicle.
+ * The passenger record is the source of the WhatsApp number imported from
+ * the weekly booking sheet.
+ */
+export function findVehicleRepPassenger(manifest: Manifest, vehicle: Vehicle): Passenger | undefined {
+  if (!vehicle.repName) return undefined;
+
+  return getRiderPassengers(manifest, vehicle).find((passenger) =>
+    isPassengerRepOfVehicle(passenger, vehicle.repName)
+    || passenger.fullName.trim().toLowerCase() === vehicle.repName?.trim().toLowerCase()
+  );
+}
+
+/** Converts common South African phone formats to the digits-only wa.me format. */
+export function normalizeWhatsAppPhone(phone?: string | null): string | null {
+  if (!phone) return null;
+
+  let digits = phone.replace(/\D/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (digits.startsWith('0')) digits = `27${digits.slice(1)}`;
+  if (digits.length === 9) digits = `27${digits}`;
+
+  return /^\d{10,15}$/.test(digits) ? digits : null;
+}
+
+/** Builds a private, vehicle-specific message for one transport rep. */
+export function generateWhatsAppVehicleRepMessage(
+  manifest: Manifest,
+  vehicle: Vehicle,
+  service: ServiceType,
+  repPortalUrl?: string
+): string {
+  const { date: sessionDate } = parseManifestKey(manifest?.date || '');
+  const riders = getRiderPassengers(manifest, vehicle);
+  const groups = getRidersGroupedByHub(manifest, vehicle);
+  const repName = vehicle.repName?.trim() || 'Transport Rep';
+  const lines: string[] = [
+    `Hi ${repName} `,
+    '',
+    `You have been assigned as the transport rep for *${vehicle.name}* on *${shortDate(sessionDate)}*.`,
+    `Service: *${serviceTitle(service, 'standard')}*`,
+    `Passengers: *${riders.length}*`,
+  ];
+
+  let riderNumber = 1;
+  for (const group of groups) {
+    const pickupTime = vehicle.stopTimes?.[group.label];
+    lines.push('');
+    lines.push(pickupTime
+      ? `*${group.label}* — ${pickupTime}`
+      : `*${group.label}*`);
+
+    for (const rider of group.riders) {
+      const isRep = isPassengerRepOfVehicle(rider, vehicle.repName);
+      const cleanName = rider.fullName.trim().replace(/^\*+|\*+$/g, '');
+      lines.push(`${riderNumber}. ${isRep ? `*${cleanName}*` : cleanName}`);
+      riderNumber++;
+    }
+  }
+
+  const note = vehicle.generalNotes?.trim();
+  if (note) {
+    lines.push('');
+    lines.push(`*Note:* ${note}`);
+  }
+
+  lines.push('');
+  lines.push('Please record attendance, cash collected and the vehicle registration number in the Rep Portal.');
+  if (repPortalUrl) lines.push(repPortalUrl);
+
+  return lines.join('\n');
+}
+
+/**
  * Downloads a text string as a UTF-8 text file.
  */
 export function downloadTextFile(filename: string, content: string) {

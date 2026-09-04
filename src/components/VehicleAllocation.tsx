@@ -3,7 +3,7 @@ import {
   Bus, Car, Plus, Trash2, Users, ArrowRight, Undo2, X, UserCog, MoveRight,
   CheckCircle2, ChevronDown, ChevronRight, ChevronUp, MapPin,
   Check, Clock, StickyNote, Sparkles, ArrowUpDown, UserCheck, Download,
-  FileText, Copy, Eye, FileDown, Search, UserX, GitMerge, CornerDownRight
+  FileText, Copy, Eye, FileDown, Search, UserX, GitMerge, CornerDownRight, MessageCircle
 } from 'lucide-react';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
@@ -15,6 +15,9 @@ import { detectVehicleRep, detectAllVehicleReps, getRepStructure, isPassengerRep
 import {
   generateWhatsAppRouteManifest,
   generateWhatsAppRepManifest,
+  generateWhatsAppVehicleRepMessage,
+  findVehicleRepPassenger,
+  normalizeWhatsAppPhone,
   downloadTextFile
 } from '@/lib/whatsappManifest';
 
@@ -161,6 +164,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   const [copiedRoute, setCopiedRoute] = useState(false);
   const [copiedRep, setCopiedRep] = useState(false);
   const [previewManifestType, setPreviewManifestType] = useState<'route' | 'rep' | null>(null);
+  const [whatsAppNotice, setWhatsAppNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   /**
    * Performs an immediate synchronous mutation on the local manifest,
@@ -652,6 +656,40 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     const text = generateWhatsAppRepManifest(localManifest, service);
     const { date: sessionDate } = parseManifestKey(localManifest.date);
     downloadTextFile(`whatsapp_rep_manifest_${sessionDate}_${service}.txt`, text);
+  }
+
+  function handleWhatsAppRep(vehicle: Vehicle) {
+    if (!vehicle.repName?.trim()) {
+      setWhatsAppNotice({ type: 'error', text: `Assign a transport rep to ${vehicle.name} before sending its passenger list.` });
+      return;
+    }
+
+    const repPassenger = findVehicleRepPassenger(localManifest, vehicle);
+    if (!repPassenger) {
+      setWhatsAppNotice({
+        type: 'error',
+        text: `${vehicle.repName} could not be matched to a passenger in ${vehicle.name}. Select the rep from the assigned passenger list.`,
+      });
+      return;
+    }
+
+    const phone = normalizeWhatsAppPhone(repPassenger.phone);
+    if (!phone) {
+      setWhatsAppNotice({
+        type: 'error',
+        text: `No valid WhatsApp number was found for ${repPassenger.fullName}. Add it to the booking sheet and import again.`,
+      });
+      return;
+    }
+
+    const repPortalUrl = `${window.location.origin}/rep`;
+    const message = generateWhatsAppVehicleRepMessage(localManifest, vehicle, service, repPortalUrl);
+    const whatsAppUrl = `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
+    window.open(whatsAppUrl, '_blank', 'noopener,noreferrer');
+    setWhatsAppNotice({
+      type: 'success',
+      text: `WhatsApp opened for ${repPassenger.fullName}. Review the list, then tap Send.`,
+    });
   }
 
   const hasAllocatedVehicles = localManifest.vehicles.length > 0 && localManifest.vehicles.some((v) => riderPassengers(v).length > 0);
@@ -1458,6 +1496,27 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
         </div>
       )}
 
+      {whatsAppNotice && (
+        <div
+          role="status"
+          className={`mb-4 flex items-start justify-between gap-3 rounded-xl border px-4 py-3 text-sm ${
+            whatsAppNotice.type === 'success'
+              ? 'border-success/30 bg-success/10 text-success-light'
+              : 'border-red-400/25 bg-red-400/5 text-red-200'
+          }`}
+        >
+          <span>{whatsAppNotice.text}</span>
+          <button
+            type="button"
+            onClick={() => setWhatsAppNotice(null)}
+            className="shrink-0 rounded p-0.5 text-current opacity-70 hover:opacity-100"
+            aria-label="Dismiss WhatsApp notice"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
       {/* Vehicle cards */}
       {localManifest.vehicles.length === 0 ? (
         <div className="flex flex-col items-center gap-2 py-10 text-center">
@@ -1478,6 +1537,8 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
               ? getRepStructure(vehicle.repName)
               : (selectedRepObj ? selectedRepObj.rep.structure : (detectedOfficialRep ? getRepStructure(detectedOfficialRep) : null));
             const groups = ridersGroupedByHub(vehicle);
+            const repPassenger = findVehicleRepPassenger(localManifest, vehicle);
+            const hasRepWhatsApp = Boolean(normalizeWhatsAppPhone(repPassenger?.phone));
 
             // Attendance & Sponsorship metrics
             const vPresent = vehicle.submitted
@@ -1568,6 +1629,23 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                     </div>
                   </button>
                   <div className="flex items-center gap-2">
+                    {riders.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => handleWhatsAppRep(vehicle)}
+                        title={hasRepWhatsApp
+                          ? `Open WhatsApp message for ${vehicle.repName}`
+                          : 'Assign a rep with a valid phone number to send this list'}
+                        className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-2 text-xs font-semibold transition-colors ${
+                          hasRepWhatsApp
+                            ? 'border-success/30 bg-success/10 text-success-light hover:bg-success/20'
+                            : 'border-line bg-card text-muted hover:border-red-400/30 hover:text-ink'
+                        }`}
+                      >
+                        <MessageCircle className="h-4 w-4" />
+                        <span className="hidden lg:inline">WhatsApp rep</span>
+                      </button>
+                    )}
                     {riders.length > 0 && (
                       <button
                         onClick={() => unassignAllFromVehicle(vehicle.id)}
