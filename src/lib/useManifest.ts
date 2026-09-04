@@ -203,6 +203,37 @@ export function useManifest(
     onLiveActionRef.current?.(action);
   }, []);
 
+  const isChannelSubscribedRef = useRef(false);
+
+  const safeChannelSend = useCallback((payload: { type: 'broadcast'; event: string; payload: unknown }) => {
+    if (!channelRef.current) return;
+    try {
+      const ch = channelRef.current as unknown as {
+        state?: string;
+        channelAdapter?: { canPush?: () => boolean };
+        send?: (p: unknown) => Promise<unknown>;
+        httpSend?: (event: string, payload: unknown, opts?: unknown) => Promise<unknown>;
+      };
+      const canPush = typeof ch.channelAdapter?.canPush === 'function'
+        ? Boolean(ch.channelAdapter.canPush())
+        : ch.state === 'joined';
+
+      if (canPush) {
+        ch.send?.(payload)?.catch?.(() => {});
+      } else if (typeof ch.httpSend === 'function') {
+        const eventName = payload.event || 'broadcast';
+        const eventData = payload.payload !== undefined && payload.payload !== null
+          ? payload.payload
+          : {};
+        ch.httpSend(eventName, eventData)?.catch?.(() => {});
+      } else if (typeof ch.send === 'function') {
+        ch.send(payload)?.catch?.(() => {});
+      }
+    } catch {
+      // Send failed non-critically
+    }
+  }, []);
+
   const broadcastLiveAction = useCallback((action: LiveSyncAction) => {
     if (!keyRef.current) return;
     if (broadcastChannelRef.current) {
@@ -212,18 +243,12 @@ export function useManifest(
         // Broadcast failed
       }
     }
-    if (channelRef.current) {
-      try {
-        channelRef.current.send({
-          type: 'broadcast',
-          event: 'live_action',
-          payload: action,
-        });
-      } catch {
-        // Send failed
-      }
-    }
-  }, []);
+    safeChannelSend({
+      type: 'broadcast',
+      event: 'live_action',
+      payload: action,
+    });
+  }, [safeChannelSend]);
 
   // Track the updatedAt timestamp of the last thing WE saved.
   // Used to suppress our own realtime echoes without blocking external updates.
@@ -415,9 +440,9 @@ export function useManifest(
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
-          // Channel connected
+          isChannelSubscribedRef.current = true;
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
-          // Auto-reconnect if needed
+          isChannelSubscribedRef.current = false;
           channel.unsubscribe().catch(() => {});
         }
       });
@@ -496,6 +521,7 @@ export function useManifest(
         broadcastChannelRef.current = null;
       }
       if (channelRef.current) {
+        isChannelSubscribedRef.current = false;
         supabase.removeChannel(channelRef.current);
         channelRef.current = null;
       }
@@ -559,17 +585,11 @@ export function useManifest(
     }
 
     // Broadcast across connected devices via Supabase channel
-    if (channelRef.current) {
-      try {
-        channelRef.current.send({
-          type: 'broadcast',
-          event: 'manifest_updated',
-          payload: { date: finalToSave.date, manifest: finalToSave },
-        });
-      } catch {
-        // Broadcast failed
-      }
-    }
+    safeChannelSend({
+      type: 'broadcast',
+      event: 'manifest_updated',
+      payload: { date: finalToSave.date, manifest: finalToSave },
+    });
 
     const { error: upsertError, data } = await supabase
       .from(MANIFESTS_TABLE)
@@ -716,27 +736,21 @@ export function useManifest(
     }
 
     // Broadcast targeted vehicle delta across connected devices via Supabase channel
-    if (channelRef.current) {
-      try {
-        channelRef.current.send({
-          type: 'broadcast',
-          event: 'vehicle_draft_delta',
-          payload: {
-            vehicleId,
-            draftState: mergedDraft,
-            repName: mergedDraft?.repName || repName,
-            licensePlate: mergedDraft?.licensePlate || licensePlate,
-          },
-        });
-        channelRef.current.send({
-          type: 'broadcast',
-          event: 'manifest_updated',
-          payload: { date: mergedManifest.date, manifest: mergedManifest },
-        });
-      } catch {
-        // Broadcast failed
-      }
-    }
+    safeChannelSend({
+      type: 'broadcast',
+      event: 'vehicle_draft_delta',
+      payload: {
+        vehicleId,
+        draftState: mergedDraft,
+        repName: mergedDraft?.repName || repName,
+        licensePlate: mergedDraft?.licensePlate || licensePlate,
+      },
+    });
+    safeChannelSend({
+      type: 'broadcast',
+      event: 'manifest_updated',
+      payload: { date: mergedManifest.date, manifest: mergedManifest },
+    });
 
     const { error: upsertError, data } = await supabase
       .from(MANIFESTS_TABLE)

@@ -330,6 +330,11 @@ export function createMockClient() {
           void _payload;
           return Promise.resolve('ok');
         },
+        httpSend(_event: string, _payload?: unknown) {
+          void _event;
+          void _payload;
+          return Promise.resolve({ success: true as const });
+        },
         track(_state: unknown) {
           void _state;
           return Promise.resolve('ok');

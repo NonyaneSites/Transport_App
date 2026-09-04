@@ -17,7 +17,6 @@ import {
   type Vehicle,
   type VehicleDraftState,
   type LiveSyncAction,
-  type LiveRiderIndicator,
 } from '@/lib/types';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
@@ -98,9 +97,7 @@ export function RepPage() {
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [generalNotes, setGeneralNotes] = useState('');
 
-  // Live real-time indications for co-reps
-  const [liveRiderIndicators, setLiveRiderIndicators] = useState<Record<string, LiveRiderIndicator>>({});
-  const [liveSyncStatus, setLiveSyncStatus] = useState<{ text: string; timestamp: number } | null>(null);
+  // Concurrency tracking
   const licensePlateFocusedRef = useRef(false);
   const generalNotesFocusedRef = useRef(false);
   const clientIdRef = useRef<string>(makeClientId());
@@ -111,7 +108,7 @@ export function RepPage() {
 
     if (action.vehicleId === selectedVehicleId) {
       if (action.type === 'rider_attendance') {
-        const { riderId, status, repName: author } = action;
+        const { riderId, status } = action;
         const now = Date.now();
         const lastEdit = recentlyEditedRidersRef.current.get(riderId) ?? 0;
         if (now - lastEdit > 1500) {
@@ -142,52 +139,22 @@ export function RepPage() {
             });
           }
         }
-
-        setLiveRiderIndicators((prev) => ({
-          ...prev,
-          [riderId]: {
-            author: author || 'Co-rep',
-            status: status === 'present' ? 'Present' : status === 'absent' ? 'Absent' : 'Unticked',
-            timestamp: now,
-          },
-        }));
-
-        setLiveSyncStatus({
-          text: `⚡ ${author || 'Co-rep'} checked a passenger`,
-          timestamp: now,
-        });
       } else if (action.type === 'rider_sponsored') {
-        const { riderId, sponsored, repName: author } = action;
+        const { riderId, sponsored } = action;
         setSponsoredIds((prev) => {
           const next = new Set(prev);
           if (sponsored) next.add(riderId);
           else next.delete(riderId);
           return next;
         });
-        setLiveRiderIndicators((prev) => ({
-          ...prev,
-          [riderId]: {
-            author: author || 'Co-rep',
-            status: sponsored ? 'Sponsored' : 'Self-paying',
-            timestamp: Date.now(),
-          },
-        }));
       } else if (action.type === 'rider_unpaid') {
-        const { riderId, unpaid, repName: author } = action;
+        const { riderId, unpaid } = action;
         setUnpaidIds((prev) => {
           const next = new Set(prev);
           if (unpaid) next.add(riderId);
           else next.delete(riderId);
           return next;
         });
-        setLiveRiderIndicators((prev) => ({
-          ...prev,
-          [riderId]: {
-            author: author || 'Co-rep',
-            status: unpaid ? 'Unpaid' : 'Paid',
-            timestamp: Date.now(),
-          },
-        }));
       } else if (action.type === 'rider_note') {
         const { riderId, note } = action;
         setNotes((prev) => ({ ...prev, [riderId]: note }));
@@ -210,7 +177,6 @@ export function RepPage() {
     refresh,
     save,
     updateVehicleDraft,
-    activeCoReps,
     broadcastLiveAction,
   } = useManifest(key, selectedVehicleId, handleLiveActionReceived);
 
@@ -234,7 +200,6 @@ export function RepPage() {
 
   // Sync locks & conflict prevention
   const [draftRestored, setDraftRestored] = useState(false);
-  const [remoteSyncNotice, setRemoteSyncNotice] = useState<string | null>(null);
   const pendingSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAppliedDraftAtRef = useRef<string | null>(null);
   const isApplyingDraftRef = useRef(false);
@@ -267,26 +232,6 @@ export function RepPage() {
 
     return () => clearInterval(interval);
   }, [selectedVehicleId, repName, broadcastLiveAction]);
-
-  // Expire temporary live indicator badges after 3.5s
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const now = Date.now();
-      setLiveRiderIndicators((prev) => {
-        let hasExpired = false;
-        const next: Record<string, LiveRiderIndicator> = {};
-        for (const [k, v] of Object.entries(prev)) {
-          if (now - v.timestamp < 3500) {
-            next[k] = v;
-          } else {
-            hasExpired = true;
-          }
-        }
-        return hasExpired ? next : prev;
-      });
-    }, 1200);
-    return () => clearInterval(interval);
-  }, []);
 
   const manifestRef = useRef(manifest);
   useEffect(() => { manifestRef.current = manifest; }, [manifest]);
@@ -701,10 +646,6 @@ export function RepPage() {
 
     mergeRemoteDraftState(draft, riders);
     lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
-    const author = draft.repName || 'another device';
-    setRemoteSyncNotice(`Updated by ${author}`);
-    const t = setTimeout(() => setRemoteSyncNotice(null), 3000);
-    return () => clearTimeout(t);
   }, [selectedVehicle?.draftState, selectedVehicle, riders, mergeRemoteDraftState]);
 
   // Sync submission status changes from other devices / admin in real time
@@ -1746,17 +1687,8 @@ export function RepPage() {
               CRC <span className="text-crimson-400">Rep Portal</span>
             </div>
             <div className="flex items-center gap-1.5 text-[11px] text-muted">
-              {liveSyncStatus && Date.now() - liveSyncStatus.timestamp < 3500 ? (
-                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-medium animate-fade-in">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
-                  {liveSyncStatus.text}
-                </span>
-              ) : (
-                <>
-                  <span className={`inline-block h-2 w-2 rounded-full ${isSyncing ? 'bg-amber-400 animate-ping' : 'bg-success'}`} />
-                  <span>{isSyncing ? 'Syncing…' : 'Live Synced'}</span>
-                </>
-              )}
+              <span className={`inline-block h-2 w-2 rounded-full ${isSyncing ? 'bg-amber-400 animate-ping' : 'bg-success'}`} />
+              <span>{isSyncing ? 'Syncing…' : 'Live Synced'}</span>
             </div>
           </div>
           <button
@@ -1873,23 +1805,6 @@ export function RepPage() {
                 </div>
               ) : (
                 <div className="space-y-3 border-t border-line/60 pt-3">
-                  {selectedVehicleId && activeCoReps.length > 0 && (
-                    <div className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 text-xs font-medium animate-fade-in">
-                      <div className="flex items-center gap-2">
-                        <span className="relative flex h-2 w-2">
-                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                          <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
-                        </span>
-                        <span>
-                          Active co-reps on this vehicle: <strong className="font-semibold text-emerald-200">{activeCoReps.map(c => c.repName).join(', ')}</strong>
-                        </span>
-                      </div>
-                      <span className="text-[10px] uppercase font-mono tracking-wider text-emerald-400/80 bg-emerald-500/20 px-1.5 py-0.5 rounded">
-                        Live
-                      </span>
-                    </div>
-                  )}
-
                   <div>
                     <div className="mb-1.5 flex items-center justify-between">
                       <label className="block text-xs font-semibold uppercase tracking-wide text-muted">
@@ -1994,21 +1909,14 @@ export function RepPage() {
               )}
             </div>
 
-            {selectedVehicle && remoteSyncNotice && (
-              <div className="flex items-center gap-2 rounded-lg border border-sky-500/40 bg-sky-950/40 p-2.5 text-xs text-sky-200 animate-fade-in">
-                <Sparkles className="h-4 w-4 shrink-0 text-sky-400" />
-                <span>⚡ {remoteSyncNotice}</span>
-              </div>
-            )}
-
-            {selectedVehicle && draftRestored && !remoteSyncNotice && (
+            {selectedVehicle && draftRestored && (
               <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-2.5 text-xs text-success-light animate-fade-in">
                 <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
                 <span>Working draft restored — your progress is preserved.</span>
               </div>
             )}
 
-            {selectedVehicle && !isSubmitted && !draftRestored && !remoteSyncNotice && (
+            {selectedVehicle && !isSubmitted && !draftRestored && (
               <div className="flex items-center justify-between rounded-lg border border-line bg-card/60 px-3 py-1.5 text-[11px] text-muted">
                 <span className="flex items-center gap-1.5">
                   <span className={`inline-block h-2 w-2 rounded-full ${isSyncing ? 'bg-amber-400 animate-ping' : 'bg-success'}`} />
@@ -2314,7 +2222,6 @@ export function RepPage() {
                     riderDebtsMap={riderDebtsMap}
                     collectedCancellationIds={collectedCancellationIds}
                     onToggleCancellation={toggleCollectedCancellation}
-                    liveRiderIndicators={liveRiderIndicators}
                   />
                 ) : (
                   <AlphabeticalChecklist
@@ -2334,7 +2241,6 @@ export function RepPage() {
                     riderDebtsMap={riderDebtsMap}
                     collectedCancellationIds={collectedCancellationIds}
                     onToggleCancellation={toggleCollectedCancellation}
-                    liveRiderIndicators={liveRiderIndicators}
                   />
                 )}
 
@@ -2946,7 +2852,7 @@ function CashCalculatorCard({
 
 function StopGroupedChecklist({
   riders, vehicleType, orderedStops, stopRedirects, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
-  riderDebtsMap, collectedCancellationIds, onToggleCancellation, liveRiderIndicators,
+  riderDebtsMap, collectedCancellationIds, onToggleCancellation,
 }: {
   riders: Passenger[];
   vehicleType: 'Bus' | 'Taxi';
@@ -2965,7 +2871,6 @@ function StopGroupedChecklist({
   riderDebtsMap?: Record<string, LedgerEntry[]>;
   collectedCancellationIds?: Set<string>;
   onToggleCancellation?: (id: string) => void;
-  liveRiderIndicators?: Record<string, LiveRiderIndicator>;
 }) {
   const byStop = useMemo(() => {
     const groups: Record<string, Passenger[]> = {};
@@ -3079,7 +2984,6 @@ function StopGroupedChecklist({
                       outstandingDebts={riderDebtsMap?.[p.id]}
                       collectedCancellationIds={collectedCancellationIds}
                       onToggleCancellation={onToggleCancellation}
-                      liveIndicator={liveRiderIndicators?.[p.id]}
                     />
                   );
                 })}
@@ -3094,7 +2998,7 @@ function StopGroupedChecklist({
 
 function AlphabeticalChecklist({
   riders, vehicleType, stopRedirects, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
-  riderDebtsMap, collectedCancellationIds, onToggleCancellation, liveRiderIndicators,
+  riderDebtsMap, collectedCancellationIds, onToggleCancellation,
 }: {
   riders: Passenger[];
   vehicleType?: 'Bus' | 'Taxi';
@@ -3112,7 +3016,6 @@ function AlphabeticalChecklist({
   riderDebtsMap?: Record<string, LedgerEntry[]>;
   collectedCancellationIds?: Set<string>;
   onToggleCancellation?: (id: string) => void;
-  liveRiderIndicators?: Record<string, LiveRiderIndicator>;
 }) {
   const sorted = useMemo(() => {
     return [...riders].sort((a, b) => naturalCompare(a.fullName, b.fullName));
@@ -3152,7 +3055,6 @@ function AlphabeticalChecklist({
             outstandingDebts={riderDebtsMap?.[p.id]}
             collectedCancellationIds={collectedCancellationIds}
             onToggleCancellation={onToggleCancellation}
-            liveIndicator={liveRiderIndicators?.[p.id]}
           />
         );
       })}
@@ -3162,7 +3064,7 @@ function AlphabeticalChecklist({
 
 const PassengerRow = React.memo(function PassengerRow({
   passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, isSponsored, isUnpaid, noteText, redirectedFrom, disabled,
-  outstandingDebts, collectedCancellationIds, onToggleCancellation, liveIndicator,
+  outstandingDebts, collectedCancellationIds, onToggleCancellation,
 }: {
   passenger: Passenger;
   isPresent: boolean;
@@ -3180,7 +3082,6 @@ const PassengerRow = React.memo(function PassengerRow({
   outstandingDebts?: LedgerEntry[];
   collectedCancellationIds?: Set<string>;
   onToggleCancellation?: (id: string) => void;
-  liveIndicator?: LiveRiderIndicator;
 }) {
   const [showNote, setShowNote] = useState(isSponsored || isUnpaid || !!noteText);
   const [showDebtBreakdown, setShowDebtBreakdown] = useState(false);
@@ -3243,12 +3144,6 @@ const PassengerRow = React.memo(function PassengerRow({
             {!touched && !disabled && (
               <span className="text-[10px] text-amber-400/80 font-medium">
                 (unmarked)
-              </span>
-            )}
-            {liveIndicator && Date.now() - liveIndicator.timestamp < 3500 && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 border border-emerald-500/40 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 animate-pulse">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                {liveIndicator.author}: {liveIndicator.status}
               </span>
             )}
           </div>
