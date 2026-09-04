@@ -8,7 +8,17 @@ import {
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey, shortDate } from '@/lib/dates';
-import { SERVICE_TYPES, CANCELLATION_FEE, sortByRouteSequence, type ServiceType, type Passenger, type Vehicle, type VehicleDraftState } from '@/lib/types';
+import {
+  SERVICE_TYPES,
+  CANCELLATION_FEE,
+  sortByRouteSequence,
+  type ServiceType,
+  type Passenger,
+  type Vehicle,
+  type VehicleDraftState,
+  type LiveSyncAction,
+  type LiveRiderIndicator,
+} from '@/lib/types';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { vehicleRiders } from '@/lib/manifest';
@@ -65,7 +75,6 @@ export function RepPage() {
     }
   });
   const key = manifestKey(date, service);
-  const { manifest, loading, error, isSyncing, refresh, save, updateVehicleDraft } = useManifest(key);
 
   const [selectedVehicleId, setSelectedVehicleId] = useState<string>(() => {
     try {
@@ -89,6 +98,122 @@ export function RepPage() {
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [generalNotes, setGeneralNotes] = useState('');
 
+  // Live real-time indications for co-reps
+  const [liveRiderIndicators, setLiveRiderIndicators] = useState<Record<string, LiveRiderIndicator>>({});
+  const [liveSyncStatus, setLiveSyncStatus] = useState<{ text: string; timestamp: number } | null>(null);
+  const licensePlateFocusedRef = useRef(false);
+  const generalNotesFocusedRef = useRef(false);
+  const clientIdRef = useRef<string>(makeClientId());
+  const recentlyEditedRidersRef = useRef<Map<string, number>>(new Map());
+
+  const handleLiveActionReceived = useCallback((action: LiveSyncAction) => {
+    if (action.clientId === clientIdRef.current) return;
+
+    if (action.vehicleId === selectedVehicleId) {
+      if (action.type === 'rider_attendance') {
+        const { riderId, status, repName: author } = action;
+        const now = Date.now();
+        const lastEdit = recentlyEditedRidersRef.current.get(riderId) ?? 0;
+        if (now - lastEdit > 1500) {
+          if (status === 'present') {
+            setPresentIds((prev) => new Set(prev).add(riderId));
+            setAbsentIds((prev) => {
+              const next = new Set(prev);
+              next.delete(riderId);
+              return next;
+            });
+          } else if (status === 'absent') {
+            setAbsentIds((prev) => new Set(prev).add(riderId));
+            setPresentIds((prev) => {
+              const next = new Set(prev);
+              next.delete(riderId);
+              return next;
+            });
+          } else {
+            setPresentIds((prev) => {
+              const next = new Set(prev);
+              next.delete(riderId);
+              return next;
+            });
+            setAbsentIds((prev) => {
+              const next = new Set(prev);
+              next.delete(riderId);
+              return next;
+            });
+          }
+        }
+
+        setLiveRiderIndicators((prev) => ({
+          ...prev,
+          [riderId]: {
+            author: author || 'Co-rep',
+            status: status === 'present' ? 'Present' : status === 'absent' ? 'Absent' : 'Unticked',
+            timestamp: now,
+          },
+        }));
+
+        setLiveSyncStatus({
+          text: `⚡ ${author || 'Co-rep'} checked a passenger`,
+          timestamp: now,
+        });
+      } else if (action.type === 'rider_sponsored') {
+        const { riderId, sponsored, repName: author } = action;
+        setSponsoredIds((prev) => {
+          const next = new Set(prev);
+          if (sponsored) next.add(riderId);
+          else next.delete(riderId);
+          return next;
+        });
+        setLiveRiderIndicators((prev) => ({
+          ...prev,
+          [riderId]: {
+            author: author || 'Co-rep',
+            status: sponsored ? 'Sponsored' : 'Self-paying',
+            timestamp: Date.now(),
+          },
+        }));
+      } else if (action.type === 'rider_unpaid') {
+        const { riderId, unpaid, repName: author } = action;
+        setUnpaidIds((prev) => {
+          const next = new Set(prev);
+          if (unpaid) next.add(riderId);
+          else next.delete(riderId);
+          return next;
+        });
+        setLiveRiderIndicators((prev) => ({
+          ...prev,
+          [riderId]: {
+            author: author || 'Co-rep',
+            status: unpaid ? 'Unpaid' : 'Paid',
+            timestamp: Date.now(),
+          },
+        }));
+      } else if (action.type === 'rider_note') {
+        const { riderId, note } = action;
+        setNotes((prev) => ({ ...prev, [riderId]: note }));
+      } else if (action.type === 'metadata_change') {
+        if (action.licensePlate && !licensePlateFocusedRef.current) {
+          setLicensePlate(action.licensePlate);
+        }
+        if (action.generalNotes && !generalNotesFocusedRef.current) {
+          setGeneralNotes(action.generalNotes);
+        }
+      }
+    }
+  }, [selectedVehicleId]);
+
+  const {
+    manifest,
+    loading,
+    error,
+    isSyncing,
+    refresh,
+    save,
+    updateVehicleDraft,
+    activeCoReps,
+    broadcastLiveAction,
+  } = useManifest(key, selectedVehicleId, handleLiveActionReceived);
+
   // Rider search, filtering, and view mode for person-by-person check-in
   const [riderSearch, setRiderSearch] = useState('');
   const [riderFilter, setRiderFilter] = useState<'all' | 'unticked' | 'present' | 'absent'>('all');
@@ -110,15 +235,58 @@ export function RepPage() {
   // Sync locks & conflict prevention
   const [draftRestored, setDraftRestored] = useState(false);
   const [remoteSyncNotice, setRemoteSyncNotice] = useState<string | null>(null);
-  const clientIdRef = useRef<string>(makeClientId());
   const pendingSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAppliedDraftAtRef = useRef<string | null>(null);
   const isApplyingDraftRef = useRef(false);
   const isUserDirtyRef = useRef(false);
   const lastLocalEditTimeRef = useRef<number>(0);
   const initializedKeyRef = useRef<string>('');
-  const recentlyEditedRidersRef = useRef<Map<string, number>>(new Map());
   const prevVehicleSubmittedRef = useRef<boolean | undefined>(undefined);
+
+  // Periodic presence heartbeat: keeps co-reps aware of each other
+  useEffect(() => {
+    if (!selectedVehicleId) return;
+    broadcastLiveAction({
+      type: 'presence_heartbeat',
+      vehicleId: selectedVehicleId,
+      repName: repName.trim() || 'Co-rep',
+      clientId: clientIdRef.current,
+      timestamp: Date.now(),
+    });
+
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      broadcastLiveAction({
+        type: 'presence_heartbeat',
+        vehicleId: selectedVehicleId,
+        repName: repName.trim() || 'Co-rep',
+        clientId: clientIdRef.current,
+        timestamp: Date.now(),
+      });
+    }, 7000);
+
+    return () => clearInterval(interval);
+  }, [selectedVehicleId, repName, broadcastLiveAction]);
+
+  // Expire temporary live indicator badges after 3.5s
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setLiveRiderIndicators((prev) => {
+        let hasExpired = false;
+        const next: Record<string, LiveRiderIndicator> = {};
+        for (const [k, v] of Object.entries(prev)) {
+          if (now - v.timestamp < 3500) {
+            next[k] = v;
+          } else {
+            hasExpired = true;
+          }
+        }
+        return hasExpired ? next : prev;
+      });
+    }, 1200);
+    return () => clearInterval(interval);
+  }, []);
 
   const manifestRef = useRef(manifest);
   useEffect(() => { manifestRef.current = manifest; }, [manifest]);
@@ -331,7 +499,7 @@ export function RepPage() {
     isApplyingDraftRef.current = true;
     const now = Date.now();
 
-    // 1. Merge Present and Absent IDs without overriding riders the local user clicked in the last 1500ms
+    // 1. Merge Present and Absent IDs without overriding riders the local user clicked in the last 3500ms
     setPresentIds((prevPresent) => {
       const nextPresent = new Set(prevPresent);
       const remotePresent = new Set(draft.presentIds ?? []);
@@ -339,7 +507,7 @@ export function RepPage() {
 
       for (const rider of vehicleRidersList) {
         const lastEdit = recentlyEditedRidersRef.current.get(rider.id) ?? 0;
-        if (now - lastEdit < 1500) {
+        if (now - lastEdit < 3500) {
           // Local user explicitly touched this rider recently — prioritize local action
           continue;
         }
@@ -359,7 +527,7 @@ export function RepPage() {
 
       for (const rider of vehicleRidersList) {
         const lastEdit = recentlyEditedRidersRef.current.get(rider.id) ?? 0;
-        if (now - lastEdit < 1500) {
+        if (now - lastEdit < 3500) {
           // Local user explicitly touched this rider recently — prioritize local action
           continue;
         }
@@ -551,24 +719,6 @@ export function RepPage() {
       prevVehicleSubmittedRef.current = selectedVehicle.submitted;
     }
   }, [selectedVehicle?.submitted, selectedVehicle?.draftState, selectedVehicle, riders, applyDraftState]);
-
-  // Sync passengers marked present in manifest.signups by Admin
-  useEffect(() => {
-    if (!selectedVehicle || riders.length === 0) return;
-    const toAddAsPresent: string[] = [];
-    riders.forEach((r) => {
-      if (r.present && !presentIds.has(r.id) && !absentIds.has(r.id)) {
-        toAddAsPresent.push(r.id);
-      }
-    });
-    if (toAddAsPresent.length > 0) {
-      setPresentIds((prev) => {
-        const next = new Set(prev);
-        toAddAsPresent.forEach((id) => next.add(id));
-        return next;
-      });
-    }
-  }, [riders, selectedVehicle, presentIds, absentIds]);
 
   // Load past cancellations so reps have instant live search of church debtors
   const ensurePastCancellationsLoaded = useCallback(async () => {
@@ -797,38 +947,98 @@ export function RepPage() {
         return next;
       });
     }
-  }, []);
+
+    if (selectedVehicleId) {
+      broadcastLiveAction({
+        type: 'rider_attendance',
+        vehicleId: selectedVehicleId,
+        riderId: passengerId,
+        status: wantPresent ? 'present' : 'absent',
+        repName: repName.trim() || 'Co-rep',
+        clientId: clientIdRef.current,
+        timestamp: Date.now(),
+      });
+    }
+  }, [selectedVehicleId, repName, broadcastLiveAction]);
 
   const handleToggleSponsored = useCallback((passengerId: string) => {
     lastLocalEditTimeRef.current = Date.now();
     recentlyEditedRidersRef.current.set(passengerId, Date.now());
     isUserDirtyRef.current = true;
+    let nextVal = false;
     setSponsoredIds((prev) => {
       const next = new Set(prev);
-      if (next.has(passengerId)) next.delete(passengerId);
-      else next.add(passengerId);
+      if (next.has(passengerId)) {
+        next.delete(passengerId);
+        nextVal = false;
+      } else {
+        next.add(passengerId);
+        nextVal = true;
+      }
       return next;
     });
-  }, []);
+
+    if (selectedVehicleId) {
+      broadcastLiveAction({
+        type: 'rider_sponsored',
+        vehicleId: selectedVehicleId,
+        riderId: passengerId,
+        sponsored: nextVal,
+        repName: repName.trim() || 'Co-rep',
+        clientId: clientIdRef.current,
+        timestamp: Date.now(),
+      });
+    }
+  }, [selectedVehicleId, repName, broadcastLiveAction]);
 
   const handleToggleUnpaid = useCallback((passengerId: string) => {
     lastLocalEditTimeRef.current = Date.now();
     recentlyEditedRidersRef.current.set(passengerId, Date.now());
     isUserDirtyRef.current = true;
+    let nextVal = false;
     setUnpaidIds((prev) => {
       const next = new Set(prev);
-      if (next.has(passengerId)) next.delete(passengerId);
-      else next.add(passengerId);
+      if (next.has(passengerId)) {
+        next.delete(passengerId);
+        nextVal = false;
+      } else {
+        next.add(passengerId);
+        nextVal = true;
+      }
       return next;
     });
-  }, []);
+
+    if (selectedVehicleId) {
+      broadcastLiveAction({
+        type: 'rider_unpaid',
+        vehicleId: selectedVehicleId,
+        riderId: passengerId,
+        unpaid: nextVal,
+        repName: repName.trim() || 'Co-rep',
+        clientId: clientIdRef.current,
+        timestamp: Date.now(),
+      });
+    }
+  }, [selectedVehicleId, repName, broadcastLiveAction]);
 
   const handleSetNote = useCallback((passengerId: string, text: string) => {
     lastLocalEditTimeRef.current = Date.now();
     recentlyEditedRidersRef.current.set(passengerId, Date.now());
     isUserDirtyRef.current = true;
     setNotes((prev) => ({ ...prev, [passengerId]: text }));
-  }, []);
+
+    if (selectedVehicleId) {
+      broadcastLiveAction({
+        type: 'rider_note',
+        vehicleId: selectedVehicleId,
+        riderId: passengerId,
+        note: text,
+        repName: repName.trim() || 'Co-rep',
+        clientId: clientIdRef.current,
+        timestamp: Date.now(),
+      });
+    }
+  }, [selectedVehicleId, repName, broadcastLiveAction]);
 
   // Attendance Check: Mark all unticked riders as Absent
   const handleMarkUntickedAsAbsent = useCallback(() => {
@@ -1536,8 +1746,17 @@ export function RepPage() {
               CRC <span className="text-crimson-400">Rep Portal</span>
             </div>
             <div className="flex items-center gap-1.5 text-[11px] text-muted">
-              <span className={`inline-block h-2 w-2 rounded-full ${isSyncing ? 'bg-amber-400 animate-ping' : 'bg-success'}`} />
-              <span>{isSyncing ? 'Syncing…' : 'Live Synced'}</span>
+              {liveSyncStatus && Date.now() - liveSyncStatus.timestamp < 3500 ? (
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-medium animate-fade-in">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
+                  {liveSyncStatus.text}
+                </span>
+              ) : (
+                <>
+                  <span className={`inline-block h-2 w-2 rounded-full ${isSyncing ? 'bg-amber-400 animate-ping' : 'bg-success'}`} />
+                  <span>{isSyncing ? 'Syncing…' : 'Live Synced'}</span>
+                </>
+              )}
             </div>
           </div>
           <button
@@ -1654,6 +1873,23 @@ export function RepPage() {
                 </div>
               ) : (
                 <div className="space-y-3 border-t border-line/60 pt-3">
+                  {selectedVehicleId && activeCoReps.length > 0 && (
+                    <div className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 text-xs font-medium animate-fade-in">
+                      <div className="flex items-center gap-2">
+                        <span className="relative flex h-2 w-2">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                          <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+                        </span>
+                        <span>
+                          Active co-reps on this vehicle: <strong className="font-semibold text-emerald-200">{activeCoReps.map(c => c.repName).join(', ')}</strong>
+                        </span>
+                      </div>
+                      <span className="text-[10px] uppercase font-mono tracking-wider text-emerald-400/80 bg-emerald-500/20 px-1.5 py-0.5 rounded">
+                        Live
+                      </span>
+                    </div>
+                  )}
+
                   <div>
                     <div className="mb-1.5 flex items-center justify-between">
                       <label className="block text-xs font-semibold uppercase tracking-wide text-muted">
@@ -1705,8 +1941,19 @@ export function RepPage() {
                       type="text"
                       value={licensePlate}
                       onChange={(e) => {
+                        const val = e.target.value.toUpperCase();
                         isUserDirtyRef.current = true;
-                        setLicensePlate(e.target.value);
+                        setLicensePlate(val);
+                        if (selectedVehicleId) {
+                          broadcastLiveAction({
+                            type: 'vehicle_license_plate',
+                            vehicleId: selectedVehicleId,
+                            licensePlate: val,
+                            repName: repName.trim() || 'Co-rep',
+                            clientId: clientIdRef.current,
+                            timestamp: Date.now(),
+                          });
+                        }
                       }}
                       placeholder="Required for this vehicle — e.g. GP 123 ABC"
                       className="input-field uppercase"
@@ -2067,6 +2314,7 @@ export function RepPage() {
                     riderDebtsMap={riderDebtsMap}
                     collectedCancellationIds={collectedCancellationIds}
                     onToggleCancellation={toggleCollectedCancellation}
+                    liveRiderIndicators={liveRiderIndicators}
                   />
                 ) : (
                   <AlphabeticalChecklist
@@ -2086,6 +2334,7 @@ export function RepPage() {
                     riderDebtsMap={riderDebtsMap}
                     collectedCancellationIds={collectedCancellationIds}
                     onToggleCancellation={toggleCollectedCancellation}
+                    liveRiderIndicators={liveRiderIndicators}
                   />
                 )}
 
@@ -2099,8 +2348,19 @@ export function RepPage() {
                       <textarea
                         value={generalNotes}
                         onChange={(e) => {
+                          const val = e.target.value;
                           isUserDirtyRef.current = true;
-                          setGeneralNotes(e.target.value);
+                          setGeneralNotes(val);
+                          if (selectedVehicleId) {
+                            broadcastLiveAction({
+                              type: 'vehicle_general_notes',
+                              vehicleId: selectedVehicleId,
+                              generalNotes: val,
+                              repName: repName.trim() || 'Co-rep',
+                              clientId: clientIdRef.current,
+                              timestamp: Date.now(),
+                            });
+                          }
                         }}
                         placeholder="Any notes for this vehicle's submission — e.g. 'Person A in Taxi 1 is paying for Person B in Taxi 2'"
                         rows={2}
@@ -2686,7 +2946,7 @@ function CashCalculatorCard({
 
 function StopGroupedChecklist({
   riders, vehicleType, orderedStops, stopRedirects, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
-  riderDebtsMap, collectedCancellationIds, onToggleCancellation,
+  riderDebtsMap, collectedCancellationIds, onToggleCancellation, liveRiderIndicators,
 }: {
   riders: Passenger[];
   vehicleType: 'Bus' | 'Taxi';
@@ -2705,6 +2965,7 @@ function StopGroupedChecklist({
   riderDebtsMap?: Record<string, LedgerEntry[]>;
   collectedCancellationIds?: Set<string>;
   onToggleCancellation?: (id: string) => void;
+  liveRiderIndicators?: Record<string, LiveRiderIndicator>;
 }) {
   const byStop = useMemo(() => {
     const groups: Record<string, Passenger[]> = {};
@@ -2818,6 +3079,7 @@ function StopGroupedChecklist({
                       outstandingDebts={riderDebtsMap?.[p.id]}
                       collectedCancellationIds={collectedCancellationIds}
                       onToggleCancellation={onToggleCancellation}
+                      liveIndicator={liveRiderIndicators?.[p.id]}
                     />
                   );
                 })}
@@ -2832,7 +3094,7 @@ function StopGroupedChecklist({
 
 function AlphabeticalChecklist({
   riders, vehicleType, stopRedirects, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
-  riderDebtsMap, collectedCancellationIds, onToggleCancellation,
+  riderDebtsMap, collectedCancellationIds, onToggleCancellation, liveRiderIndicators,
 }: {
   riders: Passenger[];
   vehicleType?: 'Bus' | 'Taxi';
@@ -2850,6 +3112,7 @@ function AlphabeticalChecklist({
   riderDebtsMap?: Record<string, LedgerEntry[]>;
   collectedCancellationIds?: Set<string>;
   onToggleCancellation?: (id: string) => void;
+  liveRiderIndicators?: Record<string, LiveRiderIndicator>;
 }) {
   const sorted = useMemo(() => {
     return [...riders].sort((a, b) => naturalCompare(a.fullName, b.fullName));
@@ -2889,6 +3152,7 @@ function AlphabeticalChecklist({
             outstandingDebts={riderDebtsMap?.[p.id]}
             collectedCancellationIds={collectedCancellationIds}
             onToggleCancellation={onToggleCancellation}
+            liveIndicator={liveRiderIndicators?.[p.id]}
           />
         );
       })}
@@ -2898,7 +3162,7 @@ function AlphabeticalChecklist({
 
 const PassengerRow = React.memo(function PassengerRow({
   passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, isSponsored, isUnpaid, noteText, redirectedFrom, disabled,
-  outstandingDebts, collectedCancellationIds, onToggleCancellation,
+  outstandingDebts, collectedCancellationIds, onToggleCancellation, liveIndicator,
 }: {
   passenger: Passenger;
   isPresent: boolean;
@@ -2916,6 +3180,7 @@ const PassengerRow = React.memo(function PassengerRow({
   outstandingDebts?: LedgerEntry[];
   collectedCancellationIds?: Set<string>;
   onToggleCancellation?: (id: string) => void;
+  liveIndicator?: LiveRiderIndicator;
 }) {
   const [showNote, setShowNote] = useState(isSponsored || isUnpaid || !!noteText);
   const [showDebtBreakdown, setShowDebtBreakdown] = useState(false);
@@ -2978,6 +3243,12 @@ const PassengerRow = React.memo(function PassengerRow({
             {!touched && !disabled && (
               <span className="text-[10px] text-amber-400/80 font-medium">
                 (unmarked)
+              </span>
+            )}
+            {liveIndicator && Date.now() - liveIndicator.timestamp < 3500 && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 border border-emerald-500/40 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 animate-pulse">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                {liveIndicator.author}: {liveIndicator.status}
               </span>
             )}
           </div>

@@ -326,6 +326,17 @@ export function createMockClient() {
         unsubscribe() {
           if (unsub) unsub();
         },
+        send(_payload: unknown) {
+          void _payload;
+          return Promise.resolve('ok');
+        },
+        track(_state: unknown) {
+          void _state;
+          return Promise.resolve('ok');
+        },
+        untrack() {
+          return Promise.resolve('ok');
+        },
       };
       return ch;
     },

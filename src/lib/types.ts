@@ -178,6 +178,66 @@ export interface Manifest {
   updated_at?: string;
 }
 
+export type LiveSyncAction =
+  | {
+      type: 'rider_attendance';
+      vehicleId: string;
+      riderId: string;
+      status: 'present' | 'absent' | 'unticked';
+      repName: string;
+      clientId: string;
+      timestamp: number;
+    }
+  | {
+      type: 'rider_sponsored';
+      vehicleId: string;
+      riderId: string;
+      sponsored: boolean;
+      repName: string;
+      clientId: string;
+      timestamp: number;
+    }
+  | {
+      type: 'rider_unpaid';
+      vehicleId: string;
+      riderId: string;
+      unpaid: boolean;
+      repName: string;
+      clientId: string;
+      timestamp: number;
+    }
+  | {
+      type: 'rider_note';
+      vehicleId: string;
+      riderId: string;
+      note: string;
+      repName: string;
+      clientId: string;
+      timestamp: number;
+    }
+  | {
+      type: 'metadata_change';
+      vehicleId: string;
+      repName?: string;
+      licensePlate?: string;
+      generalNotes?: string;
+      clientId: string;
+      timestamp: number;
+    }
+  | {
+      type: 'presence_heartbeat';
+      vehicleId: string;
+      repName: string;
+      clientId: string;
+      timestamp: number;
+    };
+
+export interface LiveRiderIndicator {
+  author: string;
+  status: string;
+  timestamp: number;
+}
+
 export type ServiceType =
   | 'AM_Serving'
   | 'AM_Ushers'
