@@ -1,0 +1,40 @@
+{
+  "entities": {
+    "Manifest": {
+      "title": "Manifest",
+      "description": "Transport manifest containing vehicles, riders, drafts, and attendance",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" },
+        "service": { "type": "string" },
+        "vehicles": { "type": "array" },
+        "signups": { "type": "array" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["date", "service"]
+    },
+    "LedgerEntry": {
+      "title": "LedgerEntry",
+      "description": "Cancellation ledger record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "passengerName": { "type": "string" },
+        "amount": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "passengerName", "amount"]
+    }
+  },
+  "firestore": {
+    "/transport_manifests/{manifestId}": {
+      "schema": "Manifest",
+      "description": "Stores live transportation manifests indexed by date and service"
+    },
+    "/cancellation_ledger/{entryId}": {
+      "schema": "LedgerEntry",
+      "description": "Stores cancellation debts and payment receipts"
+    }
+  }
+}

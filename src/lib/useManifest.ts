@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase, MANIFESTS_TABLE } from './supabase';
-import { loadManifest } from './manifest';
-import type { Manifest, Vehicle, LiveSyncAction } from './types';
+import { loadManifest, upsertManifest } from './manifest';
+import {
+  subscribeToManifestFirestore,
+  appendWalkInTransaction,
+  saveManifestFirestore,
+  updateVehicleDraftInFirestore,
+} from './firebase';
+import type { Manifest, Vehicle, Passenger, VehicleDraftState, LiveSyncAction } from './types';
 
 export interface ActiveCoRep {
   clientId: string;
@@ -45,71 +51,55 @@ export function mergeIncomingManifest(
   const currentActiveVehicle = current.vehicles.find((v) => v.id === activeVehicleId);
   if (!currentActiveVehicle) return incoming;
 
-  // Identify rider IDs belonging to the active vehicle
-  const activeRiderIds = new Set(currentActiveVehicle.riders || []);
-
-  // Merge vehicles: preserve active vehicle from current, but adopt all other vehicles from incoming
+  // Merge vehicles: adopt authoritative remote draftState from Firestore
   const mergedVehicles = incoming.vehicles.map((incV) => {
     if (incV.id !== activeVehicleId) {
       return incV;
     }
 
-    // It's the active vehicle:
-    // If incoming vehicle has a newer draft from a co-rep (different updatedBy), merge it!
+    // It's the active vehicle: combine riders and orderedStops
+    const curRiders = new Set(currentActiveVehicle.riders || []);
+    const incRiders = incV.riders || [];
+    const combinedRiders = Array.from(new Set([...curRiders, ...incRiders]));
+    const combinedOrderedStops = Array.from(new Set([...(currentActiveVehicle.orderedStops || []), ...(incV.orderedStops || [])]));
+
     const incDraft = incV.draftState;
     const curDraft = currentActiveVehicle.draftState;
 
-    if (incDraft && curDraft && incDraft.updatedBy && incDraft.updatedBy !== curDraft.updatedBy) {
-      const curTime = curDraft.updatedAt ? new Date(curDraft.updatedAt).getTime() : 0;
-      const incTime = incDraft.updatedAt ? new Date(incDraft.updatedAt).getTime() : 0;
-      if (incTime > curTime) {
-        // Union attendance marks
-        const combinedPresent = new Set([...(curDraft.presentIds || []), ...(incDraft.presentIds || [])]);
-        const combinedAbsent = new Set([...(curDraft.absentIds || []), ...(incDraft.absentIds || [])]);
-        // Absent takes precedence only if explicitly marked in incoming absent
-        (incDraft.absentIds || []).forEach((id) => combinedPresent.delete(id));
-        (incDraft.presentIds || []).forEach((id) => combinedAbsent.delete(id));
+    // Adopt remote draftState from Firestore as authoritative for shared arrays
+    // (sponsoredIds, unpaidIds, presentIds, absentIds, notes)
+    const nextDraftState: VehicleDraftState = incDraft
+      ? {
+          ...(curDraft || {}),
+          ...incDraft,
+          presentIds: incDraft.presentIds !== undefined ? incDraft.presentIds : (curDraft?.presentIds || []),
+          absentIds: incDraft.absentIds !== undefined ? incDraft.absentIds : (curDraft?.absentIds || []),
+          sponsoredIds: incDraft.sponsoredIds !== undefined ? incDraft.sponsoredIds : (curDraft?.sponsoredIds || []),
+          unpaidIds: incDraft.unpaidIds !== undefined ? incDraft.unpaidIds : (curDraft?.unpaidIds || []),
+          notes: { ...(curDraft?.notes || {}), ...(incDraft.notes || {}) },
+          updatedAt: incDraft.updatedAt || curDraft?.updatedAt || new Date().toISOString(),
+          updatedBy: incDraft.updatedBy || curDraft?.updatedBy,
+        }
+      : (curDraft || {});
 
-        return {
-          ...currentActiveVehicle,
-          submitted: incV.submitted || currentActiveVehicle.submitted,
-          submittedAt: incV.submittedAt || currentActiveVehicle.submittedAt,
-          submittedBy: incV.submittedBy || currentActiveVehicle.submittedBy,
-          draftState: {
-            ...curDraft,
-            ...incDraft,
-            presentIds: Array.from(combinedPresent),
-            absentIds: Array.from(combinedAbsent),
-            sponsoredIds: Array.from(new Set([...(curDraft.sponsoredIds || []), ...(incDraft.sponsoredIds || [])])),
-            unpaidIds: Array.from(new Set([...(curDraft.unpaidIds || []), ...(incDraft.unpaidIds || [])])),
-            notes: { ...(curDraft.notes || {}), ...(incDraft.notes || {}) },
-          },
-        };
-      }
-    }
-
-    // Preserve local active vehicle state
     return {
-      ...currentActiveVehicle,
-      // If remote submitted status changed, respect that
+      ...incV,
+      riders: combinedRiders,
+      orderedStops: combinedOrderedStops,
       submitted: incV.submitted !== undefined ? incV.submitted : currentActiveVehicle.submitted,
       submittedAt: incV.submittedAt || currentActiveVehicle.submittedAt,
       submittedBy: incV.submittedBy || currentActiveVehicle.submittedBy,
+      draftState: nextDraftState,
     };
   });
 
-  // Merge signups: keep local active vehicle's riders intact, update all other passengers from incoming
-  const mergedSignups = incoming.signups.map((incP) => {
-    if (activeRiderIds.has(incP.id)) {
-      const curP = current.signups.find((p) => p.id === incP.id);
-      return curP || incP;
-    }
-    return incP;
-  });
+  // Merge signups: ensure newly created walk-in signups from incoming or local are preserved!
+  const incomingIds = new Set(incoming.signups.map((p) => p.id));
+  const localOnlySignups = current.signups.filter((p) => !incomingIds.has(p.id));
 
   return {
     ...incoming,
-    signups: mergedSignups,
+    signups: [...incoming.signups, ...localOnlySignups],
     vehicles: mergedVehicles,
   };
 }
@@ -284,6 +274,25 @@ export function useManifest(
     keyRef.current = key;
     setLoading(true);
     setError(null);
+
+    // 0. Primary: Realtime Firestore onSnapshot listener
+    let unsubscribeFirestore: (() => void) | null = null;
+    try {
+      unsubscribeFirestore = subscribeToManifestFirestore(
+        key,
+        (remoteManifest) => {
+          if (keyRef.current !== key) return;
+          setManifest((prev) => mergeIncomingManifest(prev, remoteManifest, activeVehicleIdRef.current));
+          setLastSyncedAt(Date.now());
+          setLoading(false);
+        },
+        (err) => {
+          console.warn('[useManifest] Firestore onSnapshot warning:', err);
+        }
+      );
+    } catch (err) {
+      console.warn('[useManifest] Firestore subscribe error:', err);
+    }
 
     // 1. Initialize local browser BroadcastChannel for zero-latency multi-tab sync
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -508,6 +517,9 @@ export function useManifest(
 
     return () => {
       keyRef.current = null;
+      if (unsubscribeFirestore) {
+        unsubscribeFirestore();
+      }
       clearInterval(pollInterval);
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -531,6 +543,11 @@ export function useManifest(
   async function save(m: Manifest): Promise<void> {
     const normalized = normalizeManifestData(m) || m;
     if (!normalized || !key) return;
+
+    // 1. Primary: Save to Firestore
+    saveManifestFirestore(normalized).catch((err) => {
+      console.warn('[useManifest] saveManifestFirestore warning:', err);
+    });
 
     // Fetch latest remote row to safely merge any other vehicles submitted or edited concurrently
     let finalToSave = normalized;
@@ -685,8 +702,8 @@ export function useManifest(
         ...draftState,
         presentIds: Array.from(combinedPresent),
         absentIds: Array.from(combinedAbsent),
-        sponsoredIds: Array.from(new Set([...(existingDraft.sponsoredIds ?? []), ...(draftState.sponsoredIds ?? [])])),
-        unpaidIds: Array.from(new Set([...(existingDraft.unpaidIds ?? []), ...(draftState.unpaidIds ?? [])])),
+        sponsoredIds: draftState.sponsoredIds !== undefined ? draftState.sponsoredIds : existingDraft.sponsoredIds,
+        unpaidIds: draftState.unpaidIds !== undefined ? draftState.unpaidIds : existingDraft.unpaidIds,
         notes: { ...(existingDraft.notes ?? {}), ...(draftState.notes ?? {}) },
         repName: draftState.repName?.trim() || existingDraft.repName || targetVehicle?.repName,
         licensePlate: draftState.licensePlate?.trim() || existingDraft.licensePlate || targetVehicle?.licensePlate,
@@ -717,6 +734,16 @@ export function useManifest(
 
     setManifest((prev) => mergeIncomingManifest(prev, mergedManifest, activeVehicleIdRef.current));
     setLastSyncedAt(Date.now());
+
+    // Update in Firestore
+    updateVehicleDraftInFirestore(
+      mergedManifest.date,
+      vehicleId,
+      mergedDraft || {},
+      mergedDraft?.repName || repName,
+      mergedDraft?.licensePlate || licensePlate
+    ).catch(() => {});
+    saveManifestFirestore(mergedManifest).catch(() => {});
 
     // Broadcast targeted vehicle delta across local tabs
     if (broadcastChannelRef.current) {
@@ -752,25 +779,72 @@ export function useManifest(
       payload: { date: mergedManifest.date, manifest: mergedManifest },
     });
 
-    const { error: upsertError, data } = await supabase
-      .from(MANIFESTS_TABLE)
-      .upsert(
-        {
-          date: mergedManifest.date,
-          signups: mergedManifest.signups,
-          vehicles: mergedManifest.vehicles,
-        },
-        { onConflict: 'date' }
-      )
-      .select('updated_at')
-      .single();
+    try {
+      const { data } = await supabase
+        .from(MANIFESTS_TABLE)
+        .upsert(
+          {
+            date: mergedManifest.date,
+            signups: mergedManifest.signups,
+            vehicles: mergedManifest.vehicles,
+          },
+          { onConflict: 'date' }
+        )
+        .select('updated_at')
+        .single();
 
-    if (upsertError) throw upsertError;
-    if (data?.updated_at) {
-      lastSavedUpdatedAtRef.current = data.updated_at;
-      lastKnownUpdatedAtRef.current = data.updated_at;
+      if (data?.updated_at) {
+        lastSavedUpdatedAtRef.current = data.updated_at;
+        lastKnownUpdatedAtRef.current = data.updated_at;
+      }
+    } catch {
+      // Supabase is secondary; Firestore is primary cloud database
     }
   }
+
+  /**
+   * Concurrently appends a walk-in to the manifest using Firestore transactions.
+   * Eliminates race conditions when multiple users add walk-ins at the same time,
+   * without requiring manual page syncing.
+   */
+  const appendWalkIn = useCallback(
+    async (
+      vehicleId: string,
+      newPassenger: Passenger,
+      draftUpdate?: Partial<VehicleDraftState>
+    ): Promise<Manifest> => {
+      const activeKey = keyRef.current || key;
+      if (!activeKey) throw new Error('No active manifest key');
+      setIsSyncing(true);
+      try {
+        const updated = await appendWalkInTransaction(activeKey, vehicleId, newPassenger, draftUpdate);
+        setManifest((prev) => mergeIncomingManifest(prev, updated, activeVehicleIdRef.current));
+        setLastSyncedAt(Date.now());
+
+        if (broadcastChannelRef.current) {
+          try {
+            broadcastChannelRef.current.postMessage({
+              type: 'manifest_updated',
+              manifest: updated,
+            });
+          } catch {
+            // Broadcast failed non-critically
+          }
+        }
+        safeChannelSend({
+          type: 'broadcast',
+          event: 'manifest_updated',
+          payload: { date: updated.date, manifest: updated },
+        });
+
+        upsertManifest(updated).catch(() => {});
+        return updated;
+      } finally {
+        setIsSyncing(false);
+      }
+    },
+    [key, safeChannelSend]
+  );
 
   return {
     manifest,
@@ -782,6 +856,7 @@ export function useManifest(
     refresh,
     save,
     updateVehicleDraft,
+    appendWalkIn,
     broadcastLiveAction,
   };
 }

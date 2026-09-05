@@ -1,0 +1,36 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    function isValidManifest(data) {
+      return data.keys().hasAll(['date']) &&
+        data.date is string && data.date.size() > 0 && data.date.size() <= 64 &&
+        (!('vehicles' in data) || (data.vehicles is list && data.vehicles.size() <= 500)) &&
+        (!('signups' in data) || (data.signups is list && data.signups.size() <= 5000));
+    }
+
+    function isValidLedgerEntry(data) {
+      return data.keys().hasAll(['id', 'passengerName', 'amount']) &&
+        data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+        data.passengerName is string && data.passengerName.size() > 0 && data.passengerName.size() <= 128 &&
+        data.amount is number && data.amount >= 0 && data.amount <= 100000 &&
+        (!('status' in data) || (data.status is string && data.status.size() <= 32));
+    }
+
+    match /transport_manifests/{manifestId} {
+      allow read: if isValidId(manifestId);
+      allow create, update: if isValidId(manifestId) && isValidManifest(request.resource.data);
+      allow delete: if false;
+    }
+
+    match /cancellation_ledger/{entryId} {
+      allow read: if isValidId(entryId);
+      allow create, update: if isValidId(entryId) && isValidLedgerEntry(request.resource.data);
+      allow delete: if false;
+    }
+  }
+}

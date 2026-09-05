@@ -355,14 +355,21 @@ export function stopToBusHub(stop?: string | null): string | null {
 }
 
 export const INDIVIDUAL_STOPS = [
-  'Yale', 'Stanley', 'Stanley Ave', 'UJ Bunting', 'Ghandi Square',
-  'Focus 1', 'Maboneng', 'Urban Circle', 'DFC Bus Stop', 'DFC bus stop', 'The Fields',
-  'Laborie', 'Richmond', 'Gate 2', 'Gate 4', "APK McDonald's", 'Westdene', 'Westdene Engen',
-  'Junction', 'Education Campus', 'Education campus', 'Saratoga', 'Argyle', 'Arteria', 'Knockando',
+  // Yale & Stanley are very close together
+  'Yale', 'Stanley', 'Stanley Ave',
+  // UJ / Auckland Park / Westdene cluster
+  'UJ Bunting', 'Richmond', 'Laborie', 'Gate 2', 'Gate 4', "APK McDonald's", 'Westdene', 'Westdene Engen',
+  // Parktown cluster along road progression towards church highway
+  // Junction is right next to Argyle; Arteria starts when nearby; EOH is closer to highway exiting to church
+  'Argyle', 'Arteria', 'Junction', 'Knockando', 'Education Campus', 'Education campus', 'Saratoga',
   'Charlotte Maxeke', 'Charlotte',
+  'Campus Central on empire', 'Campus Central (on Empire)', 'Campus Central (on empire)', 'Campus Central - Empire', 'Campus Central Empire',
+  // Other individual stops
+  'Ghandi Square',
+  'Focus 1', 'Maboneng', 'Urban Circle', 'DFC Bus Stop', 'DFC bus stop', 'The Fields',
   'Solomon Mahlangu',
   'Randburg Surrey Square',
-  'Campus Central on empire', 'Campus Central (on Empire)', 'Campus Central (on empire)', 'Campus Central - Empire', 'Campus Central Empire',
+  'Walk-In',
 ] as const;
 
 export const MASTER_HUBS = ['Braam', 'Gate 7', 'EOH'] as const;
@@ -480,11 +487,22 @@ export const ROUTE_SEQUENCE: string[] = [
   '56 Jorissen', 'Amani', 'Apex', 'Solomon Mahlangu', 'Student Digzz', 'YMCA',
   'Gate 7',
   'Amic Deck - David Webster', 'Barnato', "Amic Deck - Men's Res", 'Amic Deck - Sunnyside', 'Amic Deck - Jubilee',
-  'EOH',
-  'Campus Central - EOH', 'EOH Campus Central',
+  // Yale & Stanley (very close together)
+  'Yale', 'Stanley', 'Stanley Ave',
+  // UJ / Auckland Park
+  'UJ Bunting', 'Richmond', 'Laborie', 'Gate 2', 'Gate 4', "APK McDonald's", 'Westdene', 'Westdene Engen',
+  // Parktown road progression: Argyle starts or Arteria starts -> Junction (right next to Argyle) -> Knockando -> Education Campus -> Saratoga
+  'Argyle', 'Arteria', 'Junction', 'Knockando', 'Education Campus', 'Education campus', 'Saratoga',
   'Charlotte Maxeke', 'Charlotte',
   'Campus Central on empire', 'Campus Central (on Empire)', 'Campus Central (on empire)', 'Campus Central - Empire', 'Campus Central Empire',
-  ...INDIVIDUAL_STOPS,
+  // EOH stops are closer to the road/highway leaving to church and are never first before Argyle/Junction
+  'EOH',
+  'Campus Central - EOH', 'Campus Central -EOH', 'EOH Campus Central',
+  // Other stops
+  'Ghandi Square',
+  'Focus 1', 'Maboneng', 'Urban Circle', 'DFC Bus Stop', 'DFC bus stop', 'The Fields',
+  'Randburg Surrey Square',
+  'Walk-In',
 ];
 
 /** Index of a stop/hub label in the canonical route sequence (unknown labels sort last, in encounter order). */
@@ -506,3 +524,13 @@ export function sortByRouteSequence<T>(items: T[], getKey: (item: T) => string):
     .sort((a, b) => (a.idx - b.idx) || (a.i - b.i))
     .map((x) => x.item);
 }
+
+/**
+ * Orders a vehicle's stops according to road progression:
+ * - Yale and Stanley are grouped together.
+ * - Parktown starts at Argyle or Arteria, Junction is right next to Argyle, and EOH comes towards the end (closer to highway to church).
+ */
+export function orderVehicleStopsCanonical(stops: string[]): string[] {
+  return sortByRouteSequence(stops, (s) => s);
+}
+

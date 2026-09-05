@@ -31,6 +31,11 @@ import {
   isPassengerTransferMatch,
   extractStructureFromText,
 } from '@/lib/transfer';
+import {
+  toggleRiderSponsoredInFirestore,
+  toggleRiderUnpaidInFirestore,
+  setRiderAttendanceInFirestore,
+} from '@/lib/firebase';
 
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
 const SYNC_DEBOUNCE_MS = 500; // 500ms debounce: ultra-fast multi-device synchronization while batching bursts of taps
@@ -177,6 +182,7 @@ export function RepPage() {
     refresh,
     save,
     updateVehicleDraft,
+    appendWalkIn,
     broadcastLiveAction,
   } = useManifest(key, selectedVehicleId, handleLiveActionReceived);
 
@@ -452,8 +458,8 @@ export function RepPage() {
 
       for (const rider of vehicleRidersList) {
         const lastEdit = recentlyEditedRidersRef.current.get(rider.id) ?? 0;
-        if (now - lastEdit < 3500) {
-          // Local user explicitly touched this rider recently — prioritize local action
+        if (now - lastEdit < 600) {
+          // Local user explicitly touched this rider within the last 600ms — keep local action in flight
           continue;
         }
         if (remotePresent.has(rider.id)) {
@@ -472,8 +478,8 @@ export function RepPage() {
 
       for (const rider of vehicleRidersList) {
         const lastEdit = recentlyEditedRidersRef.current.get(rider.id) ?? 0;
-        if (now - lastEdit < 3500) {
-          // Local user explicitly touched this rider recently — prioritize local action
+        if (now - lastEdit < 600) {
+          // Local user explicitly touched this rider within the last 600ms — keep local action in flight
           continue;
         }
         if (remoteAbsent.has(rider.id)) {
@@ -485,19 +491,33 @@ export function RepPage() {
       return nextAbsent;
     });
 
-    // 2. Merge sponsored, unpaid, and notes
-    if (draft.sponsoredIds) {
+    // 2. Direct synchronization of sponsored and unpaid statuses across all co-reps (turning on and off)
+    if (draft.sponsoredIds !== undefined) {
+      const remoteSponsored = new Set(draft.sponsoredIds);
       setSponsoredIds((prev) => {
-        const next = new Set(prev);
-        draft.sponsoredIds!.forEach((id) => next.add(id));
+        const next = new Set<string>(remoteSponsored);
+        // Retain optimistic local tap only if touched in the last 600ms
+        for (const id of prev) {
+          const lastEdit = recentlyEditedRidersRef.current.get(id) ?? 0;
+          if (now - lastEdit < 600 && !remoteSponsored.has(id)) {
+            next.add(id);
+          }
+        }
         return next;
       });
     }
 
-    if (draft.unpaidIds) {
+    if (draft.unpaidIds !== undefined) {
+      const remoteUnpaid = new Set(draft.unpaidIds);
       setUnpaidIds((prev) => {
-        const next = new Set(prev);
-        draft.unpaidIds!.forEach((id) => next.add(id));
+        const next = new Set<string>(remoteUnpaid);
+        // Retain optimistic local tap only if touched in the last 600ms
+        for (const id of prev) {
+          const lastEdit = recentlyEditedRidersRef.current.get(id) ?? 0;
+          if (now - lastEdit < 600 && !remoteUnpaid.has(id)) {
+            next.add(id);
+          }
+        }
         return next;
       });
     }
@@ -864,7 +884,6 @@ export function RepPage() {
   const handleSetPresent = useCallback((passengerId: string, wantPresent: boolean) => {
     lastLocalEditTimeRef.current = Date.now();
     recentlyEditedRidersRef.current.set(passengerId, Date.now());
-    isUserDirtyRef.current = true;
     if (wantPresent) {
       setPresentIds((prev) => {
         if (prev.has(passengerId)) return prev;
@@ -899,13 +918,21 @@ export function RepPage() {
         clientId: clientIdRef.current,
         timestamp: Date.now(),
       });
+      if (key) {
+        setRiderAttendanceInFirestore(
+          key,
+          selectedVehicleId,
+          passengerId,
+          wantPresent ? 'present' : 'absent',
+          clientIdRef.current
+        ).catch(() => {});
+      }
     }
-  }, [selectedVehicleId, repName, broadcastLiveAction]);
+  }, [selectedVehicleId, key, repName, broadcastLiveAction]);
 
   const handleToggleSponsored = useCallback((passengerId: string) => {
     lastLocalEditTimeRef.current = Date.now();
     recentlyEditedRidersRef.current.set(passengerId, Date.now());
-    isUserDirtyRef.current = true;
     let nextVal = false;
     setSponsoredIds((prev) => {
       const next = new Set(prev);
@@ -929,13 +956,21 @@ export function RepPage() {
         clientId: clientIdRef.current,
         timestamp: Date.now(),
       });
+      if (key) {
+        toggleRiderSponsoredInFirestore(
+          key,
+          selectedVehicleId,
+          passengerId,
+          nextVal,
+          clientIdRef.current
+        ).catch(() => {});
+      }
     }
-  }, [selectedVehicleId, repName, broadcastLiveAction]);
+  }, [selectedVehicleId, key, repName, broadcastLiveAction]);
 
   const handleToggleUnpaid = useCallback((passengerId: string) => {
     lastLocalEditTimeRef.current = Date.now();
     recentlyEditedRidersRef.current.set(passengerId, Date.now());
-    isUserDirtyRef.current = true;
     let nextVal = false;
     setUnpaidIds((prev) => {
       const next = new Set(prev);
@@ -959,8 +994,17 @@ export function RepPage() {
         clientId: clientIdRef.current,
         timestamp: Date.now(),
       });
+      if (key) {
+        toggleRiderUnpaidInFirestore(
+          key,
+          selectedVehicleId,
+          passengerId,
+          nextVal,
+          clientIdRef.current
+        ).catch(() => {});
+      }
     }
-  }, [selectedVehicleId, repName, broadcastLiveAction]);
+  }, [selectedVehicleId, key, repName, broadcastLiveAction]);
 
   const handleSetNote = useCallback((passengerId: string, text: string) => {
     lastLocalEditTimeRef.current = Date.now();
@@ -1231,48 +1275,13 @@ export function RepPage() {
       present: true,
       cancellationFeeOwed: false,
     };
-    const poolKey = hubDisplayName(selectedVehicle.type, newPassenger.stop);
-    const updatedVehicles = manifest.vehicles.map((v) => {
-      if (v.id !== selectedVehicle.id) return v;
-      const nextRiders = [...v.riders, newPassenger.id];
-      const nextOrderedStops = orderedStopsWith(v, poolKey);
-      const existingDraftPresent = v.draftState?.presentIds ?? [];
-      const nextDraftPresent = existingDraftPresent.includes(newPassenger.id)
-        ? existingDraftPresent
-        : [...existingDraftPresent, newPassenger.id];
-
-      const nextDraft: VehicleDraftState = {
-        presentIds: nextDraftPresent,
-        absentIds: v.draftState?.absentIds ?? [],
-        sponsoredIds: v.draftState?.sponsoredIds ?? Array.from(sponsoredIds),
-        notes: v.draftState?.notes ?? notes,
-        repName: repName.trim() || v.repName || '',
-        coReps: coReps.filter(Boolean),
-        licensePlate: licensePlate.trim() || v.licensePlate || '',
-        generalNotes: generalNotes.trim() || v.generalNotes || '',
-        cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
-        settledLedgerIds: Array.from(collectedCancellationIds),
-        manualCancellations,
-        externalSponsees,
-        updatedAt: new Date().toISOString(),
-        updatedBy: clientIdRef.current,
-      };
-
-      return {
-        ...v,
-        riders: nextRiders,
-        orderedStops: nextOrderedStops,
-        draftState: nextDraft,
-      };
-    });
-
-    const nextManifest: Manifest = {
-      ...manifest,
-      signups: [...manifest.signups, newPassenger],
-      vehicles: updatedVehicles,
+    const draftMetadata: Partial<VehicleDraftState> = {
+      repName: repName.trim() || selectedVehicle.repName || '',
+      licensePlate: licensePlate.trim() || selectedVehicle.licensePlate || '',
+      generalNotes: generalNotes.trim() || selectedVehicle.generalNotes || '',
+      updatedBy: clientIdRef.current,
     };
 
-    manifestRef.current = nextManifest;
     setPresentIds((prev) => new Set(prev).add(newPassenger.id));
     setAbsentIds((prev) => {
       if (!prev.has(newPassenger.id)) return prev;
@@ -1281,7 +1290,9 @@ export function RepPage() {
       return next;
     });
 
-    await save(nextManifest);
+    // Atomic transaction in Firestore: allows multiple users to append walk-ins simultaneously
+    // without race conditions or manual syncing
+    await appendWalkIn(selectedVehicle.id, newPassenger, draftMetadata);
     setWalkInName('');
     setWalkInStructure('');
     setWalkInOpen(false);

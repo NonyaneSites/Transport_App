@@ -1,10 +1,22 @@
 import { supabase, MANIFESTS_TABLE, mockStorage } from './supabase';
+import { getManifestFirestore, saveManifestFirestore, listManifestsFirestore } from './firebase';
 import type { Manifest, Passenger, Vehicle } from './types';
 import { hubDisplayName } from './types';
 import { normalizePassengerText, getSubmissionTimestampEpoch } from './importer';
 export { parseGoogleSheetSignups, type RawSheetRow } from './importer';
 
 export async function loadManifest(key: string): Promise<Manifest | null> {
+  // 1. Primary: Load from Firestore
+  try {
+    const firestoreManifest = await getManifestFirestore(key);
+    if (firestoreManifest) {
+      return firestoreManifest;
+    }
+  } catch (err) {
+    console.warn('[Manifest] Failed to load from Firestore, trying fallback:', err);
+  }
+
+  // 2. Secondary: Supabase
   try {
     const { data, error } = await supabase
       .from(MANIFESTS_TABLE)
@@ -46,6 +58,14 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
 }
 
 export async function upsertManifest(manifest: Manifest): Promise<void> {
+  // 1. Primary: Save to Firestore
+  try {
+    await saveManifestFirestore(manifest);
+  } catch (err) {
+    console.warn('[Manifest] Failed to save to Firestore:', err);
+  }
+
+  // 2. Secondary: Save to Supabase and mockStorage
   try {
     const { error } = await supabase
       .from(MANIFESTS_TABLE)
@@ -90,20 +110,37 @@ export async function upsertManifest(manifest: Manifest): Promise<void> {
 }
 
 export async function listAllManifests(): Promise<Manifest[]> {
+  // 1. Primary: Load all manifests from Cloud Firestore
+  try {
+    const firestoreManifests = await listManifestsFirestore();
+    if (firestoreManifests && firestoreManifests.length > 0) {
+      // Sync to local memory cache
+      for (const m of firestoreManifests) {
+        mockStorage.upsert(MANIFESTS_TABLE, {
+          date: m.date,
+          signups: m.signups,
+          vehicles: m.vehicles,
+          updated_at: m.updated_at || new Date().toISOString(),
+        });
+      }
+      return firestoreManifests;
+    }
+  } catch (err) {
+    console.debug('[Manifest] Firestore list returned no entries, checking secondary:', err);
+  }
+
+  // 2. Secondary: Supabase (silent fallback if offline / not provisioned)
   try {
     const { data, error } = await supabase
       .from(MANIFESTS_TABLE)
       .select('date, signups, vehicles, created_at, updated_at')
       .order('date', { ascending: false });
-    if (error) {
-      console.warn('[Manifest] Remote list failed, returning local cached manifests:', error);
-    }
-    if (data && Array.isArray(data)) {
+    if (!error && data && Array.isArray(data) && data.length > 0) {
       return data.map((d) => ({
         date: d.date,
         signups: Array.isArray(d.signups) ? d.signups : [],
         vehicles: Array.isArray(d.vehicles)
-          ? d.vehicles.map((v: Vehicle) => ({
+          ? data.vehicles.map((v: Vehicle) => ({
               ...v,
               riders: Array.isArray(v.riders) ? v.riders : [],
               orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
@@ -113,8 +150,8 @@ export async function listAllManifests(): Promise<Manifest[]> {
         updated_at: d.updated_at,
       }));
     }
-  } catch (err) {
-    console.warn('[Manifest] Exception listing manifests, checking local cache:', err);
+  } catch {
+    // Non-critical network/offline fallback
   }
 
   // Fallback to local storage
