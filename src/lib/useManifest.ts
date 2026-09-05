@@ -43,7 +43,9 @@ export function mergeIncomingManifest(
   activeVehicleId?: string
 ): Manifest | null {
   if (!incoming) return current;
-  if (!current) return incoming;
+  // CRITICAL: Strict session boundary. If current and incoming are for different dates/manifest keys,
+  // NEVER merge! The incoming manifest is the only valid state for its date and service.
+  if (!current || current.date !== incoming.date) return incoming;
 
   // If no specific vehicle is actively open for editing, incoming is authoritative
   if (!activeVehicleId) return incoming;
@@ -272,6 +274,8 @@ export function useManifest(
       return;
     }
     keyRef.current = key;
+    // CRITICAL: Immediately clear out any previous date's manifest from state so it never bleeds over!
+    setManifest(null);
     setLoading(true);
     setError(null);
 
@@ -282,7 +286,12 @@ export function useManifest(
         key,
         (remoteManifest) => {
           if (keyRef.current !== key) return;
-          setManifest((prev) => mergeIncomingManifest(prev, remoteManifest, activeVehicleIdRef.current));
+          if (remoteManifest) {
+            setManifest((prev) => (prev && prev.date === key ? mergeIncomingManifest(prev, remoteManifest, activeVehicleIdRef.current) : remoteManifest));
+          } else {
+            // New or uncreated date/service: initialize an isolated, clean empty manifest for this key
+            setManifest((prev) => (prev && prev.date === key ? prev : { date: key, signups: [], vehicles: [] }));
+          }
           setLastSyncedAt(Date.now());
           setLoading(false);
         },
@@ -309,7 +318,7 @@ export function useManifest(
           if (event.data.type === 'vehicle_draft_delta' && event.data.vehicleId && event.data.draftState) {
             const { vehicleId, draftState, repName, licensePlate } = event.data;
             setManifest((prev) => {
-              if (!prev) return prev;
+              if (!prev || prev.date !== key) return prev;
               const isTargetActive = activeVehicleIdRef.current === vehicleId;
               const updatedVehicles = prev.vehicles.map((v) => {
                 if (v.id !== vehicleId) return v;
@@ -329,8 +338,8 @@ export function useManifest(
 
           if (event.data.manifest) {
             const incoming = normalizeManifestData(event.data.manifest);
-            if (incoming) {
-              setManifest((prev) => mergeIncomingManifest(prev, incoming, activeVehicleIdRef.current));
+            if (incoming && incoming.date === key) {
+              setManifest((prev) => (prev && prev.date === key ? mergeIncomingManifest(prev, incoming, activeVehicleIdRef.current) : incoming));
               setLastSyncedAt(Date.now());
             }
           }
@@ -346,9 +355,14 @@ export function useManifest(
       try {
         const loaded = await loadManifest(key);
         if (keyRef.current === key) {
-          setManifest((prev) => mergeIncomingManifest(prev, loaded, activeVehicleIdRef.current));
-          if (loaded?.updated_at) {
-            lastKnownUpdatedAtRef.current = loaded.updated_at;
+          if (loaded) {
+            setManifest((prev) => (prev && prev.date === key ? mergeIncomingManifest(prev, loaded, activeVehicleIdRef.current) : loaded));
+            if (loaded.updated_at) {
+              lastKnownUpdatedAtRef.current = loaded.updated_at;
+            }
+          } else {
+            // New or empty date session: initialize an isolated, clean empty manifest!
+            setManifest((prev) => (prev && prev.date === key ? prev : { date: key, signups: [], vehicles: [] }));
           }
           setLastSyncedAt(Date.now());
           setLoading(false);
@@ -356,9 +370,13 @@ export function useManifest(
       } catch (e) {
         if (keyRef.current === key) {
           const fallback = await loadManifest(key).catch(() => null);
-          setManifest((prev) => mergeIncomingManifest(prev, fallback, activeVehicleIdRef.current));
-          if (fallback?.updated_at) {
-            lastKnownUpdatedAtRef.current = fallback.updated_at;
+          if (fallback) {
+            setManifest((prev) => (prev && prev.date === key ? mergeIncomingManifest(prev, fallback, activeVehicleIdRef.current) : fallback));
+            if (fallback.updated_at) {
+              lastKnownUpdatedAtRef.current = fallback.updated_at;
+            }
+          } else {
+            setManifest((prev) => (prev && prev.date === key ? prev : { date: key, signups: [], vehicles: [] }));
           }
           if (!fallback) {
             setError(e instanceof Error ? e.message : String(e));
@@ -543,6 +561,12 @@ export function useManifest(
   async function save(m: Manifest): Promise<void> {
     const normalized = normalizeManifestData(m) || m;
     if (!normalized || !key) return;
+
+    // Strict boundary: Never save a manifest whose date does not match the active session key
+    if (normalized.date !== key) {
+      console.warn(`[useManifest] Refusing cross-date save attempt: manifest date '${normalized.date}' does not match active session key '${key}'`);
+      return;
+    }
 
     // 1. Primary: Save to Firestore
     saveManifestFirestore(normalized).catch((err) => {

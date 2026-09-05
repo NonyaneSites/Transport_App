@@ -410,6 +410,27 @@ export function RepPage() {
     setLicensePlate('');
   }, []);
 
+  // When session key (date or service) changes, update vehicle selection to the stored vehicle for that session,
+  // or clear selection and reset draft state so vehicles and drafts from previous dates never bleed over
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(`crc_rep_vehicle_${key}`);
+      setSelectedVehicleId(stored || '');
+    } catch {
+      setSelectedVehicleId('');
+    }
+    resetLocalDraftState();
+  }, [key, resetLocalDraftState]);
+
+  // When manifest loads or changes, if the selected vehicle does not exist in the manifest, reset vehicle selection
+  useEffect(() => {
+    if (!manifest || manifest.date !== key) return;
+    if (selectedVehicleId && !manifest.vehicles.some((v) => v.id === selectedVehicleId)) {
+      setSelectedVehicleId('');
+      resetLocalDraftState();
+    }
+  }, [manifest, key, selectedVehicleId, resetLocalDraftState]);
+
   const applyDraftState = useCallback((draft: VehicleDraftState, vehicleRidersList: Passenger[], fallbackVehicle?: Vehicle | null) => {
     isApplyingDraftRef.current = true;
     const pIds = new Set(draft.presentIds ?? []);

@@ -116,12 +116,14 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
           clearTimeout(saveDebounceTimerRef.current);
           saveDebounceTimerRef.current = null;
         }
-        try {
-          localStorage.setItem(`crc_admin_manifest_${latestManifestRef.current.date}`, JSON.stringify(latestManifestRef.current));
-        } catch {
-          // localStorage full or disabled
+        if (latestManifestRef.current && latestManifestRef.current.date === manifest.date) {
+          try {
+            localStorage.setItem(`crc_admin_manifest_${latestManifestRef.current.date}`, JSON.stringify(latestManifestRef.current));
+          } catch {
+            // localStorage full or disabled
+          }
+          onSave(latestManifestRef.current).catch(() => {});
         }
-        onSave(latestManifestRef.current).catch(() => {});
       }
     };
 
@@ -136,10 +138,12 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       if (saveDebounceTimerRef.current) {
         clearTimeout(saveDebounceTimerRef.current);
         saveDebounceTimerRef.current = null;
-        onSave(latestManifestRef.current).catch(() => {});
+        if (latestManifestRef.current && latestManifestRef.current.date === manifest.date) {
+          onSave(latestManifestRef.current).catch(() => {});
+        }
       }
     };
-  }, [onSave]);
+  }, [onSave, manifest.date]);
 
   const [newName, setNewName] = useState('');
   const [newType, setNewType] = useState<'Bus' | 'Taxi'>('Bus');

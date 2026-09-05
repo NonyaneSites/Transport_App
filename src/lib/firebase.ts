@@ -61,7 +61,7 @@ testConnection().catch(() => {});
  */
 export function subscribeToManifestFirestore(
   key: string,
-  onUpdate: (manifest: Manifest) => void,
+  onUpdate: (manifest: Manifest | null) => void,
   onError?: (err: Error) => void
 ): Unsubscribe {
   const manifestDocRef = doc(db, MANIFESTS_COLLECTION, key);
@@ -70,10 +70,14 @@ export function subscribeToManifestFirestore(
     manifestDocRef,
     (snapshot) => {
       if (!snapshot.exists()) {
+        onUpdate(null);
         return;
       }
       const data = snapshot.data();
-      if (!data) return;
+      if (!data) {
+        onUpdate(null);
+        return;
+      }
 
       const normalized: Manifest = {
         date: data.date || key,

@@ -22,13 +22,13 @@ service cloud.firestore {
     }
 
     match /transport_manifests/{manifestId} {
-      allow read: if isValidId(manifestId);
+      allow read: if true;
       allow create, update: if isValidId(manifestId) && isValidManifest(request.resource.data);
       allow delete: if false;
     }
 
     match /cancellation_ledger/{entryId} {
-      allow read: if isValidId(entryId);
+      allow read: if true;
       allow create, update: if isValidId(entryId) && isValidLedgerEntry(request.resource.data);
       allow delete: if false;
     }

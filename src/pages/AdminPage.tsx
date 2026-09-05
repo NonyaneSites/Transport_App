@@ -94,7 +94,7 @@ export function AdminPage() {
 
   // Sync current active session into sessionList in-memory without database egress
   useEffect(() => {
-    if (!manifest) return;
+    if (!manifest || manifest.date !== key) return;
     setSessionList((prev) => {
       const idx = prev.findIndex((m) => m.date === manifest.date);
       if (idx >= 0) {
@@ -104,7 +104,7 @@ export function AdminPage() {
       }
       return [manifest, ...prev];
     });
-  }, [manifest]);
+  }, [manifest, key]);
 
   async function handleImport(passengers: Passenger[]) {
     if (!manifest) {
@@ -260,8 +260,9 @@ export function AdminPage() {
         ) : (
           <div className="mt-5 space-y-5">
             <VehicleAllocation
+              key={key}
               manifest={
-                manifest
+                manifest && manifest.date === key
                   ? {
                       date: manifest.date,
                       signups: Array.isArray(manifest.signups) ? manifest.signups : [],
