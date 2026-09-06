@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
-const supabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
+const supabaseUrl = (import.meta?.env?.VITE_SUPABASE_URL as string | undefined)?.trim();
+const supabaseAnonKey = (import.meta?.env?.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
 
 export const MANIFESTS_TABLE = 'transport_manifests';
 export const LEDGER_TABLE = 'cancellation_ledger';
@@ -73,6 +73,29 @@ export class MockSupabaseStorage {
 
   setTable(table: string, rows: TableRow[]) {
     this.memoryStore[table] = rows;
+    this.saveToLocalStorage(table);
+  }
+
+  upsert(table: string, row: TableRow, onConflictKey?: string) {
+    const keyField = onConflictKey || (table === MANIFESTS_TABLE ? 'date' : 'id');
+    const current = [...(this.memoryStore[table] ?? [])];
+    const now = new Date().toISOString();
+    const fullItem: TableRow = {
+      ...row,
+      updated_at: row.updated_at || now,
+    };
+    const matchVal = String(fullItem[keyField] ?? '');
+    const idx = current.findIndex(
+      (r) => String(r[keyField] ?? '') === matchVal
+    );
+    if (idx !== -1) {
+      current[idx] = { ...current[idx], ...fullItem };
+      this.notify(table, 'UPDATE', current[idx]);
+    } else {
+      current.push(fullItem);
+      this.notify(table, 'INSERT', fullItem);
+    }
+    this.memoryStore[table] = current;
     this.saveToLocalStorage(table);
   }
 
