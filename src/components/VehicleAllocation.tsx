@@ -135,10 +135,17 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       window.removeEventListener('beforeunload', handleExitFlush);
       window.removeEventListener('pagehide', handleExitFlush);
       document.removeEventListener('visibilitychange', handleExitFlush);
-      if (saveDebounceTimerRef.current) {
-        clearTimeout(saveDebounceTimerRef.current);
-        saveDebounceTimerRef.current = null;
+      if (saveDebounceTimerRef.current || isLocalMutationPendingRef.current) {
+        if (saveDebounceTimerRef.current) {
+          clearTimeout(saveDebounceTimerRef.current);
+          saveDebounceTimerRef.current = null;
+        }
         if (latestManifestRef.current && latestManifestRef.current.date === manifest.date) {
+          try {
+            localStorage.setItem(`crc_admin_manifest_${latestManifestRef.current.date}`, JSON.stringify(latestManifestRef.current));
+          } catch {
+            // localStorage full or disabled
+          }
           onSave(latestManifestRef.current).catch(() => {});
         }
       }
@@ -180,6 +187,15 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     latestManifestRef.current = nextManifest;
     setLocalManifest(nextManifest);
     isLocalMutationPendingRef.current = true;
+
+    // Immediately cache to localStorage synchronously for zero-loss recovery
+    if (nextManifest && nextManifest.date) {
+      try {
+        localStorage.setItem(`crc_admin_manifest_${nextManifest.date}`, JSON.stringify(nextManifest));
+      } catch {
+        // localStorage full or disabled
+      }
+    }
 
     if (saveDebounceTimerRef.current) {
       clearTimeout(saveDebounceTimerRef.current);

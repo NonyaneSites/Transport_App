@@ -282,12 +282,11 @@ export function useManifest(
           if (keyRef.current !== key) return;
           if (remoteManifest) {
             setManifest((prev) => (prev && prev.date === key ? mergeIncomingManifest(prev, remoteManifest, activeVehicleIdRef.current) : remoteManifest));
-          } else {
-            // New or uncreated date/service: initialize an isolated, clean empty manifest for this key
-            setManifest((prev) => (prev && prev.date === key ? prev : { date: key, signups: [], vehicles: [] }));
+            setLastSyncedAt(Date.now());
+            setLoading(false);
           }
-          setLastSyncedAt(Date.now());
-          setLoading(false);
+          // Note: if remoteManifest is null, do NOT wipe local state or prematurely set loading=false.
+          // loadManifest(key) below will query local storage and secondary caches.
         },
         (err) => {
           console.warn('[useManifest] Firestore onSnapshot warning:', err);
@@ -554,32 +553,43 @@ export function useManifest(
 
   async function save(m: Manifest): Promise<void> {
     const normalized = normalizeManifestData(m) || m;
-    if (!normalized || !key) return;
+    if (!normalized || !normalized.date) return;
+    const targetKey = normalized.date;
 
-    // Strict boundary: Never save a manifest whose date does not match the active session key
-    if (normalized.date !== key) {
-      console.warn(`[useManifest] Refusing cross-date save attempt: manifest date '${normalized.date}' does not match active session key '${key}'`);
-      return;
+    const now = new Date().toISOString();
+    const toPersist: Manifest = {
+      ...normalized,
+      updated_at: now,
+    };
+
+    // 0. Synchronous local persistence immediately so state survives instant page refresh or navigation
+    mockStorage.upsert(MANIFESTS_TABLE, {
+      date: targetKey,
+      signups: toPersist.signups,
+      vehicles: toPersist.vehicles,
+      updated_at: now,
+    });
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(`crc_admin_manifest_${targetKey}`, JSON.stringify(toPersist));
+      } catch {
+        // ignore quota error
+      }
     }
 
-    // 1. Primary: Save to Firestore
-    saveManifestFirestore(normalized).catch((err) => {
-      console.warn('[useManifest] saveManifestFirestore warning:', err);
-    });
-
     // Fetch latest remote row to safely merge any other vehicles submitted or edited concurrently
-    let finalToSave = normalized;
+    let finalToSave = toPersist;
     try {
       const { data: latestRow } = await supabase
         .from(MANIFESTS_TABLE)
         .select('date, signups, vehicles, updated_at')
-        .eq('date', key)
+        .eq('date', targetKey)
         .maybeSingle();
 
       if (latestRow) {
         const remoteNorm = normalizeManifestData(latestRow);
         if (remoteNorm) {
-          const mergedVehicles = normalized.vehicles.map((localV) => {
+          const mergedVehicles = toPersist.vehicles.map((localV) => {
             const remoteV = remoteNorm.vehicles.find((rv) => rv.id === localV.id);
             if (!remoteV) return localV;
             // Retain rep submission status and draft work for existing vehicles
@@ -596,23 +606,47 @@ export function useManifest(
           });
 
           finalToSave = {
-            ...normalized,
+            ...toPersist,
             vehicles: mergedVehicles,
           };
         }
       }
     } catch {
-      // fallback to normalized
+      // fallback to toPersist
     }
 
-    // Optimistically update local state immediately for zero-lag UI
-    setManifest((prev) => mergeIncomingManifest(prev, finalToSave, activeVehicleIdRef.current));
-    setLastSyncedAt(Date.now());
+    // Cache merged result locally
+    mockStorage.upsert(MANIFESTS_TABLE, {
+      date: targetKey,
+      signups: finalToSave.signups,
+      vehicles: finalToSave.vehicles,
+      updated_at: now,
+    });
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(`crc_admin_manifest_${targetKey}`, JSON.stringify(finalToSave));
+      } catch {
+        // ignore quota error
+      }
+    }
+
+    // Update in-memory React state ONLY if this save matches the currently active session key
+    if (targetKey === keyRef.current) {
+      setManifest((prev) => mergeIncomingManifest(prev, finalToSave, activeVehicleIdRef.current));
+      setLastSyncedAt(Date.now());
+    }
+
+    // 1. Primary: Save to Firestore
+    try {
+      await saveManifestFirestore(finalToSave);
+    } catch (err) {
+      console.warn('[useManifest] saveManifestFirestore warning:', err);
+    }
 
     // Broadcast across local tabs immediately
     if (broadcastChannelRef.current) {
       try {
-        broadcastChannelRef.current.postMessage({ key: finalToSave.date, manifest: finalToSave });
+        broadcastChannelRef.current.postMessage({ key: targetKey, manifest: finalToSave });
       } catch {
         // Broadcast failed
       }
@@ -622,25 +656,28 @@ export function useManifest(
     safeChannelSend({
       type: 'broadcast',
       event: 'manifest_updated',
-      payload: { date: finalToSave.date, manifest: finalToSave },
+      payload: { date: targetKey, manifest: finalToSave },
     });
 
-    const { error: upsertError, data } = await supabase
-      .from(MANIFESTS_TABLE)
-      .upsert(
-        {
-          date: finalToSave.date,
-          signups: finalToSave.signups,
-          vehicles: finalToSave.vehicles,
-        },
-        { onConflict: 'date' }
-      )
-      .select('updated_at')
-      .single();
-    if (upsertError) throw upsertError;
-    if (data?.updated_at) {
-      lastSavedUpdatedAtRef.current = data.updated_at;
-      lastKnownUpdatedAtRef.current = data.updated_at;
+    try {
+      const { error: upsertError, data } = await supabase
+        .from(MANIFESTS_TABLE)
+        .upsert(
+          {
+            date: targetKey,
+            signups: finalToSave.signups,
+            vehicles: finalToSave.vehicles,
+          },
+          { onConflict: 'date' }
+        )
+        .select('updated_at')
+        .single();
+      if (!upsertError && data?.updated_at && targetKey === keyRef.current) {
+        lastSavedUpdatedAtRef.current = data.updated_at;
+        lastKnownUpdatedAtRef.current = data.updated_at;
+      }
+    } catch (err) {
+      console.warn('[useManifest] supabase upsert error:', err);
     }
   }
 
