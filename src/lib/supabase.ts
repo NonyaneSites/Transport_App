@@ -76,6 +76,15 @@ export class MockSupabaseStorage {
     this.saveToLocalStorage(table);
   }
 
+  upsert(table: string, row: TableRow, keyCol: string = 'date') {
+    const existing = this.getTable(table);
+    const keyVal = row[keyCol];
+    const filtered = existing.filter((r) => String(r[keyCol] ?? '') !== String(keyVal ?? ''));
+    filtered.push(row);
+    this.setTable(table, filtered);
+    this.notify(table, 'UPSERT', row);
+  }
+
   notify(table: string, event: string, row: TableRow) {
     this.listeners.forEach((fn) => {
       try {

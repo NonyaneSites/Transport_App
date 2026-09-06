@@ -3,8 +3,9 @@ import {
   Bus, Car, Plus, Trash2, Users, ArrowRight, Undo2, X, UserCog, MoveRight,
   CheckCircle2, ChevronDown, ChevronRight, ChevronUp, MapPin,
   Check, Clock, StickyNote, Sparkles, ArrowUpDown, UserCheck, Download,
-  FileText, Copy, Eye, FileDown, Search, UserX, GitMerge, CornerDownRight, MessageCircle
+  FileText, Copy, Eye, FileDown, Search, UserX, GitMerge, CornerDownRight, MessageCircle, Pencil
 } from 'lucide-react';
+import { EditVehicleModal } from './EditVehicleModal';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
@@ -150,6 +151,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   const [selectedPoolKey, setSelectedPoolKey] = useState('');
   const [assignQty, setAssignQty] = useState('');
   const [expandedVehicle, setExpandedVehicle] = useState<string | null>(null);
+  const [editingVehicle, setEditingVehicle] = useState<Vehicle | null>(null);
   const [saving, setSaving] = useState(false);
 
   // Search functionality for admins to find and move passengers
@@ -263,6 +265,12 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   }
 
   function removeVehicle(vehicleId: string) {
+    if (expandedVehicle === vehicleId) {
+      setExpandedVehicle(null);
+    }
+    if (editingVehicle?.id === vehicleId) {
+      setEditingVehicle(null);
+    }
     mutateAndSave((prev) => {
       const vehicle = prev.vehicles.find((v) => v.id === vehicleId);
       if (!vehicle) return prev;
@@ -271,6 +279,28 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       );
       const updatedVehicles = prev.vehicles.filter((v) => v.id !== vehicleId);
       return { ...prev, signups: updatedSignups, vehicles: updatedVehicles };
+    });
+  }
+
+  function updateVehicle(vehicleId: string, updates: Partial<Vehicle>) {
+    mutateAndSave((prev) => {
+      const updatedVehicles = prev.vehicles.map((v) => {
+        if (v.id !== vehicleId) return v;
+        const nextVeh: Vehicle = {
+          ...v,
+          ...updates,
+          name: updates.name !== undefined ? (updates.name.trim() || v.name) : v.name,
+          type: updates.type || v.type,
+          licensePlate: updates.licensePlate !== undefined ? (updates.licensePlate.trim() || undefined) : v.licensePlate,
+          driverName: updates.driverName !== undefined ? (updates.driverName.trim() || undefined) : v.driverName,
+          driverPhone: updates.driverPhone !== undefined ? (updates.driverPhone.trim() || undefined) : v.driverPhone,
+          capacity: updates.capacity !== undefined ? updates.capacity : v.capacity,
+          repName: updates.repName !== undefined ? (updates.repName.trim() || undefined) : v.repName,
+          generalNotes: updates.generalNotes !== undefined ? (updates.generalNotes.trim() || undefined) : v.generalNotes,
+        };
+        return nextVeh;
+      });
+      return { ...prev, vehicles: updatedVehicles };
     });
   }
 
@@ -1677,6 +1707,16 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                       </button>
                     )}
                     <button
+                      type="button"
+                      onClick={() => setEditingVehicle(vehicle)}
+                      title="Edit vehicle details"
+                      className="inline-flex items-center gap-1 rounded-lg border border-line bg-card px-2.5 py-2 text-xs font-semibold text-muted hover:border-accent hover:text-ink transition-colors"
+                    >
+                      <Pencil className="h-4 w-4 text-accent" />
+                      <span className="hidden sm:inline">Edit</span>
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => removeVehicle(vehicle.id)}
                       title="Delete vehicle"
                       className="rounded-lg border border-crimson-500/20 bg-crimson-900/20 p-2 text-crimson-300 transition-all hover:border-crimson-500 hover:bg-crimson-900/40"
@@ -1688,6 +1728,35 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
 
                 {isExpanded && (
                   <div className="border-t border-line bg-bg/40 p-4 animate-fade-in">
+                    {/* Vehicle Quick Info & Edit Bar */}
+                    <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-card/60 p-3">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="font-bold text-ink">{vehicle.name}</span>
+                        <span className="rounded-md border border-line px-2 py-0.5 font-medium text-muted">
+                          {vehicle.type} ({vehicle.capacity ?? (vehicle.type === 'Taxi' ? 15 : 60)} seats)
+                        </span>
+                        {vehicle.licensePlate && (
+                          <span className="font-mono rounded-md bg-bg px-2 py-0.5 text-ink font-semibold">
+                            {vehicle.licensePlate}
+                          </span>
+                        )}
+                        {vehicle.driverName && (
+                          <span className="text-muted">
+                            Driver: <strong className="text-ink">{vehicle.driverName}</strong>
+                            {vehicle.driverPhone ? ` (${vehicle.driverPhone})` : ''}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setEditingVehicle(vehicle)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-accent/30 bg-accent/10 px-2.5 py-1 text-xs font-semibold text-accent hover:bg-accent/20 transition-all"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                        <span>Edit Vehicle</span>
+                      </button>
+                    </div>
+
                     {/* General / Dispatch note banner */}
                     {vGeneralNote && (
                       <div className="mb-4 rounded-lg border border-sky-500/30 bg-sky-500/10 p-3 text-xs text-sky-200 shadow-xs">
@@ -2223,6 +2292,16 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
             </div>
           )}
         </div>
+      )}
+
+      {/* Edit Vehicle Modal */}
+      {editingVehicle && (
+        <EditVehicleModal
+          vehicle={editingVehicle}
+          onSave={updateVehicle}
+          onClose={() => setEditingVehicle(null)}
+          onDelete={removeVehicle}
+        />
       )}
     </div>
   );

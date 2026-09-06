@@ -6,7 +6,7 @@ import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { ExcelUpload } from '@/components/ExcelUpload';
 import { VehicleAllocation } from '@/components/VehicleAllocation';
 import { useManifest } from '@/lib/useManifest';
-import { listAllManifests } from '@/lib/manifest';
+import { listAllManifests, loadManifest } from '@/lib/manifest';
 import { listLedgerEntries } from '@/lib/ledger';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey as parseKey } from '@/lib/dates';
 import { SERVICE_TYPES, RESET_PASSWORD, type ServiceType, type Passenger, type Manifest } from '@/lib/types';
@@ -107,7 +107,12 @@ export function AdminPage() {
   }, [manifest, key]);
 
   async function handleImport(passengers: Passenger[]) {
-    if (!manifest) {
+    let currentManifest = manifest;
+    if (!currentManifest || currentManifest.date !== key) {
+      currentManifest = await loadManifest(key);
+    }
+
+    if (!currentManifest) {
       // Deduplicate incoming batch among itself if saving fresh manifest
       const deduplicated: Passenger[] = [];
       for (const incoming of passengers) {
@@ -125,7 +130,7 @@ export function AdminPage() {
     //     while strictly preserving live assignment and attendance states.
     // If incoming passenger is entirely new:
     //   - Add them as a fresh signup.
-    const updatedSignups = [...manifest.signups];
+    const updatedSignups = [...(currentManifest.signups || [])];
     const fresh: Passenger[] = [];
 
     for (const incoming of passengers) {
@@ -158,7 +163,11 @@ export function AdminPage() {
       }
     }
 
-    await save({ ...manifest, signups: [...updatedSignups, ...fresh] });
+    await save({
+      ...currentManifest,
+      vehicles: currentManifest.vehicles || [],
+      signups: [...updatedSignups, ...fresh],
+    });
   }
 
   async function handleReset() {

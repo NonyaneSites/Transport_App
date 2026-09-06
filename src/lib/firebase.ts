@@ -174,21 +174,37 @@ export async function listManifestsFirestore(): Promise<Manifest[]> {
 }
 
 /**
+ * Recursively strips any undefined values from an object or array so that
+ * Firestore setDoc/updateDoc never throws "Unsupported field value: undefined".
+ */
+export function deepCleanForFirestore<T>(data: T): T {
+  if (data === null || data === undefined) return null as unknown as T;
+  if (typeof data !== 'object') return data;
+  if (Array.isArray(data)) {
+    return data.map((item) => deepCleanForFirestore(item)) as unknown as T;
+  }
+  const clean: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+    if (value !== undefined) {
+      clean[key] = deepCleanForFirestore(value);
+    }
+  }
+  return clean as T;
+}
+
+/**
  * Saves or updates a manifest document in Firestore.
  */
 export async function saveManifestFirestore(manifest: Manifest): Promise<void> {
   try {
     const docRef = doc(db, MANIFESTS_COLLECTION, manifest.date);
-    await setDoc(
-      docRef,
-      {
-        date: manifest.date,
-        signups: manifest.signups || [],
-        vehicles: manifest.vehicles || [],
-        updatedAt: new Date().toISOString(),
-      },
-      { merge: true }
-    );
+    const payload = deepCleanForFirestore({
+      date: manifest.date,
+      signups: manifest.signups || [],
+      vehicles: manifest.vehicles || [],
+      updatedAt: new Date().toISOString(),
+    });
+    await setDoc(docRef, payload, { merge: true });
   } catch (err) {
     console.error('[Firebase] saveManifestFirestore error:', err);
     throw err;

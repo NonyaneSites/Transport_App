@@ -288,12 +288,11 @@ export function useManifest(
           if (keyRef.current !== key) return;
           if (remoteManifest) {
             setManifest((prev) => (prev && prev.date === key ? mergeIncomingManifest(prev, remoteManifest, activeVehicleIdRef.current) : remoteManifest));
-          } else {
-            // New or uncreated date/service: initialize an isolated, clean empty manifest for this key
-            setManifest((prev) => (prev && prev.date === key ? prev : { date: key, signups: [], vehicles: [] }));
+            setLastSyncedAt(Date.now());
+            setLoading(false);
           }
-          setLastSyncedAt(Date.now());
-          setLoading(false);
+          // Note: If remoteManifest is null, do NOT wipe local state or clear loading immediately.
+          // Let initial loadManifest complete first from secondary/local storage tiers.
         },
         (err) => {
           console.warn('[useManifest] Firestore onSnapshot warning:', err);
@@ -360,6 +359,10 @@ export function useManifest(
             if (loaded.updated_at) {
               lastKnownUpdatedAtRef.current = loaded.updated_at;
             }
+            // Prime Firestore with the authoritative loaded manifest so future refreshes find it immediately
+            saveManifestFirestore(loaded).catch((err) => {
+              console.debug('[useManifest] Priming Firestore cache:', err);
+            });
           } else {
             // New or empty date session: initialize an isolated, clean empty manifest!
             setManifest((prev) => (prev && prev.date === key ? prev : { date: key, signups: [], vehicles: [] }));
@@ -568,86 +571,68 @@ export function useManifest(
       return;
     }
 
-    // 1. Primary: Save to Firestore
-    saveManifestFirestore(normalized).catch((err) => {
-      console.warn('[useManifest] saveManifestFirestore warning:', err);
-    });
-
-    // Fetch latest remote row to safely merge any other vehicles submitted or edited concurrently
-    let finalToSave = normalized;
-    try {
-      const { data: latestRow } = await supabase
-        .from(MANIFESTS_TABLE)
-        .select('date, signups, vehicles, updated_at')
-        .eq('date', key)
-        .maybeSingle();
-
-      if (latestRow) {
-        const remoteNorm = normalizeManifestData(latestRow);
-        if (remoteNorm) {
-          const mergedVehicles = normalized.vehicles.map((localV) => {
-            const remoteV = remoteNorm.vehicles.find((rv) => rv.id === localV.id);
-            if (!remoteV) return localV;
-            // If remote vehicle was already submitted or newer and local is not submitting this vehicle:
-            if (remoteV.submitted && !localV.submitted) {
-              return remoteV;
-            }
-            return localV;
-          });
-
-          // Also retain any vehicles that exist remotely but not locally
-          remoteNorm.vehicles.forEach((rv) => {
-            if (!mergedVehicles.some((mv) => mv.id === rv.id)) {
-              mergedVehicles.push(rv);
-            }
-          });
-
-          finalToSave = {
-            ...normalized,
-            vehicles: mergedVehicles,
-          };
-        }
-      }
-    } catch {
-      // fallback to normalized
-    }
-
-    // Optimistically update local state immediately for zero-lag UI
-    setManifest((prev) => mergeIncomingManifest(prev, finalToSave, activeVehicleIdRef.current));
+    // 1. Optimistically update local state immediately for zero-lag UI
+    setManifest(normalized);
     setLastSyncedAt(Date.now());
 
-    // Broadcast across local tabs immediately
+    // 2. Primary: Save to Cloud Firestore
+    try {
+      await saveManifestFirestore(normalized);
+    } catch (err) {
+      console.warn('[useManifest] saveManifestFirestore warning:', err);
+    }
+
+    // 3. Broadcast across local browser tabs immediately
     if (broadcastChannelRef.current) {
       try {
-        broadcastChannelRef.current.postMessage({ key: finalToSave.date, manifest: finalToSave });
+        broadcastChannelRef.current.postMessage({ key: normalized.date, manifest: normalized });
       } catch {
         // Broadcast failed
       }
     }
 
-    // Broadcast across connected devices via Supabase channel
+    // 4. Broadcast across connected devices via Supabase channel
     safeChannelSend({
       type: 'broadcast',
       event: 'manifest_updated',
-      payload: { date: finalToSave.date, manifest: finalToSave },
+      payload: { date: normalized.date, manifest: normalized },
     });
 
-    const { error: upsertError, data } = await supabase
-      .from(MANIFESTS_TABLE)
-      .upsert(
-        {
-          date: finalToSave.date,
-          signups: finalToSave.signups,
-          vehicles: finalToSave.vehicles,
-        },
-        { onConflict: 'date' }
-      )
-      .select('updated_at')
-      .single();
-    if (upsertError) throw upsertError;
-    if (data?.updated_at) {
-      lastSavedUpdatedAtRef.current = data.updated_at;
-      lastKnownUpdatedAtRef.current = data.updated_at;
+    // 5. Persist to Supabase and fallback storage
+    try {
+      const { error: upsertError, data } = await supabase
+        .from(MANIFESTS_TABLE)
+        .upsert(
+          {
+            date: normalized.date,
+            signups: normalized.signups,
+            vehicles: normalized.vehicles,
+          },
+          { onConflict: 'date' }
+        )
+        .select('updated_at')
+        .maybeSingle();
+
+      if (upsertError) {
+        console.warn('[useManifest] Supabase upsert error, syncing to local storage:', upsertError);
+        mockStorage.upsert(MANIFESTS_TABLE, {
+          date: normalized.date,
+          signups: normalized.signups,
+          vehicles: normalized.vehicles,
+          updated_at: new Date().toISOString(),
+        });
+      } else if (data?.updated_at) {
+        lastSavedUpdatedAtRef.current = data.updated_at;
+        lastKnownUpdatedAtRef.current = data.updated_at;
+      }
+    } catch (err) {
+      console.warn('[useManifest] Exception during supabase save, falling back locally:', err);
+      mockStorage.upsert(MANIFESTS_TABLE, {
+        date: normalized.date,
+        signups: normalized.signups,
+        vehicles: normalized.vehicles,
+        updated_at: new Date().toISOString(),
+      });
     }
   }
 
