@@ -140,7 +140,7 @@ export async function listAllManifests(): Promise<Manifest[]> {
         date: d.date,
         signups: Array.isArray(d.signups) ? d.signups : [],
         vehicles: Array.isArray(d.vehicles)
-          ? data.vehicles.map((v: Vehicle) => ({
+          ? d.vehicles.map((v: Vehicle) => ({
               ...v,
               riders: Array.isArray(v.riders) ? v.riders : [],
               orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],

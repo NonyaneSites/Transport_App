@@ -359,10 +359,6 @@ export function useManifest(
             if (loaded.updated_at) {
               lastKnownUpdatedAtRef.current = loaded.updated_at;
             }
-            // Prime Firestore with the authoritative loaded manifest so future refreshes find it immediately
-            saveManifestFirestore(loaded).catch((err) => {
-              console.debug('[useManifest] Priming Firestore cache:', err);
-            });
           } else {
             // New or empty date session: initialize an isolated, clean empty manifest!
             setManifest((prev) => (prev && prev.date === key ? prev : { date: key, signups: [], vehicles: [] }));
@@ -752,7 +748,6 @@ export function useManifest(
       mergedDraft?.repName || repName,
       mergedDraft?.licensePlate || licensePlate
     ).catch(() => {});
-    saveManifestFirestore(mergedManifest).catch(() => {});
 
     // Broadcast targeted vehicle delta across local tabs
     if (broadcastChannelRef.current) {
