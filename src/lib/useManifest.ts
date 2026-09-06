@@ -53,51 +53,45 @@ export function mergeIncomingManifest(
   const currentActiveVehicle = current.vehicles.find((v) => v.id === activeVehicleId);
   if (!currentActiveVehicle) return incoming;
 
-  // Merge vehicles: adopt authoritative remote draftState from Firestore
+  // If the vehicle was deleted in incoming (by admin), respect the deletion!
+  const incActiveVehicle = incoming.vehicles.find((v) => v.id === activeVehicleId);
+  if (!incActiveVehicle) return incoming;
+
+  // Merge vehicles: incoming (admin) is authoritative for vehicle existence, riders, and stops.
+  // Rep's draft work (attendance, sponsorships, unpaid flags, notes, cash collections) on the active vehicle is preserved.
   const mergedVehicles = incoming.vehicles.map((incV) => {
     if (incV.id !== activeVehicleId) {
       return incV;
     }
 
-    // It's the active vehicle: combine riders and orderedStops
-    const curRiders = new Set(currentActiveVehicle.riders || []);
-    const incRiders = incV.riders || [];
-    const combinedRiders = Array.from(new Set([...curRiders, ...incRiders]));
-    const combinedOrderedStops = Array.from(new Set([...(currentActiveVehicle.orderedStops || []), ...(incV.orderedStops || [])]));
-
     const incDraft = incV.draftState;
     const curDraft = currentActiveVehicle.draftState;
 
-    // Adopt remote draftState from Firestore as authoritative for shared arrays
-    // (sponsoredIds, unpaidIds, presentIds, absentIds, notes)
-    const nextDraftState: VehicleDraftState = incDraft
-      ? {
-          ...(curDraft || {}),
-          ...incDraft,
-          presentIds: incDraft.presentIds !== undefined ? incDraft.presentIds : (curDraft?.presentIds || []),
-          absentIds: incDraft.absentIds !== undefined ? incDraft.absentIds : (curDraft?.absentIds || []),
-          sponsoredIds: incDraft.sponsoredIds !== undefined ? incDraft.sponsoredIds : (curDraft?.sponsoredIds || []),
-          unpaidIds: incDraft.unpaidIds !== undefined ? incDraft.unpaidIds : (curDraft?.unpaidIds || []),
-          notes: { ...(curDraft?.notes || {}), ...(incDraft.notes || {}) },
-          updatedAt: incDraft.updatedAt || curDraft?.updatedAt || new Date().toISOString(),
-          updatedBy: incDraft.updatedBy || curDraft?.updatedBy,
-        }
-      : (curDraft || {});
+    const nextDraftState: VehicleDraftState = {
+      ...(curDraft || {}),
+      ...(incDraft || {}),
+      presentIds: incDraft?.presentIds !== undefined ? incDraft.presentIds : (curDraft?.presentIds || []),
+      absentIds: incDraft?.absentIds !== undefined ? incDraft.absentIds : (curDraft?.absentIds || []),
+      sponsoredIds: incDraft?.sponsoredIds !== undefined ? incDraft.sponsoredIds : (curDraft?.sponsoredIds || []),
+      unpaidIds: incDraft?.unpaidIds !== undefined ? incDraft.unpaidIds : (curDraft?.unpaidIds || []),
+      notes: { ...(curDraft?.notes || {}), ...(incDraft?.notes || {}) },
+      generalNotes: incV.generalNotes ?? incDraft?.generalNotes ?? curDraft?.generalNotes,
+      repName: incV.repName ?? incDraft?.repName ?? curDraft?.repName,
+      licensePlate: incV.licensePlate ?? incDraft?.licensePlate ?? curDraft?.licensePlate,
+      coReps: incDraft?.coReps ?? curDraft?.coReps,
+      updatedAt: incDraft?.updatedAt || curDraft?.updatedAt || new Date().toISOString(),
+      updatedBy: incDraft?.updatedBy || curDraft?.updatedBy,
+    };
 
     return {
-      ...incV,
-      riders: combinedRiders,
-      orderedStops: combinedOrderedStops,
-      submitted: incV.submitted !== undefined ? incV.submitted : currentActiveVehicle.submitted,
-      submittedAt: incV.submittedAt || currentActiveVehicle.submittedAt,
-      submittedBy: incV.submittedBy || currentActiveVehicle.submittedBy,
+      ...incV, // Admin assignment is authoritative
       draftState: nextDraftState,
     };
   });
 
-  // Merge signups: ensure newly created walk-in signups from incoming or local are preserved!
+  // Merge signups: incoming is authoritative, but keep any local in-flight walk-ins
   const incomingIds = new Set(incoming.signups.map((p) => p.id));
-  const localOnlySignups = current.signups.filter((p) => !incomingIds.has(p.id));
+  const localOnlySignups = current.signups.filter((p) => !incomingIds.has(p.id) && p.id.startsWith('walkin-'));
 
   return {
     ...incoming,
@@ -588,18 +582,17 @@ export function useManifest(
           const mergedVehicles = normalized.vehicles.map((localV) => {
             const remoteV = remoteNorm.vehicles.find((rv) => rv.id === localV.id);
             if (!remoteV) return localV;
-            // If remote vehicle was already submitted or newer and local is not submitting this vehicle:
-            if (remoteV.submitted && !localV.submitted) {
-              return remoteV;
-            }
-            return localV;
-          });
-
-          // Also retain any vehicles that exist remotely but not locally
-          remoteNorm.vehicles.forEach((rv) => {
-            if (!mergedVehicles.some((mv) => mv.id === rv.id)) {
-              mergedVehicles.push(rv);
-            }
+            // Retain rep submission status and draft work for existing vehicles
+            return {
+              ...localV,
+              submitted: remoteV.submitted !== undefined ? remoteV.submitted : localV.submitted,
+              submittedAt: remoteV.submittedAt || localV.submittedAt,
+              submittedBy: remoteV.submittedBy || localV.submittedBy,
+              draftState: {
+                ...(remoteV.draftState || {}),
+                ...(localV.draftState || {}),
+              },
+            };
           });
 
           finalToSave = {
@@ -696,6 +689,11 @@ export function useManifest(
 
     // 2. Only modify the present/absent flag of THIS specific vehicle's passengers
     const targetVehicle = remoteManifest.vehicles.find((v) => v.id === vehicleId);
+    if (!targetVehicle) {
+      // Vehicle was deleted by admin; do not recreate or save!
+      console.warn(`[useManifest] updateVehicleDraft skipped: vehicle ${vehicleId} was deleted.`);
+      return;
+    }
     const vehicleRiderSet = new Set(targetVehicle?.riders ?? []);
 
     const updatedSignups = remoteManifest.signups.map((p) => {
@@ -767,7 +765,6 @@ export function useManifest(
       mergedDraft?.repName || repName,
       mergedDraft?.licensePlate || licensePlate
     ).catch(() => {});
-    saveManifestFirestore(mergedManifest).catch(() => {});
 
     // Broadcast targeted vehicle delta across local tabs
     if (broadcastChannelRef.current) {

@@ -107,7 +107,7 @@ export function AdminPage() {
   }, [manifest, key]);
 
   async function handleImport(passengers: Passenger[]) {
-    if (!manifest) {
+    if (!manifest || manifest.date !== key) {
       // Deduplicate incoming batch among itself if saving fresh manifest
       const deduplicated: Passenger[] = [];
       for (const incoming of passengers) {
@@ -158,7 +158,7 @@ export function AdminPage() {
       }
     }
 
-    await save({ ...manifest, signups: [...updatedSignups, ...fresh] });
+    await save({ ...manifest, date: key, signups: [...updatedSignups, ...fresh] });
   }
 
   async function handleReset() {
