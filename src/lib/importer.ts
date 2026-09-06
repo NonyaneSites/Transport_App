@@ -163,11 +163,11 @@ export function normalizeService(raw: string, defaultService?: string): string {
   const s = raw.toLowerCase().trim();
   if (!s && defaultService) return defaultService;
 
-  const isUshers = s.includes('usher (early)') || s.includes('ushers (early)') || (s.includes('usher') && s.includes('early'));
-  if (isUshers) return 'AM_Ushers';
-
   const isAM = s.includes('am') || s.includes('morning') || s.includes('08:') || s.includes('09:') || s.includes('10:');
   const isPM = s.includes('pm') || s.includes('evening') || s.includes('afternoon') || s.includes('17:') || s.includes('18:');
+
+  const isUshers = s.includes('usher (early)') || s.includes('ushers (early)') || (s.includes('usher') && s.includes('early'));
+  if (isAM && isUshers) return 'AM_Ushers';
 
   const isServing = s.includes('serving') || s.includes('usher') || s.includes('choir') || s.includes('band') || s.includes('volunteer');
   const isMega = s.includes('mega');
@@ -395,47 +395,15 @@ export function parseGoogleSheetSignups(
       const timestamp = parseTimestampToISO(rawTimestamp);
 
       // Service
-      const isDefaultPM = defaultService.startsWith('PM');
-      let rawService = '';
-      if (isDefaultPM) {
-        rawService = findValue([
-          'PM Service Type',
-          'PM Service',
-          'PM Serving',
-          'Which PM service are you attending?',
-          'Which service are you attending?',
-          'Service',
-          'Attending',
-          'Service Type',
-        ]);
-        const amVal = findValue(['AM Service Type', 'AM Service', 'AM Serving']);
-        if (amVal && !rawService) {
-          return null;
-        }
-      } else {
-        rawService = findValue([
-          'AM Service Type',
-          'AM Service',
-          'AM Serving',
-          'Which AM service are you attending?',
-          'Which service are you attending?',
-          'Service',
-          'Attending',
-          'Service Type',
-        ]);
-        const pmVal = findValue(['PM Service Type', 'PM Service', 'PM Serving']);
-        if (pmVal && !rawService) {
-          return null;
-        }
-      }
+      const rawService = findValue([
+        'Which service are you attending?',
+        'Service',
+        'Attending',
+        'AM Service Type',
+        'PM Service Type',
+        'Service Type',
+      ]);
       const service = normalizeService(rawService, defaultService);
-
-      if (isDefaultPM && service.startsWith('AM')) {
-        return null;
-      }
-      if (!isDefaultPM && service.startsWith('PM')) {
-        return null;
-      }
 
       // Ministry & Category
       const rawMinistry = findValue(['Serving Ministry', 'Serving', 'Ministry']);

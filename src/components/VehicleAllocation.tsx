@@ -135,17 +135,10 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       window.removeEventListener('beforeunload', handleExitFlush);
       window.removeEventListener('pagehide', handleExitFlush);
       document.removeEventListener('visibilitychange', handleExitFlush);
-      if (saveDebounceTimerRef.current || isLocalMutationPendingRef.current) {
-        if (saveDebounceTimerRef.current) {
-          clearTimeout(saveDebounceTimerRef.current);
-          saveDebounceTimerRef.current = null;
-        }
+      if (saveDebounceTimerRef.current) {
+        clearTimeout(saveDebounceTimerRef.current);
+        saveDebounceTimerRef.current = null;
         if (latestManifestRef.current && latestManifestRef.current.date === manifest.date) {
-          try {
-            localStorage.setItem(`crc_admin_manifest_${latestManifestRef.current.date}`, JSON.stringify(latestManifestRef.current));
-          } catch {
-            // localStorage full or disabled
-          }
           onSave(latestManifestRef.current).catch(() => {});
         }
       }
@@ -187,15 +180,6 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     latestManifestRef.current = nextManifest;
     setLocalManifest(nextManifest);
     isLocalMutationPendingRef.current = true;
-
-    // Immediately cache to localStorage synchronously for zero-loss recovery
-    if (nextManifest && nextManifest.date) {
-      try {
-        localStorage.setItem(`crc_admin_manifest_${nextManifest.date}`, JSON.stringify(nextManifest));
-      } catch {
-        // localStorage full or disabled
-      }
-    }
 
     if (saveDebounceTimerRef.current) {
       clearTimeout(saveDebounceTimerRef.current);
@@ -279,32 +263,15 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   }
 
   function removeVehicle(vehicleId: string) {
-    if (saveDebounceTimerRef.current) {
-      clearTimeout(saveDebounceTimerRef.current);
-      saveDebounceTimerRef.current = null;
-    }
-    const prev = latestManifestRef.current;
-    const vehicle = prev.vehicles.find((v) => v.id === vehicleId);
-    if (!vehicle) return;
-    const updatedSignups = prev.signups.map((p) =>
-      vehicle.riders.includes(p.id) ? { ...p, assignedTo: null } : p
-    );
-    const updatedVehicles = prev.vehicles.filter((v) => v.id !== vehicleId);
-    const nextManifest: Manifest = { ...prev, signups: updatedSignups, vehicles: updatedVehicles };
-
-    latestManifestRef.current = nextManifest;
-    setLocalManifest(nextManifest);
-    isLocalMutationPendingRef.current = true;
-    setSaving(true);
-
-    onSave(nextManifest)
-      .catch((err) => console.error('Cloud manifest delete vehicle error:', err))
-      .finally(() => {
-        setSaving(false);
-        setTimeout(() => {
-          isLocalMutationPendingRef.current = false;
-        }, 300);
-      });
+    mutateAndSave((prev) => {
+      const vehicle = prev.vehicles.find((v) => v.id === vehicleId);
+      if (!vehicle) return prev;
+      const updatedSignups = prev.signups.map((p) =>
+        vehicle.riders.includes(p.id) ? { ...p, assignedTo: null } : p
+      );
+      const updatedVehicles = prev.vehicles.filter((v) => v.id !== vehicleId);
+      return { ...prev, signups: updatedSignups, vehicles: updatedVehicles };
+    });
   }
 
   /**

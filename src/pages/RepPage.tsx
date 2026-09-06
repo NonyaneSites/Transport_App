@@ -300,19 +300,14 @@ export function RepPage() {
   const serviceLabel = SERVICE_TYPES.find((s) => s.value === service)?.label ?? service;
   const { date: parsedDate } = parseManifestKey(key);
 
-  const currentManifest = useMemo(() => {
-    if (!manifest || manifest.date !== key) return null;
-    return manifest;
-  }, [manifest, key]);
-
   const selectedVehicle = useMemo(
-    () => currentManifest?.vehicles.find((v) => v.id === selectedVehicleId) ?? null,
-    [currentManifest, selectedVehicleId]
+    () => manifest?.vehicles.find((v) => v.id === selectedVehicleId) ?? null,
+    [manifest, selectedVehicleId]
   );
 
   const riders = useMemo(
-    () => (selectedVehicle && currentManifest ? vehicleRiders(currentManifest, selectedVehicle) : []),
-    [currentManifest, selectedVehicle]
+    () => (selectedVehicle ? vehicleRiders(manifest, selectedVehicle) : []),
+    [manifest, selectedVehicle]
   );
 
   const detectedOfficialRep = useMemo(
@@ -321,44 +316,6 @@ export function RepPage() {
   );
 
   const repStructure = repName ? getRepStructure(repName) : null;
-
-  // Real-time synchronization of authoritative Admin changes (rep name, license plate, general notes, dispatch updates)
-  const prevAdminRepRef = useRef<string | undefined>(undefined);
-  const prevAdminPlateRef = useRef<string | undefined>(undefined);
-  const prevAdminGeneralNotesRef = useRef<string | undefined>(undefined);
-
-  useEffect(() => {
-    if (!selectedVehicle) {
-      prevAdminRepRef.current = undefined;
-      prevAdminPlateRef.current = undefined;
-      prevAdminGeneralNotesRef.current = undefined;
-      return;
-    }
-
-    // 1. Rep Name: Admin updates hold precedence
-    if (selectedVehicle.repName !== undefined && selectedVehicle.repName !== prevAdminRepRef.current) {
-      prevAdminRepRef.current = selectedVehicle.repName;
-      if (selectedVehicle.repName) {
-        setRepName(selectedVehicle.repName);
-      }
-    }
-
-    // 2. License Plate: Admin updates hold precedence (if rep isn't actively typing)
-    if (selectedVehicle.licensePlate !== undefined && selectedVehicle.licensePlate !== prevAdminPlateRef.current) {
-      prevAdminPlateRef.current = selectedVehicle.licensePlate;
-      if (!licensePlateFocusedRef.current && selectedVehicle.licensePlate) {
-        setLicensePlate(selectedVehicle.licensePlate);
-      }
-    }
-
-    // 3. Dispatch / General Notes: Admin updates hold precedence (if rep isn't actively typing)
-    if (selectedVehicle.generalNotes !== undefined && selectedVehicle.generalNotes !== prevAdminGeneralNotesRef.current) {
-      prevAdminGeneralNotesRef.current = selectedVehicle.generalNotes;
-      if (!generalNotesFocusedRef.current && selectedVehicle.generalNotes !== undefined) {
-        setGeneralNotes(selectedVehicle.generalNotes);
-      }
-    }
-  }, [selectedVehicle, selectedVehicle?.repName, selectedVehicle?.licensePlate, selectedVehicle?.generalNotes]);
 
   // Prune any IDs that are no longer riders of this vehicle (e.g. moved by admin to another taxi)
   useEffect(() => {
@@ -404,13 +361,13 @@ export function RepPage() {
 
   // Exact match vehicle when typing rep name if not yet selected (requires exact full name match)
   useEffect(() => {
-    if (!currentManifest || selectedVehicleId) return;
+    if (!manifest || selectedVehicleId) return;
     const q = repName.trim().toLowerCase();
     if (q.length < 3) return;
 
     const repMatch = matchRiderToOfficialRep({ fullName: repName });
 
-    const match = currentManifest.vehicles.find((v) => {
+    const match = manifest.vehicles.find((v) => {
       const vRep = (v.repName ?? '').trim().toLowerCase();
       if (vRep) {
         if (vRep === q) return true;
@@ -419,7 +376,7 @@ export function RepPage() {
         }
       }
 
-      const vRiders = vehicleRiders(currentManifest, v);
+      const vRiders = vehicleRiders(manifest, v);
       for (const r of vRiders) {
         const normRider = r.fullName.trim().toLowerCase();
         if (normRider === q) return true;
@@ -434,7 +391,7 @@ export function RepPage() {
     });
 
     if (match) setSelectedVehicleId(match.id);
-  }, [repName, currentManifest, selectedVehicleId]);
+  }, [repName, manifest, selectedVehicleId]);
 
   const resetLocalDraftState = useCallback(() => {
     isApplyingDraftRef.current = true;
@@ -635,7 +592,7 @@ export function RepPage() {
       return;
     }
 
-    if (!currentManifest) return;
+    if (!manifest) return;
 
     const currentKey = `${key}:${selectedVehicleId}`;
     if (initializedKeyRef.current === currentKey) {
@@ -650,11 +607,11 @@ export function RepPage() {
       prevVehicleIdRef.current = selectedVehicleId;
     }
 
-    const vehicle = currentManifest.vehicles.find((v) => v.id === selectedVehicleId);
+    const vehicle = manifest.vehicles.find((v) => v.id === selectedVehicleId);
     if (!vehicle) return;
 
     initializedKeyRef.current = currentKey;
-    const currentRiders = vehicleRiders(currentManifest, vehicle);
+    const currentRiders = vehicleRiders(manifest, vehicle);
 
     // Retrieve local device draft cache if any (for instant recovery if refreshed or browser closed)
     let localDraft: VehicleDraftState | null = null;
@@ -718,7 +675,7 @@ export function RepPage() {
       setLicensePlate(vehicle.licensePlate || '');
       lastAppliedDraftAtRef.current = null;
     }
-  }, [key, currentManifest, selectedVehicleId, resetLocalDraftState, applyDraftState]);
+  }, [key, manifest, selectedVehicleId, resetLocalDraftState, applyDraftState]);
 
   // Live cross-device sync (only applies genuine new updates from other devices)
   useEffect(() => {
@@ -1250,12 +1207,12 @@ export function RepPage() {
   }
 
   function findVehicleForPassenger(p: Passenger): Vehicle | undefined {
-    if (!currentManifest) return undefined;
+    if (!manifest) return undefined;
     if (p.assignedTo) {
-      const v = currentManifest.vehicles.find((veh) => veh.id === p.assignedTo);
+      const v = manifest.vehicles.find((veh) => veh.id === p.assignedTo);
       if (v) return v;
     }
-    return currentManifest.vehicles.find((veh) => veh.riders.includes(p.id));
+    return manifest.vehicles.find((veh) => veh.riders.includes(p.id));
   }
 
   function orderedStopsWith(vehicle: Vehicle, poolKey: string): string[] {
@@ -1264,12 +1221,12 @@ export function RepPage() {
   }
 
   async function handleAddWalkIn(overrideCrossTransfer = false) {
-    if (!currentManifest || !selectedVehicle || !walkInName.trim()) return;
+    if (!manifest || !selectedVehicle || !walkInName.trim()) return;
     const query = walkInName.trim();
     const effectiveStruct = walkInStructure.trim();
 
     // 1. First check within current manifest (same service, different vehicle)
-    const existing = findPassengerForTransfer(query, effectiveStruct, currentManifest.signups);
+    const existing = findPassengerForTransfer(query, effectiveStruct, manifest.signups);
 
     if (existing && !overrideCrossTransfer) {
       const fromVehicle = findVehicleForPassenger(existing);
@@ -1363,7 +1320,7 @@ export function RepPage() {
   }
 
   async function assignWalkIn(passenger: Passenger, fromVehicleId: string | null) {
-    if (!currentManifest || !selectedVehicle) return;
+    if (!manifest || !selectedVehicle) return;
 
     if (pendingSyncTimerRef.current) {
       clearTimeout(pendingSyncTimerRef.current);
@@ -1373,14 +1330,14 @@ export function RepPage() {
 
     const poolKey = hubDisplayName(selectedVehicle.type, passenger.stop || 'Walk-In');
 
-    const updatedSignups = currentManifest.signups.map((p) =>
+    const updatedSignups = manifest.signups.map((p) =>
       p.id === passenger.id ? { ...p, assignedTo: selectedVehicle.id, present: true } : p
     );
     if (!updatedSignups.some((p) => p.id === passenger.id)) {
       updatedSignups.push({ ...passenger, assignedTo: selectedVehicle.id, present: true });
     }
 
-    const updatedVehicles = currentManifest.vehicles.map((v) => {
+    const updatedVehicles = manifest.vehicles.map((v) => {
       if (fromVehicleId && v.id === fromVehicleId && v.id !== selectedVehicle.id) {
         const nextRiders = v.riders.filter((id) => id !== passenger.id);
         const cleanedDraft = v.draftState ? {
@@ -1441,8 +1398,7 @@ export function RepPage() {
     });
 
     const nextManifest: Manifest = {
-      ...currentManifest,
-      date: key,
+      ...manifest,
       signups: updatedSignups,
       vehicles: updatedVehicles,
     };
@@ -1594,7 +1550,7 @@ export function RepPage() {
         updatedBy: clientIdRef.current,
       };
 
-      const updatedSignups = (currentManifest ?? manifest)!.signups.map((p) => {
+      const updatedSignups = manifest.signups.map((p) => {
         if (presentIds.has(p.id)) {
           return {
             ...p,
@@ -1617,7 +1573,7 @@ export function RepPage() {
         return p;
       });
 
-      const updatedVehicles = (currentManifest ?? manifest)!.vehicles.map((v) =>
+      const updatedVehicles = manifest.vehicles.map((v) =>
         v.id === selectedVehicle.id
           ? {
               ...v,
@@ -1633,7 +1589,7 @@ export function RepPage() {
           : v
       );
 
-      await save({ ...(currentManifest ?? manifest)!, date: key, signups: updatedSignups, vehicles: updatedVehicles });
+      await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
 
       try {
         localStorage.setItem(`crc_rep_draft_${key}_${selectedVehicle.id}`, JSON.stringify(finalizedDraft));
@@ -1654,20 +1610,19 @@ export function RepPage() {
   }
 
   async function handleReopen() {
-    if ((!currentManifest && !manifest) || !selectedVehicle) return;
-    const baseManifest = currentManifest ?? manifest!;
+    if (!manifest || !selectedVehicle) return;
     setSubmitting(true);
     setSubmitMsg(null);
     try {
       const vehicleRiderNames = riders.map((r) => r.fullName);
       await withdrawAbsentees(key, vehicleRiderNames);
 
-      const updatedVehicles = baseManifest.vehicles.map((v) =>
+      const updatedVehicles = manifest.vehicles.map((v) =>
         v.id === selectedVehicle.id
           ? { ...v, submitted: false, submittedAt: undefined, submittedBy: undefined }
           : v
       );
-      await save({ ...baseManifest, date: key, vehicles: updatedVehicles });
+      await save({ ...manifest, vehicles: updatedVehicles });
 
       setSubmitMsg(
         `Attendance reopened for editing. Unconfirmed absentees have been withdrawn from the cancellation ledger until you submit again.`
@@ -1810,12 +1765,12 @@ export function RepPage() {
           </div>
         )}
 
-        {loading || !currentManifest ? (
+        {loading ? (
           <div className="mt-8 flex flex-col items-center gap-3 py-16">
             <Loader2 className="h-8 w-8 animate-spin text-crimson-400" />
             <p className="text-sm text-muted">Loading manifest…</p>
           </div>
-        ) : currentManifest.vehicles.length === 0 ? (
+        ) : !manifest || manifest.vehicles.length === 0 ? (
           <div className="mt-6 flex flex-col items-center gap-3 rounded-xl border border-line bg-card py-14 text-center">
             <Bus className="h-10 w-10 text-line" />
             <p className="text-sm text-muted">No vehicles dispatched for this session yet.</p>
@@ -1853,8 +1808,8 @@ export function RepPage() {
                   className="input-field pl-10"
                 >
                   <option value="" className="bg-card-2">Choose your vehicle…</option>
-                  {sortVehiclesNatural(currentManifest.vehicles).map((v) => {
-                    const vRiders = vehicleRiders(currentManifest, v);
+                  {sortVehiclesNatural(manifest.vehicles).map((v) => {
+                    const vRiders = vehicleRiders(manifest, v);
                     return (
                       <option key={v.id} value={v.id} className="bg-card-2">
                         {v.name} — Assigned Rep: {v.repName || 'Unassigned'} ({v.type}) — {vRiders.length} passengers

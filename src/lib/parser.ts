@@ -107,45 +107,15 @@ export function extractMemberType(row: RawRow, headers: string[], structure?: st
 export function extractCategoryAndMinistry(
   row: RawRow,
   headers: string[],
-  sheetName?: string,
-  targetPeriod?: 'AM' | 'PM'
+  sheetName?: string
 ): { category: 'Ushers' | 'Serving' | 'Normal'; ministry: string } {
-  let serviceTypeCol: string | undefined;
-  if (targetPeriod === 'PM') {
-    serviceTypeCol = findColumn(headers, [
-      'pm service type',
-      'pm service',
-      'pm serving',
-      'pm service attending',
-      'which pm service',
-      'evening service type',
-      'evening service',
-      'service type',
-      'servicetype',
-      'which service are you attending',
-    ]);
-  } else if (targetPeriod === 'AM') {
-    serviceTypeCol = findColumn(headers, [
-      'am service type',
-      'am service',
-      'am serving',
-      'am service attending',
-      'which am service',
-      'morning service type',
-      'morning service',
-      'service type',
-      'servicetype',
-      'which service are you attending',
-    ]);
-  } else {
-    serviceTypeCol = findColumn(headers, [
-      'service type',
-      'servicetype',
-      'which service are you attending',
-      'am service type',
-      'pm service type',
-    ]);
-  }
+  const serviceTypeCol = findColumn(headers, [
+    'am service type',
+    'pm service type',
+    'service type',
+    'servicetype',
+    'which service are you attending',
+  ]);
   const servingCol = findColumn(headers, ['serving ministry', 'serving', 'ministry']);
 
   const rawService = serviceTypeCol ? clean(row[serviceTypeCol]) : '';
@@ -154,16 +124,15 @@ export function extractCategoryAndMinistry(
   const ministryLower = lower(rawMinistry);
   const sheetLower = lower(clean(sheetName || ''));
 
-  // 1. Explicit Ushers (Early) - Strictly AM
+  // 1. Explicit Ushers (Early)
   if (
-    targetPeriod !== 'PM' &&
-    (serviceLower.includes('usher (early)') ||
-      serviceLower.includes('ushers (early)') ||
-      serviceLower.includes('usher(early)') ||
-      serviceLower.includes('ushers(early)') ||
-      (serviceLower.includes('usher') && serviceLower.includes('early')) ||
-      (serviceLower.includes('early') && ministryLower.includes('usher')) ||
-      sheetLower.includes('usher'))
+    serviceLower.includes('usher (early)') ||
+    serviceLower.includes('ushers (early)') ||
+    serviceLower.includes('usher(early)') ||
+    serviceLower.includes('ushers(early)') ||
+    (serviceLower.includes('usher') && serviceLower.includes('early')) ||
+    (serviceLower.includes('early') && ministryLower.includes('usher')) ||
+    sheetLower.includes('usher')
   ) {
     return { category: 'Ushers', ministry: rawMinistry || 'Usher (Early)' };
   }
@@ -593,24 +562,6 @@ function matchesDate(row: RawRow, headers: string[], selectedDate: string): bool
   return true;
 }
 
-function isBlankOrNegative(val: string): boolean {
-  const s = lower(clean(val));
-  return (
-    !s ||
-    s === 'none' ||
-    s === 'n/a' ||
-    s === 'na' ||
-    s === 'no' ||
-    s === 'nil' ||
-    s === '-' ||
-    s === 'neither' ||
-    s === 'not attending' ||
-    s.includes('not attending') ||
-    s === 'not serving' ||
-    s === 'no transport'
-  );
-}
-
 export function matchesService(
   row: RawRow,
   headers: string[],
@@ -629,113 +580,47 @@ export function matchesService(
     return false;
   }
 
-  // Look for AM-specific and PM-specific service columns
-  const amCol = findColumn(headers, [
-    'am service type',
-    'am service',
-    'am serving',
-    'am service attending',
-    'which am service',
-    'morning service',
-    'morning service type',
-    'morning',
-  ]);
-  const pmCol = findColumn(headers, [
-    'pm service type',
-    'pm service',
-    'pm serving',
-    'pm service attending',
-    'which pm service',
-    'evening service',
-    'evening service type',
-    'evening',
-    'afternoon',
-  ]);
-
-  if (selectedPeriod === 'PM') {
-    if (pmCol) {
-      const pmVal = clean(row[pmCol]);
-      if (isBlankOrNegative(pmVal)) {
-        return false;
-      }
-      const pmValLower = lower(pmVal);
-      if (selectedService === 'PM_Serving') {
-        if ((pmValLower.includes('normal') || pmValLower.includes('regular')) && !pmValLower.includes('serving')) {
-          return false;
-        }
-      } else if (selectedService === 'PM_Normal') {
-        if (pmValLower.includes('serving')) {
-          return false;
-        }
-      }
-    } else if (amCol) {
-      // Form only has an AM service column, but user is importing for PM
-      const amVal = clean(row[amCol]);
-      if (!isBlankOrNegative(amVal)) {
-        return false;
-      }
-    }
-  } else {
-    // selectedPeriod === 'AM'
-    if (amCol) {
-      const amVal = clean(row[amCol]);
-      if (isBlankOrNegative(amVal)) {
-        return false;
-      }
-      const amValLower = lower(amVal);
-      if (selectedService === 'AM_Ushers') {
-        if (!amValLower.includes('usher')) {
-          return false;
-        }
-      } else if (selectedService === 'AM_Serving') {
-        if ((amValLower.includes('normal') || amValLower.includes('regular')) && !amValLower.includes('serving') && !amValLower.includes('usher')) {
-          return false;
-        }
-      } else if (selectedService === 'AM_Normal') {
-        if (amValLower.includes('serving') || amValLower.includes('usher')) {
-          return false;
-        }
-      }
-    } else if (pmCol) {
-      // Form only has a PM service column, but user is importing for AM
-      const pmVal = clean(row[pmCol]);
-      if (!isBlankOrNegative(pmVal)) {
-        return false;
-      }
-    }
-  }
-
-  // Check general service column for explicit AM / PM indicators
-  const generalServiceCol = findColumn(headers, [
+  // Check row service column for AM / PM indicators
+  const serviceCol = findColumn(headers, [
     'which service are you attending',
     'service attending',
     'service',
+    'am service type',
+    'pm service type',
     'service type',
     'servicetype',
   ]);
 
-  if (generalServiceCol && generalServiceCol !== amCol && generalServiceCol !== pmCol) {
-    const val = lower(clean(row[generalServiceCol]));
+  if (serviceCol) {
+    const val = lower(clean(row[serviceCol]));
     if (val) {
       if (
         selectedPeriod === 'AM' &&
         (val.includes('pm') || val.includes('evening') || val.includes('afternoon') || val.includes('17:00') || val.includes('18:00')) &&
         !val.includes('am') &&
-        !val.includes('morning') &&
-        !val.includes('both')
+        !val.includes('morning')
       ) {
         return false;
       }
       if (
         selectedPeriod === 'PM' &&
-        (val.includes('am') || val.includes('morning') || val.includes('08:30') || val.includes('10:00') || val.includes('ushers (early)')) &&
+        (val.includes('am') || val.includes('morning') || val.includes('08:30') || val.includes('10:00')) &&
         !val.includes('pm') &&
-        !val.includes('evening') &&
-        !val.includes('both')
+        !val.includes('evening')
       ) {
         return false;
       }
     }
+  }
+
+  // Check if both AM and PM columns exist in the row
+  const amCol = findColumn(headers, ['am service type', 'am service', 'am serving']);
+  const pmCol = findColumn(headers, ['pm service type', 'pm service', 'pm serving']);
+  if (amCol && pmCol) {
+    const amVal = clean(row[amCol]);
+    const pmVal = clean(row[pmCol]);
+    if (selectedPeriod === 'AM' && !amVal && pmVal) return false;
+    if (selectedPeriod === 'PM' && !pmVal && amVal) return false;
   }
 
   return true;
@@ -826,8 +711,7 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
       const phone = extractPhone(row, headers);
       const userEmail = extractEmail(row, headers);
       const hub = hubDisplayName('Taxi', stop);
-      const targetPeriod: 'AM' | 'PM' = opts.selectedService.startsWith('AM') ? 'AM' : 'PM';
-      const { category, ministry } = extractCategoryAndMinistry(row, headers, sheetName, targetPeriod);
+      const { category, ministry } = extractCategoryAndMinistry(row, headers, sheetName);
       const memberType = extractMemberType(row, headers, structure);
       const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
@@ -938,7 +822,7 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
       }
     } else if (selectedService === 'PM_Serving') {
       // PM Serving
-      include = c.category === 'Serving';
+      include = c.category === 'Serving' || c.category === 'Ushers';
     }
 
     if (include) {

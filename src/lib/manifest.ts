@@ -6,164 +6,106 @@ import { normalizePassengerText, getSubmissionTimestampEpoch } from './importer'
 export { parseGoogleSheetSignups, type RawSheetRow } from './importer';
 
 export async function loadManifest(key: string): Promise<Manifest | null> {
-  let firestoreManifest: Manifest | null = null;
   // 1. Primary: Load from Firestore
   try {
-    firestoreManifest = await getManifestFirestore(key);
+    const firestoreManifest = await getManifestFirestore(key);
+    if (firestoreManifest) {
+      return firestoreManifest;
+    }
   } catch (err) {
     console.warn('[Manifest] Failed to load from Firestore, trying fallback:', err);
   }
 
-  // 2. Secondary: Supabase / mockStorage
-  let localManifest: Manifest | null = null;
+  // 2. Secondary: Supabase
   try {
     const { data, error } = await supabase
       .from(MANIFESTS_TABLE)
       .select('date, signups, vehicles, created_at, updated_at')
       .eq('date', key)
       .maybeSingle();
-
-    if (!error && data) {
-      localManifest = {
-        date: String(data.date),
-        signups: Array.isArray(data.signups) ? (data.signups as Passenger[]) : [],
+    if (error) {
+      console.warn('[Manifest] Failed to load remote manifest, reading local store:', error);
+    }
+    if (data) {
+      return {
+        date: data.date,
+        signups: Array.isArray(data.signups) ? data.signups : [],
         vehicles: Array.isArray(data.vehicles)
-          ? (data.vehicles as Vehicle[]).map((v: Vehicle) => ({
+          ? data.vehicles.map((v: Vehicle) => ({
               ...v,
               riders: Array.isArray(v.riders) ? v.riders : [],
               orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
             }))
           : [],
-        created_at: typeof data.created_at === 'string' ? data.created_at : undefined,
-        updated_at: typeof data.updated_at === 'string' ? data.updated_at : undefined,
+        created_at: data.created_at,
+        updated_at: data.updated_at,
       };
     }
   } catch (err) {
     console.warn('[Manifest] Exception loading manifest, checking local store:', err);
   }
 
-  // Check mockStorage table
-  if (!localManifest) {
-    const localRow = mockStorage.getTable(MANIFESTS_TABLE).find((r) => r.date === key);
-    if (localRow) {
-      localManifest = {
-        date: String(localRow.date),
-        signups: Array.isArray(localRow.signups) ? (localRow.signups as Passenger[]) : [],
-        vehicles: Array.isArray(localRow.vehicles) ? (localRow.vehicles as Vehicle[]) : [],
-        created_at: typeof localRow.created_at === 'string' ? localRow.created_at : undefined,
-        updated_at: typeof localRow.updated_at === 'string' ? localRow.updated_at : undefined,
-      };
-    }
-  }
-
-  // Check explicit localStorage backup key
-  if (typeof localStorage !== 'undefined') {
-    try {
-      const backup = localStorage.getItem(`crc_admin_manifest_${key}`);
-      if (backup) {
-        const parsed = JSON.parse(backup);
-        if (parsed && parsed.date === key) {
-          const parsedUpdated = parsed.updated_at || parsed.updatedAt || '';
-          const localUpdated = localManifest?.updated_at || '';
-          if (!localManifest || (parsedUpdated && parsedUpdated > localUpdated)) {
-            localManifest = {
-              date: parsed.date,
-              signups: Array.isArray(parsed.signups) ? parsed.signups : [],
-              vehicles: Array.isArray(parsed.vehicles) ? parsed.vehicles : [],
-              created_at: parsed.created_at || parsed.createdAt,
-              updated_at: parsedUpdated || new Date().toISOString(),
-            };
-          }
-        }
-      }
-    } catch {
-      // ignore localStorage parse error
-    }
-  }
-
-  // Compare timestamps between Firestore and Local store
-  if (firestoreManifest && localManifest) {
-    const fTime = firestoreManifest.updated_at || firestoreManifest.created_at || '';
-    const lTime = localManifest.updated_at || localManifest.created_at || '';
-    if (lTime && fTime && lTime > fTime) {
-      // Local copy has newer edits that have not synced to Firestore yet: use local and sync to Firestore
-      saveManifestFirestore(localManifest).catch(() => {});
-      return localManifest;
-    }
-    // Firestore is authoritative or newer; update local cache
-    mockStorage.upsert(MANIFESTS_TABLE, {
-      date: firestoreManifest.date,
-      signups: firestoreManifest.signups,
-      vehicles: firestoreManifest.vehicles,
-      updated_at: fTime || new Date().toISOString(),
-    });
-    return firestoreManifest;
-  }
-
-  if (firestoreManifest) {
-    mockStorage.upsert(MANIFESTS_TABLE, {
-      date: firestoreManifest.date,
-      signups: firestoreManifest.signups,
-      vehicles: firestoreManifest.vehicles,
-      updated_at: firestoreManifest.updated_at || new Date().toISOString(),
-    });
-    return firestoreManifest;
-  }
-
-  if (localManifest) {
-    // Sync local to Firestore
-    saveManifestFirestore(localManifest).catch(() => {});
-    return localManifest;
-  }
-
-  return null;
+  // Fallback to local storage
+  const localRow = mockStorage.getTable(MANIFESTS_TABLE).find((r) => r.date === key);
+  if (!localRow) return null;
+  return {
+    date: String(localRow.date),
+    signups: Array.isArray(localRow.signups) ? (localRow.signups as Passenger[]) : [],
+    vehicles: Array.isArray(localRow.vehicles) ? (localRow.vehicles as Vehicle[]) : [],
+    created_at: typeof localRow.created_at === 'string' ? localRow.created_at : undefined,
+    updated_at: typeof localRow.updated_at === 'string' ? localRow.updated_at : undefined,
+  };
 }
 
 export async function upsertManifest(manifest: Manifest): Promise<void> {
-  const normalized: Manifest = {
-    date: manifest.date,
-    signups: Array.isArray(manifest.signups) ? manifest.signups : [],
-    vehicles: Array.isArray(manifest.vehicles) ? manifest.vehicles : [],
-    created_at: manifest.created_at,
-    updated_at: manifest.updated_at || new Date().toISOString(),
-  };
-
-  // 1. Save locally to mockStorage and localStorage immediately
-  mockStorage.upsert(MANIFESTS_TABLE, {
-    date: normalized.date,
-    signups: normalized.signups,
-    vehicles: normalized.vehicles,
-    updated_at: normalized.updated_at,
-  });
-  if (typeof localStorage !== 'undefined') {
-    try {
-      localStorage.setItem(`crc_admin_manifest_${normalized.date}`, JSON.stringify(normalized));
-    } catch {
-      // ignore storage quota
-    }
-  }
-
-  // 2. Primary: Save to Firestore
+  // 1. Primary: Save to Firestore
   try {
-    await saveManifestFirestore(normalized);
+    await saveManifestFirestore(manifest);
   } catch (err) {
     console.warn('[Manifest] Failed to save to Firestore:', err);
   }
 
-  // 3. Secondary: Save to Supabase
+  // 2. Secondary: Save to Supabase and mockStorage
   try {
-    await supabase
+    const { error } = await supabase
       .from(MANIFESTS_TABLE)
       .upsert(
         {
-          date: normalized.date,
-          signups: normalized.signups,
-          vehicles: normalized.vehicles,
+          date: manifest.date,
+          signups: Array.isArray(manifest.signups) ? manifest.signups : [],
+          vehicles: Array.isArray(manifest.vehicles) ? manifest.vehicles : [],
         },
         { onConflict: 'date' }
       );
+    if (error) {
+      console.warn('[Manifest] Remote upsert failed, saving to local store:', error);
+      mockStorage.setTable(
+        MANIFESTS_TABLE,
+        [
+          ...mockStorage.getTable(MANIFESTS_TABLE).filter((r) => r.date !== manifest.date),
+          {
+            date: manifest.date,
+            signups: manifest.signups,
+            vehicles: manifest.vehicles,
+            updated_at: new Date().toISOString(),
+          },
+        ]
+      );
+    }
   } catch (err) {
-    console.warn('[Manifest] Exception in upsertManifest for Supabase:', err);
+    console.warn('[Manifest] Exception in upsertManifest, saving locally:', err);
+    mockStorage.setTable(
+      MANIFESTS_TABLE,
+      [
+        ...mockStorage.getTable(MANIFESTS_TABLE).filter((r) => r.date !== manifest.date),
+        {
+          date: manifest.date,
+          signups: manifest.signups,
+          vehicles: manifest.vehicles,
+          updated_at: new Date().toISOString(),
+        },
+      ]
+    );
   }
 }
 

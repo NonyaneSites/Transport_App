@@ -53,45 +53,51 @@ export function mergeIncomingManifest(
   const currentActiveVehicle = current.vehicles.find((v) => v.id === activeVehicleId);
   if (!currentActiveVehicle) return incoming;
 
-  // If the vehicle was deleted in incoming (by admin), respect the deletion!
-  const incActiveVehicle = incoming.vehicles.find((v) => v.id === activeVehicleId);
-  if (!incActiveVehicle) return incoming;
-
-  // Merge vehicles: incoming (admin) is authoritative for vehicle existence, riders, and stops.
-  // Rep's draft work (attendance, sponsorships, unpaid flags, notes, cash collections) on the active vehicle is preserved.
+  // Merge vehicles: adopt authoritative remote draftState from Firestore
   const mergedVehicles = incoming.vehicles.map((incV) => {
     if (incV.id !== activeVehicleId) {
       return incV;
     }
 
+    // It's the active vehicle: combine riders and orderedStops
+    const curRiders = new Set(currentActiveVehicle.riders || []);
+    const incRiders = incV.riders || [];
+    const combinedRiders = Array.from(new Set([...curRiders, ...incRiders]));
+    const combinedOrderedStops = Array.from(new Set([...(currentActiveVehicle.orderedStops || []), ...(incV.orderedStops || [])]));
+
     const incDraft = incV.draftState;
     const curDraft = currentActiveVehicle.draftState;
 
-    const nextDraftState: VehicleDraftState = {
-      ...(curDraft || {}),
-      ...(incDraft || {}),
-      presentIds: incDraft?.presentIds !== undefined ? incDraft.presentIds : (curDraft?.presentIds || []),
-      absentIds: incDraft?.absentIds !== undefined ? incDraft.absentIds : (curDraft?.absentIds || []),
-      sponsoredIds: incDraft?.sponsoredIds !== undefined ? incDraft.sponsoredIds : (curDraft?.sponsoredIds || []),
-      unpaidIds: incDraft?.unpaidIds !== undefined ? incDraft.unpaidIds : (curDraft?.unpaidIds || []),
-      notes: { ...(curDraft?.notes || {}), ...(incDraft?.notes || {}) },
-      generalNotes: incV.generalNotes ?? incDraft?.generalNotes ?? curDraft?.generalNotes,
-      repName: incV.repName ?? incDraft?.repName ?? curDraft?.repName,
-      licensePlate: incV.licensePlate ?? incDraft?.licensePlate ?? curDraft?.licensePlate,
-      coReps: incDraft?.coReps ?? curDraft?.coReps,
-      updatedAt: incDraft?.updatedAt || curDraft?.updatedAt || new Date().toISOString(),
-      updatedBy: incDraft?.updatedBy || curDraft?.updatedBy,
-    };
+    // Adopt remote draftState from Firestore as authoritative for shared arrays
+    // (sponsoredIds, unpaidIds, presentIds, absentIds, notes)
+    const nextDraftState: VehicleDraftState = incDraft
+      ? {
+          ...(curDraft || {}),
+          ...incDraft,
+          presentIds: incDraft.presentIds !== undefined ? incDraft.presentIds : (curDraft?.presentIds || []),
+          absentIds: incDraft.absentIds !== undefined ? incDraft.absentIds : (curDraft?.absentIds || []),
+          sponsoredIds: incDraft.sponsoredIds !== undefined ? incDraft.sponsoredIds : (curDraft?.sponsoredIds || []),
+          unpaidIds: incDraft.unpaidIds !== undefined ? incDraft.unpaidIds : (curDraft?.unpaidIds || []),
+          notes: { ...(curDraft?.notes || {}), ...(incDraft.notes || {}) },
+          updatedAt: incDraft.updatedAt || curDraft?.updatedAt || new Date().toISOString(),
+          updatedBy: incDraft.updatedBy || curDraft?.updatedBy,
+        }
+      : (curDraft || {});
 
     return {
-      ...incV, // Admin assignment is authoritative
+      ...incV,
+      riders: combinedRiders,
+      orderedStops: combinedOrderedStops,
+      submitted: incV.submitted !== undefined ? incV.submitted : currentActiveVehicle.submitted,
+      submittedAt: incV.submittedAt || currentActiveVehicle.submittedAt,
+      submittedBy: incV.submittedBy || currentActiveVehicle.submittedBy,
       draftState: nextDraftState,
     };
   });
 
-  // Merge signups: incoming is authoritative, but keep any local in-flight walk-ins
+  // Merge signups: ensure newly created walk-in signups from incoming or local are preserved!
   const incomingIds = new Set(incoming.signups.map((p) => p.id));
-  const localOnlySignups = current.signups.filter((p) => !incomingIds.has(p.id) && p.id.startsWith('walkin-'));
+  const localOnlySignups = current.signups.filter((p) => !incomingIds.has(p.id));
 
   return {
     ...incoming,
@@ -282,11 +288,12 @@ export function useManifest(
           if (keyRef.current !== key) return;
           if (remoteManifest) {
             setManifest((prev) => (prev && prev.date === key ? mergeIncomingManifest(prev, remoteManifest, activeVehicleIdRef.current) : remoteManifest));
-            setLastSyncedAt(Date.now());
-            setLoading(false);
+          } else {
+            // New or uncreated date/service: initialize an isolated, clean empty manifest for this key
+            setManifest((prev) => (prev && prev.date === key ? prev : { date: key, signups: [], vehicles: [] }));
           }
-          // Note: if remoteManifest is null, do NOT wipe local state or prematurely set loading=false.
-          // loadManifest(key) below will query local storage and secondary caches.
+          setLastSyncedAt(Date.now());
+          setLoading(false);
         },
         (err) => {
           console.warn('[useManifest] Firestore onSnapshot warning:', err);
@@ -553,100 +560,66 @@ export function useManifest(
 
   async function save(m: Manifest): Promise<void> {
     const normalized = normalizeManifestData(m) || m;
-    if (!normalized || !normalized.date) return;
-    const targetKey = normalized.date;
+    if (!normalized || !key) return;
 
-    const now = new Date().toISOString();
-    const toPersist: Manifest = {
-      ...normalized,
-      updated_at: now,
-    };
-
-    // 0. Synchronous local persistence immediately so state survives instant page refresh or navigation
-    mockStorage.upsert(MANIFESTS_TABLE, {
-      date: targetKey,
-      signups: toPersist.signups,
-      vehicles: toPersist.vehicles,
-      updated_at: now,
-    });
-    if (typeof localStorage !== 'undefined') {
-      try {
-        localStorage.setItem(`crc_admin_manifest_${targetKey}`, JSON.stringify(toPersist));
-      } catch {
-        // ignore quota error
-      }
+    // Strict boundary: Never save a manifest whose date does not match the active session key
+    if (normalized.date !== key) {
+      console.warn(`[useManifest] Refusing cross-date save attempt: manifest date '${normalized.date}' does not match active session key '${key}'`);
+      return;
     }
 
+    // 1. Primary: Save to Firestore
+    saveManifestFirestore(normalized).catch((err) => {
+      console.warn('[useManifest] saveManifestFirestore warning:', err);
+    });
+
     // Fetch latest remote row to safely merge any other vehicles submitted or edited concurrently
-    let finalToSave = toPersist;
+    let finalToSave = normalized;
     try {
       const { data: latestRow } = await supabase
         .from(MANIFESTS_TABLE)
         .select('date, signups, vehicles, updated_at')
-        .eq('date', targetKey)
+        .eq('date', key)
         .maybeSingle();
 
       if (latestRow) {
         const remoteNorm = normalizeManifestData(latestRow);
         if (remoteNorm) {
-          const mergedVehicles = toPersist.vehicles.map((localV) => {
+          const mergedVehicles = normalized.vehicles.map((localV) => {
             const remoteV = remoteNorm.vehicles.find((rv) => rv.id === localV.id);
             if (!remoteV) return localV;
-            // Retain rep submission status and draft work for existing vehicles
-            return {
-              ...localV,
-              submitted: remoteV.submitted !== undefined ? remoteV.submitted : localV.submitted,
-              submittedAt: remoteV.submittedAt || localV.submittedAt,
-              submittedBy: remoteV.submittedBy || localV.submittedBy,
-              draftState: {
-                ...(remoteV.draftState || {}),
-                ...(localV.draftState || {}),
-              },
-            };
+            // If remote vehicle was already submitted or newer and local is not submitting this vehicle:
+            if (remoteV.submitted && !localV.submitted) {
+              return remoteV;
+            }
+            return localV;
+          });
+
+          // Also retain any vehicles that exist remotely but not locally
+          remoteNorm.vehicles.forEach((rv) => {
+            if (!mergedVehicles.some((mv) => mv.id === rv.id)) {
+              mergedVehicles.push(rv);
+            }
           });
 
           finalToSave = {
-            ...toPersist,
+            ...normalized,
             vehicles: mergedVehicles,
           };
         }
       }
     } catch {
-      // fallback to toPersist
+      // fallback to normalized
     }
 
-    // Cache merged result locally
-    mockStorage.upsert(MANIFESTS_TABLE, {
-      date: targetKey,
-      signups: finalToSave.signups,
-      vehicles: finalToSave.vehicles,
-      updated_at: now,
-    });
-    if (typeof localStorage !== 'undefined') {
-      try {
-        localStorage.setItem(`crc_admin_manifest_${targetKey}`, JSON.stringify(finalToSave));
-      } catch {
-        // ignore quota error
-      }
-    }
-
-    // Update in-memory React state ONLY if this save matches the currently active session key
-    if (targetKey === keyRef.current) {
-      setManifest((prev) => mergeIncomingManifest(prev, finalToSave, activeVehicleIdRef.current));
-      setLastSyncedAt(Date.now());
-    }
-
-    // 1. Primary: Save to Firestore
-    try {
-      await saveManifestFirestore(finalToSave);
-    } catch (err) {
-      console.warn('[useManifest] saveManifestFirestore warning:', err);
-    }
+    // Optimistically update local state immediately for zero-lag UI
+    setManifest((prev) => mergeIncomingManifest(prev, finalToSave, activeVehicleIdRef.current));
+    setLastSyncedAt(Date.now());
 
     // Broadcast across local tabs immediately
     if (broadcastChannelRef.current) {
       try {
-        broadcastChannelRef.current.postMessage({ key: targetKey, manifest: finalToSave });
+        broadcastChannelRef.current.postMessage({ key: finalToSave.date, manifest: finalToSave });
       } catch {
         // Broadcast failed
       }
@@ -656,28 +629,25 @@ export function useManifest(
     safeChannelSend({
       type: 'broadcast',
       event: 'manifest_updated',
-      payload: { date: targetKey, manifest: finalToSave },
+      payload: { date: finalToSave.date, manifest: finalToSave },
     });
 
-    try {
-      const { error: upsertError, data } = await supabase
-        .from(MANIFESTS_TABLE)
-        .upsert(
-          {
-            date: targetKey,
-            signups: finalToSave.signups,
-            vehicles: finalToSave.vehicles,
-          },
-          { onConflict: 'date' }
-        )
-        .select('updated_at')
-        .single();
-      if (!upsertError && data?.updated_at && targetKey === keyRef.current) {
-        lastSavedUpdatedAtRef.current = data.updated_at;
-        lastKnownUpdatedAtRef.current = data.updated_at;
-      }
-    } catch (err) {
-      console.warn('[useManifest] supabase upsert error:', err);
+    const { error: upsertError, data } = await supabase
+      .from(MANIFESTS_TABLE)
+      .upsert(
+        {
+          date: finalToSave.date,
+          signups: finalToSave.signups,
+          vehicles: finalToSave.vehicles,
+        },
+        { onConflict: 'date' }
+      )
+      .select('updated_at')
+      .single();
+    if (upsertError) throw upsertError;
+    if (data?.updated_at) {
+      lastSavedUpdatedAtRef.current = data.updated_at;
+      lastKnownUpdatedAtRef.current = data.updated_at;
     }
   }
 
@@ -726,11 +696,6 @@ export function useManifest(
 
     // 2. Only modify the present/absent flag of THIS specific vehicle's passengers
     const targetVehicle = remoteManifest.vehicles.find((v) => v.id === vehicleId);
-    if (!targetVehicle) {
-      // Vehicle was deleted by admin; do not recreate or save!
-      console.warn(`[useManifest] updateVehicleDraft skipped: vehicle ${vehicleId} was deleted.`);
-      return;
-    }
     const vehicleRiderSet = new Set(targetVehicle?.riders ?? []);
 
     const updatedSignups = remoteManifest.signups.map((p) => {
@@ -802,6 +767,7 @@ export function useManifest(
       mergedDraft?.repName || repName,
       mergedDraft?.licensePlate || licensePlate
     ).catch(() => {});
+    saveManifestFirestore(mergedManifest).catch(() => {});
 
     // Broadcast targeted vehicle delta across local tabs
     if (broadcastChannelRef.current) {

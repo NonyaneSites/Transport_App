@@ -174,43 +174,21 @@ export async function listManifestsFirestore(): Promise<Manifest[]> {
 }
 
 /**
- * Recursively removes undefined fields and filters undefined from arrays,
- * which Firestore strictly forbids and rejects with "Unsupported field value: undefined".
- */
-export function cleanForFirestore<T>(obj: T): T {
-  if (obj === null || obj === undefined) {
-    return obj;
-  }
-  if (Array.isArray(obj)) {
-    return obj
-      .filter((item) => item !== undefined)
-      .map((item) => cleanForFirestore(item)) as unknown as T;
-  }
-  if (typeof obj === 'object') {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
-      if (value !== undefined) {
-        result[key] = cleanForFirestore(value);
-      }
-    }
-    return result as T;
-  }
-  return obj;
-}
-
-/**
  * Saves or updates a manifest document in Firestore.
  */
 export async function saveManifestFirestore(manifest: Manifest): Promise<void> {
   try {
     const docRef = doc(db, MANIFESTS_COLLECTION, manifest.date);
-    const cleaned = cleanForFirestore({
-      date: manifest.date,
-      signups: manifest.signups || [],
-      vehicles: manifest.vehicles || [],
-      updatedAt: manifest.updated_at || new Date().toISOString(),
-    });
-    await setDoc(docRef, cleaned, { merge: true });
+    await setDoc(
+      docRef,
+      {
+        date: manifest.date,
+        signups: manifest.signups || [],
+        vehicles: manifest.vehicles || [],
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
   } catch (err) {
     console.error('[Firebase] saveManifestFirestore error:', err);
     throw err;
@@ -315,12 +293,12 @@ export async function appendWalkInTransaction(
 
     tx.set(
       docRef,
-      cleanForFirestore({
+      {
         date: key,
         signups: nextSignups,
         vehicles: nextVehicles,
         updatedAt: new Date().toISOString(),
-      }),
+      },
       { merge: true }
     );
 
@@ -365,13 +343,10 @@ export async function updateVehicleDraftInFirestore(
       };
     });
 
-    tx.update(
-      docRef,
-      cleanForFirestore({
-        vehicles: updatedVehicles,
-        updatedAt: new Date().toISOString(),
-      })
-    );
+    tx.update(docRef, {
+      vehicles: updatedVehicles,
+      updatedAt: new Date().toISOString(),
+    });
   });
 }
 
@@ -417,13 +392,10 @@ export async function toggleRiderSponsoredInFirestore(
       };
     });
 
-    tx.update(
-      docRef,
-      cleanForFirestore({
-        vehicles: updatedVehicles,
-        updatedAt: new Date().toISOString(),
-      })
-    );
+    tx.update(docRef, {
+      vehicles: updatedVehicles,
+      updatedAt: new Date().toISOString(),
+    });
   });
 }
 
@@ -469,13 +441,10 @@ export async function toggleRiderUnpaidInFirestore(
       };
     });
 
-    tx.update(
-      docRef,
-      cleanForFirestore({
-        vehicles: updatedVehicles,
-        updatedAt: new Date().toISOString(),
-      })
-    );
+    tx.update(docRef, {
+      vehicles: updatedVehicles,
+      updatedAt: new Date().toISOString(),
+    });
   });
 }
 
@@ -528,12 +497,9 @@ export async function setRiderAttendanceInFirestore(
       };
     });
 
-    tx.update(
-      docRef,
-      cleanForFirestore({
-        vehicles: updatedVehicles,
-        updatedAt: new Date().toISOString(),
-      })
-    );
+    tx.update(docRef, {
+      vehicles: updatedVehicles,
+      updatedAt: new Date().toISOString(),
+    });
   });
 }
