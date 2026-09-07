@@ -5,6 +5,7 @@ const supabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | unde
 
 export const MANIFESTS_TABLE = 'transport_manifests';
 export const LEDGER_TABLE = 'cancellation_ledger';
+export const VEHICLES_TABLE = 'transport_vehicles';
 
 const isConfigured = Boolean(
   supabaseUrl &&
@@ -26,6 +27,7 @@ export class MockSupabaseStorage {
   private memoryStore: Record<string, TableRow[]> = {
     [MANIFESTS_TABLE]: [],
     [LEDGER_TABLE]: [],
+    [VEHICLES_TABLE]: [],
   };
   private listeners: Set<(table: string, payload: StoragePayload) => void> = new Set();
 
@@ -53,6 +55,11 @@ export class MockSupabaseStorage {
         const parsed = JSON.parse(ledger);
         if (Array.isArray(parsed)) this.memoryStore[LEDGER_TABLE] = parsed;
       }
+      const vehicles = localStorage.getItem(`crc_transport_${VEHICLES_TABLE}`);
+      if (vehicles) {
+        const parsed = JSON.parse(vehicles);
+        if (Array.isArray(parsed)) this.memoryStore[VEHICLES_TABLE] = parsed;
+      }
     } catch {
       // Ignore local storage parse errors
     }
@@ -76,10 +83,11 @@ export class MockSupabaseStorage {
     this.saveToLocalStorage(table);
   }
 
-  upsert(table: string, row: TableRow, keyCol: string = 'date') {
+  upsert(table: string, row: TableRow, keyCol?: string) {
+    const col = keyCol || (table === MANIFESTS_TABLE ? 'date' : 'id');
     const existing = this.getTable(table);
-    const keyVal = row[keyCol];
-    const filtered = existing.filter((r) => String(r[keyCol] ?? '') !== String(keyVal ?? ''));
+    const keyVal = row[col];
+    const filtered = existing.filter((r) => String(r[col] ?? '') !== String(keyVal ?? ''));
     filtered.push(row);
     this.setTable(table, filtered);
     this.notify(table, 'UPSERT', row);

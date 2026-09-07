@@ -1,5 +1,11 @@
 import * as XLSX from 'xlsx';
 import { supabase } from './supabase';
+import {
+  listLedgerFromServer,
+  settleLedgerOnServer,
+  addManualLedgerOnServer,
+  deleteLedgerOnServer,
+} from './serverApi';
 import type { Passenger, Vehicle } from './types';
 import { CANCELLATION_FEE } from './types';
 import { naturalCompare } from './sort';
@@ -33,7 +39,7 @@ export interface LedgerEntry {
   general_notes: string;
 }
 
-interface AbsenteeInput extends Passenger {
+export interface AbsenteeInput extends Passenger {
   sponsored?: boolean;
   sponsorNote?: string;
 }
@@ -175,7 +181,8 @@ export function extractNameAndService(
     raw = raw.replace(complexMatch[0], ' ').trim();
   }
 
-  // Clean any trailing FTV/R20 tags, punctuation, or empty parens
+  // Clean any trailing FTV/R20 tags, attached rep markers, punctuation, or empty parens
+  raw = raw.replace(/(?:[–—|-]\s*)?\(?\s*rep(?:resentative)?\s*[:—–-]?\s*[^),]+(?:\)|$)/gi, '').trim();
   raw = raw.replace(/\bFTV\s*20\b|\bFTV20\b|\bFTV\b|\bR20\b/gi, '').trim();
   raw = raw.replace(/\(\s*\)/g, '').trim();
   raw = raw.replace(/[(),]+$/, '').trim();
@@ -197,6 +204,8 @@ export function extractNameAndService(
 /**
  * Robust search evaluator that provides accurate prefix, full-name, token,
  * structure, notes, and substring matching with intuitive priority scoring.
+ * Intentionally EXCLUDES rep name so searching a rep's name does not mistakenly
+ * return every absentee they submitted.
  */
 export function evaluateLedgerSearch(
   item: {
@@ -222,7 +231,6 @@ export function evaluateLedgerSearch(
   const structure = (item.structure || '').toLowerCase().trim();
   const notes = `${item.general_notes || ''} ${item.sponsor_note || ''} ${item.notes || ''}`.toLowerCase().trim();
   const dateStr = `${item.date || ''} ${item.formattedDateList || ''}`.toLowerCase().trim();
-  const rep = (item.repName || item.rep_name || '').toLowerCase().trim();
   const service = `${item.service || ''} ${(item.serviceCodes || []).join(' ')}`.toLowerCase().trim();
 
   const nameWords = fullName.split(/\s+/).filter(Boolean);
@@ -265,8 +273,14 @@ export function evaluateLedgerSearch(
     return { matched: true, score: 500 };
   }
 
-  // 7. Multi-token match across all fields (name + structure + notes + dates + service)
-  const combinedAll = `${fullName} ${structure} ${notes} ${dateStr} ${rep} ${service}`;
+  // 7. Structure match (e.g. user typed "S1" or "FTV")
+  if (structure === q || structure.startsWith(q) || structure.includes(q)) {
+    return { matched: true, score: 400 };
+  }
+
+  // 8. Multi-token match across fields: passenger name, structure, notes, dates, service.
+  // Note: rep name is intentionally omitted so searching a rep's name does not match submitted passengers.
+  const combinedAll = `${fullName} ${structure} ${notes} ${dateStr} ${service}`;
   const allTokensInCombined = qTokens.every((token) => combinedAll.includes(token));
   if (allTokensInCombined) {
     let score = 300;
@@ -349,14 +363,22 @@ export async function withdrawAbsentees(
 }
 
 export async function listLedgerEntries(): Promise<LedgerEntry[]> {
+  // 1. Primary: Central Express Server API
   try {
-    const { data, error } = await supabase
+    const serverEntries = await listLedgerFromServer();
+    if (serverEntries && serverEntries.length > 0) {
+      return serverEntries;
+    }
+  } catch (err) {
+    console.debug('[Ledger] Server fetch note:', err);
+  }
+
+  // 2. Secondary: Supabase / Mock store
+  try {
+    const { data } = await supabase
       .from(LEDGER_TABLE)
       .select('*')
       .order('submitted_at', { ascending: false });
-    if (error) {
-      console.warn('[Ledger] Failed to fetch remote ledger, reading local store:', error);
-    }
     if (data && Array.isArray(data)) {
       return data as LedgerEntry[];
     }
@@ -367,27 +389,21 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
 }
 
 export async function listLedgerByDate(date: string): Promise<LedgerEntry[]> {
-  try {
-    const { data, error } = await supabase
-      .from(LEDGER_TABLE)
-      .select('*')
-      .eq('date', date)
-      .order('submitted_at', { ascending: false });
-    if (error) {
-      console.warn('[Ledger] Failed to fetch remote ledger by date:', error);
-    }
-    if (data && Array.isArray(data)) {
-      return data as LedgerEntry[];
-    }
-  } catch (err) {
-    console.warn('[Ledger] Exception fetching ledger by date:', err);
-  }
-  return [];
+  const all = await listLedgerEntries();
+  return all.filter((entry) => entry.date === date);
 }
 
 export async function deleteLedgerEntry(id: string): Promise<void> {
-  const { error } = await supabase.from(LEDGER_TABLE).delete().eq('id', id);
-  if (error) throw error;
+  try {
+    await deleteLedgerOnServer(id);
+  } catch (err) {
+    console.debug('[Ledger] Server delete note:', err);
+  }
+  try {
+    await supabase.from(LEDGER_TABLE).delete().eq('id', id);
+  } catch {
+    // local fallback
+  }
 }
 
 /**
@@ -398,8 +414,16 @@ export async function deleteLedgerEntry(id: string): Promise<void> {
  */
 export async function settleLedgerEntries(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
-  const { error } = await supabase.from(LEDGER_TABLE).delete().in('id', ids);
-  if (error) throw error;
+  try {
+    await settleLedgerOnServer(ids);
+  } catch (err) {
+    console.debug('[Ledger] Server settle note:', err);
+  }
+  try {
+    await supabase.from(LEDGER_TABLE).delete().in('id', ids);
+  } catch {
+    // local fallback
+  }
 }
 
 export async function updateLedgerEntry(id: string, updates: Partial<LedgerEntry>): Promise<void> {
@@ -458,6 +482,21 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
     structure_debt: debtAmt,
     general_notes: input.notes || '',
   };
+
+  try {
+    const serverEntry = await addManualLedgerOnServer(row);
+    if (serverEntry) {
+      // Also update local store
+      try {
+        await supabase.from(LEDGER_TABLE).insert([serverEntry]);
+      } catch {
+        /* ignore local mirror errors */
+      }
+      return serverEntry;
+    }
+  } catch (err) {
+    console.debug('[Ledger] Server addManual error:', err);
+  }
 
   const { data, error } = await supabase
     .from(LEDGER_TABLE)

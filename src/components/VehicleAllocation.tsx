@@ -9,7 +9,7 @@ import { EditVehicleModal } from './EditVehicleModal';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
-import { passengersByStop, passengersByPoolGroup, unassignedPassengers } from '@/lib/manifest';
+import { passengersByStop, passengersByPoolGroup, unassignedPassengers, deleteVehicleFromDb } from '@/lib/manifest';
 import { parseManifestKey } from '@/lib/dates';
 import { allocateSubStopsIntact } from '@/lib/allocation';
 import { detectVehicleRep, detectAllVehicleReps, getRepStructure, isPassengerRepOfVehicle, matchRiderToOfficialRep } from '@/lib/officialReps';
@@ -270,6 +270,9 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     }
     if (editingVehicle?.id === vehicleId) {
       setEditingVehicle(null);
+    }
+    if (localManifest.date) {
+      deleteVehicleFromDb(localManifest.date, vehicleId).catch(() => {});
     }
     mutateAndSave((prev) => {
       const vehicle = prev.vehicles.find((v) => v.id === vehicleId);

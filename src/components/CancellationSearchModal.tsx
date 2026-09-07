@@ -193,7 +193,6 @@ export function CancellationSearchModal({
             sponsor_note: e.sponsor_note,
             date: e.date,
             service: e.service,
-            rep_name: e.rep_name,
           },
           q
         ).matched

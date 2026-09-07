@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { supabase, MANIFESTS_TABLE, mockStorage } from './supabase';
+import { supabase, MANIFESTS_TABLE, VEHICLES_TABLE, mockStorage } from './supabase';
 import {
   loadManifest,
   normalizeManifestData,
   applyWalkInToManifest,
   reconcileManifestForSave,
+  saveVehicleToDb,
+  syncVehiclesToDb,
+  dbRowToVehicle,
 } from './manifest';
 import type { Manifest, Vehicle, Passenger, VehicleDraftState, LiveSyncAction } from './types';
 
@@ -380,6 +383,34 @@ export function useManifest(
           }
         }
       )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: VEHICLES_TABLE, filter: `manifest_key=eq.${key}` },
+        (payload) => {
+          if (keyRef.current !== key) return;
+          const row = payload.new as Record<string, unknown> | null;
+          if (!row || !row.id) return;
+          const incomingVehicle = dbRowToVehicle(row);
+
+          setManifest((prev) => {
+            if (!prev || prev.date !== key) return prev;
+            const isTargetActive = activeVehicleIdRef.current === incomingVehicle.id;
+            const idx = prev.vehicles.findIndex((v) => v.id === incomingVehicle.id);
+            let updatedVehicles: Vehicle[];
+            if (idx !== -1) {
+              if (isTargetActive && prev.vehicles[idx].draftState?.updatedBy === incomingVehicle.draftState?.updatedBy) {
+                return prev;
+              }
+              updatedVehicles = [...prev.vehicles];
+              updatedVehicles[idx] = incomingVehicle;
+            } else {
+              updatedVehicles = [...prev.vehicles, incomingVehicle];
+            }
+            return { ...prev, vehicles: updatedVehicles };
+          });
+          setLastSyncedAt(Date.now());
+        }
+      )
       .on('broadcast', { event: 'vehicle_draft_delta' }, (msg: {
         payload?: {
           vehicleId?: string;
@@ -569,6 +600,11 @@ export function useManifest(
 
     // 5. Persist the reconciled manifest to Supabase (source of truth), with local fallback
     try {
+      // Also persist each vehicle individually to transport_vehicles for granular control
+      syncVehiclesToDb(merged.date, merged.vehicles).catch((err) => {
+        console.warn('[useManifest] Error saving individual vehicles:', err);
+      });
+
       const { error: upsertError, data } = await supabase
         .from(MANIFESTS_TABLE)
         .upsert(
@@ -752,6 +788,13 @@ export function useManifest(
     });
 
     try {
+      const updatedVehicleRecord = updatedVehicles.find((v) => v.id === vehicleId);
+      if (updatedVehicleRecord) {
+        saveVehicleToDb(mergedManifest.date, updatedVehicleRecord).catch((err) => {
+          console.warn('[useManifest] Error saving individual vehicle:', err);
+        });
+      }
+
       const { data } = await supabase
         .from(MANIFESTS_TABLE)
         .upsert(
@@ -796,6 +839,14 @@ export function useManifest(
         const remote = (latestRow ? normalizeManifestData(latestRow) : null) || { date: activeKey, signups: [], vehicles: [] };
 
         const updated = applyWalkInToManifest(remote, vehicleId, newPassenger, draftUpdate);
+
+        // Persist target vehicle individually to transport_vehicles
+        const updatedTargetVehicle = updated.vehicles.find((v) => v.id === vehicleId);
+        if (updatedTargetVehicle) {
+          saveVehicleToDb(updated.date, updatedTargetVehicle).catch((err) => {
+            console.warn('[useManifest] Error saving walk-in vehicle individually:', err);
+          });
+        }
 
         const { data: saved } = await supabase
           .from(MANIFESTS_TABLE)

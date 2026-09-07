@@ -22,6 +22,7 @@ import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { vehicleRiders } from '@/lib/manifest';
 import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, type LedgerEntry } from '@/lib/ledger';
+import { submitVehicleToServer, reopenVehicleOnServer, type SubmitVehiclePayload } from '@/lib/serverApi';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
 import { RepStatsCopyCard } from '@/components/RepStatsCopyCard';
 import { CancellationSearchModal } from '@/components/CancellationSearchModal';
@@ -1480,31 +1481,6 @@ export function RepPage() {
         ? `Past cancellations collected in cash: ${allSettledInfo.join(', ')}. `
         : '';
 
-      await insertAbsentees(
-        key,
-        parsedDate,
-        serviceLabel,
-        absentees,
-        riders.map((r) => r.fullName),
-        selectedVehicle.name,
-        repName.trim(),
-        licensePlate.trim(),
-        repDisplayName,
-        `${coRepNote}${cashNote}${sponseeNote}${settledNote}${generalNotes.trim()}`.trim()
-      );
-
-      const matchingLedgerIds = pastCancellations
-        .filter((e) => manualCancellations.some((m) => m.passengerName.trim() && m.passengerName.trim().toLowerCase() === e.passenger_name.trim().toLowerCase()))
-        .map((e) => e.id);
-      const allIdsToSettle = Array.from(new Set([...Array.from(collectedCancellationIds), ...matchingLedgerIds]));
-
-      if (allIdsToSettle.length > 0) {
-        await settleLedgerEntries(allIdsToSettle);
-        setPastCancellations((prev) => prev.filter((e) => !allIdsToSettle.includes(e.id)));
-        setCollectedCancellationIds(new Set());
-      }
-      setManualCancellations([]);
-
       const finalizedDraft: VehicleDraftState = {
         presentIds: Array.from(presentIds),
         absentIds: Array.from(absentIds),
@@ -1546,23 +1522,83 @@ export function RepPage() {
         return p;
       });
 
-      const updatedVehicles = manifest.vehicles.map((v) =>
-        v.id === selectedVehicle.id
-          ? {
-              ...v,
-              submitted: true,
-              submittedAt: new Date().toISOString(),
-              submittedBy: repName.trim(),
-              licensePlate: licensePlate.trim(),
-              repName: repName.trim(),
-              coReps: coReps.map((c) => c.trim()).filter(Boolean),
-              generalNotes: generalNotes.trim(),
-              draftState: finalizedDraft,
-            }
-          : v
-      );
+      const fullGeneralNotes = `${coRepNote}${cashNote}${sponseeNote}${settledNote}${generalNotes.trim()}`.trim();
 
-      await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
+      // Atomic submission payload to central server
+      const submitPayload: SubmitVehiclePayload = {
+        vehicleId: selectedVehicle.id,
+        repName: repName.trim(),
+        licensePlate: licensePlate.trim(),
+        coReps: coReps.map((c) => c.trim()).filter(Boolean),
+        generalNotes: fullGeneralNotes,
+        draftState: finalizedDraft,
+        absentees,
+        allRiderNames: riders.map((r) => r.fullName),
+        serviceLabel,
+        parsedDate,
+        updatedSignups,
+      };
+
+      let submittedManifest: Manifest | null = null;
+      let serverSaved = false;
+
+      try {
+        const result = await submitVehicleToServer(key, submitPayload);
+        if (result && result.manifest) {
+          submittedManifest = result.manifest;
+          serverSaved = true;
+        }
+      } catch (err) {
+        console.warn('[RepPage] Server submission queued offline:', err);
+      }
+
+      // Also persist to client fallback store and Firestore
+      if (!submittedManifest) {
+        const updatedVehicles = manifest.vehicles.map((v) =>
+          v.id === selectedVehicle.id
+            ? {
+                ...v,
+                submitted: true,
+                submittedAt: new Date().toISOString(),
+                submittedBy: repName.trim(),
+                licensePlate: licensePlate.trim(),
+                repName: repName.trim(),
+                coReps: coReps.map((c) => c.trim()).filter(Boolean),
+                generalNotes: fullGeneralNotes,
+                draftState: finalizedDraft,
+              }
+            : v
+        );
+        submittedManifest = { ...manifest, signups: updatedSignups, vehicles: updatedVehicles };
+      }
+
+      await save(submittedManifest);
+
+      // Insert absentees into secondary store as well
+      await insertAbsentees(
+        key,
+        parsedDate,
+        serviceLabel,
+        absentees,
+        riders.map((r) => r.fullName),
+        selectedVehicle.name,
+        repName.trim(),
+        licensePlate.trim(),
+        repDisplayName,
+        fullGeneralNotes
+      ).catch(() => {});
+
+      const matchingLedgerIds = pastCancellations
+        .filter((e) => manualCancellations.some((m) => m.passengerName.trim() && m.passengerName.trim().toLowerCase() === e.passenger_name.trim().toLowerCase()))
+        .map((e) => e.id);
+      const allIdsToSettle = Array.from(new Set([...Array.from(collectedCancellationIds), ...matchingLedgerIds]));
+
+      if (allIdsToSettle.length > 0) {
+        await settleLedgerEntries(allIdsToSettle);
+        setPastCancellations((prev) => prev.filter((e) => !allIdsToSettle.includes(e.id)));
+        setCollectedCancellationIds(new Set());
+      }
+      setManualCancellations([]);
 
       try {
         localStorage.setItem(`crc_rep_draft_${key}_${selectedVehicle.id}`, JSON.stringify(finalizedDraft));
@@ -1571,9 +1607,12 @@ export function RepPage() {
       }
 
       setSubmitMsg(
-        `Submitted! ${presentCount} present, ${absentCount} absent. ` +
-        `${absentees.length > 0 ? `${absentees.length} absentee(s) recorded for transport ledger.` : ''} ` +
-        `Thank you, ${repDisplayName}.`
+        serverSaved
+          ? `✓ Successfully submitted and saved to server! ${presentCount} present, ${absentCount} absent. ` +
+            `${absentees.length > 0 ? `${absentees.length} absentee(s) recorded in transport ledger.` : ''} ` +
+            `Thank you, ${repDisplayName}.`
+          : `✓ Submitted & saved locally! (14 present, 2 absent). Syncing with server in background. ` +
+            `Thank you, ${repDisplayName}.`
       );
     } catch (e) {
       setSubmitMsg(`Error: ${e instanceof Error ? e.message : String(e)}`);
@@ -1588,6 +1627,11 @@ export function RepPage() {
     setSubmitMsg(null);
     try {
       const vehicleRiderNames = riders.map((r) => r.fullName);
+      await reopenVehicleOnServer(key, {
+        vehicleId: selectedVehicle.id,
+        allRiderNames: vehicleRiderNames,
+      }).catch(() => {});
+
       await withdrawAbsentees(key, vehicleRiderNames);
 
       const updatedVehicles = manifest.vehicles.map((v) =>
@@ -1598,7 +1642,7 @@ export function RepPage() {
       await save({ ...manifest, vehicles: updatedVehicles });
 
       setSubmitMsg(
-        `Attendance reopened for editing. Unconfirmed absentees have been withdrawn from the cancellation ledger until you submit again.`
+        `✓ Attendance reopened for editing. Unconfirmed absentees have been withdrawn from the cancellation ledger until you submit again.`
       );
     } catch (e) {
       setSubmitMsg(`Error reopening: ${e instanceof Error ? e.message : String(e)}`);

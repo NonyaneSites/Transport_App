@@ -1,4 +1,4 @@
-import { supabase, MANIFESTS_TABLE, mockStorage } from './supabase';
+import { supabase, MANIFESTS_TABLE, VEHICLES_TABLE, mockStorage } from './supabase';
 import type { Manifest, Passenger, Vehicle, VehicleDraftState } from './types';
 import { hubDisplayName } from './types';
 import { normalizePassengerText, getSubmissionTimestampEpoch } from './importer';
@@ -157,7 +157,164 @@ export function reconcileManifestForSave(
   };
 }
 
+export function vehicleToDbRow(manifestKey: string, v: Vehicle): Record<string, unknown> {
+  return {
+    id: v.id,
+    manifest_key: manifestKey,
+    name: v.name,
+    type: v.type,
+    riders: Array.isArray(v.riders) ? v.riders : [],
+    ordered_stops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
+    submitted: Boolean(v.submitted),
+    submitted_at: v.submittedAt || null,
+    submitted_by: v.submittedBy || null,
+    license_plate: v.licensePlate || null,
+    rep_name: v.repName || null,
+    co_reps: Array.isArray(v.coReps) ? v.coReps : null,
+    general_notes: v.generalNotes || null,
+    rep_count: typeof v.repCount === 'number' ? v.repCount : null,
+    stop_times: v.stopTimes || null,
+    stop_redirects: v.stopRedirects || null,
+    draft_state: v.draftState || null,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+export function dbRowToVehicle(row: Record<string, unknown>): Vehicle {
+  return {
+    id: String(row.id),
+    name: String(row.name || ''),
+    type: row.type === 'Bus' ? 'Bus' : 'Taxi',
+    riders: Array.isArray(row.riders) ? (row.riders as string[]) : [],
+    orderedStops: Array.isArray(row.ordered_stops)
+      ? (row.ordered_stops as string[])
+      : Array.isArray(row.orderedStops)
+      ? (row.orderedStops as string[])
+      : [],
+    submitted: Boolean(row.submitted),
+    submittedAt: (row.submitted_at || row.submittedAt) ? String(row.submitted_at || row.submittedAt) : undefined,
+    submittedBy: (row.submitted_by || row.submittedBy) ? String(row.submitted_by || row.submittedBy) : undefined,
+    licensePlate: (row.license_plate || row.licensePlate) ? String(row.license_plate || row.licensePlate) : undefined,
+    repName: (row.rep_name || row.repName) ? String(row.rep_name || row.repName) : undefined,
+    coReps: Array.isArray(row.co_reps)
+      ? (row.co_reps as string[])
+      : Array.isArray(row.coReps)
+      ? (row.coReps as string[])
+      : undefined,
+    generalNotes: (row.general_notes || row.generalNotes) ? String(row.general_notes || row.generalNotes) : undefined,
+    repCount: typeof row.rep_count === 'number'
+      ? row.rep_count
+      : typeof row.repCount === 'number'
+      ? row.repCount
+      : undefined,
+    stopTimes: (row.stop_times || row.stopTimes) as Record<string, string> | undefined,
+    stopRedirects: (row.stop_redirects || row.stopRedirects) as Record<string, string> | undefined,
+    draftState: (row.draft_state || row.draftState) as VehicleDraftState | undefined,
+  };
+}
+
+/**
+ * Saves a single vehicle individually to the database (transport_vehicles table),
+ * allowing granular, safe control per vehicle without overwriting the entire manifest.
+ */
+export async function saveVehicleToDb(manifestKey: string, vehicle: Vehicle): Promise<void> {
+  if (!manifestKey || !vehicle || !vehicle.id) return;
+  const row = vehicleToDbRow(manifestKey, vehicle);
+
+  // Always update local/mock storage immediately
+  mockStorage.upsert(VEHICLES_TABLE, row, 'id');
+
+  try {
+    const { error } = await supabase
+      .from(VEHICLES_TABLE)
+      .upsert(row, { onConflict: 'id' });
+    if (error) {
+      console.warn('[Manifest] Remote vehicle upsert warning:', error);
+    }
+  } catch (err) {
+    console.warn('[Manifest] Exception saving individual vehicle to remote DB:', err);
+  }
+}
+
+/**
+ * Deletes a single vehicle individually from the database.
+ */
+export async function deleteVehicleFromDb(manifestKey: string, vehicleId: string): Promise<void> {
+  if (!vehicleId) return;
+  const current = mockStorage.getTable(VEHICLES_TABLE);
+  mockStorage.setTable(
+    VEHICLES_TABLE,
+    current.filter((r) => !(String(r.id) === vehicleId && (!manifestKey || String(r.manifest_key) === manifestKey)))
+  );
+
+  try {
+    const { error } = await supabase
+      .from(VEHICLES_TABLE)
+      .delete()
+      .eq('id', vehicleId)
+      .eq('manifest_key', manifestKey);
+    if (error) {
+      console.warn('[Manifest] Remote vehicle delete warning:', error);
+    }
+  } catch (err) {
+    console.warn('[Manifest] Exception deleting individual vehicle from remote DB:', err);
+  }
+}
+
+/**
+ * Loads all individual vehicles persisted for a given manifest key.
+ */
+export async function loadVehiclesForManifest(manifestKey: string): Promise<Vehicle[]> {
+  if (!manifestKey) return [];
+  try {
+    const { data, error } = await supabase
+      .from(VEHICLES_TABLE)
+      .select('*')
+      .eq('manifest_key', manifestKey);
+    if (!error && Array.isArray(data) && data.length > 0) {
+      return data.map((r) => dbRowToVehicle(r as Record<string, unknown>));
+    }
+  } catch (err) {
+    console.warn('[Manifest] Failed to query remote vehicles table:', err);
+  }
+
+  // Local storage fallback
+  const localRows = mockStorage
+    .getTable(VEHICLES_TABLE)
+    .filter((r) => String(r.manifest_key) === manifestKey);
+  if (localRows.length > 0) {
+    return localRows.map((r) => dbRowToVehicle(r));
+  }
+  return [];
+}
+
+/**
+ * Synchronizes a full list of vehicles to the database individually.
+ * Upserts each vehicle as an individual row and removes any vehicles that no longer exist.
+ */
+export async function syncVehiclesToDb(manifestKey: string, vehicles: Vehicle[]): Promise<void> {
+  if (!manifestKey) return;
+  const currentVehicleIds = new Set(vehicles.map((v) => v.id));
+
+  // Prune any deleted vehicles
+  try {
+    const localExisting = mockStorage.getTable(VEHICLES_TABLE).filter((r) => String(r.manifest_key) === manifestKey);
+    const toDeleteIds = localExisting.filter((r) => !currentVehicleIds.has(String(r.id))).map((r) => String(r.id));
+    for (const delId of toDeleteIds) {
+      await deleteVehicleFromDb(manifestKey, delId);
+    }
+  } catch (e) {
+    console.warn('[Manifest] Error pruning deleted vehicles:', e);
+  }
+
+  // Save each vehicle individually
+  for (const v of vehicles) {
+    await saveVehicleToDb(manifestKey, v);
+  }
+}
+
 export async function loadManifest(key: string): Promise<Manifest | null> {
+  let manifest: Manifest | null = null;
   try {
     const { data, error } = await supabase
       .from(MANIFESTS_TABLE)
@@ -168,7 +325,7 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
       console.warn('[Manifest] Failed to load remote manifest, reading local store:', error);
     }
     if (data) {
-      return {
+      manifest = {
         date: data.date,
         signups: Array.isArray(data.signups) ? data.signups : [],
         vehicles: Array.isArray(data.vehicles)
@@ -186,20 +343,69 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
     console.warn('[Manifest] Exception loading manifest, checking local store:', err);
   }
 
-  // Fallback to local storage
-  const localRow = mockStorage.getTable(MANIFESTS_TABLE).find((r) => r.date === key);
-  if (!localRow) return null;
-  return {
-    date: String(localRow.date),
-    signups: Array.isArray(localRow.signups) ? (localRow.signups as Passenger[]) : [],
-    vehicles: Array.isArray(localRow.vehicles) ? (localRow.vehicles as Vehicle[]) : [],
-    created_at: typeof localRow.created_at === 'string' ? localRow.created_at : undefined,
-    updated_at: typeof localRow.updated_at === 'string' ? localRow.updated_at : undefined,
-  };
+  // Fallback to local storage if not yet loaded from remote
+  if (!manifest) {
+    const localRow = mockStorage.getTable(MANIFESTS_TABLE).find((r) => r.date === key);
+    if (localRow) {
+      manifest = {
+        date: String(localRow.date),
+        signups: Array.isArray(localRow.signups) ? (localRow.signups as Passenger[]) : [],
+        vehicles: Array.isArray(localRow.vehicles) ? (localRow.vehicles as Vehicle[]) : [],
+        created_at: typeof localRow.created_at === 'string' ? localRow.created_at : undefined,
+        updated_at: typeof localRow.updated_at === 'string' ? localRow.updated_at : undefined,
+      };
+    }
+  }
+
+  if (!manifest) return null;
+
+  // Integrate individual vehicle persistence (source of truth per vehicle)
+  try {
+    const individualVehicles = await loadVehiclesForManifest(key);
+    if (individualVehicles.length > 0) {
+      // Build a map of individually saved vehicles
+      const indMap = new Map(individualVehicles.map((v) => [v.id, v]));
+      // Merge with manifest list to maintain order, updating with latest individual records
+      const mergedVehicles: Vehicle[] = [];
+      const seenIds = new Set<string>();
+
+      for (const v of manifest.vehicles) {
+        if (indMap.has(v.id)) {
+          mergedVehicles.push(indMap.get(v.id)!);
+          seenIds.add(v.id);
+        } else {
+          mergedVehicles.push(v);
+          seenIds.add(v.id);
+        }
+      }
+      // Add any newly created individual vehicles that were not in the manifest row
+      for (const v of individualVehicles) {
+        if (!seenIds.has(v.id)) {
+          mergedVehicles.push(v);
+          seenIds.add(v.id);
+        }
+      }
+      manifest.vehicles = mergedVehicles;
+    } else if (manifest.vehicles.length > 0) {
+      // Backfill individual vehicle records so they are stored individually
+      syncVehiclesToDb(key, manifest.vehicles).catch(() => {});
+    }
+  } catch (err) {
+    console.warn('[Manifest] Error loading individual vehicles for manifest:', err);
+  }
+
+  return manifest;
 }
 
 export async function upsertManifest(manifest: Manifest): Promise<void> {
-  // Save to Supabase (source of truth) with a local-storage fallback if offline.
+  // 1. Save each vehicle individually to transport_vehicles for granular control
+  try {
+    await syncVehiclesToDb(manifest.date, manifest.vehicles);
+  } catch (err) {
+    console.warn('[Manifest] Error saving individual vehicles:', err);
+  }
+
+  // 2. Save manifest to Supabase (source of truth) with a local-storage fallback if offline.
   try {
     const { error } = await supabase
       .from(MANIFESTS_TABLE)

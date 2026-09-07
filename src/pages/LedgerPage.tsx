@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
+import { connectSyncEvents } from '@/lib/serverApi';
 import {
   listLedgerEntries, deleteLedgerEntry, downloadLedgerExcel,
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
@@ -100,7 +101,20 @@ export function LedgerPage() {
         }
       }
     })();
-    return () => { mounted = false; };
+
+    const disconnectSSE = connectSyncEvents(
+      undefined,
+      (ledgerData) => {
+        if (mounted && Array.isArray(ledgerData)) {
+          setEntries(ledgerData);
+        }
+      }
+    );
+
+    return () => {
+      mounted = false;
+      disconnectSSE();
+    };
   }, []);
 
   const structures = useMemo(() => {
@@ -124,7 +138,6 @@ export function LedgerPage() {
           sponsor_note: e.sponsor_note,
           date: e.date,
           service: e.service,
-          rep_name: e.rep_name,
         },
         q
       );
@@ -153,7 +166,6 @@ export function LedgerPage() {
             notes: row.notes,
             formattedDateList: row.formattedDateList,
             serviceCodes: row.serviceCodes,
-            repName: row.repName,
           },
           q
         );
