@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { supabase, MANIFESTS_TABLE } from './supabase';
-import { loadManifest, upsertManifest } from './manifest';
+import { supabase, MANIFESTS_TABLE, mockStorage } from './supabase';
 import {
-  subscribeToManifestFirestore,
-  appendWalkInTransaction,
-  saveManifestFirestore,
-  updateVehicleDraftInFirestore,
-} from './firebase';
+  loadManifest,
+  normalizeManifestData,
+  applyWalkInToManifest,
+  reconcileManifestForSave,
+} from './manifest';
 import type { Manifest, Vehicle, Passenger, VehicleDraftState, LiveSyncAction } from './types';
 
 export interface ActiveCoRep {
@@ -15,22 +14,7 @@ export interface ActiveCoRep {
   lastSeen: number;
 }
 
-export function normalizeManifestData(raw: Partial<Manifest> | null | undefined): Manifest | null {
-  if (!raw || !raw.date) return null;
-  return {
-    date: raw.date,
-    signups: Array.isArray(raw.signups) ? raw.signups : [],
-    vehicles: Array.isArray(raw.vehicles)
-      ? raw.vehicles.map((v: Vehicle) => ({
-          ...v,
-          riders: Array.isArray(v.riders) ? v.riders : [],
-          orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
-        }))
-      : [],
-    created_at: raw.created_at,
-    updated_at: raw.updated_at,
-  };
-}
+export { normalizeManifestData };
 
 /**
  * Intelligently merges an incoming manifest (from Supabase Realtime, broadcast, or poll)
@@ -279,29 +263,6 @@ export function useManifest(
     setLoading(true);
     setError(null);
 
-    // 0. Primary: Realtime Firestore onSnapshot listener
-    let unsubscribeFirestore: (() => void) | null = null;
-    try {
-      unsubscribeFirestore = subscribeToManifestFirestore(
-        key,
-        (remoteManifest) => {
-          if (keyRef.current !== key) return;
-          if (remoteManifest) {
-            setManifest((prev) => (prev && prev.date === key ? mergeIncomingManifest(prev, remoteManifest, activeVehicleIdRef.current) : remoteManifest));
-            setLastSyncedAt(Date.now());
-            setLoading(false);
-          }
-          // Note: If remoteManifest is null, do NOT wipe local state or clear loading immediately.
-          // Let initial loadManifest complete first from secondary/local storage tiers.
-        },
-        (err) => {
-          console.warn('[useManifest] Firestore onSnapshot warning:', err);
-        }
-      );
-    } catch (err) {
-      console.warn('[useManifest] Firestore subscribe error:', err);
-    }
-
     // 1. Initialize local browser BroadcastChannel for zero-latency multi-tab sync
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
       try {
@@ -506,10 +467,12 @@ export function useManifest(
       }
     };
 
+    // Realtime (Supabase postgres_changes + broadcast) delivers updates immediately; this poll
+    // is only a safety net for flaky mobile connections, so it can run infrequently.
     const pollInterval = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return;
       pollCheck();
-    }, 4000);
+    }, 20000);
 
     // 5. Immediate trigger on window focus, tab visible, or network online
     const handleVisibilityChange = () => {
@@ -534,9 +497,6 @@ export function useManifest(
 
     return () => {
       keyRef.current = null;
-      if (unsubscribeFirestore) {
-        unsubscribeFirestore();
-      }
       clearInterval(pollInterval);
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -567,21 +527,34 @@ export function useManifest(
       return;
     }
 
+    // Capture what this caller believed was true BEFORE its own edit, so we can tell the
+    // difference between "this is what I intentionally changed" and "this is stale data I
+    // never touched" once we reconcile against the freshest copy of the row below.
+    const baseline = manifestRef.current;
+
     // 1. Optimistically update local state immediately for zero-lag UI
     setManifest(normalized);
     setLastSyncedAt(Date.now());
 
-    // 2. Primary: Save to Cloud Firestore
+    // 2. Fetch the freshest possible copy of the row and reconcile: this is what prevents one
+    // rep's save from silently erasing another rep's concurrent vehicle add/delete/submit.
+    let merged = normalized;
     try {
-      await saveManifestFirestore(normalized);
+      const { data: latestRow } = await supabase
+        .from(MANIFESTS_TABLE)
+        .select('date, signups, vehicles, updated_at')
+        .eq('date', key)
+        .maybeSingle();
+      const remote = latestRow ? normalizeManifestData(latestRow) : null;
+      merged = reconcileManifestForSave(baseline, normalized, remote);
     } catch (err) {
-      console.warn('[useManifest] saveManifestFirestore warning:', err);
+      console.warn('[useManifest] Could not fetch latest manifest before saving, saving as-is:', err);
     }
 
     // 3. Broadcast across local browser tabs immediately
     if (broadcastChannelRef.current) {
       try {
-        broadcastChannelRef.current.postMessage({ key: normalized.date, manifest: normalized });
+        broadcastChannelRef.current.postMessage({ key: merged.date, manifest: merged });
       } catch {
         // Broadcast failed
       }
@@ -591,18 +564,18 @@ export function useManifest(
     safeChannelSend({
       type: 'broadcast',
       event: 'manifest_updated',
-      payload: { date: normalized.date, manifest: normalized },
+      payload: { date: merged.date, manifest: merged },
     });
 
-    // 5. Persist to Supabase and fallback storage
+    // 5. Persist the reconciled manifest to Supabase (source of truth), with local fallback
     try {
       const { error: upsertError, data } = await supabase
         .from(MANIFESTS_TABLE)
         .upsert(
           {
-            date: normalized.date,
-            signups: normalized.signups,
-            vehicles: normalized.vehicles,
+            date: merged.date,
+            signups: merged.signups,
+            vehicles: merged.vehicles,
           },
           { onConflict: 'date' }
         )
@@ -612,9 +585,9 @@ export function useManifest(
       if (upsertError) {
         console.warn('[useManifest] Supabase upsert error, syncing to local storage:', upsertError);
         mockStorage.upsert(MANIFESTS_TABLE, {
-          date: normalized.date,
-          signups: normalized.signups,
-          vehicles: normalized.vehicles,
+          date: merged.date,
+          signups: merged.signups,
+          vehicles: merged.vehicles,
           updated_at: new Date().toISOString(),
         });
       } else if (data?.updated_at) {
@@ -624,12 +597,16 @@ export function useManifest(
     } catch (err) {
       console.warn('[useManifest] Exception during supabase save, falling back locally:', err);
       mockStorage.upsert(MANIFESTS_TABLE, {
-        date: normalized.date,
-        signups: normalized.signups,
-        vehicles: normalized.vehicles,
+        date: merged.date,
+        signups: merged.signups,
+        vehicles: merged.vehicles,
         updated_at: new Date().toISOString(),
       });
     }
+
+    // 6. Reflect the reconciled result locally (without blowing away this device's actively
+    // open vehicle edit), so the UI shows the true, merged outcome rather than the pre-merge guess.
+    setManifest((prev) => mergeIncomingManifest(prev, merged, activeVehicleIdRef.current));
   }
 
   /**
@@ -740,15 +717,6 @@ export function useManifest(
     setManifest((prev) => mergeIncomingManifest(prev, mergedManifest, activeVehicleIdRef.current));
     setLastSyncedAt(Date.now());
 
-    // Update in Firestore
-    updateVehicleDraftInFirestore(
-      mergedManifest.date,
-      vehicleId,
-      mergedDraft || {},
-      mergedDraft?.repName || repName,
-      mergedDraft?.licensePlate || licensePlate
-    ).catch(() => {});
-
     // Broadcast targeted vehicle delta across local tabs
     if (broadcastChannelRef.current) {
       try {
@@ -807,9 +775,8 @@ export function useManifest(
   }
 
   /**
-   * Concurrently appends a walk-in to the manifest using Firestore transactions.
-   * Eliminates race conditions when multiple users add walk-ins at the same time,
-   * without requiring manual page syncing.
+   * Appends a walk-in to the manifest. Reads the freshest copy of the row immediately before
+   * writing so a walk-in added by one rep can never be lost to a stale write from another.
    */
   const appendWalkIn = useCallback(
     async (
@@ -821,7 +788,29 @@ export function useManifest(
       if (!activeKey) throw new Error('No active manifest key');
       setIsSyncing(true);
       try {
-        const updated = await appendWalkInTransaction(activeKey, vehicleId, newPassenger, draftUpdate);
+        const { data: latestRow } = await supabase
+          .from(MANIFESTS_TABLE)
+          .select('date, signups, vehicles, updated_at')
+          .eq('date', activeKey)
+          .maybeSingle();
+        const remote = (latestRow ? normalizeManifestData(latestRow) : null) || { date: activeKey, signups: [], vehicles: [] };
+
+        const updated = applyWalkInToManifest(remote, vehicleId, newPassenger, draftUpdate);
+
+        const { data: saved } = await supabase
+          .from(MANIFESTS_TABLE)
+          .upsert(
+            { date: updated.date, signups: updated.signups, vehicles: updated.vehicles },
+            { onConflict: 'date' }
+          )
+          .select('updated_at')
+          .maybeSingle();
+        if (saved?.updated_at) {
+          lastSavedUpdatedAtRef.current = saved.updated_at;
+          lastKnownUpdatedAtRef.current = saved.updated_at;
+          updated.updated_at = saved.updated_at;
+        }
+
         setManifest((prev) => mergeIncomingManifest(prev, updated, activeVehicleIdRef.current));
         setLastSyncedAt(Date.now());
 
@@ -841,7 +830,6 @@ export function useManifest(
           payload: { date: updated.date, manifest: updated },
         });
 
-        upsertManifest(updated).catch(() => {});
         return updated;
       } finally {
         setIsSyncing(false);

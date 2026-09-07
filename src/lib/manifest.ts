@@ -1,22 +1,163 @@
 import { supabase, MANIFESTS_TABLE, mockStorage } from './supabase';
-import { getManifestFirestore, saveManifestFirestore, listManifestsFirestore } from './firebase';
-import type { Manifest, Passenger, Vehicle } from './types';
+import type { Manifest, Passenger, Vehicle, VehicleDraftState } from './types';
 import { hubDisplayName } from './types';
 import { normalizePassengerText, getSubmissionTimestampEpoch } from './importer';
 export { parseGoogleSheetSignups, type RawSheetRow } from './importer';
 
-export async function loadManifest(key: string): Promise<Manifest | null> {
-  // 1. Primary: Load from Firestore
-  try {
-    const firestoreManifest = await getManifestFirestore(key);
-    if (firestoreManifest) {
-      return firestoreManifest;
-    }
-  } catch (err) {
-    console.warn('[Manifest] Failed to load from Firestore, trying fallback:', err);
+/**
+ * Normalizes a raw manifest payload (from Supabase, broadcast, or local storage)
+ * into a well-formed Manifest with safe array defaults.
+ */
+export function normalizeManifestData(raw: Partial<Manifest> | null | undefined): Manifest | null {
+  if (!raw || !raw.date) return null;
+  return {
+    date: raw.date,
+    signups: Array.isArray(raw.signups) ? raw.signups : [],
+    vehicles: Array.isArray(raw.vehicles)
+      ? raw.vehicles.map((v: Vehicle) => ({
+          ...v,
+          riders: Array.isArray(v.riders) ? v.riders : [],
+          orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
+        }))
+      : [],
+    created_at: raw.created_at,
+    updated_at: raw.updated_at,
+  };
+}
+
+/**
+ * Pure function to apply a walk-in passenger to a manifest, with no database dependencies.
+ */
+export function applyWalkInToManifest(
+  currentManifest: Manifest,
+  vehicleId: string,
+  walkInPassenger: Passenger,
+  extraDraftUpdate?: Partial<VehicleDraftState>
+): Manifest {
+  const existingIndex = currentManifest.signups.findIndex((p) => p.id === walkInPassenger.id);
+  let nextSignups: Passenger[];
+  if (existingIndex >= 0) {
+    nextSignups = [...currentManifest.signups];
+    nextSignups[existingIndex] = { ...currentManifest.signups[existingIndex], ...walkInPassenger };
+  } else {
+    nextSignups = [...currentManifest.signups, walkInPassenger];
   }
 
-  // 2. Secondary: Supabase
+  const poolKey = hubDisplayName(
+    currentManifest.vehicles.find((v) => v.id === vehicleId)?.type,
+    walkInPassenger.stop || 'Walk-In'
+  );
+
+  const nextVehicles = currentManifest.vehicles.map((v) => {
+    if (v.id !== vehicleId) return v;
+
+    const riders = Array.isArray(v.riders) ? v.riders : [];
+    const nextRiders = riders.includes(walkInPassenger.id) ? riders : [...riders, walkInPassenger.id];
+
+    const orderedStops = Array.isArray(v.orderedStops) ? v.orderedStops : [];
+    const nextOrderedStops = orderedStops.includes(poolKey) ? orderedStops : [...orderedStops, poolKey];
+
+    const currentDraft = v.draftState || {};
+    const presentIds = currentDraft.presentIds || [];
+    const nextPresentIds = presentIds.includes(walkInPassenger.id)
+      ? presentIds
+      : [...presentIds, walkInPassenger.id];
+
+    const absentIds = (currentDraft.absentIds || []).filter((id) => id !== walkInPassenger.id);
+
+    const nextDraftState: VehicleDraftState = {
+      ...currentDraft,
+      repName: extraDraftUpdate?.repName?.trim() || currentDraft.repName || v.repName || '',
+      licensePlate: extraDraftUpdate?.licensePlate?.trim() || currentDraft.licensePlate || v.licensePlate || '',
+      generalNotes: extraDraftUpdate?.generalNotes !== undefined ? extraDraftUpdate.generalNotes : (currentDraft.generalNotes || ''),
+      notes: { ...(currentDraft.notes || {}), ...(extraDraftUpdate?.notes || {}) },
+      presentIds: nextPresentIds,
+      absentIds,
+      sponsoredIds: currentDraft.sponsoredIds || [],
+      unpaidIds: currentDraft.unpaidIds || [],
+      updatedAt: new Date().toISOString(),
+      updatedBy: extraDraftUpdate?.updatedBy || currentDraft.updatedBy,
+    };
+
+    return {
+      ...v,
+      riders: nextRiders,
+      orderedStops: nextOrderedStops,
+      draftState: nextDraftState,
+    };
+  });
+
+  return {
+    ...currentManifest,
+    signups: nextSignups,
+    vehicles: nextVehicles,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+/**
+ * CONCURRENCY-SAFE SAVE RECONCILIATION
+ *
+ * Problem this solves: multiple reps/admins can be editing the manifest at the same time.
+ * A caller builds its "next manifest" from whatever it last had in memory (`baseline`), which
+ * can be a few seconds stale by the time the save actually reaches the server. Blindly writing
+ * that "next manifest" over the shared row would silently discard anything anyone else changed
+ * in between (a vehicle someone else just added, a submission someone else just made, etc).
+ *
+ * Instead: we look at what actually CHANGED between `baseline` (what the caller believed was
+ * true when it started editing) and `incoming` (what the caller wants to save) to infer intent
+ * (this vehicle was added / this vehicle was removed / this vehicle's fields changed / this
+ * signup was added or edited), then we replay just that intent on top of the freshest possible
+ * copy of the row (`remote`, fetched immediately before writing). Anything nobody touched is
+ * always taken from `remote`, so concurrent edits by other people are preserved.
+ */
+export function reconcileManifestForSave(
+  baseline: Manifest | null,
+  incoming: Manifest,
+  remote: Manifest | null
+): Manifest {
+  // No remote row yet, or it's for a different session key: nothing to reconcile against.
+  if (!remote || remote.date !== incoming.date) {
+    return incoming;
+  }
+  // No known baseline (e.g. very first save of a session): we can't tell intent apart from
+  // "stale copy", so fall back to trusting the incoming manifest as-is.
+  if (!baseline || baseline.date !== incoming.date) {
+    return incoming;
+  }
+
+  function reconcileList<T extends { id: string }>(baseList: T[], incomingList: T[], remoteList: T[]): T[] {
+    const baseMap = new Map(baseList.map((item) => [item.id, item]));
+    const incomingMap = new Map(incomingList.map((item) => [item.id, item]));
+
+    // Intentional removal: present in baseline, missing from incoming.
+    const removedIds = new Set(baseList.filter((item) => !incomingMap.has(item.id)).map((item) => item.id));
+
+    // Intentional add/edit: new to baseline, or different from baseline's version.
+    const changedOrNew = incomingList.filter((item) => {
+      const baseItem = baseMap.get(item.id);
+      return !baseItem || JSON.stringify(baseItem) !== JSON.stringify(item);
+    });
+
+    const mergedMap = new Map(remoteList.filter((item) => !removedIds.has(item.id)).map((item) => [item.id, item]));
+    changedOrNew.forEach((item) => mergedMap.set(item.id, item));
+
+    // Preserve remote ordering, then append anything genuinely new at the end.
+    const remoteOrderIds = remoteList.map((item) => item.id).filter((id) => !removedIds.has(id));
+    const newIds = changedOrNew.map((item) => item.id).filter((id) => !remoteOrderIds.includes(id));
+    return [...remoteOrderIds, ...newIds]
+      .map((id) => mergedMap.get(id))
+      .filter((item): item is T => Boolean(item));
+  }
+
+  return {
+    ...incoming,
+    vehicles: reconcileList(baseline.vehicles, incoming.vehicles, remote.vehicles),
+    signups: reconcileList(baseline.signups, incoming.signups, remote.signups),
+  };
+}
+
+export async function loadManifest(key: string): Promise<Manifest | null> {
   try {
     const { data, error } = await supabase
       .from(MANIFESTS_TABLE)
@@ -58,14 +199,7 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
 }
 
 export async function upsertManifest(manifest: Manifest): Promise<void> {
-  // 1. Primary: Save to Firestore
-  try {
-    await saveManifestFirestore(manifest);
-  } catch (err) {
-    console.warn('[Manifest] Failed to save to Firestore:', err);
-  }
-
-  // 2. Secondary: Save to Supabase and mockStorage
+  // Save to Supabase (source of truth) with a local-storage fallback if offline.
   try {
     const { error } = await supabase
       .from(MANIFESTS_TABLE)
@@ -110,26 +244,7 @@ export async function upsertManifest(manifest: Manifest): Promise<void> {
 }
 
 export async function listAllManifests(): Promise<Manifest[]> {
-  // 1. Primary: Load all manifests from Cloud Firestore
-  try {
-    const firestoreManifests = await listManifestsFirestore();
-    if (firestoreManifests && firestoreManifests.length > 0) {
-      // Sync to local memory cache
-      for (const m of firestoreManifests) {
-        mockStorage.upsert(MANIFESTS_TABLE, {
-          date: m.date,
-          signups: m.signups,
-          vehicles: m.vehicles,
-          updated_at: m.updated_at || new Date().toISOString(),
-        });
-      }
-      return firestoreManifests;
-    }
-  } catch (err) {
-    console.debug('[Manifest] Firestore list returned no entries, checking secondary:', err);
-  }
-
-  // 2. Secondary: Supabase (silent fallback if offline / not provisioned)
+  // Supabase (silent fallback to local storage if offline / not provisioned)
   try {
     const { data, error } = await supabase
       .from(MANIFESTS_TABLE)
