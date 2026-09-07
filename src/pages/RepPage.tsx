@@ -31,11 +31,6 @@ import {
   isPassengerTransferMatch,
   extractStructureFromText,
 } from '@/lib/transfer';
-import {
-  toggleRiderSponsoredInFirestore,
-  toggleRiderUnpaidInFirestore,
-  setRiderAttendanceInFirestore,
-} from '@/lib/firebase';
 
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
 const SYNC_DEBOUNCE_MS = 500; // 500ms debounce: ultra-fast multi-device synchronization while batching bursts of taps
@@ -939,15 +934,9 @@ export function RepPage() {
         clientId: clientIdRef.current,
         timestamp: Date.now(),
       });
-      if (key) {
-        setRiderAttendanceInFirestore(
-          key,
-          selectedVehicleId,
-          passengerId,
-          wantPresent ? 'present' : 'absent',
-          clientIdRef.current
-        ).catch(() => {});
-      }
+      // Persistence happens via the debounced updateVehicleDraft sync below (see the effect
+      // watching presentIds/absentIds), which safely merges against the freshest server copy.
+      // This broadcast alone gives co-reps instant visibility without an extra write per click.
     }
   }, [selectedVehicleId, key, repName, broadcastLiveAction]);
 
@@ -977,15 +966,7 @@ export function RepPage() {
         clientId: clientIdRef.current,
         timestamp: Date.now(),
       });
-      if (key) {
-        toggleRiderSponsoredInFirestore(
-          key,
-          selectedVehicleId,
-          passengerId,
-          nextVal,
-          clientIdRef.current
-        ).catch(() => {});
-      }
+      // Persistence happens via the debounced updateVehicleDraft sync (safe merge against server).
     }
   }, [selectedVehicleId, key, repName, broadcastLiveAction]);
 
@@ -1015,15 +996,7 @@ export function RepPage() {
         clientId: clientIdRef.current,
         timestamp: Date.now(),
       });
-      if (key) {
-        toggleRiderUnpaidInFirestore(
-          key,
-          selectedVehicleId,
-          passengerId,
-          nextVal,
-          clientIdRef.current
-        ).catch(() => {});
-      }
+      // Persistence happens via the debounced updateVehicleDraft sync (safe merge against server).
     }
   }, [selectedVehicleId, key, repName, broadcastLiveAction]);
 
