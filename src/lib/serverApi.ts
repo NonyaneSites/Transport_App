@@ -260,6 +260,28 @@ export async function deleteLedgerOnServer(id: string): Promise<boolean> {
   }
 }
 
+export async function updateDebtorOnServer(payload: {
+  existingEntryIds: string[];
+  updates: {
+    name: string;
+    structure: string;
+    isSponsored?: boolean;
+    notes?: string;
+    instances: Array<{ id?: string; date: string; service: string; amount: number }>;
+  };
+}): Promise<boolean> {
+  try {
+    const res = await fetch('/api/ledger/update-debtor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 // Server-Sent Events (SSE) live connection
 export function connectSyncEvents(
   onManifestUpdate: (data: { key: string; manifest?: Manifest }) => void,

@@ -3,6 +3,7 @@ import type { Manifest, Passenger, Vehicle, ServiceType } from './types';
 import { manifestKey, parseManifestKey } from './dates';
 import { hubDisplayName } from './types';
 import { loadManifest, upsertManifest } from './manifest';
+import { normalizeStructureCode } from './ledger';
 
 export type ServicePeriod = 'AM' | 'PM';
 
@@ -76,17 +77,17 @@ export function extractStructureFromText(text: string): { cleanText: string; str
   
   const bracketMatch = text.match(/([([{])\s*(?:structure|struct|s)?\s*([0-9]+[a-z]?|[a-z0-9]+)\s*([)\]}])/i);
   if (bracketMatch) {
-    const rawVal = bracketMatch[1].toUpperCase();
-    const structVal = rawVal.startsWith('S') ? rawVal : `S${rawVal}`;
+    const rawVal = bracketMatch[2];
+    const structVal = normalizeStructureCode(rawVal);
     const clean = text.replace(bracketMatch[0], '').trim().replace(/\s+/g, ' ');
     return { cleanText: clean, structure: structVal };
   }
 
   const trailingMatch = text.match(/\b(?:structure|struct|s)\s*([0-9]+[a-z]?)\b$/i);
   if (trailingMatch) {
-    const rawVal = trailingMatch[1].toUpperCase();
+    const rawVal = trailingMatch[1];
     const clean = text.substring(0, trailingMatch.index).trim();
-    return { cleanText: clean, structure: `S${rawVal}` };
+    return { cleanText: clean, structure: normalizeStructureCode(rawVal) };
   }
 
   return { cleanText: text.trim().replace(/\s+/g, ' ') };

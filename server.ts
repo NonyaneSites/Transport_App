@@ -451,6 +451,84 @@ app.delete('/api/ledger/:id', (req, res) => {
   res.json({ success: true, removed: before - ledger.length });
 });
 
+// Update debtor details and instances
+app.post('/api/ledger/update-debtor', (req, res) => {
+  const { existingEntryIds, updates } = req.body || {};
+  if (!Array.isArray(existingEntryIds) || existingEntryIds.length === 0) {
+    res.status(400).json({ error: 'existingEntryIds array is required' });
+    return;
+  }
+
+  let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+  const existingSet = new Set(existingEntryIds);
+
+  const cleanName = updates?.name ? String(updates.name).trim() : '';
+  const rawStruct = updates?.structure ? String(updates.structure).trim() : 'No Structure';
+  const isSponsored = Boolean(updates?.isSponsored);
+  const notes = updates?.notes ? String(updates.notes).trim() : (isSponsored ? 'Unaccounted Sponsorship' : '');
+
+  const instances = Array.isArray(updates?.instances) ? updates.instances : [];
+
+  if (instances.length === 0) {
+    // Settle/remove all entries for this debtor
+    ledger = ledger.filter((e) => !existingSet.has(e.id));
+  } else {
+    const template = ledger.find((e) => existingSet.has(e.id)) || {};
+    const updatedIds = new Set<string>();
+
+    for (const inst of instances) {
+      const validAmt = typeof inst.amount === 'number' && inst.amount >= 0 ? inst.amount : 40;
+      const validDate = inst.date ? String(inst.date).trim() : '';
+      const validService = inst.service ? String(inst.service).trim() : 'PM';
+
+      if (inst.id && existingSet.has(inst.id)) {
+        updatedIds.add(inst.id);
+        const idx = ledger.findIndex((e) => e.id === inst.id);
+        if (idx !== -1) {
+          ledger[idx] = {
+            ...ledger[idx],
+            date: validDate,
+            service: validService,
+            passenger_name: cleanName || ledger[idx].passenger_name,
+            structure: rawStruct,
+            structure_debt: validAmt,
+            sponsored: isSponsored,
+            sponsor_note: notes,
+            general_notes: notes,
+          };
+        }
+      } else {
+        const newId = `ledger_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        updatedIds.add(newId);
+        ledger.unshift({
+          id: newId,
+          manifest_key: template.manifest_key || `manual-${Date.now()}`,
+          date: validDate,
+          service: validService,
+          passenger_name: cleanName || template.passenger_name || 'Debtor',
+          stop: template.stop || 'Structure Stop',
+          structure: rawStruct,
+          vehicle_name: template.vehicle_name || '—',
+          submitted_by: template.submitted_by || 'Admin Manual Edit',
+          rep_name: template.rep_name || '',
+          license_plate: template.license_plate || '',
+          sponsored: isSponsored,
+          sponsor_note: notes,
+          structure_debt: validAmt,
+          general_notes: notes,
+          submitted_at: new Date().toISOString(),
+        });
+      }
+    }
+
+    ledger = ledger.filter((e) => !existingSet.has(e.id) || updatedIds.has(e.id));
+  }
+
+  atomicWriteJson(LEDGER_FILE, ledger);
+  broadcastSse('ledger_updated', { timestamp: Date.now() });
+  res.json({ success: true, count: ledger.length });
+});
+
 // ----------------------------------------------------
 // FRONTEND SERVING (VITE & STATIC)
 // ----------------------------------------------------

@@ -5,11 +5,108 @@ import {
   settleLedgerOnServer,
   addManualLedgerOnServer,
   deleteLedgerOnServer,
+  updateDebtorOnServer,
 } from './serverApi';
 import type { Passenger, Vehicle } from './types';
 import { CANCELLATION_FEE } from './types';
 import { naturalCompare } from './sort';
 import { shortDate } from './dates';
+
+/**
+ * Normalizes structure strings to canonical structure codes.
+ * - 'Unidentified', 'sunidentified', 'SUNIDENTIFIED', 'unidentified' -> 'Unidentified'
+ * - 'No Structure', 'none', 'unassigned' -> 'No Structure'
+ * - 'FTV', 'FTV 20', 'ftv20' -> 'FTV 20'
+ * - 'S1', 's1', '1', 'Structure 1' -> 'S1'
+ * - 'YZ1', 'yz1' -> 'YZ1'
+ * - Custom names are preserved cleanly without erroneous 'S' prefixing.
+ */
+export function normalizeStructureCode(raw: string | null | undefined): string {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return 'No Structure';
+
+  const lower = trimmed.toLowerCase();
+
+  // 1. Unidentified variants (including accidental 'sunidentified' or 's-unidentified')
+  if (
+    lower === 'unidentified' ||
+    lower === 'sunidentified' ||
+    lower === 's-unidentified' ||
+    lower === 's_unidentified' ||
+    lower === 'unassigned'
+  ) {
+    return 'Unidentified';
+  }
+
+  // 2. No Structure variants
+  if (
+    lower === 'no structure' ||
+    lower === 'none' ||
+    lower === 'no struct' ||
+    lower === 'nostructure' ||
+    lower === 'unknown'
+  ) {
+    return 'No Structure';
+  }
+
+  // 3. FTV structures
+  if (lower === 'ftv' || lower === 'ftv 20' || lower === 'ftv20' || lower === 'ftv-20') {
+    return 'FTV 20';
+  }
+
+  // 4. Standard S structures (e.g. S1, S2, S15, S2B)
+  const sMatch = trimmed.match(/^s\s*(\d+[a-z]?)$/i);
+  if (sMatch) {
+    return `S${sMatch[1].toUpperCase()}`;
+  }
+
+  // 5. YZ structures (e.g. YZ1, YZ12)
+  const yzMatch = trimmed.match(/^yz\s*(\d+[a-z]?)$/i);
+  if (yzMatch) {
+    return `YZ${yzMatch[1].toUpperCase()}`;
+  }
+
+  // 6. Bare numbers entered by user (e.g. "1" -> "S1", "14" -> "S14")
+  if (/^\d+[a-z]?$/i.test(trimmed)) {
+    return `S${trimmed.toUpperCase()}`;
+  }
+
+  // 7. "Structure 1" or "Structure S1" -> "S1"
+  const structWord = trimmed.match(/^Structure\s*(S?\d+[a-z]?)$/i);
+  if (structWord) {
+    const num = structWord[1].toUpperCase();
+    return num.startsWith('S') ? num : `S${num}`;
+  }
+
+  // 8. Accidental 's' prefix on other non-numeric words e.g. "sunidentified"
+  if (lower.startsWith('s') && lower.slice(1) === 'unidentified') {
+    return 'Unidentified';
+  }
+
+  return trimmed;
+}
+
+/**
+ * Sorts structures cleanly:
+ * S1..S15 in natural order, YZ..., FTV..., then Unidentified and No Structure at the bottom.
+ */
+export function structureSortComparator(a: string, b: string): number {
+  const aNorm = normalizeStructureCode(a);
+  const bNorm = normalizeStructureCode(b);
+
+  const aIsSpecial = aNorm === 'Unidentified' || aNorm === 'No Structure';
+  const bIsSpecial = bNorm === 'Unidentified' || bNorm === 'No Structure';
+
+  if (aIsSpecial && !bIsSpecial) return 1;
+  if (!aIsSpecial && bIsSpecial) return -1;
+  if (aIsSpecial && bIsSpecial) {
+    if (aNorm === 'Unidentified' && bNorm === 'No Structure') return -1;
+    if (aNorm === 'No Structure' && bNorm === 'Unidentified') return 1;
+    return 0;
+  }
+
+  return naturalCompare(aNorm, bNorm);
+}
 
 export const BANK_DETAILS = {
   accountName: 'CRCY&SJHB',
@@ -95,7 +192,7 @@ export function extractServiceCode(serviceStr: string): string {
  */
 export function parseStructureCell(raw: string): { structure: string; repName: string } {
   const str = (raw || '').trim().replace(/\r?\n/g, ' ');
-  if (!str) return { structure: '', repName: '' };
+  if (!str) return { structure: 'No Structure', repName: '' };
 
   // FTV or FTV 20 structures e.g. "FTV 20", "FTV-20", "FTV 20 - Rep", "FTV"
   const ftvMatch = str.match(/^(FTV\s*20|FTV20|FTV)\s*[-–—:]?\s*(.*)$/i);
@@ -106,11 +203,11 @@ export function parseStructureCell(raw: string): { structure: string; repName: s
     };
   }
 
-  // E.g. "S1 - Nthabiseng, Nthabeleng", "S1 – Thuto", "S14 – Kgolaganyo/Nicole", "S1: Name"
+  // E.g. "S1 - Nthabiseng, Nthabeleng", "S1 – Thuto", "S14 – Kgolaganyo/Nicole", "S1: Name", "Unidentified - Rep"
   const m = str.match(/^(S\d+|YZ\d+|Unidentified|No Structure)\s*[-–—:]\s*(.*)$/i);
   if (m) {
     return {
-      structure: m[1].trim().toUpperCase(),
+      structure: normalizeStructureCode(m[1]),
       repName: m[2].trim(),
     };
   }
@@ -119,7 +216,7 @@ export function parseStructureCell(raw: string): { structure: string; repName: s
   const justCode = str.match(/^(S\d+|YZ\d+|Unidentified|No Structure)$/i);
   if (justCode) {
     return {
-      structure: justCode[1].trim().toUpperCase(),
+      structure: normalizeStructureCode(justCode[1]),
       repName: '',
     };
   }
@@ -127,15 +224,14 @@ export function parseStructureCell(raw: string): { structure: string; repName: s
   // "Structure 1" or "Structure S1"
   const structWord = str.match(/^Structure\s*(S?\d+)\s*[-–—:]?\s*(.*)$/i);
   if (structWord) {
-    const code = structWord[1].toUpperCase().startsWith('S') ? structWord[1].toUpperCase() : `S${structWord[1]}`;
     return {
-      structure: code,
+      structure: normalizeStructureCode(structWord[1]),
       repName: structWord[2].trim(),
     };
   }
 
   return {
-    structure: str,
+    structure: normalizeStructureCode(str),
     repName: '',
   };
 }
@@ -363,29 +459,37 @@ export async function withdrawAbsentees(
 }
 
 export async function listLedgerEntries(): Promise<LedgerEntry[]> {
+  let entries: LedgerEntry[] = [];
   // 1. Primary: Central Express Server API
   try {
     const serverEntries = await listLedgerFromServer();
     if (serverEntries && serverEntries.length > 0) {
-      return serverEntries;
+      entries = serverEntries;
     }
   } catch (err) {
     console.debug('[Ledger] Server fetch note:', err);
   }
 
   // 2. Secondary: Supabase / Mock store
-  try {
-    const { data } = await supabase
-      .from(LEDGER_TABLE)
-      .select('*')
-      .order('submitted_at', { ascending: false });
-    if (data && Array.isArray(data)) {
-      return data as LedgerEntry[];
+  if (entries.length === 0) {
+    try {
+      const { data } = await supabase
+        .from(LEDGER_TABLE)
+        .select('*')
+        .order('submitted_at', { ascending: false });
+      if (data && Array.isArray(data)) {
+        entries = data as LedgerEntry[];
+      }
+    } catch (err) {
+      console.warn('[Ledger] Exception fetching ledger entries:', err);
     }
-  } catch (err) {
-    console.warn('[Ledger] Exception fetching ledger entries:', err);
   }
-  return [];
+
+  // Ensure all structures are normalized to canonical codes (fixing any historical 'sunidentified' or malformed codes)
+  return entries.map((e) => ({
+    ...e,
+    structure: normalizeStructureCode(e.structure),
+  }));
 }
 
 export async function listLedgerByDate(date: string): Promise<LedgerEntry[]> {
@@ -459,9 +563,7 @@ export function normalizeDateToYMD(dateStr?: string | null): string {
 export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promise<LedgerEntry> {
   const fullName = `${input.firstName.trim()} ${input.surname.trim()}`.trim();
   const manifestKey = `manual-${input.date}-${input.service.toLowerCase()}-${Date.now()}`;
-  const structureCode = input.structure.trim().toUpperCase().startsWith('S') || input.structure.trim().toUpperCase().startsWith('YZ')
-    ? input.structure.trim().toUpperCase()
-    : input.structure.trim() ? `S${input.structure.trim()}` : 'No Structure';
+  const structureCode = normalizeStructureCode(input.structure);
 
   const rawAmt = Number(input.amount);
   const debtAmt = Number.isFinite(rawAmt) && rawAmt >= 0 ? rawAmt : CANCELLATION_FEE;
@@ -529,15 +631,26 @@ export async function updateDebtorWithInstances(
     instances: DebtorInstanceUpdateItem[];
   }
 ): Promise<void> {
-  const structCode = updates.structure
-    ? (updates.structure.trim().toUpperCase().startsWith('S') || updates.structure.trim().toUpperCase().startsWith('YZ')
-        ? updates.structure.trim().toUpperCase()
-        : updates.structure.trim() ? `S${updates.structure.trim()}` : 'No Structure')
-    : 'No Structure';
-
+  const structCode = normalizeStructureCode(updates.structure);
   const cleanName = updates.name.trim();
   const isSponsored = !!updates.isSponsored;
   const noteText = isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '';
+
+  // Synchronize to server
+  try {
+    await updateDebtorOnServer({
+      existingEntryIds,
+      updates: {
+        name: cleanName,
+        structure: structCode,
+        isSponsored,
+        notes: noteText,
+        instances: updates.instances,
+      },
+    });
+  } catch (err) {
+    console.debug('[Ledger] Server updateDebtor error:', err);
+  }
 
   // If no instances remain, remove all debtor entries completely
   if (!updates.instances || updates.instances.length === 0) {
@@ -641,11 +754,7 @@ export async function updateDebtorDetails(
   if (fetchErr) throw fetchErr;
   if (!currentEntries || currentEntries.length === 0) return;
 
-  const structCode = updates.structure
-    ? (updates.structure.trim().toUpperCase().startsWith('S') || updates.structure.trim().toUpperCase().startsWith('YZ')
-        ? updates.structure.trim().toUpperCase()
-        : updates.structure.trim() ? `S${updates.structure.trim()}` : 'No Structure')
-    : undefined;
+  const structCode = updates.structure !== undefined ? normalizeStructureCode(updates.structure) : undefined;
 
   // If debt amount is updated
   if (updates.newTotalDebt !== undefined) {
@@ -1145,9 +1254,12 @@ export function isEntrySponsorshipOrUnpaid(e: {
 export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedgerGroup[] {
   const byStructure = new Map<string, LedgerEntry[]>();
   for (const e of entries) {
-    const key = e.structure || 'No Structure';
+    const key = normalizeStructureCode(e.structure);
     if (!byStructure.has(key)) byStructure.set(key, []);
-    byStructure.get(key)!.push(e);
+    byStructure.get(key)!.push({
+      ...e,
+      structure: key,
+    });
   }
 
   const groups: AggregatedLedgerGroup[] = [];
@@ -1263,7 +1375,7 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
     });
   }
 
-  return groups.sort((a, b) => naturalCompare(a.structure, b.structure));
+  return groups.sort((a, b) => structureSortComparator(a.structure, b.structure));
 }
 
 /**

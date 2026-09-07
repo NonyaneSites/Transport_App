@@ -3,7 +3,7 @@ import {
   Search, X, Banknote, Plus, CheckCircle2,
   Calendar, MapPin, Car, Filter, Check, ChevronDown, ChevronUp,
 } from 'lucide-react';
-import { type LedgerEntry, evaluateLedgerSearch, isEntrySponsorshipOrUnpaid } from '@/lib/ledger';
+import { type LedgerEntry, evaluateLedgerSearch, isEntrySponsorshipOrUnpaid, normalizeStructureCode, structureSortComparator } from '@/lib/ledger';
 import type { ManualCancellation } from '@/pages/RepPage';
 import type { Passenger } from '@/lib/types';
 import { shortDate } from '@/lib/dates';
@@ -82,10 +82,10 @@ export function CancellationSearchModal({
     const set = new Set<string>();
     pastCancellations.forEach((e) => {
       if (e.structure && e.structure.trim()) {
-        set.add(e.structure.trim().toUpperCase());
+        set.add(normalizeStructureCode(e.structure));
       }
     });
-    return Array.from(set).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    return Array.from(set).sort(structureSortComparator);
   }, [pastCancellations]);
 
   // Names of current vehicle riders normalized
@@ -124,7 +124,8 @@ export function CancellationSearchModal({
     const groups: DebtorGroup[] = [];
     map.forEach((entries, normalizedName) => {
       const displayName = entries[0]?.passenger_name?.trim() || 'Unknown';
-      const structure = entries.find((e) => e.structure && e.structure.trim())?.structure?.trim() || '';
+      const structureRaw = entries.find((e) => e.structure && e.structure.trim())?.structure?.trim() || '';
+      const structure = normalizeStructureCode(structureRaw);
       const isVehicleRider = vehicleRiderNamesSet.has(normalizedName);
       const totalAmount = entries.reduce((sum, e) => sum + (Number(e.structure_debt) || fare), 0);
       const settledEntries = entries.filter((e) => collectedCancellationIds.has(e.id));
@@ -167,8 +168,8 @@ export function CancellationSearchModal({
     const filtered = list.filter((g) => {
       // Structure filter
       if (structureFilter !== 'ALL') {
-        const structUpper = g.structure.toUpperCase();
-        if (structUpper !== structureFilter) return false;
+        const structNorm = normalizeStructureCode(g.structure);
+        if (structNorm !== structureFilter) return false;
       }
 
       if (!q) return true;
@@ -348,7 +349,7 @@ export function CancellationSearchModal({
                   <option value="ALL">All Structures</option>
                   {availableStructures.map((s) => (
                     <option key={s} value={s}>
-                      Structure {s}
+                      {s === 'Unidentified' || s === 'No Structure' || s.toLowerCase().startsWith('ftv') ? s : `Structure ${s}`}
                     </option>
                   ))}
                 </select>

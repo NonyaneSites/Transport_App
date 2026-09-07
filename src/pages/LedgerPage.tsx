@@ -11,11 +11,11 @@ import {
   listLedgerEntries, deleteLedgerEntry, downloadLedgerExcel,
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
   recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch,
-  updateDebtorWithInstances, normalizeDateToYMD, type DebtorInstanceUpdateItem,
+  updateDebtorWithInstances, normalizeDateToYMD, normalizeStructureCode, structureSortComparator,
+  type DebtorInstanceUpdateItem,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
 } from '@/lib/ledger';
 import { downloadCancellationDebtPdf } from '@/lib/pdfExport';
-import { naturalCompare } from '@/lib/sort';
 
 function HighlightMatch({ text, query }: { text: string; query: string }) {
   const q = query.trim();
@@ -119,8 +119,10 @@ export function LedgerPage() {
 
   const structures = useMemo(() => {
     const set = new Set<string>();
-    entries.forEach((e) => { if (e.structure) set.add(e.structure); });
-    return Array.from(set).sort(naturalCompare);
+    entries.forEach((e) => {
+      if (e.structure) set.add(normalizeStructureCode(e.structure));
+    });
+    return Array.from(set).sort(structureSortComparator);
   }, [entries]);
 
   const filtered = useMemo(() => {
@@ -128,12 +130,13 @@ export function LedgerPage() {
     if (!q && !structureFilter) return entries;
 
     return entries.filter((e) => {
-      if (structureFilter && e.structure !== structureFilter) return false;
+      const struct = normalizeStructureCode(e.structure);
+      if (structureFilter && struct !== structureFilter) return false;
       if (!q) return true;
       const { matched } = evaluateLedgerSearch(
         {
           passenger_name: e.passenger_name,
-          structure: e.structure,
+          structure: struct,
           general_notes: e.general_notes,
           sponsor_note: e.sponsor_note,
           date: e.date,
@@ -248,7 +251,7 @@ export function LedgerPage() {
   function openEditModal(row: AggregatedLedgerRow) {
     setEditTarget(row);
     setEditName(row.name);
-    setEditStructure(row.structure);
+    setEditStructure(normalizeStructureCode(row.structure));
     setEditDebt(String(row.amount));
     setEditNotes(row.notes);
     setEditIsSponsored(row.isSponsorshipOrUnpaid);
@@ -356,7 +359,8 @@ export function LedgerPage() {
       setEditError('Passenger name cannot be empty.');
       return;
     }
-    if (!editStructure.trim()) {
+    const targetStructure = normalizeStructureCode(editStructure);
+    if (!targetStructure) {
       setEditError('Structure cannot be empty.');
       return;
     }
@@ -374,7 +378,7 @@ export function LedgerPage() {
         // If user deleted all date instances or set debt to 0, completely settle/remove debtor
         await updateDebtorWithInstances(editTarget.entryIds, {
           name: editName.trim(),
-          structure: editStructure.trim(),
+          structure: targetStructure,
           isSponsored: editIsSponsored,
           notes: editIsSponsored ? editNotes.trim() : '',
           instances: [],
@@ -382,7 +386,7 @@ export function LedgerPage() {
       } else {
         await updateDebtorWithInstances(editTarget.entryIds, {
           name: editName.trim(),
-          structure: editStructure.trim(),
+          structure: targetStructure,
           isSponsored: editIsSponsored,
           notes: editIsSponsored ? editNotes.trim() : '',
           instances: editInstances,
@@ -451,7 +455,8 @@ export function LedgerPage() {
       setAddError('Surname is required.');
       return;
     }
-    if (!addStructure.trim()) {
+    const targetStructure = normalizeStructureCode(addStructure);
+    if (!targetStructure) {
       setAddError('Structure is required.');
       return;
     }
@@ -471,7 +476,7 @@ export function LedgerPage() {
       await addManualLedgerEntry({
         firstName: addFirstName,
         surname: addSurname,
-        structure: addStructure,
+        structure: targetStructure,
         service: addService,
         amount: amtNum,
         date: addDate,
@@ -481,7 +486,7 @@ export function LedgerPage() {
 
       const refreshed = await listLedgerEntries();
       setEntries(refreshed);
-      setAddSuccessMessage(`Added ${addFirstName.trim()} ${addSurname.trim()} (R${amtNum}) to ${addStructure.toUpperCase()}`);
+      setAddSuccessMessage(`Added ${addFirstName.trim()} ${addSurname.trim()} (R${amtNum}) to ${targetStructure}`);
       setTimeout(() => {
         closeAddModal();
       }, 900);
@@ -724,7 +729,8 @@ export function LedgerPage() {
             <div className="space-y-4">
               {groupedByStructure.map(({ structure, rows, cancellationRows, sponsorshipRows, cancellationDebt, sponsorshipDebt, totalDebt: structDebt }) => {
                 const isOpen = Boolean(search.trim()) || openStructures.has(structure);
-                const structureLabel = structure === 'No Structure' ? structure : `Structure ${structure}`;
+                const isSpecialStructure = structure === 'No Structure' || structure === 'Unidentified' || structure.toLowerCase().startsWith('ftv');
+                const structureLabel = isSpecialStructure ? structure : `Structure ${structure}`;
 
                 return (
                   <div key={structure} className="overflow-hidden rounded-2xl border border-line bg-card shadow-sm">
@@ -1156,11 +1162,30 @@ export function LedgerPage() {
                         <input
                           type="text"
                           required
+                          list="structure-options"
                           value={addStructure}
-                          onChange={(e) => setAddStructure(e.target.value.toUpperCase())}
-                          placeholder="e.g. S1, S2, S13, YZ1"
-                          className="input-field w-full font-mono text-sm font-semibold uppercase"
+                          onChange={(e) => setAddStructure(e.target.value)}
+                          onBlur={() => setAddStructure((s) => normalizeStructureCode(s))}
+                          placeholder="e.g. S1, Unidentified, FTV 20"
+                          className="input-field w-full font-mono text-sm font-semibold"
                         />
+                        <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                          <span className="text-[10px] uppercase font-bold text-muted mr-0.5">Quick:</span>
+                          {['Unidentified', 'No Structure', 'FTV 20', 'S1', 'S2', 'S13'].map((qs) => (
+                            <button
+                              key={qs}
+                              type="button"
+                              onClick={() => setAddStructure(qs)}
+                              className={`px-2 py-0.5 rounded text-[11px] font-semibold border transition-all ${
+                                normalizeStructureCode(addStructure) === qs
+                                  ? 'bg-ink text-bg border-ink shadow-sm'
+                                  : 'bg-card-2 text-muted hover:text-ink hover:border-line border-line/60'
+                              }`}
+                            >
+                              {qs}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                       <div>
                         <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
@@ -1362,11 +1387,30 @@ export function LedgerPage() {
                         <input
                           type="text"
                           required
+                          list="structure-options"
                           value={editStructure}
-                          onChange={(e) => setEditStructure(e.target.value.toUpperCase())}
-                          placeholder="e.g. S1"
-                          className="input-field w-full font-mono text-sm font-semibold uppercase"
+                          onChange={(e) => setEditStructure(e.target.value)}
+                          onBlur={() => setEditStructure((s) => normalizeStructureCode(s))}
+                          placeholder="e.g. S1, Unidentified, FTV 20"
+                          className="input-field w-full font-mono text-sm font-semibold"
                         />
+                        <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                          <span className="text-[10px] uppercase font-bold text-muted mr-0.5">Quick:</span>
+                          {['Unidentified', 'No Structure', 'FTV 20', 'S1', 'S2', 'S13'].map((qs) => (
+                            <button
+                              key={qs}
+                              type="button"
+                              onClick={() => setEditStructure(qs)}
+                              className={`px-2 py-0.5 rounded text-[11px] font-semibold border transition-all ${
+                                normalizeStructureCode(editStructure) === qs
+                                  ? 'bg-ink text-bg border-ink shadow-sm'
+                                  : 'bg-card-2 text-muted hover:text-ink hover:border-line border-line/60'
+                              }`}
+                            >
+                              {qs}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     </div>
 
@@ -1649,6 +1693,16 @@ export function LedgerPage() {
                 No entries match your search. Try different keywords or clear the filter.
               </div>
             )}
+
+            {/* Datalist for Structure Auto-suggestions */}
+            <datalist id="structure-options">
+              <option value="Unidentified" />
+              <option value="No Structure" />
+              <option value="FTV 20" />
+              {structures.map((s) => (
+                <option key={s} value={s} />
+              ))}
+            </datalist>
           </>
         )}
       </main>
