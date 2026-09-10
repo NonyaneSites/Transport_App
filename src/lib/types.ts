@@ -238,19 +238,27 @@ export interface LiveRiderIndicator {
   timestamp: number;
 }
 
-export type ServiceType =
-  | 'AM_Serving'
-  | 'AM_Ushers'
-  | 'AM_Normal'
-  | 'PM_Serving'
-  | 'PM_Normal';
+export interface ServiceTypeConfig {
+  value: string;
+  label: string;
+  acronym: string;
+  period: 'AM' | 'PM' | 'OTHER';
+  mode?: 'Serving' | 'Normal' | 'Ushers' | 'Special';
+  description?: string;
+  isCustom?: boolean;
+  isSystem?: boolean;
+  createdAt?: string;
+}
 
-export const SERVICE_TYPES: { value: ServiceType; label: string; period: 'AM' | 'PM'; mode: 'Serving' | 'Normal' | 'Ushers' }[] = [
-  { value: 'AM_Serving', label: 'AM Service — Serving Only', period: 'AM', mode: 'Serving' },
-  { value: 'AM_Ushers', label: 'AM Service — Ushers (Early)', period: 'AM', mode: 'Ushers' },
-  { value: 'AM_Normal', label: 'AM Service — Normal Only', period: 'AM', mode: 'Normal' },
-  { value: 'PM_Serving', label: 'PM Service — Serving Only', period: 'PM', mode: 'Serving' },
-  { value: 'PM_Normal', label: 'PM Service — Normal Only', period: 'PM', mode: 'Normal' },
+export type ServiceType = string;
+
+export const SERVICE_TYPES: ServiceTypeConfig[] = [
+  { value: 'AM_Serving', label: 'AM Service — Serving Only', acronym: 'AM', period: 'AM', mode: 'Serving', isSystem: true },
+  { value: 'AM_Ushers', label: 'AM Service — Ushers (Early)', acronym: 'AM', period: 'AM', mode: 'Ushers', isSystem: true },
+  { value: 'AM_Normal', label: 'AM Service — Normal Only', acronym: 'AM', period: 'AM', mode: 'Normal', isSystem: true },
+  { value: 'PM_Serving', label: 'PM Service — Serving Only', acronym: 'PM', period: 'PM', mode: 'Serving', isSystem: true },
+  { value: 'PM_Normal', label: 'PM Service — Normal Only', acronym: 'PM', period: 'PM', mode: 'Normal', isSystem: true },
+  { value: 'Funeral_Service', label: 'Funeral Service', acronym: 'FS', period: 'AM', mode: 'Special', description: 'Saturday Church Funeral Service Transport', isCustom: true },
 ];
 
 export const RESET_PASSWORD = 'CRC2026!';

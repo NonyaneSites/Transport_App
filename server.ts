@@ -11,11 +11,35 @@ app.use(express.json({ limit: '10mb' }));
 const DATA_DIR = path.join(process.cwd(), 'data');
 const MANIFESTS_DIR = path.join(DATA_DIR, 'manifests');
 const LEDGER_FILE = path.join(DATA_DIR, 'ledger.json');
+const SERVICE_TYPES_FILE = path.join(DATA_DIR, 'service_types.json');
 
 // Ensure directories exist
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(MANIFESTS_DIR)) fs.mkdirSync(MANIFESTS_DIR, { recursive: true });
 if (!fs.existsSync(LEDGER_FILE)) fs.writeFileSync(LEDGER_FILE, JSON.stringify([]), 'utf-8');
+
+const DEFAULT_SERVER_SERVICE_TYPES = [
+  { value: 'AM_Serving', label: 'AM Service — Serving Only', acronym: 'AM', period: 'AM', mode: 'Serving', isSystem: true },
+  { value: 'AM_Ushers', label: 'AM Service — Ushers (Early)', acronym: 'AM', period: 'AM', mode: 'Ushers', isSystem: true },
+  { value: 'AM_Normal', label: 'AM Service — Normal Only', acronym: 'AM', period: 'AM', mode: 'Normal', isSystem: true },
+  { value: 'PM_Serving', label: 'PM Service — Serving Only', acronym: 'PM', period: 'PM', mode: 'Serving', isSystem: true },
+  { value: 'PM_Normal', label: 'PM Service — Normal Only', acronym: 'PM', period: 'PM', mode: 'Normal', isSystem: true },
+  { value: 'Funeral_Service', label: 'Funeral Service', acronym: 'FS', period: 'AM', mode: 'Special', description: 'Saturday Church Funeral Service Transport', isCustom: true },
+];
+
+function getMergedServiceTypes(): Array<Record<string, unknown>> {
+  const stored = readJsonFile<Array<Record<string, unknown>>>(SERVICE_TYPES_FILE, []);
+  const map = new Map<string, Record<string, unknown>>();
+  for (const item of DEFAULT_SERVER_SERVICE_TYPES) {
+    map.set(String(item.value), { ...item });
+  }
+  for (const item of stored) {
+    if (item && typeof item.value === 'string' && typeof item.label === 'string') {
+      map.set(item.value, item);
+    }
+  }
+  return Array.from(map.values());
+}
 
 // Atomic write helper
 function atomicWriteJson(filePath: string, data: unknown): void {
@@ -71,6 +95,92 @@ app.get('/api/sync/events', (req, res) => {
   req.on('close', () => {
     sseClients.delete(res);
   });
+});
+
+// ----------------------------------------------------
+// SERVICE TYPES API
+// ----------------------------------------------------
+
+app.get('/api/service-types', (req, res) => {
+  try {
+    const list = getMergedServiceTypes();
+    res.json(list);
+  } catch (err) {
+    console.error('[Server] Failed to get service types:', err);
+    res.status(500).json({ error: 'Failed to read service types' });
+  }
+});
+
+app.post('/api/service-types', (req, res) => {
+  try {
+    const body = req.body || {};
+    const label = String(body.label || '').trim();
+    if (!label) {
+      res.status(400).json({ error: 'Service name/label is required' });
+      return;
+    }
+
+    let acronym = String(body.acronym || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!acronym) {
+      acronym = label.slice(0, 3).toUpperCase();
+    }
+
+    let value = String(body.value || '').trim();
+    if (!value) {
+      value = label.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    }
+
+    const current = getMergedServiceTypes();
+    const existingIndex = current.findIndex((s) => s.value === value);
+
+    const newRecord: Record<string, unknown> = {
+      value,
+      label,
+      acronym,
+      period: body.period === 'PM' ? 'PM' : body.period === 'OTHER' ? 'OTHER' : 'AM',
+      mode: body.mode || 'Special',
+      description: String(body.description || '').trim(),
+      isCustom: true,
+      isSystem: false,
+      createdAt: body.createdAt || new Date().toISOString(),
+    };
+
+    let updatedList: Array<Record<string, unknown>>;
+    if (existingIndex >= 0) {
+      updatedList = current.map((s, idx) => (idx === existingIndex ? { ...s, ...newRecord } : s));
+    } else {
+      updatedList = [...current, newRecord];
+    }
+
+    // Persist custom items to file
+    atomicWriteJson(SERVICE_TYPES_FILE, updatedList);
+    broadcastSse('service_types', updatedList);
+    res.json(updatedList);
+  } catch (err) {
+    console.error('[Server] Failed to save service type:', err);
+    res.status(500).json({ error: 'Failed to save service type' });
+  }
+});
+
+app.delete('/api/service-types/:value', (req, res) => {
+  try {
+    const targetValue = req.params.value;
+    const current = getMergedServiceTypes();
+    const target = current.find((s) => s.value === targetValue);
+
+    if (target && target.isSystem) {
+      res.status(400).json({ error: 'System service types cannot be deleted.' });
+      return;
+    }
+
+    const filtered = current.filter((s) => s.value !== targetValue);
+    atomicWriteJson(SERVICE_TYPES_FILE, filtered);
+    broadcastSse('service_types', filtered);
+    res.json(filtered);
+  } catch (err) {
+    console.error('[Server] Failed to delete service type:', err);
+    res.status(500).json({ error: 'Failed to delete service type' });
+  }
 });
 
 // List all manifests

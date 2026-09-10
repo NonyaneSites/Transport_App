@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
 import type { Passenger, ServiceType } from './types';
 import { MIN_TAXI_THRESHOLD, hubDisplayName } from './types';
+import { getServiceConfig } from './serviceTypes';
 import { sanitizeTransportValue } from './transportSanitization';
 import {
   toTitleCase,
@@ -568,8 +569,36 @@ export function matchesService(
   selectedService: ServiceType,
   sheetName: string = ''
 ): boolean {
-  const selectedPeriod: 'AM' | 'PM' = selectedService.startsWith('AM') ? 'AM' : 'PM';
+  const cfg = getServiceConfig(selectedService);
+  const selectedPeriod = cfg?.period || (selectedService.startsWith('AM') ? 'AM' : selectedService.startsWith('PM') ? 'PM' : 'OTHER');
   const normSheet = lower(clean(sheetName));
+
+  // If custom service (e.g. Funeral, Dreamweek, etc.)
+  if (cfg?.isCustom) {
+    const sName = lower(cfg.label);
+    const sVal = lower(cfg.value);
+    const sAcr = lower(cfg.acronym);
+    if (sName.includes('funeral') && (normSheet.includes('funeral') || normSheet.includes('saturday'))) {
+      return true;
+    }
+    if (sName.includes('dreamweek') && (normSheet.includes('dreamweek') || normSheet.includes('dream week'))) {
+      return true;
+    }
+    // Check if row has service matching custom name or acronym
+    const serviceCol = findColumn(headers, [
+      'which service are you attending',
+      'service attending',
+      'service',
+      'service type',
+      'servicetype',
+    ]);
+    if (serviceCol) {
+      const val = lower(clean(row[serviceCol]));
+      if (val && (val.includes(sName) || val.includes(sVal) || val.includes(sAcr))) {
+        return true;
+      }
+    }
+  }
 
   // If sheet explicitly declares PM, do not include in AM service
   if (selectedPeriod === 'AM' && (normSheet.includes('pm') || normSheet.includes('evening')) && !normSheet.includes('am')) {
@@ -823,6 +852,9 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
     } else if (selectedService === 'PM_Serving') {
       // PM Serving
       include = c.category === 'Serving' || c.category === 'Ushers';
+    } else {
+      // Custom church event service (e.g. Funeral Service, Dreamweek, etc.)
+      include = true;
     }
 
     if (include) {

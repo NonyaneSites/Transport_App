@@ -10,11 +10,14 @@ import { listAllManifests, loadManifest } from '@/lib/manifest';
 import { listLedgerEntries } from '@/lib/ledger';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey as parseKey } from '@/lib/dates';
 import { SERVICE_TYPES, RESET_PASSWORD, type ServiceType, type Passenger, type Manifest } from '@/lib/types';
+import { getServiceLabel } from '@/lib/serviceTypes';
 import { isSamePassenger, getSubmissionTimestampEpoch } from '@/lib/importer';
 import { generateWhatsAppRouteManifest, generateWhatsAppRepManifest, downloadTextFile } from '@/lib/whatsappManifest';
 import { downloadTaxiStatsExcel, downloadTaxiStatsCSV } from '@/lib/statsExport';
 import { AdminStatsExportModal } from '@/components/AdminStatsExportModal';
 import { AdminAttendanceNotesSection } from '@/components/AdminAttendanceNotesSection';
+import { AdminServiceTypesModal } from '@/components/AdminServiceTypesModal';
+import { Layers } from 'lucide-react';
 
 export function AdminPage() {
   const [date, setDate] = useState(() => {
@@ -62,6 +65,7 @@ export function AdminPage() {
   const [ledgerCount, setLedgerCount] = useState(0);
   const [archiveSelected, setArchiveSelected] = useState('');
   const [showHistory, setShowHistory] = useState(false);
+  const [serviceTypesModalOpen, setServiceTypesModalOpen] = useState(false);
   const [exportModalManifest, setExportModalManifest] = useState<{ manifest: Manifest; serviceLabel: string } | null>(null);
 
   // Initial load on mount only — avoid re-fetching the entire database history on every live tick
@@ -186,7 +190,7 @@ export function AdminPage() {
     }
   }
 
-  const serviceLabel = SERVICE_TYPES.find((s) => s.value === service)?.label ?? service;
+  const serviceLabel = getServiceLabel(service);
 
   const totalRegistrations = (sessionList || []).reduce((sum, m) => sum + (m?.signups?.length || 0), 0);
   const totalVehicles = (sessionList || []).reduce((sum, m) => sum + (m?.vehicles?.length || 0), 0);
@@ -212,6 +216,14 @@ export function AdminPage() {
             </p>
           </div>
           <div className="flex items-center gap-2 self-start sm:self-auto">
+            <button
+              onClick={() => setServiceTypesModalOpen(true)}
+              className="btn-secondary text-xs py-1.5 px-3 flex items-center gap-1.5"
+              title="Add or configure church service types and cancellation acronyms"
+            >
+              <Layers className="h-3.5 w-3.5 text-crimson-400" />
+              <span>Service Types & Acronyms</span>
+            </button>
             <button onClick={() => setResetOpen(true)} className="btn-danger text-xs py-1.5 px-3">
               <Trash2 className="h-3.5 w-3.5" />
               <span>Reset Manifest</span>
@@ -588,6 +600,13 @@ export function AdminPage() {
           onClose={() => setExportModalManifest(null)}
         />
       )}
+
+      {/* Dynamic Service Types Modal */}
+      <AdminServiceTypesModal
+        isOpen={serviceTypesModalOpen}
+        onClose={() => setServiceTypesModalOpen(false)}
+        onSelectService={(newVal) => setService(newVal as ServiceType)}
+      />
 
       <Footer />
     </div>
