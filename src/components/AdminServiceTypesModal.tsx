@@ -20,6 +20,7 @@ export function AdminServiceTypesModal({ isOpen, onClose, onSelectService }: Pro
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [deletingVal, setDeletingVal] = useState<string | null>(null);
+  const [confirmDeleteVal, setConfirmDeleteVal] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -72,16 +73,14 @@ export function AdminServiceTypesModal({ isOpen, onClose, onSelectService }: Pro
     }
   };
 
-  const handleDelete = async (service: ServiceTypeConfig) => {
+  const executeDelete = async (service: ServiceTypeConfig) => {
     if (service.isSystem) return;
-    if (!window.confirm(`Are you sure you want to remove "${service.label}" (${service.acronym})?`)) {
-      return;
-    }
 
     setDeletingVal(service.value);
+    setConfirmDeleteVal(null);
     try {
       await deleteServiceType(service.value);
-      setSuccessMsg(`Removed "${service.label}".`);
+      setSuccessMsg(`Permanently removed "${service.label}".`);
       setTimeout(() => setSuccessMsg(null), 3000);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to delete service.';
@@ -337,15 +336,38 @@ export function AdminServiceTypesModal({ isOpen, onClose, onSelectService }: Pro
                     )}
 
                     {!s.isSystem && (
-                      <button
-                        type="button"
-                        disabled={deletingVal === s.value}
-                        onClick={() => handleDelete(s)}
-                        className="rounded p-1.5 text-muted hover:text-crimson-400 hover:bg-crimson-500/10 transition-colors"
-                        title={`Delete ${s.label}`}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        {confirmDeleteVal === s.value ? (
+                          <div className="flex items-center gap-1 bg-crimson-500/15 border border-crimson-500/30 rounded-lg p-1">
+                            <button
+                              type="button"
+                              disabled={deletingVal === s.value}
+                              onClick={() => executeDelete(s)}
+                              className="px-2 py-0.5 text-[11px] font-bold text-crimson-300 bg-crimson-600 hover:bg-crimson-500 rounded transition-colors"
+                            >
+                              {deletingVal === s.value ? 'Deleting...' : 'Delete?'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteVal(null)}
+                              className="p-1 text-muted hover:text-ink text-xs rounded transition-colors"
+                              title="Cancel"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={deletingVal === s.value}
+                            onClick={() => setConfirmDeleteVal(s.value)}
+                            className="rounded p-1.5 text-muted hover:text-crimson-400 hover:bg-crimson-500/10 transition-colors"
+                            title={`Delete ${s.label}`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>

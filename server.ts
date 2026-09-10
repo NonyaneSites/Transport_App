@@ -24,18 +24,17 @@ const DEFAULT_SERVER_SERVICE_TYPES = [
   { value: 'AM_Normal', label: 'AM Service — Normal Only', acronym: 'AM', period: 'AM', mode: 'Normal', isSystem: true },
   { value: 'PM_Serving', label: 'PM Service — Serving Only', acronym: 'PM', period: 'PM', mode: 'Serving', isSystem: true },
   { value: 'PM_Normal', label: 'PM Service — Normal Only', acronym: 'PM', period: 'PM', mode: 'Normal', isSystem: true },
-  { value: 'Funeral_Service', label: 'Funeral Service', acronym: 'FS', period: 'AM', mode: 'Special', description: 'Saturday Church Funeral Service Transport', isCustom: true },
 ];
 
 function getMergedServiceTypes(): Array<Record<string, unknown>> {
-  const stored = readJsonFile<Array<Record<string, unknown>>>(SERVICE_TYPES_FILE, []);
+  const customList = readJsonFile<Array<Record<string, unknown>>>(SERVICE_TYPES_FILE, []);
   const map = new Map<string, Record<string, unknown>>();
   for (const item of DEFAULT_SERVER_SERVICE_TYPES) {
     map.set(String(item.value), { ...item });
   }
-  for (const item of stored) {
+  for (const item of customList) {
     if (item && typeof item.value === 'string' && typeof item.label === 'string') {
-      map.set(item.value, item);
+      map.set(item.value, { ...item, isCustom: true, isSystem: false });
     }
   }
   return Array.from(map.values());
@@ -130,8 +129,8 @@ app.post('/api/service-types', (req, res) => {
       value = label.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
     }
 
-    const current = getMergedServiceTypes();
-    const existingIndex = current.findIndex((s) => s.value === value);
+    const customList = readJsonFile<Array<Record<string, unknown>>>(SERVICE_TYPES_FILE, []);
+    const existingIndex = customList.findIndex((s) => s.value === value);
 
     const newRecord: Record<string, unknown> = {
       value,
@@ -145,17 +144,18 @@ app.post('/api/service-types', (req, res) => {
       createdAt: body.createdAt || new Date().toISOString(),
     };
 
-    let updatedList: Array<Record<string, unknown>>;
+    let updatedCustom: Array<Record<string, unknown>>;
     if (existingIndex >= 0) {
-      updatedList = current.map((s, idx) => (idx === existingIndex ? { ...s, ...newRecord } : s));
+      updatedCustom = customList.map((s, idx) => (idx === existingIndex ? { ...s, ...newRecord } : s));
     } else {
-      updatedList = [...current, newRecord];
+      updatedCustom = [...customList, newRecord];
     }
 
     // Persist custom items to file
-    atomicWriteJson(SERVICE_TYPES_FILE, updatedList);
-    broadcastSse('service_types', updatedList);
-    res.json(updatedList);
+    atomicWriteJson(SERVICE_TYPES_FILE, updatedCustom);
+    const mergedList = getMergedServiceTypes();
+    broadcastSse('service_types', mergedList);
+    res.json(mergedList);
   } catch (err) {
     console.error('[Server] Failed to save service type:', err);
     res.status(500).json({ error: 'Failed to save service type' });
@@ -165,18 +165,20 @@ app.post('/api/service-types', (req, res) => {
 app.delete('/api/service-types/:value', (req, res) => {
   try {
     const targetValue = req.params.value;
-    const current = getMergedServiceTypes();
-    const target = current.find((s) => s.value === targetValue);
+    const isSystem = DEFAULT_SERVER_SERVICE_TYPES.some((s) => s.value === targetValue);
 
-    if (target && target.isSystem) {
+    if (isSystem) {
       res.status(400).json({ error: 'System service types cannot be deleted.' });
       return;
     }
 
-    const filtered = current.filter((s) => s.value !== targetValue);
-    atomicWriteJson(SERVICE_TYPES_FILE, filtered);
-    broadcastSse('service_types', filtered);
-    res.json(filtered);
+    let customList = readJsonFile<Array<Record<string, unknown>>>(SERVICE_TYPES_FILE, []);
+    customList = customList.filter((s) => s.value !== targetValue);
+    atomicWriteJson(SERVICE_TYPES_FILE, customList);
+
+    const mergedList = getMergedServiceTypes();
+    broadcastSse('service_types', mergedList);
+    res.json(mergedList);
   } catch (err) {
     console.error('[Server] Failed to delete service type:', err);
     res.status(500).json({ error: 'Failed to delete service type' });

@@ -101,8 +101,8 @@ export function ServiceDateSelector({
                 ? 'AM Standard Sunday service transport · Cancellation acronym: (AM)'
                 : service.includes('Serving')
                 ? 'PM Serving ministries transport · Cancellation acronym: (PM)'
-                : service === 'Funeral_Service'
-                ? 'Saturday Church Funeral Service transport · Cancellation acronym: (FS)'
+                : currentConfig?.acronym
+                ? `${currentConfig.label} transport · Cancellation acronym: (${currentConfig.acronym})`
                 : 'Sunday service transport'}
             </p>
           </div>

@@ -258,7 +258,6 @@ export const SERVICE_TYPES: ServiceTypeConfig[] = [
   { value: 'AM_Normal', label: 'AM Service — Normal Only', acronym: 'AM', period: 'AM', mode: 'Normal', isSystem: true },
   { value: 'PM_Serving', label: 'PM Service — Serving Only', acronym: 'PM', period: 'PM', mode: 'Serving', isSystem: true },
   { value: 'PM_Normal', label: 'PM Service — Normal Only', acronym: 'PM', period: 'PM', mode: 'Normal', isSystem: true },
-  { value: 'Funeral_Service', label: 'Funeral Service', acronym: 'FS', period: 'AM', mode: 'Special', description: 'Saturday Church Funeral Service Transport', isCustom: true },
 ];
 
 export const RESET_PASSWORD = 'CRC2026!';

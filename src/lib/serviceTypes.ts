@@ -7,18 +7,10 @@ export const DEFAULT_SERVICE_TYPES: ServiceTypeConfig[] = [
   { value: 'AM_Normal', label: 'AM Service — Normal Only', acronym: 'AM', period: 'AM', mode: 'Normal', isSystem: true },
   { value: 'PM_Serving', label: 'PM Service — Serving Only', acronym: 'PM', period: 'PM', mode: 'Serving', isSystem: true },
   { value: 'PM_Normal', label: 'PM Service — Normal Only', acronym: 'PM', period: 'PM', mode: 'Normal', isSystem: true },
-  {
-    value: 'Funeral_Service',
-    label: 'Funeral Service',
-    acronym: 'FS',
-    period: 'AM',
-    mode: 'Special',
-    description: 'Saturday Church Funeral Service Transport',
-    isCustom: true,
-  },
 ];
 
-const LOCAL_STORAGE_KEY = 'crc_service_types_v1';
+const CUSTOM_STORAGE_KEY = 'crc_custom_services_v2';
+const LEGACY_STORAGE_KEY = 'crc_service_types_v1';
 
 // In-memory reactive state
 let memoryServiceTypes: ServiceTypeConfig[] = loadInitialServiceTypes();
@@ -35,36 +27,48 @@ function notifyListeners() {
 }
 
 function loadInitialServiceTypes(): ServiceTypeConfig[] {
+  // Purge legacy storage key if present to remove any obsolete default injections
   try {
-    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+
+  const customTypes: ServiceTypeConfig[] = [];
+  try {
+    const raw = localStorage.getItem(CUSTOM_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        // Merge with defaults to ensure all required fields and system types exist
-        const map = new Map<string, ServiceTypeConfig>();
-        for (const item of DEFAULT_SERVICE_TYPES) {
-          map.set(item.value, item);
-        }
+      if (Array.isArray(parsed)) {
         for (const item of parsed) {
-          if (item && item.value && item.label) {
-            map.set(item.value, {
-              ...item,
+          // Never re-add Funeral_Service as a default if stale
+          if (item && item.value && item.label && !item.isSystem) {
+            customTypes.push({
+              value: item.value,
+              label: item.label,
               acronym: (item.acronym || item.value.slice(0, 3)).trim().toUpperCase(),
+              period: item.period || 'AM',
+              mode: item.mode || 'Special',
+              description: item.description || '',
+              isCustom: true,
+              isSystem: false,
+              createdAt: item.createdAt,
             });
           }
         }
-        return Array.from(map.values());
       }
     }
   } catch (err) {
-    console.warn('[ServiceTypes] Failed to load cached types:', err);
+    console.warn('[ServiceTypes] Failed to load custom service types:', err);
   }
-  return [...DEFAULT_SERVICE_TYPES];
+
+  return [...DEFAULT_SERVICE_TYPES, ...customTypes];
 }
 
-function saveToStorage(types: ServiceTypeConfig[]) {
+function saveCustomToStorage(types: ServiceTypeConfig[]) {
   try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(types));
+    const customOnly = types.filter((s) => s.isCustom && !s.isSystem);
+    localStorage.setItem(CUSTOM_STORAGE_KEY, JSON.stringify(customOnly));
   } catch {
     // localStorage full or disabled
   }
@@ -166,14 +170,16 @@ export async function fetchServiceTypesFromServer(): Promise<ServiceTypeConfig[]
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data) && data.length > 0) {
-        memoryServiceTypes = data;
-        saveToStorage(data);
+        // Filter out any obsolete system Funeral_Service if an old server state is returned
+        const clean = data.filter((s) => s.value !== 'Funeral_Service' || s.isCustom);
+        memoryServiceTypes = clean;
+        saveCustomToStorage(clean);
         notifyListeners();
-        return data;
+        return clean;
       }
     }
   } catch (err) {
-    console.debug('[ServiceTypes] Server fetch failed, using local cache:', err);
+    console.debug('[ServiceTypes] Server fetch skipped, using local cache:', err);
   }
   return memoryServiceTypes;
 }
@@ -214,7 +220,7 @@ export async function addServiceTypeToServer(
   }
   map.set(newConfig.value, newConfig);
   memoryServiceTypes = Array.from(map.values());
-  saveToStorage(memoryServiceTypes);
+  saveCustomToStorage(memoryServiceTypes);
   notifyListeners();
 
   try {
@@ -227,7 +233,7 @@ export async function addServiceTypeToServer(
       const serverTypes = await res.json();
       if (Array.isArray(serverTypes)) {
         memoryServiceTypes = serverTypes;
-        saveToStorage(serverTypes);
+        saveCustomToStorage(serverTypes);
         notifyListeners();
       }
     }
@@ -248,8 +254,10 @@ export async function deleteServiceTypeFromServer(value: string): Promise<boolea
     throw new Error('System service types cannot be removed.');
   }
 
+  // Remove from memory immediately
   memoryServiceTypes = memoryServiceTypes.filter((s) => s.value !== value);
-  saveToStorage(memoryServiceTypes);
+  // Persist updated custom types immediately
+  saveCustomToStorage(memoryServiceTypes);
   notifyListeners();
 
   try {
@@ -259,8 +267,9 @@ export async function deleteServiceTypeFromServer(value: string): Promise<boolea
     if (res.ok) {
       const serverTypes = await res.json();
       if (Array.isArray(serverTypes)) {
-        memoryServiceTypes = serverTypes;
-        saveToStorage(serverTypes);
+        const cleaned = serverTypes.filter((s) => s.value !== value);
+        memoryServiceTypes = cleaned;
+        saveCustomToStorage(cleaned);
         notifyListeners();
       }
       return true;
