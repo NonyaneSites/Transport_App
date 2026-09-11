@@ -16,7 +16,6 @@ import {
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
 } from '@/lib/ledger';
 import { downloadCancellationDebtPdf } from '@/lib/pdfExport';
-import { useServiceTypes } from '@/lib/serviceTypes';
 
 function HighlightMatch({ text, query }: { text: string; query: string }) {
   const q = query.trim();
@@ -81,30 +80,6 @@ export function LedgerPage() {
   const [addingDebtor, setAddingDebtor] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
   const [addSuccessMessage, setAddSuccessMessage] = useState<string | null>(null);
-
-  const { serviceTypes } = useServiceTypes();
-  const availableServiceCodes = useMemo(() => {
-    const defaultCodes = [
-      { code: 'PM', label: 'PM (Evening Service)' },
-      { code: 'AM', label: 'AM (Morning Service)' },
-      { code: 'LM', label: 'LM (Leaders Meeting)' },
-      { code: 'WMP', label: 'WMP (Worship/Music/Prayer)' },
-      { code: 'EF', label: 'EF (Easter Friday)' },
-      { code: 'AD', label: 'AD (Ascension Day)' },
-      { code: 'FW', label: 'FW (Fast & Worship)' },
-    ];
-    const map = new Map<string, { code: string; label: string }>();
-    for (const d of defaultCodes) {
-      map.set(d.code, d);
-    }
-    for (const s of serviceTypes) {
-      const acr = (s.acronym || '').trim().toUpperCase();
-      if (acr && !map.has(acr)) {
-        map.set(acr, { code: acr, label: `${acr} (${s.label})` });
-      }
-    }
-    return Array.from(map.values());
-  }, [serviceTypes]);
 
   // Historical Cancellation Import
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -1221,11 +1196,13 @@ export function LedgerPage() {
                           onChange={(e) => setAddService(e.target.value)}
                           className="input-field w-full text-sm"
                         >
-                          {availableServiceCodes.map((c) => (
-                            <option key={c.code} value={c.code} className="bg-card-2 text-ink">
-                              {c.label}
-                            </option>
-                          ))}
+                          <option value="PM">PM (Evening Service)</option>
+                          <option value="AM">AM (Morning Service)</option>
+                          <option value="LM">LM (Leaders Meeting)</option>
+                          <option value="WMP">WMP (Worship/Music/Prayer)</option>
+                          <option value="EF">EF (Easter Friday)</option>
+                          <option value="AD">AD (Ascension Day)</option>
+                          <option value="FW">FW (Fast & Worship)</option>
                         </select>
                       </div>
                     </div>
@@ -1620,11 +1597,13 @@ export function LedgerPage() {
                                   className="input-field w-full text-xs py-1 px-1.5 font-bold text-center"
                                   title="Service code"
                                 >
-                                  {availableServiceCodes.map((c) => (
-                                    <option key={c.code} value={c.code} className="bg-card-2 text-ink">
-                                      {c.code}
-                                    </option>
-                                  ))}
+                                  <option value="PM">PM</option>
+                                  <option value="AM">AM</option>
+                                  <option value="LM">LM</option>
+                                  <option value="WMP">WMP</option>
+                                  <option value="EF">EF</option>
+                                  <option value="AD">AD</option>
+                                  <option value="FW">FW</option>
                                 </select>
                               </div>
 

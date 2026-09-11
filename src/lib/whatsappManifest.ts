@@ -1,6 +1,5 @@
 import { shortDate, parseManifestKey } from './dates';
-import { hubDisplayName, getEffectiveStop, type Manifest, type Vehicle, type Passenger, type ServiceType } from './types';
-import { getServiceConfig } from './serviceTypes';
+import { SERVICE_TYPES, hubDisplayName, getEffectiveStop, type Manifest, type Vehicle, type Passenger, type ServiceType } from './types';
 import { sortVehiclesNatural } from './sort';
 import { isPassengerRepOfVehicle, matchRiderToOfficialRep, detectVehicleRep } from './officialReps';
 
@@ -9,19 +8,15 @@ function periodLabel(period: 'AM' | 'PM'): string {
 }
 
 function serviceTitle(service: ServiceType, style: 'standard' | 'rep'): string {
-  const def = getServiceConfig(service);
-  if (def?.isCustom) {
-    return `${def.label} Transport`;
-  }
+  const def = SERVICE_TYPES.find((s) => s.value === service);
   if (style === 'rep') {
     if (service === 'AM_Serving') return 'Am Serving Taxis';
     if (service === 'PM_Serving') return 'Pm Serving Taxis';
     if (service === 'AM_Normal') return 'Am Normal Taxis';
     if (service === 'PM_Normal') return 'Pm Normal Taxis';
-    if (service === 'AM_Ushers') return 'Am Ushers Taxis';
     return def ? `${def.period === 'AM' ? 'Am' : 'Pm'} ${def.mode} Taxis` : `${service} Taxis`;
   }
-  return def ? `${periodLabel(def.period === 'PM' ? 'PM' : 'AM')} ${def.mode} Taxis` : `${service} Taxis`;
+  return def ? `${periodLabel(def.period)} ${def.mode} Taxis` : `${service} Taxis`;
 }
 
 function getRiderPassengers(manifest: Manifest, vehicle: Vehicle): Passenger[] {

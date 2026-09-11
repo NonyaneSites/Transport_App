@@ -19,7 +19,6 @@ interface AdminStatsExportModalProps {
   serviceLabel?: string;
   isOpen: boolean;
   onClose: () => void;
-  allSessionsForDate?: Manifest[];
 }
 
 export function AdminStatsExportModal({
@@ -27,34 +26,17 @@ export function AdminStatsExportModal({
   serviceLabel = 'Transport Session',
   isOpen,
   onClose,
-  allSessionsForDate,
 }: AdminStatsExportModalProps) {
   const [copiedTSV, setCopiedTSV] = useState(false);
   const [copiedWhatsApp, setCopiedWhatsApp] = useState(false);
   const [activeTab, setActiveTab] = useState<'summary' | 'preview' | 'whatsapp'>('summary');
-  const [viewScope, setViewScope] = useState<'single' | 'combined'>('single');
 
   if (!isOpen) return null;
 
   const { date: sessionDate } = parseManifestKey(manifest.date);
+  const statsList = extractAllVehicleStats(manifest);
 
-  const hasMultipleSessions = Array.isArray(allSessionsForDate) && allSessionsForDate.length > 1;
-  const isCombined = viewScope === 'combined' && hasMultipleSessions;
-
-  const activeManifest: Manifest = isCombined
-    ? {
-        date: `${sessionDate}_ALL_SERVICES`,
-        signups: (allSessionsForDate || []).flatMap((s) => s.signups || []),
-        vehicles: (allSessionsForDate || []).flatMap((s) => s.vehicles || []),
-      }
-    : manifest;
-
-  const activeLabel = isCombined ? 'All Sunday Services (Combined)' : serviceLabel;
-  const statsList = extractAllVehicleStats(activeManifest);
-
-  const totalSignups = activeManifest.signups?.length || 0;
   const totalAllocated = statsList.reduce((sum, s) => sum + s.totalRiders, 0);
-  const totalUnallocated = Math.max(0, totalSignups - totalAllocated);
   const totalPresent = statsList.reduce((sum, s) => sum + s.presentCount, 0);
   const totalAbsent = statsList.reduce((sum, s) => sum + s.absentCount, 0);
   const totalFTVs = statsList.reduce((sum, s) => sum + s.ftvCount, 0);
@@ -62,7 +44,7 @@ export function AdminStatsExportModal({
   const totalFares = statsList.reduce((sum, s) => sum + s.fareCollected, 0);
 
   const handleCopyTSV = async () => {
-    const tsv = generateTaxiStatsTSV(activeManifest);
+    const tsv = generateTaxiStatsTSV(manifest);
     try {
       await navigator.clipboard.writeText(tsv);
       setCopiedTSV(true);
@@ -73,7 +55,7 @@ export function AdminStatsExportModal({
   };
 
   const handleCopyWhatsApp = async () => {
-    const text = generateConsolidatedWhatsAppStatsText(activeManifest, activeLabel);
+    const text = generateConsolidatedWhatsAppStatsText(manifest, serviceLabel);
     try {
       await navigator.clipboard.writeText(text);
       setCopiedWhatsApp(true);
@@ -100,64 +82,28 @@ export function AdminStatsExportModal({
                 <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px] font-mono">
                   {statsList.length} Vehicles
                 </span>
-                <span className="badge bg-emerald-500/15 text-emerald-300 text-[10px] font-mono">
-                  {totalSignups} Total Signups
-                </span>
               </div>
               <p className="text-xs text-muted">
-                {prettyDate(sessionDate)} · {activeLabel}
+                {prettyDate(sessionDate)} · {serviceLabel}
               </p>
             </div>
           </div>
-
-          <div className="flex items-center gap-3">
-            {hasMultipleSessions && (
-              <div className="flex rounded-lg border border-line bg-bg p-0.5 text-xs">
-                <button
-                  type="button"
-                  onClick={() => setViewScope('single')}
-                  className={`rounded-md px-2.5 py-1 transition-all ${
-                    viewScope === 'single'
-                      ? 'bg-card text-ink font-semibold shadow-sm'
-                      : 'text-muted hover:text-ink'
-                  }`}
-                >
-                  This Service ({manifest.signups?.length || 0})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewScope('combined')}
-                  className={`rounded-md px-2.5 py-1 transition-all ${
-                    viewScope === 'combined'
-                      ? 'bg-crimson-500 text-white font-semibold shadow-sm'
-                      : 'text-muted hover:text-ink'
-                  }`}
-                >
-                  All Sunday Services ({(allSessionsForDate || []).reduce((sum, s) => sum + (s.signups?.length || 0), 0)})
-                </button>
-              </div>
-            )}
-            <button
-              onClick={onClose}
-              className="rounded-lg p-1.5 text-muted hover:bg-card hover:text-ink transition-colors"
-            >
-              <X className="h-5 w-5" />
-            </button>
-          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-muted hover:bg-card hover:text-ink transition-colors"
+          >
+            <X className="h-5 w-5" />
+          </button>
         </div>
 
         {/* Quick Summary Metrics */}
-        <div className="grid grid-cols-2 sm:grid-cols-7 gap-2 border-b border-line bg-bg/50 px-5 py-3 shrink-0 text-xs">
-          <div className="rounded-lg border border-line/60 bg-card p-2 text-center">
-            <span className="text-[10px] uppercase font-bold text-muted block">Total Signups</span>
-            <span className="font-display text-base font-bold text-ink">{totalSignups}</span>
-          </div>
+        <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 border-b border-line bg-bg/50 px-5 py-3 shrink-0 text-xs">
           <div className="rounded-lg border border-line/60 bg-card p-2 text-center">
             <span className="text-[10px] uppercase font-bold text-muted block">Vehicles</span>
             <span className="font-display text-base font-bold text-ink">{statsList.length}</span>
           </div>
           <div className="rounded-lg border border-line/60 bg-card p-2 text-center">
-            <span className="text-[10px] uppercase font-bold text-muted block">In Vehicles</span>
+            <span className="text-[10px] uppercase font-bold text-muted block">Allocated</span>
             <span className="font-display text-base font-bold text-ink">{totalAllocated}</span>
           </div>
           <div className="rounded-lg border border-success/30 bg-success/5 p-2 text-center">
@@ -178,13 +124,6 @@ export function AdminStatsExportModal({
           </div>
         </div>
 
-        {totalUnallocated > 0 && (
-          <div className="bg-amber-500/10 border-b border-amber-500/20 px-5 py-2 text-xs text-amber-300 flex items-center justify-between">
-            <span>ℹ️ {totalUnallocated} registered attendees are currently awaiting vehicle allocation.</span>
-            <span className="text-[11px] text-amber-400">Total in system: {totalSignups} attendees</span>
-          </div>
-        )}
-
         {/* Action Buttons Bar */}
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-card px-5 py-3 shrink-0">
           <div className="flex items-center gap-1.5 text-xs font-semibold text-muted">
@@ -194,7 +133,7 @@ export function AdminStatsExportModal({
           <div className="flex items-center gap-2 flex-wrap">
             {/* Download Excel (.xlsx) */}
             <button
-              onClick={() => downloadTaxiStatsExcel(activeManifest)}
+              onClick={() => downloadTaxiStatsExcel(manifest)}
               className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-3 py-1.5 text-xs font-bold text-emerald-300 hover:bg-emerald-500/25 transition-all shadow-sm"
               title="Download full formatted Excel (.xlsx) workbook with 3 sheets"
             >
@@ -204,7 +143,7 @@ export function AdminStatsExportModal({
 
             {/* Download CSV */}
             <button
-              onClick={() => downloadTaxiStatsCSV(activeManifest)}
+              onClick={() => downloadTaxiStatsCSV(manifest)}
               className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-card-2 px-3 py-1.5 text-xs font-semibold text-ink hover:bg-card-2/80 transition-all shadow-sm"
               title="Download CSV for Google Sheets or Excel"
             >
@@ -234,12 +173,12 @@ export function AdminStatsExportModal({
 
             {/* Download Detailed Roster */}
             <button
-              onClick={() => downloadDetailedPassengersCSV(activeManifest)}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-card-2 px-3 py-1.5 text-xs font-semibold text-ink hover:bg-card-2/80 transition-all shadow-sm"
-              title="Download detailed passenger-level roster CSV"
+              onClick={() => downloadDetailedPassengersCSV(manifest)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-card-2 px-2.5 py-1.5 text-xs font-medium text-muted hover:text-ink transition-colors"
+              title="Download detailed passenger-level CSV with structure, stops, and flags"
             >
-              <Users className="h-3.5 w-3.5 text-muted" />
-              <span>Roster CSV</span>
+              <Users className="h-3.5 w-3.5" />
+              <span>Detailed Roster (.csv)</span>
             </button>
           </div>
         </div>
