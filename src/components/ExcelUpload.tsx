@@ -25,7 +25,7 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
       const buf = await file.arrayBuffer();
       const result = parseWorkbook(buf, { selectedDate: date, selectedService: service });
       setLastResult(result);
-      if (result.passengers.length > 0) {
+      if (result.passengers.length > 0 || (result.serviceBreakdown && result.serviceBreakdown.some((b) => b.passengers.length > 0))) {
         onImport(result.passengers, result);
       }
     } catch (e) {
@@ -101,14 +101,42 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
             Import complete
           </div>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <Stat label="Rows Parsed" value={lastResult.totalRows} />
+            <Stat label="Total Rows" value={lastResult.totalRows} />
             <Stat label="Wants Transport" value={lastResult.matchedTransport} />
             <Stat label="Date Matched" value={lastResult.matchedDate} />
-            <Stat label="Imported" value={lastResult.passengers.length} accent />
+            <Stat label="Active Service" value={lastResult.passengers.length} accent />
           </div>
+
+          {lastResult.serviceBreakdown && lastResult.serviceBreakdown.some((b) => b.passengers.length > 0) && (
+            <div className="rounded-xl border border-line bg-card-2/60 p-3">
+              <div className="text-xs font-semibold text-ink mb-2">
+                Sunday Services Breakdown ({lastResult.allDateSignups?.length || lastResult.matchedDate} Total Attendees Captured):
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {lastResult.serviceBreakdown.map((b) => (
+                  <div
+                    key={b.service}
+                    className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs border ${
+                      b.service === service
+                        ? 'bg-crimson-500/15 border-crimson-500/30 text-crimson-300 font-semibold'
+                        : 'bg-card border-line text-muted'
+                    }`}
+                  >
+                    <span>{b.label}:</span>
+                    <span className="font-bold text-ink">{b.passengers.length}</span>
+                    {b.service === service && <span className="text-[10px] text-crimson-400">(current)</span>}
+                  </div>
+                ))}
+              </div>
+              <p className="mt-2 text-[11px] text-muted">
+                All attendees have been saved into their respective standard Sunday service manifests.
+              </p>
+            </div>
+          )}
+
           {lastResult.skipped > 0 && (
             <p className="text-xs text-muted">
-              {lastResult.skipped} row(s) skipped — no transport needed, different date, different service, or duplicate.
+              {lastResult.skipped} row(s) skipped — no transport needed, different date, or duplicate submission.
             </p>
           )}
           {lastResult.warnings.map((w, i) => (
@@ -119,7 +147,7 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
           ))}
           {existingCount > 0 && (
             <p className="text-xs text-muted">
-              Merged with {existingCount} existing signups. Duplicates were skipped.
+              Merged with existing signups. Live assignments and attendance states were preserved.
             </p>
           )}
         </div>

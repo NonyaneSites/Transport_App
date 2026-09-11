@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
 import type { Passenger, ServiceType } from './types';
 import { MIN_TAXI_THRESHOLD, hubDisplayName } from './types';
+import { getServiceConfig } from './serviceTypes';
 import { sanitizeTransportValue } from './transportSanitization';
 import {
   toTitleCase,
@@ -500,65 +501,92 @@ const MONTH_MAP: Record<string, number> = {
   jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12,
 };
 
-function matchesDate(row: RawRow, headers: string[], selectedDate: string): boolean {
-  const col = findColumn(headers, ['service date']);
-  if (!col) return true; // no date column — don't filter by date
+export function extractRowDate(row: RawRow, headers: string[]): string | null {
+  const col = findColumn(headers, [
+    'service date',
+    'date attending',
+    'which sunday',
+    'sunday date',
+    'date of service',
+    'attendance date',
+    'date',
+  ]);
+  if (!col) return null;
   const raw = clean(row[col]);
-  if (!raw) return true; // empty date value — don't filter
+  if (!raw) return null;
 
-  // Try to parse the date into YYYY-MM-DD. If we successfully parse it,
-  // the row must match the selected date — otherwise it's from a different Sunday.
-  let parsedDate: string | null = null;
-
-  // Format: "7 Sep 2025" (D Mon YYYY)
-  const monMatch = raw.match(/^(\d{1,2})\s+([a-z]{3,4})\s+(\d{4})$/i);
+  // Format: "13 September 2026", "7 Sep 2025", "06 September 2026" (D Mon YYYY)
+  const monMatch = raw.match(/^(\d{1,2})\s+([a-z]+)\s+(\d{4})$/i);
   if (monMatch) {
     const day = parseInt(monMatch[1], 10);
     const monName = lower(monMatch[2]).slice(0, 3);
     const year = parseInt(monMatch[3], 10);
     const month = MONTH_MAP[monName];
-    if (month) {
-      parsedDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    if (month && day >= 1 && day <= 31 && year >= 2020 && year <= 2050) {
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     }
   }
 
-  // Try Date constructor (handles Date objects from cellDates:true and many string formats)
-  if (!parsedDate) {
-    const cell = new Date(raw);
-    if (!isNaN(cell.getTime())) {
-      const y = cell.getFullYear();
-      const m = String(cell.getMonth() + 1).padStart(2, '0');
-      const d = String(cell.getDate()).padStart(2, '0');
-      parsedDate = `${y}-${m}-${d}`;
+  // Format: "September 13, 2026" or "Sep 13 2026"
+  const monFirstMatch = raw.match(/^([a-z]+)\s+(\d{1,2}),?\s+(\d{4})$/i);
+  if (monFirstMatch) {
+    const monName = lower(monFirstMatch[1]).slice(0, 3);
+    const day = parseInt(monFirstMatch[2], 10);
+    const year = parseInt(monFirstMatch[3], 10);
+    const month = MONTH_MAP[monName];
+    if (month && day >= 1 && day <= 31 && year >= 2020 && year <= 2050) {
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     }
   }
 
-  // Try numeric formats: "7/9/2025", "7-9-2025", "2025-09-07"
-  if (!parsedDate) {
-    const normalized = raw.replace(/\//g, '-');
-    const parts = normalized.split(/[-.]/).filter(Boolean);
-    if (parts.length === 3) {
-      const [a, b, c] = parts.map((p) => p.trim());
-      let year: number, month: number, day: number;
-      if (a.length === 4) {
-        year = parseInt(a, 10); month = parseInt(b, 10); day = parseInt(c, 10);
-      } else if (c.length === 4) {
-        day = parseInt(a, 10); month = parseInt(b, 10); year = parseInt(c, 10);
+  // Numeric formats: "2026-09-13", "13/09/2026", "13-09-2026"
+  const normalized = raw.replace(/\//g, '-');
+  const parts = normalized.split(/[-.]/).filter(Boolean);
+  if (parts.length === 3) {
+    const [a, b, c] = parts.map((p) => p.trim());
+    let year: number, month: number, day: number;
+    if (a.length === 4) {
+      year = parseInt(a, 10); month = parseInt(b, 10); day = parseInt(c, 10);
+    } else if (c.length === 4) {
+      const n1 = parseInt(a, 10);
+      const n2 = parseInt(b, 10);
+      year = parseInt(c, 10);
+      if (n1 > 12) {
+        day = n1; month = n2;
+      } else if (n2 > 12) {
+        month = n1; day = n2;
       } else {
-        day = parseInt(a, 10); month = parseInt(b, 10); year = parseInt(c, 10);
+        // Default to DD-MM-YYYY (South Africa format)
+        day = n1; month = n2;
       }
-      if (year && month && day) {
-        parsedDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-      }
+    } else {
+      day = parseInt(a, 10); month = parseInt(b, 10); year = parseInt(c, 10);
+    }
+    if (year && month && day && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     }
   }
 
+  // Fallback: Date constructor
+  const cell = new Date(raw);
+  if (!isNaN(cell.getTime())) {
+    const y = cell.getFullYear();
+    const m = String(cell.getMonth() + 1).padStart(2, '0');
+    const d = String(cell.getDate()).padStart(2, '0');
+    if (y >= 2020 && y <= 2050) {
+      return `${y}-${m}-${d}`;
+    }
+  }
+
+  return null;
+}
+
+function matchesDate(row: RawRow, headers: string[], selectedDate: string): boolean {
+  const parsedDate = extractRowDate(row, headers);
   if (parsedDate) {
-    // We parsed a real date — only include if it matches the selected Sunday
     return parsedDate === selectedDate;
   }
-
-  // Truly unparseable date — don't exclude (benefit of the doubt)
+  // Truly unparseable date or no date column — don't exclude
   return true;
 }
 
@@ -568,8 +596,36 @@ export function matchesService(
   selectedService: ServiceType,
   sheetName: string = ''
 ): boolean {
-  const selectedPeriod: 'AM' | 'PM' = selectedService.startsWith('AM') ? 'AM' : 'PM';
+  const cfg = getServiceConfig(selectedService);
+  const selectedPeriod = cfg?.period || (selectedService.startsWith('AM') ? 'AM' : selectedService.startsWith('PM') ? 'PM' : 'OTHER');
   const normSheet = lower(clean(sheetName));
+
+  // If custom service (e.g. Funeral, Dreamweek, etc.)
+  if (cfg?.isCustom) {
+    const sName = lower(cfg.label);
+    const sVal = lower(cfg.value);
+    const sAcr = lower(cfg.acronym);
+    if (sName.includes('funeral') && (normSheet.includes('funeral') || normSheet.includes('saturday'))) {
+      return true;
+    }
+    if (sName.includes('dreamweek') && (normSheet.includes('dreamweek') || normSheet.includes('dream week'))) {
+      return true;
+    }
+    // Check if row has service matching custom name or acronym
+    const serviceCol = findColumn(headers, [
+      'which service are you attending',
+      'service attending',
+      'service',
+      'service type',
+      'servicetype',
+    ]);
+    if (serviceCol) {
+      const val = lower(clean(row[serviceCol]));
+      if (val && (val.includes(sName) || val.includes(sVal) || val.includes(sAcr))) {
+        return true;
+      }
+    }
+  }
 
   // If sheet explicitly declares PM, do not include in AM service
   if (selectedPeriod === 'AM' && (normSheet.includes('pm') || normSheet.includes('evening')) && !normSheet.includes('am')) {
@@ -626,6 +682,12 @@ export function matchesService(
   return true;
 }
 
+export interface ServiceBreakdownItem {
+  service: ServiceType;
+  label: string;
+  passengers: Passenger[];
+}
+
 export interface ParseResult {
   passengers: Passenger[];
   skipped: number;
@@ -634,6 +696,8 @@ export interface ParseResult {
   matchedService: number;
   matchedTransport: number;
   warnings: string[];
+  serviceBreakdown: ServiceBreakdownItem[];
+  allDateSignups: Passenger[];
 }
 
 export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResult {
@@ -647,6 +711,8 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
       matchedService: 0,
       matchedTransport: 0,
       warnings: ['No sheets found in workbook.'],
+      serviceBreakdown: [],
+      allDateSignups: [],
     };
   }
 
@@ -663,6 +729,7 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
     timestampEpoch: number;
     wantsTransport: boolean;
     matchesDate: boolean;
+    rowDate: string | null;
     hub: string;
     category: 'Ushers' | 'Serving' | 'Normal';
     ministry: string;
@@ -716,6 +783,7 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
       const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
       const wantsTrans = wantsTransport(row, headers);
+      const rowDate = extractRowDate(row, headers);
       const dateMatch = matchesDate(row, headers, opts.selectedDate);
 
       rawSubmissions.push({
@@ -731,6 +799,7 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
         timestampEpoch,
         wantsTransport: wantsTrans,
         matchesDate: dateMatch,
+        rowDate,
         hub,
         category,
         ministry,
@@ -742,12 +811,14 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
     }
   }
 
-  // Pass 2: Group submissions by person and keep strictly the MOST RECENT submission for each person
-  const personGroups = new Map<string, RawCandidate[]>();
+  // Pass 2: Group submissions by person + date so earlier/later Sundays are never wiped out
+  const personDateGroups = new Map<string, RawCandidate[]>();
   for (const sub of rawSubmissions) {
-    const group = personGroups.get(sub.normalizedName);
+    const dKey = sub.rowDate || opts.selectedDate;
+    const key = `${sub.normalizedName}__${dKey}`;
+    const group = personDateGroups.get(key);
     if (!group) {
-      personGroups.set(sub.normalizedName, [sub]);
+      personDateGroups.set(key, [sub]);
     } else {
       group.push(sub);
     }
@@ -755,7 +826,7 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
 
   const dateMatchedCandidates: RawCandidate[] = [];
 
-  for (const [, submissions] of personGroups) {
+  for (const [, submissions] of personDateGroups) {
     // Sort submissions for this person by timestamp descending (or row index descending if equal)
     submissions.sort((a, b) => {
       if (b.timestampEpoch !== a.timestampEpoch) {
@@ -767,7 +838,7 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
     // The most recent submission takes 100% precedence
     const mostRecent = submissions[0];
 
-    // Older duplicate submissions for this person are superseded
+    // Older duplicate submissions for this person on the same date are superseded
     if (submissions.length > 1) {
       skipped += (submissions.length - 1);
     }
@@ -792,10 +863,84 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
   const ushersCount = dateMatchedCandidates.filter((c) => c.category === 'Ushers').length;
   const normalCount = dateMatchedCandidates.filter((c) => c.category === 'Normal').length;
 
+  // Helper to build Passenger record
+  function toPassenger(c: RawCandidate, svc: ServiceType): Passenger {
+    return {
+      id: c.id,
+      fullName: c.name,
+      stop: c.stop,
+      structure: c.structure,
+      phone: c.phone,
+      userEmail: c.userEmail,
+      timestamp: c.timestamp,
+      hub: c.hub,
+      service: svc,
+      category: c.category,
+      ministry: c.ministry,
+      memberType: c.memberType,
+      assignedTo: null,
+      present: false,
+      cancellationFeeOwed: false,
+    };
+  }
+
+  // Partition candidates into standard Sunday service categories
+  const amServingList: Passenger[] = [];
+  const amUshersList: Passenger[] = [];
+  const amNormalList: Passenger[] = [];
+  const pmServingList: Passenger[] = [];
+  const pmNormalList: Passenger[] = [];
+  const allDateSignups: Passenger[] = [];
+
+  for (const c of dateMatchedCandidates) {
+    // Check if PM
+    const serviceCol = findColumn(c.headers, [
+      'which service are you attending',
+      'service attending',
+      'service',
+      'am service type',
+      'pm service type',
+      'service type',
+      'servicetype',
+    ]);
+    const serviceVal = serviceCol ? lower(clean(c.row[serviceCol])) : '';
+    const pmCol = findColumn(c.headers, ['pm service type', 'pm service', 'pm serving']);
+    const amCol = findColumn(c.headers, ['am service type', 'am service', 'am serving']);
+    const hasPMVal = pmCol && clean(c.row[pmCol]);
+    const hasAMVal = amCol && clean(c.row[amCol]);
+
+    const isPM = (
+      (serviceVal.includes('pm') || serviceVal.includes('evening') || serviceVal.includes('afternoon') || serviceVal.includes('17:00') || serviceVal.includes('18:00')) &&
+      !serviceVal.includes('am') && !serviceVal.includes('morning')
+    ) || (hasPMVal && !hasAMVal);
+
+    if (isPM) {
+      if (c.category === 'Normal') {
+        pmNormalList.push(toPassenger(c, 'PM_Normal'));
+        allDateSignups.push(toPassenger(c, 'PM_Normal'));
+      } else {
+        pmServingList.push(toPassenger(c, 'PM_Serving'));
+        allDateSignups.push(toPassenger(c, 'PM_Serving'));
+      }
+    } else {
+      // Standard AM Services
+      if (c.category === 'Ushers') {
+        amUshersList.push(toPassenger(c, 'AM_Ushers'));
+        allDateSignups.push(toPassenger(c, 'AM_Ushers'));
+      } else if (c.category === 'Normal') {
+        amNormalList.push(toPassenger(c, 'AM_Normal'));
+        allDateSignups.push(toPassenger(c, 'AM_Normal'));
+      } else {
+        amServingList.push(toPassenger(c, 'AM_Serving'));
+        allDateSignups.push(toPassenger(c, 'AM_Serving'));
+      }
+    }
+  }
+
+  // Pass 3: Construct the passenger list for opts.selectedService
   const selectedService = opts.selectedService;
   const passengers: Passenger[] = [];
 
-  // Pass 3: Filter and apply auto-merging logic based on selectedService and 15-passenger minimum
   for (const c of dateMatchedCandidates) {
     if (!matchesService(c.row, c.headers, opts.selectedService, c.sheetName)) {
       continue;
@@ -804,13 +949,10 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
     let include = false;
 
     if (selectedService === 'AM_Ushers') {
-      // Dedicated Ushers (Early) service
       include = c.category === 'Ushers';
     } else if (selectedService === 'AM_Normal' || selectedService === 'PM_Normal') {
-      // Dedicated Normal transport service
       include = c.category === 'Normal';
     } else if (selectedService === 'AM_Serving') {
-      // AM Serving main service
       if (c.category === 'Serving') {
         include = true;
       } else if (c.category === 'Ushers') {
@@ -821,28 +963,14 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
         include = normalCount < MIN_TAXI_THRESHOLD;
       }
     } else if (selectedService === 'PM_Serving') {
-      // PM Serving
       include = c.category === 'Serving' || c.category === 'Ushers';
+    } else {
+      // Custom event service (e.g. Dreamweek)
+      include = true;
     }
 
     if (include) {
-      passengers.push({
-        id: c.id,
-        fullName: c.name,
-        stop: c.stop,
-        structure: c.structure,
-        phone: c.phone,
-        userEmail: c.userEmail,
-        timestamp: c.timestamp,
-        hub: c.hub,
-        service: opts.selectedService,
-        category: c.category,
-        ministry: c.ministry,
-        memberType: c.memberType,
-        assignedTo: null,
-        present: false,
-        cancellationFeeOwed: false,
-      });
+      passengers.push(toPassenger(c, selectedService));
     }
   }
 
@@ -850,30 +978,32 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
   const totalExcluded = dateMatchedCandidates.length - passengers.length;
   skipped += totalExcluded;
 
+  // Multi-service breakdown containing all standard Sunday services
+  const serviceBreakdown: ServiceBreakdownItem[] = [
+    { service: 'AM_Serving', label: 'AM Service — Serving Only', passengers: amServingList },
+    { service: 'AM_Ushers', label: 'AM Service — Ushers (Early)', passengers: amUshersList },
+    { service: 'AM_Normal', label: 'AM Service — Normal Only', passengers: amNormalList },
+  ];
+
+  if (pmServingList.length > 0) {
+    serviceBreakdown.push({ service: 'PM_Serving', label: 'PM Service — Serving Only', passengers: pmServingList });
+  }
+  if (pmNormalList.length > 0) {
+    serviceBreakdown.push({ service: 'PM_Normal', label: 'PM Service — Normal Only', passengers: pmNormalList });
+  }
+
   // Informative notices & warnings based on threshold
   if (selectedService === 'AM_Serving') {
     if (ushersCount > 0 && ushersCount < MIN_TAXI_THRESHOLD) {
       warnings.push(`Auto-Included: ${ushersCount} Ushers (Early) signups merged into AM Serving (${ushersCount} < ${MIN_TAXI_THRESHOLD} minimum for a dedicated taxi).`);
     } else if (ushersCount >= MIN_TAXI_THRESHOLD) {
-      warnings.push(`Notice: ${ushersCount} Ushers (Early) signups detected (≥ ${MIN_TAXI_THRESHOLD}). They have enough for a dedicated taxi under "AM Service — Ushers (Early)".`);
+      warnings.push(`Notice: ${ushersCount} Ushers (Early) signups detected (≥ ${MIN_TAXI_THRESHOLD}). Available under "AM Service — Ushers (Early)".`);
     }
 
     if (normalCount > 0 && normalCount < MIN_TAXI_THRESHOLD) {
       warnings.push(`Auto-Included: ${normalCount} AM Normal signups merged into AM Serving (${normalCount} < ${MIN_TAXI_THRESHOLD} minimum for a taxi).`);
     } else if (normalCount >= MIN_TAXI_THRESHOLD) {
-      warnings.push(`Notice: ${normalCount} AM Normal signups detected. Available under "AM Service — Normal Only".`);
-    }
-  } else if (selectedService === 'AM_Ushers') {
-    if (ushersCount > 0 && ushersCount < MIN_TAXI_THRESHOLD) {
-      warnings.push(`Note: ${ushersCount} Ushers (Early) signups (< ${MIN_TAXI_THRESHOLD} taxi minimum). In "AM Service — Serving Only", these will automatically merge with AM Serving.`);
-    } else if (ushersCount >= MIN_TAXI_THRESHOLD) {
-      warnings.push(`✓ ${ushersCount} Ushers (Early) signups available — enough for a dedicated taxi (${Math.floor(ushersCount / 15)} taxi(s)).`);
-    }
-  } else if (selectedService === 'AM_Normal') {
-    if (normalCount > 0 && normalCount < MIN_TAXI_THRESHOLD) {
-      warnings.push(`Note: ${normalCount} AM Normal signups (< ${MIN_TAXI_THRESHOLD} taxi minimum). In "AM Service — Serving Only", these will automatically merge with AM Serving.`);
-    } else if (normalCount >= MIN_TAXI_THRESHOLD) {
-      warnings.push(`✓ ${normalCount} AM Normal signups available.`);
+      warnings.push(`Notice: ${normalCount} AM Normal signups detected (≥ ${MIN_TAXI_THRESHOLD}). Available under "AM Service — Normal Only".`);
     }
   }
 
@@ -885,5 +1015,7 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
     matchedService,
     matchedTransport,
     warnings,
+    serviceBreakdown,
+    allDateSignups,
   };
 }

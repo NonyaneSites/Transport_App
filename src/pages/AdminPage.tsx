@@ -1,20 +1,23 @@
 import { useState, useEffect } from 'react';
-import { Lock, Trash2, Loader2, AlertTriangle, Calendar, Users, Bus, ArrowUpRight, XCircle, FileSpreadsheet, ChevronDown, ChevronRight, History, Download, FileDown, Eye, Table } from 'lucide-react';
+import { Lock, Trash2, Loader2, AlertTriangle, Calendar, Users, Bus, ArrowUpRight, XCircle, FileSpreadsheet, ChevronDown, ChevronRight, History, Download, FileDown, Eye, Table, BarChart3, Layers } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { ExcelUpload } from '@/components/ExcelUpload';
 import { VehicleAllocation } from '@/components/VehicleAllocation';
 import { useManifest } from '@/lib/useManifest';
-import { listAllManifests, loadManifest } from '@/lib/manifest';
+import { listAllManifests, loadManifest, upsertManifest } from '@/lib/manifest';
 import { listLedgerEntries } from '@/lib/ledger';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey as parseKey } from '@/lib/dates';
 import { SERVICE_TYPES, RESET_PASSWORD, type ServiceType, type Passenger, type Manifest } from '@/lib/types';
+import { getServiceLabel } from '@/lib/serviceTypes';
 import { isSamePassenger, getSubmissionTimestampEpoch } from '@/lib/importer';
 import { generateWhatsAppRouteManifest, generateWhatsAppRepManifest, downloadTextFile } from '@/lib/whatsappManifest';
 import { downloadTaxiStatsExcel, downloadTaxiStatsCSV } from '@/lib/statsExport';
 import { AdminStatsExportModal } from '@/components/AdminStatsExportModal';
 import { AdminAttendanceNotesSection } from '@/components/AdminAttendanceNotesSection';
+import { AdminServiceTypesModal } from '@/components/AdminServiceTypesModal';
+import type { ParseResult } from '@/lib/parser';
 
 export function AdminPage() {
   const [date, setDate] = useState(() => {
@@ -62,7 +65,12 @@ export function AdminPage() {
   const [ledgerCount, setLedgerCount] = useState(0);
   const [archiveSelected, setArchiveSelected] = useState('');
   const [showHistory, setShowHistory] = useState(false);
-  const [exportModalManifest, setExportModalManifest] = useState<{ manifest: Manifest; serviceLabel: string } | null>(null);
+  const [serviceTypesModalOpen, setServiceTypesModalOpen] = useState(false);
+  const [exportModalManifest, setExportModalManifest] = useState<{
+    manifest: Manifest;
+    serviceLabel: string;
+    allSessionsForDate?: Manifest[];
+  } | null>(null);
 
   // Initial load on mount only — avoid re-fetching the entire database history on every live tick
   useEffect(() => {
@@ -106,43 +114,19 @@ export function AdminPage() {
     });
   }, [manifest, key]);
 
-  async function handleImport(passengers: Passenger[]) {
-    let currentManifest = manifest;
-    if (!currentManifest || currentManifest.date !== key) {
-      currentManifest = await loadManifest(key);
-    }
-
-    if (!currentManifest) {
-      // Deduplicate incoming batch among itself if saving fresh manifest
-      const deduplicated: Passenger[] = [];
-      for (const incoming of passengers) {
-        if (!deduplicated.some((p) => isSamePassenger(p, incoming))) {
-          deduplicated.push(incoming);
-        }
-      }
-      await save({ date: key, signups: deduplicated, vehicles: [] });
-      return;
-    }
-
-    // Merge incoming passengers into existing manifest signups:
-    // If an incoming passenger matches an existing signup:
-    //   - Compare timestamps. If incoming is more recent (or equal), update their profile details (stop, structure, phone, email, etc.)
-    //     while strictly preserving live assignment and attendance states.
-    // If incoming passenger is entirely new:
-    //   - Add them as a fresh signup.
-    const updatedSignups = [...(currentManifest.signups || [])];
+  function mergePassengersIntoList(existingList: Passenger[], incomingList: Passenger[]): Passenger[] {
+    const updated = [...existingList];
     const fresh: Passenger[] = [];
 
-    for (const incoming of passengers) {
-      const existingIdx = updatedSignups.findIndex((existing) => isSamePassenger(existing, incoming));
+    for (const incoming of incomingList) {
+      const existingIdx = updated.findIndex((existing) => isSamePassenger(existing, incoming));
       if (existingIdx >= 0) {
-        const existing = updatedSignups[existingIdx];
+        const existing = updated[existingIdx];
         const existingEpoch = getSubmissionTimestampEpoch(existing.timestamp);
         const incomingEpoch = getSubmissionTimestampEpoch(incoming.timestamp);
 
         if (incomingEpoch >= existingEpoch) {
-          // Update profile details with latest submission info
-          updatedSignups[existingIdx] = {
+          updated[existingIdx] = {
             ...existing,
             stop: incoming.stop,
             structure: incoming.structure,
@@ -162,12 +146,54 @@ export function AdminPage() {
         }
       }
     }
+    return [...updated, ...fresh];
+  }
 
-    await save({
-      ...currentManifest,
-      vehicles: currentManifest.vehicles || [],
-      signups: [...updatedSignups, ...fresh],
-    });
+  async function handleImport(passengers: Passenger[], result?: ParseResult) {
+    let currentManifest = manifest;
+    if (!currentManifest || currentManifest.date !== key) {
+      currentManifest = await loadManifest(key);
+    }
+
+    // Save passengers for current active session
+    const currentSignups = currentManifest?.signups || [];
+    const mergedCurrent = mergePassengersIntoList(currentSignups, passengers);
+    const updatedCurrentManifest: Manifest = {
+      date: key,
+      vehicles: currentManifest?.vehicles || [],
+      signups: mergedCurrent,
+      updated_at: new Date().toISOString(),
+    };
+    await save(updatedCurrentManifest);
+
+    // Save any other Sunday services detected in the upload breakdown
+    if (result?.serviceBreakdown && result.serviceBreakdown.length > 0) {
+      for (const item of result.serviceBreakdown) {
+        if (item.service !== service && item.passengers.length > 0) {
+          const otherKey = `${date}_${item.service}`;
+          const otherManifest = await loadManifest(otherKey);
+          const otherSignups = otherManifest?.signups || [];
+          const mergedOther = mergePassengersIntoList(otherSignups, item.passengers);
+          const updatedOther: Manifest = {
+            date: otherKey,
+            vehicles: otherManifest?.vehicles || [],
+            signups: mergedOther,
+            updated_at: new Date().toISOString(),
+          };
+          await upsertManifest(updatedOther);
+        }
+      }
+    }
+
+    // Refresh full session list
+    try {
+      const all = await listAllManifests();
+      if (Array.isArray(all)) {
+        setSessionList(all);
+      }
+    } catch {
+      // ignore
+    }
   }
 
   async function handleReset() {
@@ -186,7 +212,7 @@ export function AdminPage() {
     }
   }
 
-  const serviceLabel = SERVICE_TYPES.find((s) => s.value === service)?.label ?? service;
+  const serviceLabel = getServiceLabel(service);
 
   const totalRegistrations = (sessionList || []).reduce((sum, m) => sum + (m?.signups?.length || 0), 0);
   const totalVehicles = (sessionList || []).reduce((sum, m) => sum + (m?.vehicles?.length || 0), 0);
@@ -212,6 +238,14 @@ export function AdminPage() {
             </p>
           </div>
           <div className="flex items-center gap-2 self-start sm:self-auto">
+            <button
+              onClick={() => setServiceTypesModalOpen(true)}
+              className="btn-secondary text-xs py-1.5 px-3 flex items-center gap-1.5"
+              title="Add or configure church service types and cancellation acronyms"
+            >
+              <Layers className="h-3.5 w-3.5 text-crimson-400" />
+              <span>Service Types & Acronyms</span>
+            </button>
             <button onClick={() => setResetOpen(true)} className="btn-danger text-xs py-1.5 px-3">
               <Trash2 className="h-3.5 w-3.5" />
               <span>Reset Manifest</span>
@@ -247,10 +281,26 @@ export function AdminPage() {
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="font-mono text-xs text-muted bg-card-2 px-2.5 py-1 rounded-md border border-line">
               {key}
             </span>
+            <button
+              type="button"
+              onClick={() => {
+                const allForDate = sessionList.filter((s) => parseKey(s.date || '').date === date);
+                setExportModalManifest({
+                  manifest: manifest && manifest.date === key ? manifest : { date: key, signups: [], vehicles: [] },
+                  serviceLabel,
+                  allSessionsForDate: allForDate,
+                });
+              }}
+              className="btn-secondary text-xs py-1.5 px-3 flex items-center gap-1.5"
+              title="Open Transport Stats for Excel, Google Sheets, or WhatsApp"
+            >
+              <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-400" />
+              <span>Stats Console</span>
+            </button>
           </div>
         </div>
 
@@ -386,9 +436,14 @@ export function AdminPage() {
                         onClick={() => {
                           const m = sessionList.find((s) => s.date === archiveSelected);
                           if (!m) return;
-                          const { service: mService } = parseKey(m.date || '');
+                          const { date: mDate, service: mService } = parseKey(m.date || '');
                           const def = SERVICE_TYPES.find((s) => s.value === mService);
-                          setExportModalManifest({ manifest: m, serviceLabel: def?.label ?? mService });
+                          const allForDate = sessionList.filter((s) => parseKey(s.date || '').date === mDate);
+                          setExportModalManifest({
+                            manifest: m,
+                            serviceLabel: def?.label ?? mService,
+                            allSessionsForDate: allForDate,
+                          });
                         }}
                         disabled={!archiveSelected}
                         className={archiveSelected ? 'btn-ghost border-line text-xs py-2 px-3 flex items-center gap-1.5 text-amber-300 hover:bg-amber-500/10' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted text-xs py-2 px-3'}
@@ -396,6 +451,30 @@ export function AdminPage() {
                       >
                         <Eye className="h-4 w-4 text-amber-400" />
                         <span>Transport Stats Hub</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          const targetDate = archiveSelected ? parseKey(archiveSelected).date : date;
+                          const allForDate = sessionList.filter((s) => parseKey(s.date || '').date === targetDate);
+                          const combinedSignups = allForDate.flatMap((s) => s.signups || []);
+                          const combinedVehicles = allForDate.flatMap((s) => s.vehicles || []);
+                          const dummy: Manifest = {
+                            date: `${targetDate}_ALL_SERVICES`,
+                            signups: combinedSignups,
+                            vehicles: combinedVehicles,
+                          };
+                          setExportModalManifest({
+                            manifest: dummy,
+                            serviceLabel: 'All Sunday Services (Combined)',
+                            allSessionsForDate: allForDate,
+                          });
+                        }}
+                        className="btn-secondary text-xs py-2 px-3 flex items-center gap-1.5 text-ink"
+                        title="View Combined Sunday Stats across all services"
+                      >
+                        <BarChart3 className="h-4 w-4 text-crimson-400" />
+                        <span>Combined Sunday Stats</span>
                       </button>
 
                       <button
@@ -492,7 +571,14 @@ export function AdminPage() {
                                     </button>
                                     <button
                                       type="button"
-                                      onClick={() => setExportModalManifest({ manifest: m, serviceLabel: def?.label ?? mService })}
+                                      onClick={() => {
+                                        const allForDate = sessionList.filter((s) => parseKey(s.date || '').date === mDate);
+                                        setExportModalManifest({
+                                          manifest: m,
+                                          serviceLabel: def?.label ?? mService,
+                                          allSessionsForDate: allForDate,
+                                        });
+                                      }}
                                       title="Open Stats Console"
                                       className="rounded-lg p-1.5 text-amber-400 hover:bg-amber-500/20 transition-colors"
                                     >
@@ -584,10 +670,18 @@ export function AdminPage() {
         <AdminStatsExportModal
           manifest={exportModalManifest.manifest}
           serviceLabel={exportModalManifest.serviceLabel}
+          allSessionsForDate={exportModalManifest.allSessionsForDate}
           isOpen={true}
           onClose={() => setExportModalManifest(null)}
         />
       )}
+
+      {/* Dynamic Service Types Modal */}
+      <AdminServiceTypesModal
+        isOpen={serviceTypesModalOpen}
+        onClose={() => setServiceTypesModalOpen(false)}
+        onSelectService={(newVal) => setService(newVal as ServiceType)}
+      />
 
       <Footer />
     </div>
