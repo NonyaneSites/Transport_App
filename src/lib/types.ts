@@ -256,6 +256,7 @@ export const SERVICE_TYPES: { value: ServiceType; label: string; period: 'AM' | 
 export const RESET_PASSWORD = 'CRC2026!';
 export const CANCELLATION_FEE = 40;
 export const MIN_TAXI_THRESHOLD = 15;
+export const MIN_AM_NORMAL_THRESHOLD = 14;
 
 export const LARGE_BUS_THRESHOLD = 40;
 

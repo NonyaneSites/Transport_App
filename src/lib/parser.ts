@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import type { Passenger, ServiceType } from './types';
-import { MIN_TAXI_THRESHOLD, hubDisplayName } from './types';
+import { MIN_TAXI_THRESHOLD, MIN_AM_NORMAL_THRESHOLD, hubDisplayName } from './types';
 import { sanitizeTransportValue } from './transportSanitization';
 import {
   toTitleCase,
@@ -994,8 +994,8 @@ function processExtractedCandidates(
         // Auto-merge into AM Serving if not enough for a dedicated Ushers taxi (< 15)
         include = ushersCount < MIN_TAXI_THRESHOLD;
       } else if (c.category === 'Normal') {
-        // Auto-merge into AM Serving if not enough for a normal taxi (< 15)
-        include = normalCount < MIN_TAXI_THRESHOLD;
+        // Auto-merge into AM Serving if not enough for a normal taxi (< 14)
+        include = normalCount < MIN_AM_NORMAL_THRESHOLD;
       }
     } else if (selectedService === 'PM_Serving') {
       // PM Serving
@@ -1035,9 +1035,9 @@ function processExtractedCandidates(
       warnings.push(`Notice: ${ushersCount} Ushers (Early) signups detected (≥ ${MIN_TAXI_THRESHOLD}). They have enough for a dedicated taxi under "AM Service — Ushers (Early)".`);
     }
 
-    if (normalCount > 0 && normalCount < MIN_TAXI_THRESHOLD) {
-      warnings.push(`Auto-Included: ${normalCount} AM Normal signups merged into AM Serving (${normalCount} < ${MIN_TAXI_THRESHOLD} minimum for a taxi).`);
-    } else if (normalCount >= MIN_TAXI_THRESHOLD) {
+    if (normalCount > 0 && normalCount < MIN_AM_NORMAL_THRESHOLD) {
+      warnings.push(`Auto-Included: ${normalCount} AM Normal signups merged into AM Serving (${normalCount} < ${MIN_AM_NORMAL_THRESHOLD} minimum for a taxi).`);
+    } else if (normalCount >= MIN_AM_NORMAL_THRESHOLD) {
       warnings.push(`Notice: ${normalCount} AM Normal signups detected. Available under "AM Service — Normal Only".`);
     }
   } else if (selectedService === 'AM_Ushers') {
@@ -1047,9 +1047,9 @@ function processExtractedCandidates(
       warnings.push(`✓ ${ushersCount} Ushers (Early) signups available — enough for a dedicated taxi (${Math.floor(ushersCount / 15)} taxi(s)).`);
     }
   } else if (selectedService === 'AM_Normal') {
-    if (normalCount > 0 && normalCount < MIN_TAXI_THRESHOLD) {
-      warnings.push(`Note: ${normalCount} AM Normal signups (< ${MIN_TAXI_THRESHOLD} taxi minimum). In "AM Service — Serving Only", these will automatically merge with AM Serving.`);
-    } else if (normalCount >= MIN_TAXI_THRESHOLD) {
+    if (normalCount > 0 && normalCount < MIN_AM_NORMAL_THRESHOLD) {
+      warnings.push(`Note: ${normalCount} AM Normal signups (< ${MIN_AM_NORMAL_THRESHOLD} taxi minimum). In "AM Service — Serving Only", these will automatically merge with AM Serving.`);
+    } else if (normalCount >= MIN_AM_NORMAL_THRESHOLD) {
       warnings.push(`✓ ${normalCount} AM Normal signups available.`);
     }
   }

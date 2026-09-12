@@ -210,3 +210,82 @@ test('parseWorkbookAsync() yields progress and returns identical ParseResult', a
   assert.deepStrictEqual(result.skippedSheets, ['AM Table']);
   assert.ok(progressEvents.length >= 2, 'Must report progress events across phases');
 });
+
+test('AM Normal minimum threshold is 14: 13 auto-merges into AM Serving, 14 does not', () => {
+  // Test case 1: 13 AM Normal signups (< 14) + 2 AM Serving signups
+  // When parsing AM_Serving, all 15 should be included (13 Normal auto-merged because 13 < 14)
+  const wb13 = XLSX.utils.book_new();
+  const rows13: Record<string, string>[] = [
+    {
+      'Full Name': 'Server One',
+      'Which service are you attending': 'AM Service',
+      'AM Service Type': 'Serving',
+      'Serving Ministry': 'Choir',
+      'Do you need transport': 'Yes',
+      'Pickup Stop': '56 Jorissen',
+      'Service Date': '2026-09-13',
+    },
+    {
+      'Full Name': 'Server Two',
+      'Which service are you attending': 'AM Service',
+      'AM Service Type': 'Serving',
+      'Serving Ministry': 'Band',
+      'Do you need transport': 'Yes',
+      'Pickup Stop': '56 Jorissen',
+      'Service Date': '2026-09-13',
+    },
+  ];
+  for (let i = 1; i <= 13; i++) {
+    rows13.push({
+      'Full Name': `Normal Attendee ${i}`,
+      'Which service are you attending': 'AM Service',
+      'AM Service Type': 'Normal',
+      'Do you need transport': 'Yes',
+      'Pickup Stop': '56 Jorissen',
+      'Service Date': '2026-09-13',
+    });
+  }
+  XLSX.utils.book_append_sheet(wb13, XLSX.utils.json_to_sheet(rows13), 'AM Signups');
+  const buf13 = XLSX.write(wb13, { type: 'array', bookType: 'xlsx' });
+
+  const resServing13 = parseWorkbook(buf13, {
+    selectedDate: '2026-09-13',
+    selectedService: 'AM_Serving',
+  });
+  // Because normalCount (13) < 14, they auto-merge into AM Serving
+  assert.strictEqual(resServing13.passengers.length, 15);
+  assert.ok(resServing13.warnings.some((w) => w.includes('Auto-Included: 13 AM Normal signups merged into AM Serving (13 < 14 minimum for a taxi)')));
+
+  // Test case 2: 14 AM Normal signups (>= 14) + 2 AM Serving signups
+  // When parsing AM_Serving, the 14 Normal signups should NOT be auto-merged into AM Serving
+  const wb14 = XLSX.utils.book_new();
+  const rows14: Record<string, string>[] = [
+    ...rows13,
+    {
+      'Full Name': 'Normal Attendee 14',
+      'Which service are you attending': 'AM Service',
+      'AM Service Type': 'Normal',
+      'Do you need transport': 'Yes',
+      'Pickup Stop': '56 Jorissen',
+      'Service Date': '2026-09-13',
+    },
+  ];
+  XLSX.utils.book_append_sheet(wb14, XLSX.utils.json_to_sheet(rows14), 'AM Signups');
+  const buf14 = XLSX.write(wb14, { type: 'array', bookType: 'xlsx' });
+
+  const resServing14 = parseWorkbook(buf14, {
+    selectedDate: '2026-09-13',
+    selectedService: 'AM_Serving',
+  });
+  // Normal signups have reached 14 (dedicated taxi threshold), so only the 2 servers are included in AM_Serving
+  assert.strictEqual(resServing14.passengers.length, 2);
+  assert.ok(resServing14.warnings.some((w) => w.includes('14 AM Normal signups detected. Available under "AM Service — Normal Only"')));
+
+  // When parsing AM_Normal, all 14 are included
+  const resNormal14 = parseWorkbook(buf14, {
+    selectedDate: '2026-09-13',
+    selectedService: 'AM_Normal',
+  });
+  assert.strictEqual(resNormal14.passengers.length, 14);
+  assert.ok(resNormal14.warnings.some((w) => w.includes('✓ 14 AM Normal signups available')));
+});
