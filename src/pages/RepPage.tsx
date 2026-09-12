@@ -9,6 +9,7 @@ import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { useManifest } from '@/lib/useManifest';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey, shortDate } from '@/lib/dates';
 import {
+  SERVICE_TYPES,
   CANCELLATION_FEE,
   sortByRouteSequence,
   type ServiceType,
@@ -21,7 +22,6 @@ import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { vehicleRiders } from '@/lib/manifest';
 import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, type LedgerEntry } from '@/lib/ledger';
-import { getServiceLabel } from '@/lib/serviceTypes';
 import { submitVehicleToServer, reopenVehicleOnServer, type SubmitVehiclePayload } from '@/lib/serverApi';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
 import { RepStatsCopyCard } from '@/components/RepStatsCopyCard';
@@ -293,7 +293,7 @@ export function RepPage() {
   const [isCheckingCrossService, setIsCheckingCrossService] = useState(false);
   const prevVehicleIdRef = useRef<string | null>(null);
 
-  const serviceLabel = getServiceLabel(service);
+  const serviceLabel = SERVICE_TYPES.find((s) => s.value === service)?.label ?? service;
   const { date: parsedDate } = parseManifestKey(key);
 
   const selectedVehicle = useMemo(

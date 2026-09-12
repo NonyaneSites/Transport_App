@@ -16,7 +16,6 @@ import {
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
 } from '@/lib/ledger';
 import { downloadCancellationDebtPdf } from '@/lib/pdfExport';
-import { useServiceTypes } from '@/lib/serviceTypes';
 
 function HighlightMatch({ text, query }: { text: string; query: string }) {
   const q = query.trim();
@@ -81,30 +80,6 @@ export function LedgerPage() {
   const [addingDebtor, setAddingDebtor] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
   const [addSuccessMessage, setAddSuccessMessage] = useState<string | null>(null);
-
-  const { serviceTypes } = useServiceTypes();
-  const availableServiceCodes = useMemo(() => {
-    const defaultCodes = [
-      { code: 'PM', label: 'PM (Evening Service)' },
-      { code: 'AM', label: 'AM (Morning Service)' },
-      { code: 'LM', label: 'LM (Leaders Meeting)' },
-      { code: 'WMP', label: 'WMP (Worship/Music/Prayer)' },
-      { code: 'EF', label: 'EF (Easter Friday)' },
-      { code: 'AD', label: 'AD (Ascension Day)' },
-      { code: 'FW', label: 'FW (Fast & Worship)' },
-    ];
-    const map = new Map<string, { code: string; label: string }>();
-    for (const d of defaultCodes) {
-      map.set(d.code, d);
-    }
-    for (const s of serviceTypes) {
-      const acr = (s.acronym || '').trim().toUpperCase();
-      if (acr && !map.has(acr)) {
-        map.set(acr, { code: acr, label: `${acr} (${s.label})` });
-      }
-    }
-    return Array.from(map.values());
-  }, [serviceTypes]);
 
   // Historical Cancellation Import
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -551,9 +526,9 @@ export function LedgerPage() {
   return (
     <div className="min-h-screen">
       <Header current="ledger" />
-      <main className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
+      <main className="mx-auto max-w-5xl px-3 py-4 sm:px-6 sm:py-6">
         {/* Clean Header */}
-        <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-line pb-5">
+        <div className="mb-4 sm:mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 sm:gap-3 border-b border-line pb-4 sm:pb-5">
           <div>
             <div className="flex items-center gap-2">
               <h1 className="font-display text-xl font-bold tracking-tight text-ink sm:text-2xl">
@@ -588,59 +563,64 @@ export function LedgerPage() {
         ) : (
           <>
             {/* Summary + download */}
-            <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="grid grid-cols-3 gap-3">
+            <div className="mb-4 sm:mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="grid grid-cols-3 gap-2 sm:gap-3">
                 <SummaryStat label="Total Entries" value={entries.length} />
                 <SummaryStat label="Filtered" value={filtered.length} accent="crimson" />
                 <SummaryStat label="Total Debt" value={`R${totalDebt}`} accent="warning" />
               </div>
-              <div className="flex flex-wrap gap-2">
+
+              {/* Action buttons: prominent Add Debtor, compact touch-friendly exports on phone */}
+              <div className="flex flex-col sm:flex-row gap-2">
                 <button
                   type="button"
                   onClick={openAddModal}
-                  className="btn-primary flex items-center gap-2 shadow-sm"
+                  className="btn-primary flex items-center justify-center gap-2 shadow-sm py-2.5 sm:py-2 text-xs sm:text-sm font-semibold"
                   title="Add a new debtor manually (Name, Surname, Structure, Service, Amount, Date)"
                 >
-                  <UserPlus className="h-4 w-4" />
+                  <UserPlus className="h-4 w-4 shrink-0" />
                   <span>Add Debtor</span>
                 </button>
-                <input
-                  ref={importInputRef}
-                  type="file"
-                  accept=".xlsx,.xls,.csv"
-                  onChange={onImportInputChange}
-                  className="hidden"
-                />
-                <button
-                  onClick={() => importInputRef.current?.click()}
-                  disabled={importing}
-                  className="btn-ghost"
-                  title="Bulk-import historical cancellation records (Structure, Date, Service, Passenger Name, Amount)"
-                >
-                  {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-                  Import History
-                </button>
-                <button
-                  onClick={() => downloadCancellationDebtPdf(filtered.length > 0 ? filtered : entries)}
-                  className="btn-crimson flex items-center gap-2 shadow-md hover:shadow-crimson"
-                  title="Download official PDF report grouped by Structure and Person with CRC banking info"
-                >
-                  <FileText className="h-4 w-4" />
-                  Download Debt PDF
-                </button>
-                <button
-                  onClick={() => downloadLedgerExcel(filtered.length > 0 ? filtered : entries, `SZ_Cancellation_List_${new Date().toISOString().slice(0,10)}.xlsx`)}
-                  className="btn-success flex items-center gap-2"
-                >
-                  <FileSpreadsheet className="h-4 w-4" />
-                  Excel Export
-                </button>
+                <div className="grid grid-cols-3 sm:flex sm:flex-wrap gap-1.5 sm:gap-2">
+                  <input
+                    ref={importInputRef}
+                    type="file"
+                    accept=".xlsx,.xls,.csv"
+                    onChange={onImportInputChange}
+                    className="hidden"
+                  />
+                  <button
+                    onClick={() => importInputRef.current?.click()}
+                    disabled={importing}
+                    className="btn-ghost flex items-center justify-center gap-1.5 text-xs py-2 px-2"
+                    title="Bulk-import historical cancellation records (Structure, Date, Service, Passenger Name, Amount)"
+                  >
+                    {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5 shrink-0" />}
+                    <span className="truncate">Import</span>
+                  </button>
+                  <button
+                    onClick={() => downloadCancellationDebtPdf(filtered.length > 0 ? filtered : entries)}
+                    className="btn-crimson flex items-center justify-center gap-1.5 text-xs py-2 px-2 shadow-sm"
+                    title="Download official PDF report grouped by Structure and Person with CRC banking info"
+                  >
+                    <FileText className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">Debt PDF</span>
+                  </button>
+                  <button
+                    onClick={() => downloadLedgerExcel(filtered.length > 0 ? filtered : entries, `SZ_Cancellation_List_${new Date().toISOString().slice(0,10)}.xlsx`)}
+                    className="btn-success flex items-center justify-center gap-1.5 text-xs py-2 px-2"
+                    title="Export to Excel spreadsheet"
+                  >
+                    <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">Excel</span>
+                  </button>
+                </div>
               </div>
             </div>
 
             {/* Historical import feedback */}
             {importFileName && (importing || importResult || importError) && (
-              <div className="mb-4 space-y-2 rounded-xl border border-line bg-card p-4 animate-fade-in">
+              <div className="mb-4 space-y-2 rounded-xl border border-line bg-card p-3 sm:p-4 animate-fade-in">
                 {importing ? (
                   <div className="flex items-center gap-2 text-sm text-muted">
                     <Loader2 className="h-4 w-4 animate-spin text-crimson-400" />
@@ -676,53 +656,89 @@ export function LedgerPage() {
             )}
 
             {/* Search + filter controls */}
-            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center">
-              <div className="relative flex-1">
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search by first name, surname, or structure (e.g. 'amo', 'amo nhlabathi')…"
-                  className="input-field pl-10 pr-9"
-                />
-                {search && (
+            <div className="mb-3 space-y-2">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="relative flex-1">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+                  <input
+                    type="text"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search name, surname, or structure…"
+                    className="input-field pl-10 pr-9 text-xs sm:text-sm py-2"
+                  />
+                  {search && (
+                    <button
+                      type="button"
+                      onClick={() => setSearch('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-ink hover:bg-card-2"
+                      title="Clear search"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  )}
+                </div>
+                <div className="relative sm:w-56">
+                  <Filter className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+                  <select
+                    value={structureFilter}
+                    onChange={(e) => setStructureFilter(e.target.value)}
+                    className="input-field pl-10 text-xs sm:text-sm py-2"
+                  >
+                    <option value="" className="bg-card-2">All Structures</option>
+                    {structures.map((s) => (
+                      <option key={s} value={s} className="bg-card-2">{s}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Quick horizontal structure pills for one-tap filtering on phone */}
+              {structures.length > 0 && (
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1.5 pt-0.5 no-scrollbar scroll-smooth">
                   <button
                     type="button"
-                    onClick={() => setSearch('')}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-ink hover:bg-card-2"
-                    title="Clear search"
+                    onClick={() => setStructureFilter('')}
+                    className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold transition-all border ${
+                      !structureFilter
+                        ? 'bg-crimson-500 text-white border-crimson-500 shadow-xs'
+                        : 'bg-card border-line/70 text-muted hover:text-ink hover:bg-card-2'
+                    }`}
                   >
-                    <X className="h-4 w-4" />
+                    All ({structures.length})
                   </button>
-                )}
-              </div>
-              <div className="relative sm:w-56">
-                <Filter className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-                <select
-                  value={structureFilter}
-                  onChange={(e) => setStructureFilter(e.target.value)}
-                  className="input-field pl-10"
-                >
-                  <option value="" className="bg-card-2">All Structures</option>
-                  {structures.map((s) => (
-                    <option key={s} value={s} className="bg-card-2">{s}</option>
-                  ))}
-                </select>
-              </div>
+                  {structures.map((s) => {
+                    const isSelected = structureFilter === s;
+                    return (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => setStructureFilter(isSelected ? '' : s)}
+                        className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold transition-all border font-mono ${
+                          isSelected
+                            ? 'bg-crimson-500 text-white border-crimson-500 shadow-xs'
+                            : 'bg-card border-line/70 text-muted hover:text-ink hover:bg-card-2'
+                        }`}
+                      >
+                        {s}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {search.trim() && (
               <div className="mb-3 flex items-center justify-between rounded-lg border border-crimson-500/30 bg-crimson-500/10 px-3 py-1.5 text-xs text-crimson-300">
-                <span>
-                  Filtering by: <strong>"{search.trim()}"</strong> · Found <strong>{filtered.length}</strong> debtor record{filtered.length === 1 ? '' : 's'} across <strong>{groupedByStructure.length}</strong> structure{groupedByStructure.length === 1 ? '' : 's'}
+                <span className="truncate mr-2">
+                  Filtering by: <strong>"{search.trim()}"</strong> · <strong>{filtered.length}</strong> debtor{filtered.length === 1 ? '' : 's'}
                 </span>
                 <button
                   type="button"
                   onClick={() => setSearch('')}
-                  className="text-xs font-semibold underline hover:text-crimson-200"
+                  className="text-xs font-semibold underline hover:text-crimson-200 shrink-0"
                 >
-                  Clear filter
+                  Clear
                 </button>
               </div>
             )}
@@ -732,18 +748,18 @@ export function LedgerPage() {
               <span>
                 {groupedByStructure.length} structure{groupedByStructure.length === 1 ? '' : 's'} · {search.trim() ? `${groupedByStructure.length} matching` : `${openStructures.size} open`}
               </span>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 sm:gap-2">
                 <button
                   type="button"
                   onClick={expandAllStructures}
-                  className="rounded-md border border-line/60 bg-card px-2.5 py-1 text-xs font-medium text-ink hover:bg-card-2 transition-colors"
+                  className="rounded-md border border-line/60 bg-card px-2.5 py-1 text-xs font-medium text-ink hover:bg-card-2 active:bg-card-2 transition-colors"
                 >
                   Expand All
                 </button>
                 <button
                   type="button"
                   onClick={collapseAllStructures}
-                  className="rounded-md border border-line/60 bg-card px-2.5 py-1 text-xs font-medium text-ink hover:bg-card-2 transition-colors"
+                  className="rounded-md border border-line/60 bg-card px-2.5 py-1 text-xs font-medium text-ink hover:bg-card-2 active:bg-card-2 transition-colors"
                 >
                   Collapse All
                 </button>
@@ -751,35 +767,35 @@ export function LedgerPage() {
             </div>
 
             {/* Grouped by structure — strict alphanumeric order (S1, S2, S9, S13) */}
-            <div className="space-y-4">
+            <div className="space-y-3 sm:space-y-4">
               {groupedByStructure.map(({ structure, rows, cancellationRows, sponsorshipRows, cancellationDebt, sponsorshipDebt, totalDebt: structDebt }) => {
                 const isOpen = Boolean(search.trim()) || openStructures.has(structure);
                 const isSpecialStructure = structure === 'No Structure' || structure === 'Unidentified' || structure.toLowerCase().startsWith('ftv');
                 const structureLabel = isSpecialStructure ? structure : `Structure ${structure}`;
 
                 return (
-                  <div key={structure} className="overflow-hidden rounded-2xl border border-line bg-card shadow-sm">
+                  <div key={structure} className="overflow-hidden rounded-xl sm:rounded-2xl border border-line bg-card shadow-sm">
                     <button
                       onClick={() => toggleStructure(structure)}
-                      className="flex w-full items-center justify-between gap-2 border-b border-line/60 bg-card-2/60 px-4 py-3.5 text-left transition-colors hover:bg-card-2"
+                      className="flex w-full items-center justify-between gap-2 border-b border-line/60 bg-card-2/60 px-3.5 py-3 sm:px-4 sm:py-3.5 text-left transition-colors hover:bg-card-2 active:bg-card-2"
                     >
-                      <div className="flex items-center gap-2 flex-wrap">
-                        {isOpen ? <ChevronDown className="h-4 w-4 text-muted" /> : <ChevronRight className="h-4 w-4 text-muted" />}
+                      <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                        {isOpen ? <ChevronDown className="h-4 w-4 text-muted shrink-0" /> : <ChevronRight className="h-4 w-4 text-muted shrink-0" />}
                         <span className="font-display text-sm font-bold text-ink">{structureLabel}</span>
                         <span className="badge bg-bg/60 text-muted text-[10px]">{rows.length} total</span>
                         {sponsorshipRows.length > 0 && (
                           <span className="badge bg-amber-500/15 text-amber-300 border border-amber-500/25 text-[10px]">
-                            {sponsorshipRows.length} sponsorship/unpaid
+                            {sponsorshipRows.length} sponsorship
                           </span>
                         )}
                       </div>
-                      <div className="flex items-center gap-2 font-display text-sm font-bold">
+                      <div className="flex items-center gap-2 font-display text-sm font-bold shrink-0">
                         <span className="text-crimson-400">R{structDebt}</span>
                       </div>
                     </button>
 
                     {isOpen && (
-                      <div className="space-y-4 p-3 sm:p-4">
+                      <div className="space-y-3 sm:space-y-4 p-2.5 sm:p-4">
                         {/* Section 1: Regular Cancellations */}
                         {cancellationRows.length > 0 && (
                           <div className="overflow-hidden rounded-xl border border-line/70 bg-bg/50">
@@ -791,7 +807,83 @@ export function LedgerPage() {
                                 Subtotal: R{cancellationDebt}
                               </span>
                             </div>
-                            <div className="overflow-x-auto">
+
+                            {/* Mobile Card Layout for Cancellations */}
+                            <div className="block sm:hidden divide-y divide-line/40">
+                              {cancellationRows.map((row) => (
+                                <div key={`m-${row.key}`} className="p-3 space-y-2.5 transition-colors hover:bg-card-2/20">
+                                  {/* Top row: Name & Amount */}
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0 flex-1">
+                                      <div className="font-bold text-ink text-sm leading-snug">
+                                        <HighlightMatch text={row.name} query={search} />
+                                      </div>
+                                      <div className="flex items-center gap-1.5 mt-0.5">
+                                        <span className="text-[11px] font-medium text-muted">
+                                          {row.structure.startsWith('S') || row.structure.startsWith('YZ') ? `Structure ${row.structure}` : row.structure}
+                                        </span>
+                                        {row.instances.length > 1 && (
+                                          <span className="text-[10px] text-muted rounded bg-card-2 px-1.5 py-0.5 border border-line/60">
+                                            {row.instances.length} missed
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => openEditModal(row)}
+                                      className="flex items-center gap-1 rounded-lg bg-crimson-500/10 px-2.5 py-1 text-right border border-crimson-500/25 active:bg-crimson-500/20 shrink-0"
+                                      title={`Click to edit amount owing for ${row.name}`}
+                                    >
+                                      <span className="font-display text-base font-bold text-crimson-400">
+                                        R{row.amount}
+                                      </span>
+                                      <Pencil className="h-3 w-3 text-crimson-400/70" />
+                                    </button>
+                                  </div>
+
+                                  {/* Date & Service pills */}
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {row.instances.map((ins, idx) => (
+                                      <button
+                                        key={idx}
+                                        type="button"
+                                        onClick={() => openEditModal(row)}
+                                        className="inline-flex items-center gap-1.5 rounded-md bg-card-2 px-2 py-1 text-xs text-ink font-mono border border-line/60 active:border-crimson-400/60 transition-all text-left"
+                                        title={`Click to edit date, service, or amount for ${ins.formatted}`}
+                                      >
+                                        <span>{ins.formatted}</span>
+                                        <span className="text-[10px] text-crimson-400 font-sans font-semibold">R{ins.amount}</span>
+                                        <Pencil className="h-2.5 w-2.5 text-muted" />
+                                      </button>
+                                    ))}
+                                  </div>
+
+                                  {/* Action Buttons: Thumb-friendly 40px touch targets */}
+                                  <div className="flex items-center gap-2 pt-0.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => openPaymentModal(row)}
+                                      className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/15 py-2 px-3 text-xs font-semibold text-emerald-300 active:bg-emerald-500/25 transition-colors"
+                                    >
+                                      <Banknote className="h-4 w-4 shrink-0" />
+                                      <span>Record Payment</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => openEditModal(row)}
+                                      className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-line bg-card py-2 px-3 text-xs font-semibold text-ink active:bg-card-2 transition-colors shrink-0"
+                                    >
+                                      <Pencil className="h-3.5 w-3.5 text-muted shrink-0" />
+                                      <span>Edit</span>
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+
+                            {/* Desktop Table View for Cancellations */}
+                            <div className="hidden sm:block overflow-x-auto">
                               <table className="w-full text-left text-sm">
                                 <thead>
                                   <tr className="border-b border-line/60 bg-card-2/30 text-muted">
@@ -890,7 +982,83 @@ export function LedgerPage() {
                                 Subtotal: R{sponsorshipDebt}
                               </span>
                             </div>
-                            <div className="overflow-x-auto">
+
+                            {/* Mobile Card Layout for Sponsorships */}
+                            <div className="block sm:hidden divide-y divide-amber-500/15">
+                              {sponsorshipRows.map((row) => (
+                                <div key={`m-sp-${row.key}`} className="p-3 space-y-2.5 transition-colors hover:bg-amber-500/10">
+                                  {/* Top row: Name & Amount */}
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0 flex-1">
+                                      <div className="font-bold text-ink text-sm leading-snug">
+                                        <HighlightMatch text={row.name} query={search} />
+                                      </div>
+                                      <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                                        <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/15 text-amber-200 border border-amber-500/30">
+                                          {row.notes || 'Unaccounted Sponsorship'}
+                                        </span>
+                                        {row.instances.length > 1 && (
+                                          <span className="text-[10px] text-muted rounded bg-card-2 px-1.5 py-0.5 border border-line/60">
+                                            {row.instances.length}x
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => openEditModal(row)}
+                                      className="flex items-center gap-1 rounded-lg bg-amber-500/10 px-2.5 py-1 text-right border border-amber-500/30 active:bg-amber-500/20 shrink-0"
+                                      title={`Click to edit amount owing for ${row.name}`}
+                                    >
+                                      <span className="font-display text-base font-bold text-amber-300">
+                                        R{row.amount}
+                                      </span>
+                                      <Pencil className="h-3 w-3 text-amber-300/70" />
+                                    </button>
+                                  </div>
+
+                                  {/* Date & Service pills */}
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {row.instances.map((ins, idx) => (
+                                      <button
+                                        key={idx}
+                                        type="button"
+                                        onClick={() => openEditModal(row)}
+                                        className="inline-flex items-center gap-1.5 rounded-md bg-card-2 px-2 py-1 text-xs text-ink font-mono border border-amber-500/30 active:border-amber-400 transition-all text-left"
+                                        title={`Click to edit date, service, or amount for ${ins.formatted}`}
+                                      >
+                                        <span>{ins.formatted}</span>
+                                        <span className="text-[10px] text-amber-300 font-sans font-semibold">R{ins.amount}</span>
+                                        <Pencil className="h-2.5 w-2.5 text-amber-400" />
+                                      </button>
+                                    ))}
+                                  </div>
+
+                                  {/* Action Buttons: Thumb-friendly 40px touch targets */}
+                                  <div className="flex items-center gap-2 pt-0.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => openPaymentModal(row)}
+                                      className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/15 py-2 px-3 text-xs font-semibold text-emerald-300 active:bg-emerald-500/25 transition-colors"
+                                    >
+                                      <Banknote className="h-4 w-4 shrink-0" />
+                                      <span>Record Payment</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => openEditModal(row)}
+                                      className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-line bg-card py-2 px-3 text-xs font-semibold text-ink active:bg-card-2 transition-colors shrink-0"
+                                    >
+                                      <Pencil className="h-3.5 w-3.5 text-muted shrink-0" />
+                                      <span>Edit</span>
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+
+                            {/* Desktop Table View for Sponsorships */}
+                            <div className="hidden sm:block overflow-x-auto">
                               <table className="w-full text-left text-sm">
                                 <thead>
                                   <tr className="border-b border-amber-500/20 bg-amber-500/5 text-amber-200/70">
@@ -989,29 +1157,29 @@ export function LedgerPage() {
 
             {/* Payment Modal */}
             {paymentTarget && (
-              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 animate-fade-in backdrop-blur-sm">
-                <div className="w-full max-w-md rounded-2xl border border-line bg-card p-6 shadow-xl">
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 sm:p-4 animate-fade-in backdrop-blur-sm">
+                <div className="w-full max-w-md max-h-[92vh] overflow-y-auto rounded-2xl border border-line bg-card p-4 sm:p-6 shadow-2xl">
                   <div className="flex items-center justify-between border-b border-line pb-3">
                     <div className="flex items-center gap-2">
-                      <div className="rounded-lg bg-emerald-500/15 p-2 text-emerald-400">
+                      <div className="rounded-lg bg-emerald-500/15 p-2 text-emerald-400 shrink-0">
                         <Banknote className="h-5 w-5" />
                       </div>
                       <div>
-                        <h3 className="font-display text-lg font-bold text-ink">Record Payment</h3>
+                        <h3 className="font-display text-base sm:text-lg font-bold text-ink">Record Payment</h3>
                         <p className="text-xs text-muted">Deduct full or partial amount from debt</p>
                       </div>
                     </div>
                     <button
                       onClick={closePaymentModal}
                       disabled={paying}
-                      className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink"
+                      className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink active:bg-card-2"
                     >
-                      <X className="h-4 w-4" />
+                      <X className="h-5 w-5" />
                     </button>
                   </div>
 
-                  <div className="mt-4 space-y-4">
-                    <div className="rounded-xl border border-line/60 bg-card-2/60 p-3.5">
+                  <div className="mt-3.5 space-y-3.5 sm:space-y-4">
+                    <div className="rounded-xl border border-line/60 bg-card-2/60 p-3 sm:p-3.5">
                       <div className="flex items-center justify-between text-sm">
                         <span className="text-muted">Debtor:</span>
                         <span className="font-bold text-ink">{paymentTarget.name}</span>
@@ -1037,13 +1205,14 @@ export function LedgerPage() {
                         <span className="absolute left-3.5 top-1/2 -translate-y-1/2 font-bold text-muted">R</span>
                         <input
                           type="number"
+                          inputMode="numeric"
                           min="1"
                           max={paymentTarget.amount}
                           step="10"
                           value={paymentAmount}
                           onChange={(e) => setPaymentAmount(e.target.value)}
                           placeholder="e.g. 40"
-                          className="input-field pl-8 font-mono text-lg font-bold text-ink"
+                          className="input-field pl-8 font-mono text-lg font-bold text-ink py-2"
                           autoFocus
                         />
                       </div>
@@ -1053,7 +1222,7 @@ export function LedgerPage() {
                           <button
                             type="button"
                             onClick={() => setPaymentAmount('20')}
-                            className="rounded bg-card-2 px-2 py-0.5 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60"
+                            className="rounded-md bg-card-2 px-2.5 py-1 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60 active:bg-card"
                           >
                             R20
                           </button>
@@ -1062,7 +1231,7 @@ export function LedgerPage() {
                           <button
                             type="button"
                             onClick={() => setPaymentAmount('40')}
-                            className="rounded bg-card-2 px-2 py-0.5 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60"
+                            className="rounded-md bg-card-2 px-2.5 py-1 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60 active:bg-card"
                           >
                             R40 (1 session)
                           </button>
@@ -1071,7 +1240,7 @@ export function LedgerPage() {
                           <button
                             type="button"
                             onClick={() => setPaymentAmount('80')}
-                            className="rounded bg-card-2 px-2 py-0.5 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60"
+                            className="rounded-md bg-card-2 px-2.5 py-1 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60 active:bg-card"
                           >
                             R80 (2 sessions)
                           </button>
@@ -1079,7 +1248,7 @@ export function LedgerPage() {
                         <button
                           type="button"
                           onClick={() => setPaymentAmount(String(paymentTarget.amount))}
-                          className="rounded bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-300 hover:bg-emerald-500/25 border border-emerald-500/30 font-semibold"
+                          className="rounded-md bg-emerald-500/15 px-2.5 py-1 text-xs text-emerald-300 hover:bg-emerald-500/25 border border-emerald-500/30 font-semibold active:bg-emerald-500/30"
                         >
                           Full Debt (R{paymentTarget.amount})
                         </button>
@@ -1093,12 +1262,12 @@ export function LedgerPage() {
                       </div>
                     )}
 
-                    <div className="flex items-center justify-end gap-2 pt-2 border-t border-line">
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2 pt-2 border-t border-line">
                       <button
                         type="button"
                         onClick={closePaymentModal}
                         disabled={paying}
-                        className="btn-ghost text-xs"
+                        className="btn-ghost text-xs py-2.5 sm:py-2 order-2 sm:order-1"
                       >
                         Cancel
                       </button>
@@ -1106,10 +1275,10 @@ export function LedgerPage() {
                         type="button"
                         onClick={handleConfirmPayment}
                         disabled={paying || !paymentAmount}
-                        className="btn-success flex items-center gap-2 text-xs"
+                        className="btn-success flex items-center justify-center gap-2 text-xs py-2.5 sm:py-2 order-1 sm:order-2 font-semibold shadow-md"
                       >
                         {paying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Banknote className="h-4 w-4" />}
-                        Confirm Payment of R{paymentAmount || 0}
+                        <span>Confirm Payment of R{paymentAmount || 0}</span>
                       </button>
                     </div>
                   </div>
@@ -1119,24 +1288,24 @@ export function LedgerPage() {
 
             {/* Manual Add Debtor Modal */}
             {showAddModal && (
-              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 animate-fade-in backdrop-blur-sm">
-                <div className="w-full max-w-lg rounded-2xl border border-line bg-card p-6 shadow-xl">
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 sm:p-4 animate-fade-in backdrop-blur-sm">
+                <div className="w-full max-w-lg max-h-[92vh] overflow-y-auto rounded-2xl border border-line bg-card p-4 sm:p-6 shadow-2xl">
                   <div className="flex items-center justify-between border-b border-line pb-3">
                     <div className="flex items-center gap-2">
-                      <div className="rounded-lg bg-crimson-500/15 p-2 text-crimson-400">
+                      <div className="rounded-lg bg-crimson-500/15 p-2 text-crimson-400 shrink-0">
                         <UserPlus className="h-5 w-5" />
                       </div>
                       <div>
-                        <h3 className="font-display text-lg font-bold text-ink">Add Debtor to Ledger</h3>
+                        <h3 className="font-display text-base sm:text-lg font-bold text-ink">Add Debtor to Ledger</h3>
                         <p className="text-xs text-muted">Directly record an absentee cancellation or debt</p>
                       </div>
                     </div>
                     <button
                       onClick={closeAddModal}
                       disabled={addingDebtor}
-                      className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink"
+                      className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink active:bg-card-2"
                     >
-                      <X className="h-4 w-4" />
+                      <X className="h-5 w-5" />
                     </button>
                   </div>
 
@@ -1145,7 +1314,7 @@ export function LedgerPage() {
                       e.preventDefault();
                       handleAddDebtor();
                     }}
-                    className="mt-4 space-y-4"
+                    className="mt-3.5 space-y-3.5 sm:space-y-4"
                   >
                     {/* First Name & Surname */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1159,7 +1328,7 @@ export function LedgerPage() {
                           value={addFirstName}
                           onChange={(e) => setAddFirstName(e.target.value)}
                           placeholder="e.g. Amo"
-                          className="input-field w-full text-sm"
+                          className="input-field w-full text-sm py-2"
                           autoFocus
                         />
                       </div>
@@ -1173,7 +1342,7 @@ export function LedgerPage() {
                           value={addSurname}
                           onChange={(e) => setAddSurname(e.target.value)}
                           placeholder="e.g. Nhlabathi"
-                          className="input-field w-full text-sm"
+                          className="input-field w-full text-sm py-2"
                         />
                       </div>
                     </div>
@@ -1192,7 +1361,7 @@ export function LedgerPage() {
                           onChange={(e) => setAddStructure(e.target.value)}
                           onBlur={() => setAddStructure((s) => normalizeStructureCode(s))}
                           placeholder="e.g. S1, Unidentified, FTV 20"
-                          className="input-field w-full font-mono text-sm font-semibold"
+                          className="input-field w-full font-mono text-sm font-semibold py-2"
                         />
                         <div className="flex flex-wrap items-center gap-1.5 mt-2">
                           <span className="text-[10px] uppercase font-bold text-muted mr-0.5">Quick:</span>
@@ -1219,13 +1388,15 @@ export function LedgerPage() {
                         <select
                           value={addService}
                           onChange={(e) => setAddService(e.target.value)}
-                          className="input-field w-full text-sm"
+                          className="input-field w-full text-sm py-2"
                         >
-                          {availableServiceCodes.map((c) => (
-                            <option key={c.code} value={c.code} className="bg-card-2 text-ink">
-                              {c.label}
-                            </option>
-                          ))}
+                          <option value="PM">PM (Evening Service)</option>
+                          <option value="AM">AM (Morning Service)</option>
+                          <option value="LM">LM (Leaders Meeting)</option>
+                          <option value="WMP">WMP (Worship/Music/Prayer)</option>
+                          <option value="EF">EF (Easter Friday)</option>
+                          <option value="AD">AD (Ascension Day)</option>
+                          <option value="FW">FW (Fast & Worship)</option>
                         </select>
                       </div>
                     </div>
@@ -1240,12 +1411,13 @@ export function LedgerPage() {
                           <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-muted text-sm">R</span>
                           <input
                             type="number"
+                            inputMode="numeric"
                             min="1"
                             step="any"
                             required
                             value={addAmount}
                             onChange={(e) => setAddAmount(e.target.value)}
-                            className="input-field w-full pl-7 font-mono font-bold text-sm"
+                            className="input-field w-full pl-7 font-mono font-bold text-sm py-2"
                           />
                         </div>
                         <div className="mt-1 flex gap-1.5">
@@ -1283,7 +1455,7 @@ export function LedgerPage() {
                           required
                           value={addDate}
                           onChange={(e) => setAddDate(e.target.value)}
-                          className="input-field w-full text-sm font-mono"
+                          className="input-field w-full text-sm font-mono py-2"
                         />
                       </div>
                     </div>
@@ -1294,7 +1466,7 @@ export function LedgerPage() {
                         id="isSponsoredCheckbox"
                         checked={addIsSponsored}
                         onChange={(e) => setAddIsSponsored(e.target.checked)}
-                        className="rounded border-line bg-card text-crimson-500 focus:ring-crimson-500"
+                        className="rounded border-line bg-card text-crimson-500 focus:ring-crimson-500 h-4 w-4"
                       />
                       <label htmlFor="isSponsoredCheckbox" className="text-xs text-ink cursor-pointer select-none">
                         Mark as <span className="font-semibold text-amber-300">Unaccounted Sponsorship / Unpaid</span>
@@ -1312,7 +1484,7 @@ export function LedgerPage() {
                           value={addNotes}
                           onChange={(e) => setAddNotes(e.target.value)}
                           placeholder="e.g. Unaccounted Sponsorship, Did not pay, Unpaid"
-                          className="input-field w-full text-xs"
+                          className="input-field w-full text-xs py-2"
                           required={addIsSponsored}
                           autoFocus
                         />
@@ -1336,22 +1508,22 @@ export function LedgerPage() {
                       </div>
                     )}
 
-                    <div className="flex items-center justify-end gap-2 pt-3 border-t border-line">
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2 pt-3 border-t border-line">
                       <button
                         type="button"
                         onClick={closeAddModal}
                         disabled={addingDebtor}
-                        className="btn-ghost text-xs"
+                        className="btn-ghost text-xs py-2.5 sm:py-2 order-2 sm:order-1"
                       >
                         Cancel
                       </button>
                       <button
                         type="submit"
                         disabled={addingDebtor}
-                        className="btn-crimson flex items-center gap-2 text-xs font-semibold shadow-md"
+                        className="btn-crimson flex items-center justify-center gap-2 text-xs font-semibold shadow-md py-2.5 sm:py-2 order-1 sm:order-2"
                       >
                         {addingDebtor ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                        Add to Ledger
+                        <span>Add to Ledger</span>
                       </button>
                     </div>
                   </form>
@@ -1361,24 +1533,24 @@ export function LedgerPage() {
 
             {/* Edit Debtor Modal */}
             {editTarget && (
-              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
-                <div className="card w-full max-w-lg overflow-hidden border border-line bg-card p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 sm:p-4 backdrop-blur-sm">
+                <div className="card w-full max-w-lg max-h-[92vh] overflow-y-auto border border-line bg-card p-4 sm:p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
                   <div className="flex items-center justify-between border-b border-line pb-3">
                     <div className="flex items-center gap-2">
-                      <div className="rounded-lg bg-crimson-500/15 p-2 text-crimson-400">
+                      <div className="rounded-lg bg-crimson-500/15 p-2 text-crimson-400 shrink-0">
                         <Pencil className="h-5 w-5" />
                       </div>
                       <div>
-                        <h3 className="font-display text-lg font-bold text-ink">Edit Debtor Details</h3>
+                        <h3 className="font-display text-base sm:text-lg font-bold text-ink">Edit Debtor Details</h3>
                         <p className="text-xs text-muted">Adjust debt amount, add additional debt, or remove debtor</p>
                       </div>
                     </div>
                     <button
                       onClick={closeEditModal}
                       disabled={savingEdit || deletingDebtor}
-                      className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink"
+                      className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink active:bg-card-2"
                     >
-                      <X className="h-4 w-4" />
+                      <X className="h-5 w-5" />
                     </button>
                   </div>
 
@@ -1387,7 +1559,7 @@ export function LedgerPage() {
                       e.preventDefault();
                       handleSaveDebtorEdit();
                     }}
-                    className="mt-4 space-y-4"
+                    className="mt-3.5 space-y-3.5 sm:space-y-4"
                   >
                     {/* Passenger Name & Structure */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1400,7 +1572,7 @@ export function LedgerPage() {
                           required
                           value={editName}
                           onChange={(e) => setEditName(e.target.value)}
-                          className="input-field w-full text-sm font-semibold"
+                          className="input-field w-full text-sm font-semibold py-2"
                         />
                       </div>
                       <div>
@@ -1415,7 +1587,7 @@ export function LedgerPage() {
                           onChange={(e) => setEditStructure(e.target.value)}
                           onBlur={() => setEditStructure((s) => normalizeStructureCode(s))}
                           placeholder="e.g. S1, Unidentified, FTV 20"
-                          className="input-field w-full font-mono text-sm font-semibold"
+                          className="input-field w-full font-mono text-sm font-semibold py-2"
                         />
                         <div className="flex flex-wrap items-center gap-1.5 mt-2">
                           <span className="text-[10px] uppercase font-bold text-muted mr-0.5">Quick:</span>
@@ -1438,7 +1610,7 @@ export function LedgerPage() {
                     </div>
 
                     {/* Amount Owing Section */}
-                    <div className="rounded-xl border border-line bg-card-2/50 p-3.5 space-y-3">
+                    <div className="rounded-xl border border-line bg-card-2/50 p-3 sm:p-3.5 space-y-3">
                       <div className="flex items-center justify-between">
                         <label className="block text-xs font-bold uppercase tracking-wider text-ink">
                           Amount Owing (R) <span className="text-crimson-400">*</span>
@@ -1463,6 +1635,7 @@ export function LedgerPage() {
                         </span>
                         <input
                           type="number"
+                          inputMode="numeric"
                           min="0"
                           step="any"
                           required
@@ -1476,17 +1649,17 @@ export function LedgerPage() {
 
                       {/* Quick Presets & Modifiers */}
                       <div className="space-y-2 pt-2 border-t border-line/60">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="flex flex-wrap items-center gap-1.5">
+                        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
+                          <div className="grid grid-cols-3 sm:flex sm:flex-wrap items-center gap-1.5">
                             {[0, 20, 40, 60, 80, 120].map((preset) => (
                               <button
                                 key={preset}
                                 type="button"
                                 onClick={() => handleTotalDebtChange(String(preset))}
-                                className={`rounded-md px-2.5 py-1 text-xs font-semibold font-mono transition-colors border ${
+                                className={`rounded-md px-2 py-1.5 sm:px-2.5 sm:py-1 text-xs font-semibold font-mono text-center transition-colors border ${
                                   Number(editDebt) === preset
                                     ? 'bg-crimson-500 text-white border-crimson-500 shadow-sm'
-                                    : 'bg-card border-line text-ink hover:bg-card-2 hover:border-line/80'
+                                    : 'bg-card border-line text-ink hover:bg-card-2 hover:border-line/80 active:bg-card-2'
                                 }`}
                               >
                                 {preset === 0 ? 'R0 (Clear)' : `R${preset}`}
@@ -1494,11 +1667,11 @@ export function LedgerPage() {
                             ))}
                           </div>
 
-                          <div className="flex items-center gap-1">
+                          <div className="grid grid-cols-3 sm:flex items-center gap-1.5">
                             <button
                               type="button"
                               onClick={() => handleTotalDebtChange(String(Math.max(0, (Number(editDebt) || 0) - 20)))}
-                              className="rounded-md border border-line bg-card px-2 py-1 text-xs font-semibold text-muted hover:text-ink hover:bg-card-2 transition-colors"
+                              className="rounded-md border border-line bg-card py-1.5 px-2 text-xs font-semibold text-muted hover:text-ink hover:bg-card-2 active:bg-card-2 transition-colors text-center"
                               title="Subtract R20"
                             >
                               -R20
@@ -1506,7 +1679,7 @@ export function LedgerPage() {
                             <button
                               type="button"
                               onClick={() => handleTotalDebtChange(String((Number(editDebt) || 0) + 20))}
-                              className="rounded-md border border-line bg-card px-2 py-1 text-xs font-semibold text-emerald-400 hover:bg-card-2 transition-colors"
+                              className="rounded-md border border-line bg-card py-1.5 px-2 text-xs font-semibold text-emerald-400 hover:bg-card-2 active:bg-card-2 transition-colors text-center"
                               title="Add R20"
                             >
                               +R20
@@ -1514,7 +1687,7 @@ export function LedgerPage() {
                             <button
                               type="button"
                               onClick={() => handleTotalDebtChange(String((Number(editDebt) || 0) + 40))}
-                              className="rounded-md border border-line bg-card px-2 py-1 text-xs font-semibold text-emerald-400 hover:bg-card-2 transition-colors"
+                              className="rounded-md border border-line bg-card py-1.5 px-2 text-xs font-semibold text-emerald-400 hover:bg-card-2 active:bg-card-2 transition-colors text-center"
                               title="Add R40"
                             >
                               +R40
@@ -1536,7 +1709,7 @@ export function LedgerPage() {
                         id="editIsSponsoredCheckbox"
                         checked={editIsSponsored}
                         onChange={(e) => setEditIsSponsored(e.target.checked)}
-                        className="rounded border-line bg-card text-crimson-500 focus:ring-crimson-500"
+                        className="rounded border-line bg-card text-crimson-500 focus:ring-crimson-500 h-4 w-4"
                       />
                       <label htmlFor="editIsSponsoredCheckbox" className="text-xs text-ink cursor-pointer select-none">
                         Mark as <span className="font-semibold text-amber-300">Unaccounted Sponsorship / Unpaid</span>
@@ -1554,7 +1727,7 @@ export function LedgerPage() {
                           value={editNotes}
                           onChange={(e) => setEditNotes(e.target.value)}
                           placeholder="e.g. Unaccounted Sponsorship, Did not pay, Unpaid"
-                          className="input-field w-full text-xs"
+                          className="input-field w-full text-xs py-2"
                           required={editIsSponsored}
                           autoFocus
                         />
@@ -1578,10 +1751,10 @@ export function LedgerPage() {
                         <button
                           type="button"
                           onClick={handleAddNewInstance}
-                          className="inline-flex items-center gap-1 rounded-md border border-line bg-card px-2 py-1 text-[11px] font-semibold text-ink hover:bg-card-2 transition-colors"
+                          className="inline-flex items-center gap-1 rounded-md border border-line bg-card px-2.5 py-1 text-xs font-semibold text-ink hover:bg-card-2 active:bg-card-2 transition-colors shrink-0"
                           title="Add an extra missed date for this passenger"
                         >
-                          <Plus className="h-3 w-3 text-crimson-400" />
+                          <Plus className="h-3.5 w-3.5 text-crimson-400" />
                           <span>Add Date</span>
                         </button>
                       </div>
@@ -1591,71 +1764,133 @@ export function LedgerPage() {
                           All dates removed. Saving will clear this debtor from the ledger.
                         </div>
                       ) : (
-                        <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
-                          {editInstances.map((inst, idx) => (
-                            <div
-                              key={inst.id || `new-inst-${idx}`}
-                              className="flex items-center gap-2 rounded-lg bg-card p-2 border border-line/60 shadow-xs"
-                            >
-                              <span className="text-[11px] font-mono font-semibold text-muted/80 w-5 shrink-0 text-center">
-                                #{idx + 1}
-                              </span>
-
-                              {/* Date picker */}
-                              <div className="flex-1 min-w-[120px]">
-                                <input
-                                  type="date"
-                                  value={inst.date}
-                                  onChange={(e) => handleUpdateInstanceDate(idx, e.target.value)}
-                                  className="input-field w-full text-xs py-1 px-2 font-mono"
-                                  title={`Edit date for instance #${idx + 1}`}
-                                />
-                              </div>
-
-                              {/* Service selection */}
-                              <div className="w-20 shrink-0">
-                                <select
-                                  value={inst.service}
-                                  onChange={(e) => handleUpdateInstanceService(idx, e.target.value)}
-                                  className="input-field w-full text-xs py-1 px-1.5 font-bold text-center"
-                                  title="Service code"
-                                >
-                                  {availableServiceCodes.map((c) => (
-                                    <option key={c.code} value={c.code} className="bg-card-2 text-ink">
-                                      {c.code}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-
-                              {/* Debt amount for this specific date */}
-                              <div className="w-18 shrink-0 relative">
-                                <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[10px] font-bold text-muted">
-                                  R
-                                </span>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="5"
-                                  value={inst.amount}
-                                  onChange={(e) => handleUpdateInstanceAmount(idx, e.target.value)}
-                                  className="input-field w-full text-xs py-1 pl-4 pr-1 text-right font-mono font-bold text-crimson-400"
-                                  title="Fee for this specific cancellation date"
-                                />
-                              </div>
-
-                              {/* Delete this specific date */}
-                              <button
-                                type="button"
-                                onClick={() => handleRemoveSpecificInstance(idx)}
-                                className="rounded p-1 text-muted hover:text-crimson-400 hover:bg-crimson-500/10 transition-colors shrink-0"
-                                title={`Remove this specific date (${inst.date || 'Undated'}) from debtor`}
+                        <>
+                          {/* Mobile view for each instance */}
+                          <div className="block sm:hidden space-y-2 max-h-60 overflow-y-auto pr-0.5">
+                            {editInstances.map((inst, idx) => (
+                              <div
+                                key={inst.id || `m-inst-${idx}`}
+                                className="rounded-lg bg-card p-2.5 border border-line/70 space-y-2 shadow-xs"
                               >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[11px] font-mono font-bold text-muted w-5 shrink-0">
+                                    #{idx + 1}
+                                  </span>
+                                  <input
+                                    type="date"
+                                    value={inst.date}
+                                    onChange={(e) => handleUpdateInstanceDate(idx, e.target.value)}
+                                    className="input-field flex-1 text-xs py-1.5 px-2 font-mono"
+                                  />
+                                  <select
+                                    value={inst.service}
+                                    onChange={(e) => handleUpdateInstanceService(idx, e.target.value)}
+                                    className="input-field w-20 text-xs py-1.5 px-1 font-bold text-center"
+                                  >
+                                    <option value="PM">PM</option>
+                                    <option value="AM">AM</option>
+                                    <option value="LM">LM</option>
+                                    <option value="WMP">WMP</option>
+                                    <option value="EF">EF</option>
+                                    <option value="AD">AD</option>
+                                    <option value="FW">FW</option>
+                                  </select>
+                                </div>
+                                <div className="flex items-center justify-between gap-2 pt-1 border-t border-line/40">
+                                  <div className="relative flex-1">
+                                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs font-bold text-muted">R</span>
+                                    <input
+                                      type="number"
+                                      inputMode="numeric"
+                                      min="0"
+                                      step="5"
+                                      value={inst.amount}
+                                      onChange={(e) => handleUpdateInstanceAmount(idx, e.target.value)}
+                                      className="input-field w-full text-xs py-1.5 pl-6 pr-2 font-mono font-bold text-crimson-400"
+                                    />
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveSpecificInstance(idx)}
+                                    className="inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-xs text-crimson-400 bg-crimson-500/10 border border-crimson-500/20 active:bg-crimson-500/20"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                    <span>Remove</span>
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+
+                          {/* Desktop view for each instance */}
+                          <div className="hidden sm:block space-y-2 max-h-56 overflow-y-auto pr-1">
+                            {editInstances.map((inst, idx) => (
+                              <div
+                                key={inst.id || `new-inst-${idx}`}
+                                className="flex items-center gap-2 rounded-lg bg-card p-2 border border-line/60 shadow-xs"
+                              >
+                                <span className="text-[11px] font-mono font-semibold text-muted/80 w-5 shrink-0 text-center">
+                                  #{idx + 1}
+                                </span>
+
+                                {/* Date picker */}
+                                <div className="flex-1 min-w-[120px]">
+                                  <input
+                                    type="date"
+                                    value={inst.date}
+                                    onChange={(e) => handleUpdateInstanceDate(idx, e.target.value)}
+                                    className="input-field w-full text-xs py-1 px-2 font-mono"
+                                    title={`Edit date for instance #${idx + 1}`}
+                                  />
+                                </div>
+
+                                {/* Service selection */}
+                                <div className="w-20 shrink-0">
+                                  <select
+                                    value={inst.service}
+                                    onChange={(e) => handleUpdateInstanceService(idx, e.target.value)}
+                                    className="input-field w-full text-xs py-1 px-1.5 font-bold text-center"
+                                    title="Service code"
+                                  >
+                                    <option value="PM">PM</option>
+                                    <option value="AM">AM</option>
+                                    <option value="LM">LM</option>
+                                    <option value="WMP">WMP</option>
+                                    <option value="EF">EF</option>
+                                    <option value="AD">AD</option>
+                                    <option value="FW">FW</option>
+                                  </select>
+                                </div>
+
+                                {/* Debt amount for this specific date */}
+                                <div className="w-18 shrink-0 relative">
+                                  <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[10px] font-bold text-muted">
+                                    R
+                                  </span>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step="5"
+                                    value={inst.amount}
+                                    onChange={(e) => handleUpdateInstanceAmount(idx, e.target.value)}
+                                    className="input-field w-full text-xs py-1 pl-4 pr-1 text-right font-mono font-bold text-crimson-400"
+                                    title="Fee for this specific cancellation date"
+                                  />
+                                </div>
+
+                                {/* Delete this specific date */}
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveSpecificInstance(idx)}
+                                  className="rounded p-1 text-muted hover:text-crimson-400 hover:bg-crimson-500/10 transition-colors shrink-0"
+                                  title={`Remove this specific date (${inst.date || 'Undated'}) from debtor`}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </>
                       )}
                     </div>
 
@@ -1673,12 +1908,12 @@ export function LedgerPage() {
                       </div>
                     )}
 
-                    <div className="flex items-center justify-between pt-3 border-t border-line">
+                    <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-2.5 pt-3 border-t border-line">
                       <button
                         type="button"
                         onClick={handleDeleteEntireDebtor}
                         disabled={savingEdit || deletingDebtor}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-crimson-500/30 bg-crimson-950/30 px-3 py-1.5 text-xs font-semibold text-crimson-300 hover:bg-crimson-900/40 transition-colors"
+                        className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 rounded-lg border border-crimson-500/30 bg-crimson-950/30 px-3 py-2 text-xs font-semibold text-crimson-300 hover:bg-crimson-900/40 active:bg-crimson-900/50 transition-colors"
                         title="Remove debtor from ledger completely"
                       >
                         {deletingDebtor ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5 text-crimson-400" />}
@@ -1690,17 +1925,17 @@ export function LedgerPage() {
                           type="button"
                           onClick={closeEditModal}
                           disabled={savingEdit || deletingDebtor}
-                          className="btn-ghost text-xs"
+                          className="btn-ghost flex-1 sm:flex-none text-xs py-2"
                         >
                           Cancel
                         </button>
                         <button
                           type="submit"
                           disabled={savingEdit || deletingDebtor}
-                          className="btn-crimson flex items-center gap-2 text-xs font-semibold shadow-md"
+                          className="btn-crimson flex-1 sm:flex-none flex items-center justify-center gap-2 text-xs font-semibold shadow-md py-2"
                         >
                           {savingEdit ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-                          Save Changes
+                          <span>Save Changes</span>
                         </button>
                       </div>
                     </div>
@@ -1708,6 +1943,17 @@ export function LedgerPage() {
                 </div>
               </div>
             )}
+
+            {/* Mobile Floating Action Button for Quick Add */}
+            <button
+              type="button"
+              onClick={openAddModal}
+              className="sm:hidden fixed bottom-6 right-4 z-30 flex items-center gap-2 rounded-full bg-crimson-500 px-4 py-3 text-white shadow-xl hover:bg-crimson-600 active:scale-95 transition-all border border-crimson-400/40"
+              aria-label="Add new debtor"
+            >
+              <UserPlus className="h-5 w-5" />
+              <span className="text-xs font-bold tracking-wide">Add Debtor</span>
+            </button>
 
             {filtered.length === 0 && search && (
               <div className="mt-4 text-center text-sm text-muted">

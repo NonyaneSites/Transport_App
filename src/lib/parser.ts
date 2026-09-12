@@ -1,7 +1,6 @@
 import * as XLSX from 'xlsx';
 import type { Passenger, ServiceType } from './types';
 import { MIN_TAXI_THRESHOLD, hubDisplayName } from './types';
-import { getServiceConfig } from './serviceTypes';
 import { sanitizeTransportValue } from './transportSanitization';
 import {
   toTitleCase,
@@ -27,10 +26,19 @@ export {
   getSubmissionTimestampEpoch,
 };
 
-interface ParseOptions {
+export interface ParseOptions {
   selectedDate: string;
   selectedService: ServiceType;
 }
+
+export interface ParseProgress {
+  sheetName: string;
+  sheetIndex: number;
+  totalSheets: number;
+  phase: 'reading' | 'scanning_sheet' | 'processing' | 'done';
+}
+
+export type ParseProgressCallback = (progress: ParseProgress) => void;
 
 const SERVING_KEYWORDS = [
   'serving',
@@ -269,7 +277,7 @@ function inferStopFromStructure(structure?: string): string {
   return 'Unassigned Stop';
 }
 
-interface RawRow {
+export interface RawRow {
   [key: string]: string;
 }
 
@@ -497,96 +505,173 @@ function wantsTransport(row: RawRow, headers: string[]): boolean {
 }
 
 const MONTH_MAP: Record<string, number> = {
-  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
-  jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12,
+  jan: 1, january: 1,
+  feb: 2, february: 2,
+  mar: 3, march: 3,
+  apr: 4, april: 4,
+  may: 5,
+  jun: 6, june: 6,
+  jul: 7, july: 7,
+  aug: 8, august: 8,
+  sep: 9, sept: 9, september: 9,
+  oct: 10, october: 10,
+  nov: 11, november: 11,
+  dec: 12, december: 12,
 };
 
-export function extractRowDate(row: RawRow, headers: string[]): string | null {
-  const col = findColumn(headers, [
-    'service date',
-    'date attending',
-    'which sunday',
-    'sunday date',
-    'date of service',
-    'attendance date',
-    'date',
-  ]);
-  if (!col) return null;
-  const raw = clean(row[col]);
-  if (!raw) return null;
+/**
+ * Extracts and parses a calendar date pattern anywhere in a string, cell, or row,
+ * returning a normalized 'YYYY-MM-DD' string or null if no valid date pattern was found.
+ *
+ * Handles:
+ * - Unanchored formats with trailing or leading text, e.g. "11 September 2026 - Night Vigil"
+ * - "D Month YYYY", "Month D, YYYY", "Month D YYYY", "YYYY-MM-DD", "DD/MM/YYYY", "M/D/YYYY"
+ * - Native Date instances and Excel date numbers
+ */
+export function extractRowDate(input: unknown, headers?: string[]): string | null {
+  if (input === null || input === undefined) return null;
 
-  // Format: "13 September 2026", "7 Sep 2025", "06 September 2026" (D Mon YYYY)
-  const monMatch = raw.match(/^(\d{1,2})\s+([a-z]+)\s+(\d{4})$/i);
-  if (monMatch) {
-    const day = parseInt(monMatch[1], 10);
-    const monName = lower(monMatch[2]).slice(0, 3);
-    const year = parseInt(monMatch[3], 10);
-    const month = MONTH_MAP[monName];
-    if (month && day >= 1 && day <= 31 && year >= 2020 && year <= 2050) {
+  let raw: unknown = input;
+  if (headers && typeof input === 'object' && !(input instanceof Date)) {
+    const row = input as RawRow;
+    const col = findColumn(headers, [
+      'service date',
+      'date of service',
+      'event date',
+      'attendance date',
+      'service_date',
+      'date',
+    ]);
+    if (!col || row[col] === undefined || row[col] === null) return null;
+    raw = row[col];
+  }
+
+  // 1. Handle native Date instances (e.g. from SheetJS cellDates: true)
+  if (raw instanceof Date) {
+    if (isNaN(raw.getTime())) return null;
+    const y = raw.getFullYear();
+    const m = String(raw.getMonth() + 1).padStart(2, '0');
+    const d = String(raw.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  // 2. Handle Excel serial numbers if cellDates was disabled
+  if (typeof raw === 'number' && raw > 20000 && raw < 80000) {
+    const msPerDay = 86400 * 1000;
+    const date = new Date(Math.round((raw - 25569) * msPerDay));
+    if (!isNaN(date.getTime())) {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+  }
+
+  const rawStr = clean(raw).trim();
+  if (!rawStr) return null;
+
+  // 3. Match "D Month YYYY" anywhere in the string (e.g. "11 September 2026 - Night Vigil", "7 Sep 2025")
+  const dMonYrMatch = rawStr.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+([a-zA-Z]{3,10})\s+(\d{4})\b/i);
+  if (dMonYrMatch) {
+    const day = parseInt(dMonYrMatch[1], 10);
+    const monStr = lower(dMonYrMatch[2]);
+    const monKey = monStr.slice(0, 3);
+    const year = parseInt(dMonYrMatch[3], 10);
+    const month = MONTH_MAP[monStr] || MONTH_MAP[monKey];
+    if (month && day >= 1 && day <= 31 && year >= 1970 && year <= 2100) {
       return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     }
   }
 
-  // Format: "September 13, 2026" or "Sep 13 2026"
-  const monFirstMatch = raw.match(/^([a-z]+)\s+(\d{1,2}),?\s+(\d{4})$/i);
-  if (monFirstMatch) {
-    const monName = lower(monFirstMatch[1]).slice(0, 3);
-    const day = parseInt(monFirstMatch[2], 10);
-    const year = parseInt(monFirstMatch[3], 10);
-    const month = MONTH_MAP[monName];
-    if (month && day >= 1 && day <= 31 && year >= 2020 && year <= 2050) {
+  // 4. Match "Month D, YYYY" or "Month D YYYY" anywhere in the string (e.g. "September 11, 2026 - Night Vigil")
+  const monDYrMatch = rawStr.match(/\b([a-zA-Z]{3,10})\s+(\d{1,2})(?:st|nd|rd|th)?(?:,)?\s+(\d{4})\b/i);
+  if (monDYrMatch) {
+    const monStr = lower(monDYrMatch[1]);
+    const monKey = monStr.slice(0, 3);
+    const day = parseInt(monDYrMatch[2], 10);
+    const year = parseInt(monDYrMatch[3], 10);
+    const month = MONTH_MAP[monStr] || MONTH_MAP[monKey];
+    if (month && day >= 1 && day <= 31 && year >= 1970 && year <= 2100) {
       return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     }
   }
 
-  // Numeric formats: "2026-09-13", "13/09/2026", "13-09-2026"
-  const normalized = raw.replace(/\//g, '-');
-  const parts = normalized.split(/[-.]/).filter(Boolean);
-  if (parts.length === 3) {
-    const [a, b, c] = parts.map((p) => p.trim());
-    let year: number, month: number, day: number;
-    if (a.length === 4) {
-      year = parseInt(a, 10); month = parseInt(b, 10); day = parseInt(c, 10);
-    } else if (c.length === 4) {
-      const n1 = parseInt(a, 10);
-      const n2 = parseInt(b, 10);
-      year = parseInt(c, 10);
-      if (n1 > 12) {
-        day = n1; month = n2;
-      } else if (n2 > 12) {
-        month = n1; day = n2;
-      } else {
-        // Default to DD-MM-YYYY (South Africa format)
-        day = n1; month = n2;
-      }
-    } else {
-      day = parseInt(a, 10); month = parseInt(b, 10); year = parseInt(c, 10);
-    }
-    if (year && month && day && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+  // 5. Match "D-Mon-YYYY" or "D/Mon/YYYY" anywhere in the string (e.g. "11-Sep-2026", "11/September/2026 - Event")
+  const dMonYrDashMatch = rawStr.match(/\b(\d{1,2})(?:st|nd|rd|th)?[-/]([a-zA-Z]{3,10})[-/](\d{4})\b/i);
+  if (dMonYrDashMatch) {
+    const day = parseInt(dMonYrDashMatch[1], 10);
+    const monStr = lower(dMonYrDashMatch[2]);
+    const monKey = monStr.slice(0, 3);
+    const year = parseInt(dMonYrDashMatch[3], 10);
+    const month = MONTH_MAP[monStr] || MONTH_MAP[monKey];
+    if (month && day >= 1 && day <= 31 && year >= 1970 && year <= 2100) {
       return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     }
   }
 
-  // Fallback: Date constructor
-  const cell = new Date(raw);
-  if (!isNaN(cell.getTime())) {
+  // 6. Match ISO format "YYYY-MM-DD" anywhere in the string (e.g. "2026-09-11", "2026-09-11 - Night Vigil")
+  const isoMatch = rawStr.match(/\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b/);
+  if (isoMatch) {
+    const year = parseInt(isoMatch[1], 10);
+    const month = parseInt(isoMatch[2], 10);
+    const day = parseInt(isoMatch[3], 10);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && year >= 1970 && year <= 2100) {
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+
+  // 7. Match numeric "DD/MM/YYYY" or "D-M-YYYY" anywhere in the string
+  const numMatch = rawStr.match(/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b/);
+  if (numMatch) {
+    const partA = parseInt(numMatch[1], 10);
+    const partB = parseInt(numMatch[2], 10);
+    const year = parseInt(numMatch[3], 10);
+    let day = partA;
+    let month = partB;
+    if (partA > 12 && partB <= 12) {
+      day = partA;
+      month = partB;
+    } else if (partB > 12 && partA <= 12) {
+      month = partA;
+      day = partB;
+    }
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && year >= 1970 && year <= 2100) {
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+
+  // 8. Fallback: Try native Date parser for clean standard strings without trailing annotations
+  const cell = new Date(rawStr);
+  if (!isNaN(cell.getTime()) && cell.getFullYear() >= 1970 && cell.getFullYear() <= 2100) {
     const y = cell.getFullYear();
     const m = String(cell.getMonth() + 1).padStart(2, '0');
     const d = String(cell.getDate()).padStart(2, '0');
-    if (y >= 2020 && y <= 2050) {
-      return `${y}-${m}-${d}`;
-    }
+    return `${y}-${m}-${d}`;
   }
 
   return null;
 }
 
 function matchesDate(row: RawRow, headers: string[], selectedDate: string): boolean {
-  const parsedDate = extractRowDate(row, headers);
+  const col = findColumn(headers, [
+    'service date',
+    'date of service',
+    'event date',
+    'attendance date',
+    'service_date',
+    'date',
+  ]);
+  if (!col) return true; // no date column — don't filter by date
+  const raw = clean(row[col]);
+  if (!raw) return true; // empty date value — don't filter
+
+  const parsedDate = extractRowDate(raw);
   if (parsedDate) {
+    // We parsed a real date — only include if it matches the selected service date
     return parsedDate === selectedDate;
   }
-  // Truly unparseable date or no date column — don't exclude
+
+  // Truly unparseable date — don't exclude (benefit of the doubt)
   return true;
 }
 
@@ -596,36 +681,8 @@ export function matchesService(
   selectedService: ServiceType,
   sheetName: string = ''
 ): boolean {
-  const cfg = getServiceConfig(selectedService);
-  const selectedPeriod = cfg?.period || (selectedService.startsWith('AM') ? 'AM' : selectedService.startsWith('PM') ? 'PM' : 'OTHER');
+  const selectedPeriod: 'AM' | 'PM' = selectedService.startsWith('AM') ? 'AM' : 'PM';
   const normSheet = lower(clean(sheetName));
-
-  // If custom service (e.g. Funeral, Dreamweek, etc.)
-  if (cfg?.isCustom) {
-    const sName = lower(cfg.label);
-    const sVal = lower(cfg.value);
-    const sAcr = lower(cfg.acronym);
-    if (sName.includes('funeral') && (normSheet.includes('funeral') || normSheet.includes('saturday'))) {
-      return true;
-    }
-    if (sName.includes('dreamweek') && (normSheet.includes('dreamweek') || normSheet.includes('dream week'))) {
-      return true;
-    }
-    // Check if row has service matching custom name or acronym
-    const serviceCol = findColumn(headers, [
-      'which service are you attending',
-      'service attending',
-      'service',
-      'service type',
-      'servicetype',
-    ]);
-    if (serviceCol) {
-      const val = lower(clean(row[serviceCol]));
-      if (val && (val.includes(sName) || val.includes(sVal) || val.includes(sAcr))) {
-        return true;
-      }
-    }
-  }
 
   // If sheet explicitly declares PM, do not include in AM service
   if (selectedPeriod === 'AM' && (normSheet.includes('pm') || normSheet.includes('evening')) && !normSheet.includes('am')) {
@@ -682,12 +739,6 @@ export function matchesService(
   return true;
 }
 
-export interface ServiceBreakdownItem {
-  service: ServiceType;
-  label: string;
-  passengers: Passenger[];
-}
-
 export interface ParseResult {
   passengers: Passenger[];
   skipped: number;
@@ -695,11 +746,331 @@ export interface ParseResult {
   matchedDate: number;
   matchedService: number;
   matchedTransport: number;
+  skippedSheets: string[];
   warnings: string[];
-  serviceBreakdown: ServiceBreakdownItem[];
-  allDateSignups: Passenger[];
 }
 
+/** Regex for sheet names that represent computed dashboards, goals, tables, or summary metrics */
+export const NON_SIGNUP_SHEET_PATTERN = /table|tracker|goal|summary|dashboard|stats|metrics/i;
+
+/** Expected column names representing passenger identity */
+export const IDENTITY_COLUMN_PATTERNS = [
+  'name',
+  'full name',
+  'fullname',
+  'passenger name',
+  'name1',
+  'name 1',
+  'name2',
+  'name 2',
+  'first name',
+  'firstname',
+  'surname',
+  'last name',
+  'lastname',
+  'family name',
+];
+
+/**
+ * Checks if a column header represents a passenger identity field,
+ * while excluding non-passenger name headers like "Stop Name" or "Bus Name".
+ */
+export function isIdentityHeader(header: string): boolean {
+  const h = lower(clean(header));
+  if (!h) return false;
+
+  // Exclude non-person name columns
+  if (
+    h.includes('stop name') ||
+    h.includes('station name') ||
+    h.includes('bus name') ||
+    h.includes('driver name') ||
+    h.includes('church name') ||
+    h.includes('area name') ||
+    h.includes('group name') ||
+    h.includes('team name') ||
+    h.includes('ministry name') ||
+    h.includes('file name') ||
+    h.includes('sheet name')
+  ) {
+    return false;
+  }
+
+  // Exact matches
+  const exactPatterns = [
+    'name',
+    'full name',
+    'fullname',
+    'first name',
+    'firstname',
+    'surname',
+    'last name',
+    'lastname',
+    'family name',
+    'passenger name',
+    'name1',
+    'name 1',
+    'name2',
+    'name 2',
+    'attendee name',
+    'member name',
+  ];
+  if (exactPatterns.includes(h)) return true;
+
+  // Pattern matches (e.g. "What is your Name", "Passenger's Full Name")
+  if (
+    h.includes('full name') ||
+    h.includes('passenger name') ||
+    h.includes('first name') ||
+    h.includes('last name') ||
+    h.includes('surname') ||
+    h.includes('your name') ||
+    h.startsWith('name ') ||
+    h.endsWith(' name')
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Checks whether a sheet represents real signup data by:
+ * 1. Filtering out sheets whose names indicate summary tables, goal trackers, or dashboards.
+ * 2. Requiring the header row to contain at least one expected passenger identity column (Name, Surname, Full Name).
+ */
+export function isSignupSheet(sheetName: string, headers: string[]): boolean {
+  if (!sheetName) return false;
+
+  // 1. Skip sheets matching known computed/summary patterns (e.g. "PM Table", "AM Table", "SZ1 Goal tracker")
+  if (NON_SIGNUP_SHEET_PATTERN.test(sheetName.trim())) {
+    return false;
+  }
+
+  // 2. Must contain at least one expected passenger identity column
+  if (!headers || headers.length === 0) {
+    return false;
+  }
+
+  return headers.some(isIdentityHeader);
+}
+
+/**
+ * Checks if a parsed row has only empty, null, or whitespace values.
+ */
+export function isRowEmpty(row: RawRow): boolean {
+  if (!row || typeof row !== 'object') return true;
+  for (const key of Object.keys(row)) {
+    const val = row[key];
+    if (val !== undefined && val !== null && String(val).trim() !== '') {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Trims trailing fully-blank rows from a sheet before processing,
+ * preventing wasted CPU cycles on Excel sheets with ghost formatting extending to row 1000+.
+ */
+export function trimTrailingEmptyRows(rows: RawRow[]): RawRow[] {
+  if (!rows || rows.length === 0) return [];
+  let lastIndex = rows.length - 1;
+  while (lastIndex >= 0 && isRowEmpty(rows[lastIndex])) {
+    lastIndex--;
+  }
+  return lastIndex >= 0 ? rows.slice(0, lastIndex + 1) : [];
+}
+
+interface RawCandidate {
+  row: RawRow;
+  headers: string[];
+  name: string;
+  normalizedName: string;
+  stop: string;
+  structure: string;
+  phone?: string;
+  userEmail?: string;
+  timestamp?: string;
+  timestampEpoch: number;
+  wantsTransport: boolean;
+  matchesDate: boolean;
+  hub: string;
+  category: 'Ushers' | 'Serving' | 'Normal';
+  ministry: string;
+  memberType?: 'M' | 'V' | 'FTV';
+  id: string;
+  sheetName: string;
+  rowIndex: number;
+}
+
+/**
+ * Shared candidate processing and passenger allocation logic.
+ */
+function processExtractedCandidates(
+  rawSubmissions: RawCandidate[],
+  opts: ParseOptions,
+  totalRows: number,
+  initialSkipped: number,
+  skippedSheets: string[],
+  warnings: string[]
+): ParseResult {
+  let skipped = initialSkipped;
+  let matchedDate = 0;
+  let matchedTransport = 0;
+
+  // Pass 2: Group submissions by person and keep strictly the MOST RECENT submission for each person
+  const personGroups = new Map<string, RawCandidate[]>();
+  for (const sub of rawSubmissions) {
+    const group = personGroups.get(sub.normalizedName);
+    if (!group) {
+      personGroups.set(sub.normalizedName, [sub]);
+    } else {
+      group.push(sub);
+    }
+  }
+
+  const dateMatchedCandidates: RawCandidate[] = [];
+
+  for (const [, submissions] of personGroups) {
+    // Sort submissions for this person by timestamp descending (or row index descending if equal)
+    submissions.sort((a, b) => {
+      if (b.timestampEpoch !== a.timestampEpoch) {
+        return b.timestampEpoch - a.timestampEpoch;
+      }
+      return b.rowIndex - a.rowIndex;
+    });
+
+    // The most recent submission takes 100% precedence
+    const mostRecent = submissions[0];
+
+    // Older duplicate submissions for this person are superseded
+    if (submissions.length > 1) {
+      skipped += (submissions.length - 1);
+    }
+
+    // Now evaluate the most recent submission
+    if (!mostRecent.wantsTransport) {
+      skipped++;
+      continue;
+    }
+    matchedTransport++;
+
+    if (!mostRecent.matchesDate) {
+      skipped++;
+      continue;
+    }
+    matchedDate++;
+
+    dateMatchedCandidates.push(mostRecent);
+  }
+
+  // Count categories among valid date-matched submissions
+  const ushersCount = dateMatchedCandidates.filter((c) => c.category === 'Ushers').length;
+  const normalCount = dateMatchedCandidates.filter((c) => c.category === 'Normal').length;
+
+  const selectedService = opts.selectedService;
+  const passengers: Passenger[] = [];
+
+  // Pass 3: Filter and apply auto-merging logic based on selectedService and 15-passenger minimum
+  for (const c of dateMatchedCandidates) {
+    if (!matchesService(c.row, c.headers, opts.selectedService, c.sheetName)) {
+      continue;
+    }
+
+    let include = false;
+
+    if (selectedService === 'AM_Ushers') {
+      // Dedicated Ushers (Early) service
+      include = c.category === 'Ushers';
+    } else if (selectedService === 'AM_Normal' || selectedService === 'PM_Normal') {
+      // Dedicated Normal transport service
+      include = c.category === 'Normal';
+    } else if (selectedService === 'AM_Serving') {
+      // AM Serving main service
+      if (c.category === 'Serving') {
+        include = true;
+      } else if (c.category === 'Ushers') {
+        // Auto-merge into AM Serving if not enough for a dedicated Ushers taxi (< 15)
+        include = ushersCount < MIN_TAXI_THRESHOLD;
+      } else if (c.category === 'Normal') {
+        // Auto-merge into AM Serving if not enough for a normal taxi (< 15)
+        include = normalCount < MIN_TAXI_THRESHOLD;
+      }
+    } else if (selectedService === 'PM_Serving') {
+      // PM Serving
+      include = c.category === 'Serving' || c.category === 'Ushers';
+    }
+
+    if (include) {
+      passengers.push({
+        id: c.id,
+        fullName: c.name,
+        stop: c.stop,
+        structure: c.structure,
+        phone: c.phone,
+        userEmail: c.userEmail,
+        timestamp: c.timestamp,
+        hub: c.hub,
+        service: opts.selectedService,
+        category: c.category,
+        ministry: c.ministry,
+        memberType: c.memberType,
+        assignedTo: null,
+        present: false,
+        cancellationFeeOwed: false,
+      });
+    }
+  }
+
+  const matchedService = passengers.length;
+  const totalExcluded = dateMatchedCandidates.length - passengers.length;
+  skipped += totalExcluded;
+
+  // Informative notices & warnings based on threshold
+  if (selectedService === 'AM_Serving') {
+    if (ushersCount > 0 && ushersCount < MIN_TAXI_THRESHOLD) {
+      warnings.push(`Auto-Included: ${ushersCount} Ushers (Early) signups merged into AM Serving (${ushersCount} < ${MIN_TAXI_THRESHOLD} minimum for a dedicated taxi).`);
+    } else if (ushersCount >= MIN_TAXI_THRESHOLD) {
+      warnings.push(`Notice: ${ushersCount} Ushers (Early) signups detected (≥ ${MIN_TAXI_THRESHOLD}). They have enough for a dedicated taxi under "AM Service — Ushers (Early)".`);
+    }
+
+    if (normalCount > 0 && normalCount < MIN_TAXI_THRESHOLD) {
+      warnings.push(`Auto-Included: ${normalCount} AM Normal signups merged into AM Serving (${normalCount} < ${MIN_TAXI_THRESHOLD} minimum for a taxi).`);
+    } else if (normalCount >= MIN_TAXI_THRESHOLD) {
+      warnings.push(`Notice: ${normalCount} AM Normal signups detected. Available under "AM Service — Normal Only".`);
+    }
+  } else if (selectedService === 'AM_Ushers') {
+    if (ushersCount > 0 && ushersCount < MIN_TAXI_THRESHOLD) {
+      warnings.push(`Note: ${ushersCount} Ushers (Early) signups (< ${MIN_TAXI_THRESHOLD} taxi minimum). In "AM Service — Serving Only", these will automatically merge with AM Serving.`);
+    } else if (ushersCount >= MIN_TAXI_THRESHOLD) {
+      warnings.push(`✓ ${ushersCount} Ushers (Early) signups available — enough for a dedicated taxi (${Math.floor(ushersCount / 15)} taxi(s)).`);
+    }
+  } else if (selectedService === 'AM_Normal') {
+    if (normalCount > 0 && normalCount < MIN_TAXI_THRESHOLD) {
+      warnings.push(`Note: ${normalCount} AM Normal signups (< ${MIN_TAXI_THRESHOLD} taxi minimum). In "AM Service — Serving Only", these will automatically merge with AM Serving.`);
+    } else if (normalCount >= MIN_TAXI_THRESHOLD) {
+      warnings.push(`✓ ${normalCount} AM Normal signups available.`);
+    }
+  }
+
+  return {
+    passengers,
+    skipped,
+    totalRows,
+    matchedDate,
+    matchedService,
+    matchedTransport,
+    skippedSheets,
+    warnings,
+  };
+}
+
+/**
+ * Synchronous workbook parser.
+ * Filters out computed/dashboard sheets, trims trailing blank rows,
+ * parses unanchored date values, and returns ParseResult with skippedSheets.
+ */
 export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResult {
   const wb = XLSX.read(file, { type: 'array', cellDates: true });
   if (!wb.SheetNames || wb.SheetNames.length === 0) {
@@ -710,52 +1081,51 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
       matchedDate: 0,
       matchedService: 0,
       matchedTransport: 0,
+      skippedSheets: [],
       warnings: ['No sheets found in workbook.'],
-      serviceBreakdown: [],
-      allDateSignups: [],
     };
   }
 
-  interface RawCandidate {
-    row: RawRow;
-    headers: string[];
-    name: string;
-    normalizedName: string;
-    stop: string;
-    structure: string;
-    phone?: string;
-    userEmail?: string;
-    timestamp?: string;
-    timestampEpoch: number;
-    wantsTransport: boolean;
-    matchesDate: boolean;
-    rowDate: string | null;
-    hub: string;
-    category: 'Ushers' | 'Serving' | 'Normal';
-    ministry: string;
-    memberType?: 'M' | 'V' | 'FTV';
-    id: string;
-    sheetName: string;
-    rowIndex: number;
-  }
-
   const rawSubmissions: RawCandidate[] = [];
+  const skippedSheets: string[] = [];
   let totalRows = 0;
   let skipped = 0;
-  let matchedDate = 0;
-  let matchedTransport = 0;
   const warnings: string[] = [];
 
-  // Pass 1: Extract all raw row candidates across ALL sheets in the workbook
+  // Pass 1: Extract all raw row candidates across valid signup sheets in the workbook
   for (const sheetName of wb.SheetNames) {
+    // 1. Skip sheets matching dashboard / goal / table patterns by name
+    if (NON_SIGNUP_SHEET_PATTERN.test(sheetName.trim())) {
+      skippedSheets.push(sheetName);
+      continue;
+    }
+
     const sheet = wb.Sheets[sheetName];
     if (!sheet) continue;
 
-    const rows = XLSX.utils.sheet_to_json<RawRow>(sheet, { defval: '' });
+    const rawRows = XLSX.utils.sheet_to_json<RawRow>(sheet, { defval: '' });
+    if (rawRows.length === 0) {
+      skippedSheets.push(sheetName);
+      continue;
+    }
+
+    const headers = Object.keys(rawRows[0]);
+    // 2. Validate sheet header has at least one expected identity column
+    if (!isSignupSheet(sheetName, headers)) {
+      skippedSheets.push(sheetName);
+      continue;
+    }
+
+    // Pre-pass: trim trailing fully-blank rows (e.g. range extends to row 1000 with only 10 rows of data)
+    const rows = trimTrailingEmptyRows(rawRows);
     if (rows.length === 0) continue;
-    const headers = Object.keys(rows[0]);
 
     for (const row of rows) {
+      // Skip inline empty rows without doing expensive extraction
+      if (isRowEmpty(row)) {
+        continue;
+      }
+
       totalRows++;
       const name = extractFullName(row, headers);
       if (!name) {
@@ -783,7 +1153,6 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
       const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
       const wantsTrans = wantsTransport(row, headers);
-      const rowDate = extractRowDate(row, headers);
       const dateMatch = matchesDate(row, headers, opts.selectedDate);
 
       rawSubmissions.push({
@@ -799,7 +1168,6 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
         timestampEpoch,
         wantsTransport: wantsTrans,
         matchesDate: dateMatch,
-        rowDate,
         hub,
         category,
         ministry,
@@ -811,211 +1179,162 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
     }
   }
 
-  // Pass 2: Group submissions by person + date so earlier/later Sundays are never wiped out
-  const personDateGroups = new Map<string, RawCandidate[]>();
-  for (const sub of rawSubmissions) {
-    const dKey = sub.rowDate || opts.selectedDate;
-    const key = `${sub.normalizedName}__${dKey}`;
-    const group = personDateGroups.get(key);
-    if (!group) {
-      personDateGroups.set(key, [sub]);
-    } else {
-      group.push(sub);
-    }
-  }
+  return processExtractedCandidates(rawSubmissions, opts, totalRows, skipped, skippedSheets, warnings);
+}
 
-  const dateMatchedCandidates: RawCandidate[] = [];
-
-  for (const [, submissions] of personDateGroups) {
-    // Sort submissions for this person by timestamp descending (or row index descending if equal)
-    submissions.sort((a, b) => {
-      if (b.timestampEpoch !== a.timestampEpoch) {
-        return b.timestampEpoch - a.timestampEpoch;
-      }
-      return b.rowIndex - a.rowIndex;
-    });
-
-    // The most recent submission takes 100% precedence
-    const mostRecent = submissions[0];
-
-    // Older duplicate submissions for this person on the same date are superseded
-    if (submissions.length > 1) {
-      skipped += (submissions.length - 1);
-    }
-
-    // Now evaluate the most recent submission
-    if (!mostRecent.wantsTransport) {
-      skipped++;
-      continue;
-    }
-    matchedTransport++;
-
-    if (!mostRecent.matchesDate) {
-      skipped++;
-      continue;
-    }
-    matchedDate++;
-
-    dateMatchedCandidates.push(mostRecent);
-  }
-
-  // Count categories among valid date-matched submissions
-  const ushersCount = dateMatchedCandidates.filter((c) => c.category === 'Ushers').length;
-  const normalCount = dateMatchedCandidates.filter((c) => c.category === 'Normal').length;
-
-  // Helper to build Passenger record
-  function toPassenger(c: RawCandidate, svc: ServiceType): Passenger {
+/**
+ * Asynchronous workbook parser that yields periodically to the event loop.
+ * This prevents freezing the UI thread on large multi-sheet workbooks and
+ * allows progress indicators to update smoothly.
+ */
+export async function parseWorkbookAsync(
+  file: ArrayBuffer,
+  opts: ParseOptions,
+  onProgress?: ParseProgressCallback
+): Promise<ParseResult> {
+  const wb = XLSX.read(file, { type: 'array', cellDates: true });
+  if (!wb.SheetNames || wb.SheetNames.length === 0) {
     return {
-      id: c.id,
-      fullName: c.name,
-      stop: c.stop,
-      structure: c.structure,
-      phone: c.phone,
-      userEmail: c.userEmail,
-      timestamp: c.timestamp,
-      hub: c.hub,
-      service: svc,
-      category: c.category,
-      ministry: c.ministry,
-      memberType: c.memberType,
-      assignedTo: null,
-      present: false,
-      cancellationFeeOwed: false,
+      passengers: [],
+      skipped: 0,
+      totalRows: 0,
+      matchedDate: 0,
+      matchedService: 0,
+      matchedTransport: 0,
+      skippedSheets: [],
+      warnings: ['No sheets found in workbook.'],
     };
   }
 
-  // Partition candidates into standard Sunday service categories
-  const amServingList: Passenger[] = [];
-  const amUshersList: Passenger[] = [];
-  const amNormalList: Passenger[] = [];
-  const pmServingList: Passenger[] = [];
-  const pmNormalList: Passenger[] = [];
-  const allDateSignups: Passenger[] = [];
+  const rawSubmissions: RawCandidate[] = [];
+  const skippedSheets: string[] = [];
+  let totalRows = 0;
+  let skipped = 0;
+  const warnings: string[] = [];
 
-  for (const c of dateMatchedCandidates) {
-    // Check if PM
-    const serviceCol = findColumn(c.headers, [
-      'which service are you attending',
-      'service attending',
-      'service',
-      'am service type',
-      'pm service type',
-      'service type',
-      'servicetype',
-    ]);
-    const serviceVal = serviceCol ? lower(clean(c.row[serviceCol])) : '';
-    const pmCol = findColumn(c.headers, ['pm service type', 'pm service', 'pm serving']);
-    const amCol = findColumn(c.headers, ['am service type', 'am service', 'am serving']);
-    const hasPMVal = pmCol && clean(c.row[pmCol]);
-    const hasAMVal = amCol && clean(c.row[amCol]);
+  const totalSheets = wb.SheetNames.length;
 
-    const isPM = (
-      (serviceVal.includes('pm') || serviceVal.includes('evening') || serviceVal.includes('afternoon') || serviceVal.includes('17:00') || serviceVal.includes('18:00')) &&
-      !serviceVal.includes('am') && !serviceVal.includes('morning')
-    ) || (hasPMVal && !hasAMVal);
+  // Process sheet-by-sheet with asynchronous yielding
+  for (let sIdx = 0; sIdx < totalSheets; sIdx++) {
+    const sheetName = wb.SheetNames[sIdx];
 
-    if (isPM) {
-      if (c.category === 'Normal') {
-        pmNormalList.push(toPassenger(c, 'PM_Normal'));
-        allDateSignups.push(toPassenger(c, 'PM_Normal'));
-      } else {
-        pmServingList.push(toPassenger(c, 'PM_Serving'));
-        allDateSignups.push(toPassenger(c, 'PM_Serving'));
-      }
-    } else {
-      // Standard AM Services
-      if (c.category === 'Ushers') {
-        amUshersList.push(toPassenger(c, 'AM_Ushers'));
-        allDateSignups.push(toPassenger(c, 'AM_Ushers'));
-      } else if (c.category === 'Normal') {
-        amNormalList.push(toPassenger(c, 'AM_Normal'));
-        allDateSignups.push(toPassenger(c, 'AM_Normal'));
-      } else {
-        amServingList.push(toPassenger(c, 'AM_Serving'));
-        allDateSignups.push(toPassenger(c, 'AM_Serving'));
-      }
+    if (onProgress) {
+      onProgress({
+        sheetName,
+        sheetIndex: sIdx + 1,
+        totalSheets,
+        phase: 'scanning_sheet',
+      });
     }
-  }
 
-  // Pass 3: Construct the passenger list for opts.selectedService
-  const selectedService = opts.selectedService;
-  const passengers: Passenger[] = [];
+    // Yield control so UI can paint progress updates
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
-  for (const c of dateMatchedCandidates) {
-    if (!matchesService(c.row, c.headers, opts.selectedService, c.sheetName)) {
+    // 1. Skip sheets matching dashboard / goal / table patterns by name
+    if (NON_SIGNUP_SHEET_PATTERN.test(sheetName.trim())) {
+      skippedSheets.push(sheetName);
       continue;
     }
 
-    let include = false;
+    const sheet = wb.Sheets[sheetName];
+    if (!sheet) continue;
 
-    if (selectedService === 'AM_Ushers') {
-      include = c.category === 'Ushers';
-    } else if (selectedService === 'AM_Normal' || selectedService === 'PM_Normal') {
-      include = c.category === 'Normal';
-    } else if (selectedService === 'AM_Serving') {
-      if (c.category === 'Serving') {
-        include = true;
-      } else if (c.category === 'Ushers') {
-        // Auto-merge into AM Serving if not enough for a dedicated Ushers taxi (< 15)
-        include = ushersCount < MIN_TAXI_THRESHOLD;
-      } else if (c.category === 'Normal') {
-        // Auto-merge into AM Serving if not enough for a normal taxi (< 15)
-        include = normalCount < MIN_TAXI_THRESHOLD;
+    const rawRows = XLSX.utils.sheet_to_json<RawRow>(sheet, { defval: '' });
+    if (rawRows.length === 0) {
+      skippedSheets.push(sheetName);
+      continue;
+    }
+
+    const headers = Object.keys(rawRows[0]);
+    // 2. Validate sheet header has at least one expected identity column
+    if (!isSignupSheet(sheetName, headers)) {
+      skippedSheets.push(sheetName);
+      continue;
+    }
+
+    // Pre-pass: trim trailing fully-blank rows
+    const rows = trimTrailingEmptyRows(rawRows);
+    if (rows.length === 0) continue;
+
+    for (const row of rows) {
+      // Skip empty rows without doing expensive extraction
+      if (isRowEmpty(row)) {
+        continue;
       }
-    } else if (selectedService === 'PM_Serving') {
-      include = c.category === 'Serving' || c.category === 'Ushers';
-    } else {
-      // Custom event service (e.g. Dreamweek)
-      include = true;
-    }
 
-    if (include) {
-      passengers.push(toPassenger(c, selectedService));
+      totalRows++;
+      const name = extractFullName(row, headers);
+      if (!name) {
+        skipped++;
+        continue;
+      }
+      const normalizedName = normalizePassengerText(name);
+      if (!normalizedName) {
+        skipped++;
+        continue;
+      }
+
+      const timestampCol = findColumn(headers, ['completion time', 'submission time', 'timestamp', 'created at', 'date submitted']);
+      const rawTimestamp = timestampCol ? row[timestampCol] : undefined;
+      const timestamp = extractTimestamp(row, headers);
+      const timestampEpoch = getSubmissionTimestampEpoch(rawTimestamp || timestamp, totalRows);
+
+      const structure = extractStructure(row, headers);
+      const stop = extractStop(row, headers, structure);
+      const phone = extractPhone(row, headers);
+      const userEmail = extractEmail(row, headers);
+      const hub = hubDisplayName('Taxi', stop);
+      const { category, ministry } = extractCategoryAndMinistry(row, headers, sheetName);
+      const memberType = extractMemberType(row, headers, structure);
+      const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+
+      const wantsTrans = wantsTransport(row, headers);
+      const dateMatch = matchesDate(row, headers, opts.selectedDate);
+
+      rawSubmissions.push({
+        row,
+        headers,
+        name,
+        normalizedName,
+        stop,
+        structure,
+        phone,
+        userEmail,
+        timestamp,
+        timestampEpoch,
+        wantsTransport: wantsTrans,
+        matchesDate: dateMatch,
+        hub,
+        category,
+        ministry,
+        memberType,
+        id,
+        sheetName,
+        rowIndex: totalRows,
+      });
     }
   }
 
-  const matchedService = passengers.length;
-  const totalExcluded = dateMatchedCandidates.length - passengers.length;
-  skipped += totalExcluded;
-
-  // Multi-service breakdown containing all standard Sunday services
-  const serviceBreakdown: ServiceBreakdownItem[] = [
-    { service: 'AM_Serving', label: 'AM Service — Serving Only', passengers: amServingList },
-    { service: 'AM_Ushers', label: 'AM Service — Ushers (Early)', passengers: amUshersList },
-    { service: 'AM_Normal', label: 'AM Service — Normal Only', passengers: amNormalList },
-  ];
-
-  if (pmServingList.length > 0) {
-    serviceBreakdown.push({ service: 'PM_Serving', label: 'PM Service — Serving Only', passengers: pmServingList });
+  if (onProgress) {
+    onProgress({
+      sheetName: 'All sheets',
+      sheetIndex: totalSheets,
+      totalSheets,
+      phase: 'processing',
+    });
   }
-  if (pmNormalList.length > 0) {
-    serviceBreakdown.push({ service: 'PM_Normal', label: 'PM Service — Normal Only', passengers: pmNormalList });
-  }
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
-  // Informative notices & warnings based on threshold
-  if (selectedService === 'AM_Serving') {
-    if (ushersCount > 0 && ushersCount < MIN_TAXI_THRESHOLD) {
-      warnings.push(`Auto-Included: ${ushersCount} Ushers (Early) signups merged into AM Serving (${ushersCount} < ${MIN_TAXI_THRESHOLD} minimum for a dedicated taxi).`);
-    } else if (ushersCount >= MIN_TAXI_THRESHOLD) {
-      warnings.push(`Notice: ${ushersCount} Ushers (Early) signups detected (≥ ${MIN_TAXI_THRESHOLD}). Available under "AM Service — Ushers (Early)".`);
-    }
+  const result = processExtractedCandidates(rawSubmissions, opts, totalRows, skipped, skippedSheets, warnings);
 
-    if (normalCount > 0 && normalCount < MIN_TAXI_THRESHOLD) {
-      warnings.push(`Auto-Included: ${normalCount} AM Normal signups merged into AM Serving (${normalCount} < ${MIN_TAXI_THRESHOLD} minimum for a taxi).`);
-    } else if (normalCount >= MIN_TAXI_THRESHOLD) {
-      warnings.push(`Notice: ${normalCount} AM Normal signups detected (≥ ${MIN_TAXI_THRESHOLD}). Available under "AM Service — Normal Only".`);
-    }
+  if (onProgress) {
+    onProgress({
+      sheetName: 'Complete',
+      sheetIndex: totalSheets,
+      totalSheets,
+      phase: 'done',
+    });
   }
 
-  return {
-    passengers,
-    skipped,
-    totalRows,
-    matchedDate,
-    matchedService,
-    matchedTransport,
-    warnings,
-    serviceBreakdown,
-    allDateSignups,
-  };
+  return result;
 }

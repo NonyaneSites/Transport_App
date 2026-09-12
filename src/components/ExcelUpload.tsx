@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
-import { Upload, CheckCircle2, AlertTriangle, Loader2 } from 'lucide-react';
-import { parseWorkbook, type ParseResult } from '@/lib/parser';
+import { Upload, CheckCircle2, AlertTriangle, Loader2, EyeOff } from 'lucide-react';
+import { parseWorkbookAsync, type ParseResult } from '@/lib/parser';
 import type { Passenger, ServiceType } from '@/lib/types';
 
 interface Props {
@@ -13,6 +13,7 @@ interface Props {
 export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [parsing, setParsing] = useState(false);
+  const [progressText, setProgressText] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<ParseResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
@@ -20,18 +21,30 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
   async function handleFile(file: File) {
     setParsing(true);
     setError(null);
+    setProgressText('Reading workbook…');
     setFileName(file.name);
     try {
       const buf = await file.arrayBuffer();
-      const result = parseWorkbook(buf, { selectedDate: date, selectedService: service });
+      const result = await parseWorkbookAsync(
+        buf,
+        { selectedDate: date, selectedService: service },
+        (progress) => {
+          if (progress.phase === 'scanning_sheet') {
+            setProgressText(`Scanning sheet ${progress.sheetIndex} of ${progress.totalSheets}: "${progress.sheetName}"…`);
+          } else if (progress.phase === 'processing') {
+            setProgressText('Deduplicating & allocating passengers…');
+          }
+        }
+      );
       setLastResult(result);
-      if (result.passengers.length > 0 || (result.serviceBreakdown && result.serviceBreakdown.some((b) => b.passengers.length > 0))) {
+      if (result.passengers.length > 0) {
         onImport(result.passengers, result);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to parse file.');
     } finally {
       setParsing(false);
+      setProgressText(null);
     }
   }
 
@@ -70,7 +83,12 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
         {parsing ? (
           <div className="flex flex-col items-center gap-3">
             <Loader2 className="h-8 w-8 animate-spin text-crimson-400" />
-            <p className="text-sm text-muted">Parsing {fileName}…</p>
+            <div className="text-center">
+              <p className="text-sm font-semibold text-ink">Parsing {fileName}…</p>
+              {progressText && (
+                <p className="mt-1 text-xs text-muted font-medium transition-all">{progressText}</p>
+              )}
+            </div>
           </div>
         ) : (
           <div className="flex flex-col items-center gap-3">
@@ -101,53 +119,39 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
             Import complete
           </div>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <Stat label="Total Rows" value={lastResult.totalRows} />
+            <Stat label="Rows Parsed" value={lastResult.totalRows} />
             <Stat label="Wants Transport" value={lastResult.matchedTransport} />
             <Stat label="Date Matched" value={lastResult.matchedDate} />
-            <Stat label="Active Service" value={lastResult.passengers.length} accent />
+            <Stat label="Imported" value={lastResult.passengers.length} accent />
           </div>
 
-          {lastResult.serviceBreakdown && lastResult.serviceBreakdown.some((b) => b.passengers.length > 0) && (
-            <div className="rounded-xl border border-line bg-card-2/60 p-3">
-              <div className="text-xs font-semibold text-ink mb-2">
-                Sunday Services Breakdown ({lastResult.allDateSignups?.length || lastResult.matchedDate} Total Attendees Captured):
+          {lastResult.skippedSheets && lastResult.skippedSheets.length > 0 && (
+            <div className="flex items-start gap-2 rounded-lg border border-line bg-card-2/80 p-2.5 text-xs text-muted">
+              <EyeOff className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted" />
+              <div>
+                <span className="font-semibold text-ink">Ignored sheets ({lastResult.skippedSheets.length}):</span>{' '}
+                <span>{lastResult.skippedSheets.join(', ')}</span>
+                <span className="block mt-0.5 text-[11px] text-muted">Filtered out computed tables, goal trackers, or non-signup sheets.</span>
               </div>
-              <div className="flex flex-wrap gap-2">
-                {lastResult.serviceBreakdown.map((b) => (
-                  <div
-                    key={b.service}
-                    className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs border ${
-                      b.service === service
-                        ? 'bg-crimson-500/15 border-crimson-500/30 text-crimson-300 font-semibold'
-                        : 'bg-card border-line text-muted'
-                    }`}
-                  >
-                    <span>{b.label}:</span>
-                    <span className="font-bold text-ink">{b.passengers.length}</span>
-                    {b.service === service && <span className="text-[10px] text-crimson-400">(current)</span>}
-                  </div>
-                ))}
-              </div>
-              <p className="mt-2 text-[11px] text-muted">
-                All attendees have been saved into their respective standard Sunday service manifests.
-              </p>
             </div>
           )}
 
           {lastResult.skipped > 0 && (
             <p className="text-xs text-muted">
-              {lastResult.skipped} row(s) skipped — no transport needed, different date, or duplicate submission.
+              {lastResult.skipped} row(s) skipped — no transport needed, different date, different service, or duplicate.
             </p>
           )}
+
           {lastResult.warnings.map((w, i) => (
             <div key={i} className="flex items-start gap-2 rounded-lg border border-yellow-500/20 bg-yellow-500/10 p-2.5 text-xs text-yellow-300">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span>{w}</span>
             </div>
           ))}
+
           {existingCount > 0 && (
             <p className="text-xs text-muted">
-              Merged with existing signups. Live assignments and attendance states were preserved.
+              Merged with {existingCount} existing signups. Duplicates were skipped.
             </p>
           )}
         </div>

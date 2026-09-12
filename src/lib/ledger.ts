@@ -11,7 +11,6 @@ import type { Passenger, Vehicle } from './types';
 import { CANCELLATION_FEE } from './types';
 import { naturalCompare } from './sort';
 import { shortDate } from './dates';
-import { getServiceAcronym } from './serviceTypes';
 
 /**
  * Normalizes structure strings to canonical structure codes.
@@ -152,7 +151,7 @@ export function extractServiceCode(serviceStr: string): string {
   if (!serviceStr) return '';
   let clean = serviceStr.trim().replace(/\r?\n/g, ' ');
 
-  // If already in brackets e.g. "(PM)", "(LM)", "(FS)", strip the parens
+  // If already in brackets e.g. "(PM)" or "(LM)", strip the parens
   const bracketMatch = clean.match(/^\(([^)]+)\)$/);
   if (bracketMatch) {
     return extractServiceCode(bracketMatch[1]);
@@ -161,12 +160,6 @@ export function extractServiceCode(serviceStr: string): string {
   // Strip FTV prefix/suffix
   clean = clean.replace(/FTV\s*\/?|\/?\s*FTV/gi, '').trim();
   if (!clean) return 'PM';
-
-  // Check registered service types first (handles Funeral Service -> FS, Dreamweek -> DWM/DWE, etc.)
-  const registeredAcronym = getServiceAcronym(clean);
-  if (registeredAcronym && registeredAcronym !== 'PM') {
-    return registeredAcronym;
-  }
 
   // Exact known codes
   const upper = clean.toUpperCase();
@@ -177,17 +170,9 @@ export function extractServiceCode(serviceStr: string): string {
   if (upper === 'EF' || upper.startsWith('EF_') || upper.startsWith('EF ') || upper.startsWith('EF-') || upper.startsWith('EF/')) return 'EF';
   if (upper === 'AD' || upper.startsWith('AD_') || upper.startsWith('AD ') || upper.startsWith('AD-') || upper.startsWith('AD/')) return 'AD';
   if (upper === 'FW' || upper.startsWith('FW_') || upper.startsWith('FW ') || upper.startsWith('FW-') || upper.startsWith('FW/')) return 'FW';
-  if (upper === 'FS' || upper.startsWith('FS_') || upper.includes('FUNERAL')) return 'FS';
-  if (upper.includes('DREAMWEEK') || upper.includes('DREAM WEEK')) {
-    if (upper.includes('AM') || upper.includes('MORNING')) return 'DWM';
-    if (upper.includes('PM') || upper.includes('EVENING')) return 'DWE';
-    return 'DW';
-  }
 
   // Keyword searches
   const lower = clean.toLowerCase();
-  if (lower.includes('funeral')) return 'FS';
-  if (lower.includes('dreamweek') || lower.includes('dream week')) return 'DW';
   if (lower.includes('leader')) return 'LM';
   if ((lower.includes('worship') && lower.includes('prayer')) || lower.includes('wmp')) return 'WMP';
   if (lower.includes('easter') || lower.includes('good friday') || lower === 'ef') return 'EF';
@@ -196,8 +181,7 @@ export function extractServiceCode(serviceStr: string): string {
   if (lower.includes('pm') || lower.includes('evening') || lower.includes('afternoon')) return 'PM';
   if (lower.includes('am') || lower.includes('morning')) return 'AM';
 
-  // Fallback: registered acronym or extract short alphanumeric acronym up to 6 characters
-  if (registeredAcronym) return registeredAcronym;
+  // Fallback: extract short alphanumeric acronym up to 6 characters (e.g. CAMP, YOUTH, CONF)
   const token = clean.split(/[\s—_/-]+/)[0].toUpperCase();
   return token.length <= 6 ? token : upper.slice(0, 4);
 }
@@ -273,8 +257,8 @@ export function extractNameAndService(
   let serviceCode = explicitService ? extractServiceCode(explicitService) : '';
   const extraNotes = '';
 
-  // Look for service tags in parentheses like (PM), (AM), (LM), (WMP), (EF), (AD), (FW), (FS), (DW), etc.
-  const serviceParenRegex = /\(\s*(AM|PM|LM|WMP|EF|AD|FW|FS|DW|DWM|DWE|FUNERAL|W&P|W\/P|SERVING|USHERS|NORMAL)\s*[,)]*/gi;
+  // Look for service tags in parentheses like (PM), (AM), (LM), (WMP), (EF), (AD), (FW)
+  const serviceParenRegex = /\(\s*(AM|PM|LM|WMP|EF|AD|FW|W&P|W\/P|SERVING|USHERS|NORMAL)\s*[,)]*/gi;
   const matches = Array.from(raw.matchAll(serviceParenRegex));
   if (matches.length > 0) {
     const matchedCode = matches[0][1].toUpperCase();
@@ -284,8 +268,8 @@ export function extractNameAndService(
     raw = raw.replace(serviceParenRegex, ' ').trim();
   }
 
-  // Complex patterns like "(PM - R20)" or "(FS - R40)" or "(PM," or "(PM"
-  const complexMatch = raw.match(/\(\s*(AM|PM|LM|WMP|EF|AD|FW|FS|DW|DWM|DWE|FUNERAL)\s*[-–—,]?\s*([^)]*)\)?/i);
+  // Complex patterns like "(PM - R20)" or "(PM," or "(PM"
+  const complexMatch = raw.match(/\(\s*(AM|PM|LM|WMP|EF|AD|FW)\s*[-–—,]?\s*([^)]*)\)?/i);
   if (complexMatch) {
     if (!serviceCode || serviceCode === 'Unspecified' || serviceCode === 'PM') {
       serviceCode = extractServiceCode(complexMatch[1]);
