@@ -124,6 +124,7 @@ export interface VehicleDraftState {
    * calculator's name/vehicle/amount fields across devices.
    */
   externalSponsees?: { id: string; sponseeName: string; taxiName: string; amount: number }[];
+  recentlyEditedRiders?: Record<string, number>;
   updatedAt?: string;
   updatedBy?: string;
 }

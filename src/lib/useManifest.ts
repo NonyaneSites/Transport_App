@@ -34,8 +34,27 @@ export function mergeIncomingManifest(
   // NEVER merge! The incoming manifest is the only valid state for its date and service.
   if (!current || current.date !== incoming.date) return incoming;
 
-  // If no specific vehicle is actively open for editing, incoming is authoritative
-  if (!activeVehicleId) return incoming;
+  // If no specific vehicle is actively open for editing, incoming is authoritative,
+  // but protect submitted vehicles from being accidentally un-submitted by stale broadcasts
+  if (!activeVehicleId) {
+    const currentVehMap = new Map((current?.vehicles || []).map((v) => [v.id, v]));
+    const safeVehicles = incoming.vehicles.map((incV) => {
+      const curV = currentVehMap.get(incV.id);
+      if (curV?.submitted && !incV.submitted) {
+        return {
+          ...incV,
+          submitted: true,
+          submittedAt: curV.submittedAt || incV.submittedAt,
+          submittedBy: curV.submittedBy || incV.submittedBy,
+        };
+      }
+      return incV;
+    });
+    return {
+      ...incoming,
+      vehicles: safeVehicles,
+    };
+  }
 
   const currentActiveVehicle = current.vehicles.find((v) => v.id === activeVehicleId);
   if (!currentActiveVehicle) return incoming;
@@ -75,7 +94,7 @@ export function mergeIncomingManifest(
       ...incV,
       riders: combinedRiders,
       orderedStops: combinedOrderedStops,
-      submitted: incV.submitted !== undefined ? incV.submitted : currentActiveVehicle.submitted,
+      submitted: Boolean(incV.submitted || currentActiveVehicle.submitted),
       submittedAt: incV.submittedAt || currentActiveVehicle.submittedAt,
       submittedBy: incV.submittedBy || currentActiveVehicle.submittedBy,
       draftState: nextDraftState,
@@ -145,13 +164,13 @@ export function useManifest(
     setActiveCoReps([]);
   }, [activeVehicleId]);
 
-  // Periodically prune stale co-reps (inactive for > 20 seconds)
+  // Periodically prune stale co-reps (inactive for > 35 seconds)
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now();
       let changed = false;
       activeCoRepsMapRef.current.forEach((val, cId) => {
-        if (now - val.lastSeen > 20000) {
+        if (now - val.lastSeen > 35000) {
           activeCoRepsMapRef.current.delete(cId);
           changed = true;
         }
@@ -159,7 +178,7 @@ export function useManifest(
       if (changed) {
         setActiveCoReps(Array.from(activeCoRepsMapRef.current.values()));
       }
-    }, 4000);
+    }, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -503,7 +522,7 @@ export function useManifest(
     const pollInterval = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return;
       pollCheck();
-    }, 20000);
+    }, 30000);
 
     // 5. Immediate trigger on window focus, tab visible, or network online
     const handleVisibilityChange = () => {
@@ -685,51 +704,95 @@ export function useManifest(
     }
     if (!remoteManifest) return;
 
-    const pSet = presentIds ? new Set(presentIds) : (draftState?.presentIds ? new Set(draftState.presentIds) : null);
-    const aSet = absentIds ? new Set(absentIds) : (draftState?.absentIds ? new Set(draftState.absentIds) : null);
-
-    // 2. Only modify the present/absent flag of THIS specific vehicle's passengers
+    // 2. Multi-device intelligent merge if another user edited this same vehicle's draft
     const targetVehicle = remoteManifest.vehicles.find((v) => v.id === vehicleId);
     const vehicleRiderSet = new Set(targetVehicle?.riders ?? []);
-
-    const updatedSignups = remoteManifest.signups.map((p) => {
-      if (vehicleRiderSet.has(p.id)) {
-        if (pSet && pSet.has(p.id)) return { ...p, present: true };
-        if (aSet && aSet.has(p.id)) return { ...p, present: false };
-      }
-      return p;
-    });
-
-    // 3. Multi-device intelligent merge if another user edited this same vehicle's draft
     const existingDraft = targetVehicle?.draftState;
-    let mergedDraft = draftState;
+    const localPresentIds = presentIds ?? draftState?.presentIds ?? [];
+    const localAbsentIds = absentIds ?? draftState?.absentIds ?? [];
+    let mergedDraft = draftState ? { ...draftState, presentIds: localPresentIds, absentIds: localAbsentIds } : draftState;
 
-    if (existingDraft && draftState && existingDraft.updatedBy && existingDraft.updatedBy !== draftState.updatedBy) {
-      const combinedPresent = new Set(draftState.presentIds ?? []);
-      const combinedAbsent = new Set(draftState.absentIds ?? []);
+    if (existingDraft && draftState && existingDraft.updatedBy !== draftState.updatedBy) {
+      const now = Date.now();
+      const localEditedMap = draftState.recentlyEditedRiders || {};
+
+      const combinedPresent = new Set(localPresentIds);
+      const combinedAbsent = new Set(localAbsentIds);
 
       (existingDraft.presentIds ?? []).forEach((id) => {
-        if (!aSet || !aSet.has(id)) combinedPresent.add(id);
+        const lastEdit = localEditedMap[id] ?? 0;
+        // If local rep did not edit this rider in the last 15s, preserve remote present mark
+        if (now - lastEdit > 15000 && !combinedAbsent.has(id)) {
+          combinedPresent.add(id);
+        }
       });
       (existingDraft.absentIds ?? []).forEach((id) => {
-        if (!pSet || !pSet.has(id)) combinedAbsent.add(id);
+        const lastEdit = localEditedMap[id] ?? 0;
+        // If local rep did not edit this rider in the last 15s, preserve remote absent mark
+        if (now - lastEdit > 15000 && !combinedPresent.has(id)) {
+          combinedAbsent.add(id);
+        }
       });
+
+      // Merge sponsorships: preserve existing sponsorships from other reps
+      const mergedSponsored = new Set(draftState.sponsoredIds ?? []);
+      (existingDraft.sponsoredIds ?? []).forEach((id) => {
+        const lastEdit = localEditedMap[id] ?? 0;
+        if (now - lastEdit > 15000) {
+          mergedSponsored.add(id);
+        }
+      });
+
+      // Merge unpaid marks: preserve existing unpaid flags from other reps
+      const mergedUnpaid = new Set(draftState.unpaidIds ?? []);
+      (existingDraft.unpaidIds ?? []).forEach((id) => {
+        const lastEdit = localEditedMap[id] ?? 0;
+        if (now - lastEdit > 15000) {
+          mergedUnpaid.add(id);
+        }
+      });
+
+      // Merge manual cancellations by ID
+      const manualMap = new Map<string, { id: string; passengerName: string; structure?: string; amount: number; note?: string }>();
+      (existingDraft.manualCancellations ?? []).forEach((c) => manualMap.set(c.id, c));
+      (draftState.manualCancellations ?? []).forEach((c) => manualMap.set(c.id, c));
+
+      // Merge external sponsees by ID
+      const sponseeMap = new Map<string, { id: string; sponseeName: string; taxiName: string; amount: number }>();
+      (existingDraft.externalSponsees ?? []).forEach((s) => sponseeMap.set(s.id, s));
+      (draftState.externalSponsees ?? []).forEach((s) => sponseeMap.set(s.id, s));
 
       mergedDraft = {
         ...existingDraft,
         ...draftState,
         presentIds: Array.from(combinedPresent),
         absentIds: Array.from(combinedAbsent),
-        sponsoredIds: draftState.sponsoredIds !== undefined ? draftState.sponsoredIds : existingDraft.sponsoredIds,
-        unpaidIds: draftState.unpaidIds !== undefined ? draftState.unpaidIds : existingDraft.unpaidIds,
+        sponsoredIds: Array.from(mergedSponsored),
+        unpaidIds: Array.from(mergedUnpaid),
         notes: { ...(existingDraft.notes ?? {}), ...(draftState.notes ?? {}) },
         repName: draftState.repName?.trim() || existingDraft.repName || targetVehicle?.repName,
         licensePlate: draftState.licensePlate?.trim() || existingDraft.licensePlate || targetVehicle?.licensePlate,
         coReps: Array.from(new Set([...(existingDraft.coReps ?? []), ...(draftState.coReps ?? [])])).filter(Boolean),
+        settledLedgerIds: Array.from(new Set([...(existingDraft.settledLedgerIds ?? []), ...(draftState.settledLedgerIds ?? [])])),
+        manualCancellations: Array.from(manualMap.values()),
+        externalSponsees: Array.from(sponseeMap.values()),
         updatedAt: draftState.updatedAt || new Date().toISOString(),
         updatedBy: draftState.updatedBy,
       };
     }
+
+    // 3. Update passenger present status using the merged draft
+    const finalPresentSet = new Set(mergedDraft?.presentIds ?? []);
+    const finalAbsentSet = new Set(mergedDraft?.absentIds ?? []);
+
+    const updatedSignups = remoteManifest.signups.map((p) => {
+      if (vehicleRiderSet.has(p.id)) {
+        if (finalPresentSet.has(p.id)) return { ...p, present: true };
+        if (finalAbsentSet.has(p.id)) return { ...p, present: false };
+        return { ...p, present: undefined };
+      }
+      return p;
+    });
 
     // 4. Update ONLY the target vehicle, leaving all other vehicles completely untouched from the remote DB
     const updatedVehicles = remoteManifest.vehicles.map((v) => {
@@ -770,7 +833,8 @@ export function useManifest(
       }
     }
 
-    // Broadcast targeted vehicle delta across connected devices via Supabase channel
+    // Broadcast lightweight, targeted vehicle delta across connected devices via Supabase channel
+    // (Notice: we omit broadcasting the entire church manifest on every tap, saving massive egress & mobile data!)
     safeChannelSend({
       type: 'broadcast',
       event: 'vehicle_draft_delta',
@@ -780,11 +844,6 @@ export function useManifest(
         repName: mergedDraft?.repName || repName,
         licensePlate: mergedDraft?.licensePlate || licensePlate,
       },
-    });
-    safeChannelSend({
-      type: 'broadcast',
-      event: 'manifest_updated',
-      payload: { date: mergedManifest.date, manifest: mergedManifest },
     });
 
     try {

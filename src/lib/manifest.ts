@@ -140,7 +140,34 @@ export function reconcileManifestForSave(
     });
 
     const mergedMap = new Map(remoteList.filter((item) => !removedIds.has(item.id)).map((item) => [item.id, item]));
-    changedOrNew.forEach((item) => mergedMap.set(item.id, item));
+    changedOrNew.forEach((item) => {
+      const remoteItem = mergedMap.get(item.id);
+      // If the remote record is a submitted vehicle, preserve its submission attributes unless explicitly reopened
+      if (
+        remoteItem &&
+        typeof remoteItem === 'object' &&
+        'submitted' in remoteItem &&
+        (remoteItem as { submitted?: boolean }).submitted
+      ) {
+        const incV = item as unknown as Vehicle;
+        const remV = remoteItem as unknown as Vehicle;
+        const preserved: Vehicle = {
+          ...incV,
+          submitted: true,
+          submittedAt: remV.submittedAt || incV.submittedAt,
+          submittedBy: remV.submittedBy || incV.submittedBy,
+          draftState: {
+            ...(incV.draftState || {}),
+            ...(remV.draftState || {}),
+            presentIds: remV.draftState?.presentIds ?? incV.draftState?.presentIds ?? [],
+            absentIds: remV.draftState?.absentIds ?? incV.draftState?.absentIds ?? [],
+          },
+        };
+        mergedMap.set(item.id, preserved as unknown as T);
+      } else {
+        mergedMap.set(item.id, item);
+      }
+    });
 
     // Preserve remote ordering, then append anything genuinely new at the end.
     const remoteOrderIds = remoteList.map((item) => item.id).filter((id) => !removedIds.has(id));
@@ -264,7 +291,10 @@ export async function deleteVehicleFromDb(manifestKey: string, vehicleId: string
 /**
  * Loads all individual vehicles persisted for a given manifest key.
  */
-export async function loadVehiclesForManifest(manifestKey: string): Promise<Vehicle[]> {
+export async function loadVehiclesForManifest(
+  manifestKey: string,
+  skipLocalStorageFallback = false
+): Promise<Vehicle[]> {
   if (!manifestKey) return [];
   try {
     const { data, error } = await supabase
@@ -278,12 +308,14 @@ export async function loadVehiclesForManifest(manifestKey: string): Promise<Vehi
     console.warn('[Manifest] Failed to query remote vehicles table:', err);
   }
 
-  // Local storage fallback
-  const localRows = mockStorage
-    .getTable(VEHICLES_TABLE)
-    .filter((r) => String(r.manifest_key) === manifestKey);
-  if (localRows.length > 0) {
-    return localRows.map((r) => dbRowToVehicle(r));
+  // Local storage fallback: ONLY use when completely offline and remote was not loaded
+  if (!skipLocalStorageFallback) {
+    const localRows = mockStorage
+      .getTable(VEHICLES_TABLE)
+      .filter((r) => String(r.manifest_key) === manifestKey);
+    if (localRows.length > 0) {
+      return localRows.map((r) => dbRowToVehicle(r));
+    }
   }
   return [];
 }
@@ -315,6 +347,7 @@ export async function syncVehiclesToDb(manifestKey: string, vehicles: Vehicle[])
 
 export async function loadManifest(key: string): Promise<Manifest | null> {
   let manifest: Manifest | null = null;
+  let loadedFromRemote = false;
   try {
     const { data, error } = await supabase
       .from(MANIFESTS_TABLE)
@@ -338,6 +371,7 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
         created_at: data.created_at,
         updated_at: data.updated_at,
       };
+      loadedFromRemote = true;
     }
   } catch (err) {
     console.warn('[Manifest] Exception loading manifest, checking local store:', err);
@@ -361,7 +395,8 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
 
   // Integrate individual vehicle persistence (source of truth per vehicle)
   try {
-    const individualVehicles = await loadVehiclesForManifest(key);
+    // If loaded from remote Supabase, skip local storage fallback to avoid overwriting with stale cache
+    const individualVehicles = await loadVehiclesForManifest(key, loadedFromRemote);
     if (individualVehicles.length > 0) {
       // Build a map of individually saved vehicles
       const indMap = new Map(individualVehicles.map((v) => [v.id, v]));
@@ -371,7 +406,24 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
 
       for (const v of manifest.vehicles) {
         if (indMap.has(v.id)) {
-          mergedVehicles.push(indMap.get(v.id)!);
+          const ind = indMap.get(v.id)!;
+          // CRITICAL: NEVER lose submitted status! Remote or local submission must be preserved.
+          const isSubmitted = Boolean(v.submitted || ind.submitted);
+          const submittedAt = v.submittedAt || ind.submittedAt;
+          const submittedBy = v.submittedBy || ind.submittedBy;
+          mergedVehicles.push({
+            ...ind,
+            ...v,
+            submitted: isSubmitted,
+            submittedAt,
+            submittedBy,
+            draftState: {
+              ...(ind.draftState || {}),
+              ...(v.draftState || {}),
+              presentIds: v.draftState?.presentIds ?? ind.draftState?.presentIds ?? [],
+              absentIds: v.draftState?.absentIds ?? ind.draftState?.absentIds ?? [],
+            },
+          });
           seenIds.add(v.id);
         } else {
           mergedVehicles.push(v);
@@ -386,9 +438,14 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
         }
       }
       manifest.vehicles = mergedVehicles;
-    } else if (manifest.vehicles.length > 0) {
-      // Backfill individual vehicle records so they are stored individually
+    } else if (manifest.vehicles.length > 0 && !loadedFromRemote) {
+      // Backfill individual vehicle records if in local mode
       syncVehiclesToDb(key, manifest.vehicles).catch(() => {});
+    }
+
+    // Keep local cache fresh so local storage mirrors authoritative vehicles (including submitted status)
+    for (const v of manifest.vehicles) {
+      mockStorage.upsert(VEHICLES_TABLE, vehicleToDbRow(key, v), 'id');
     }
   } catch (err) {
     console.warn('[Manifest] Error loading individual vehicles for manifest:', err);

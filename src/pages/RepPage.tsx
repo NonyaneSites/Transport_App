@@ -34,7 +34,7 @@ import {
 } from '@/lib/transfer';
 
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
-const SYNC_DEBOUNCE_MS = 500; // 500ms debounce: ultra-fast multi-device synchronization while batching bursts of taps
+const SYNC_DEBOUNCE_MS = 1500; // 1500ms debounce: batches rapid check-in taps to minimize network egress and mobile data usage
 
 interface ExternalSponsee {
   id: string;
@@ -230,7 +230,7 @@ export function RepPage() {
         clientId: clientIdRef.current,
         timestamp: Date.now(),
       });
-    }, 7000);
+    }, 15000);
 
     return () => clearInterval(interval);
   }, [selectedVehicleId, repName, broadcastLiveAction]);
@@ -810,6 +810,7 @@ export function RepPage() {
       settledLedgerIds: Array.from(collectedCancellationIds),
       manualCancellations,
       externalSponsees,
+      recentlyEditedRiders: Object.fromEntries(recentlyEditedRidersRef.current),
       updatedAt: nowIso,
       updatedBy: clientIdRef.current,
     };
@@ -871,6 +872,7 @@ export function RepPage() {
         settledLedgerIds: Array.from(collectedCancellationIds),
         manualCancellations,
         externalSponsees,
+        recentlyEditedRiders: Object.fromEntries(recentlyEditedRidersRef.current),
         updatedAt: new Date().toISOString(),
         updatedBy: clientIdRef.current,
       };
@@ -901,28 +903,50 @@ export function RepPage() {
   const handleSetPresent = useCallback((passengerId: string, wantPresent: boolean) => {
     lastLocalEditTimeRef.current = Date.now();
     recentlyEditedRidersRef.current.set(passengerId, Date.now());
+    isUserDirtyRef.current = true;
+
+    const isCurrentlyPresent = presentIds.has(passengerId);
+    const isCurrentlyAbsent = absentIds.has(passengerId);
+    let finalStatus: 'present' | 'absent' | 'unmarked' = 'unmarked';
+
     if (wantPresent) {
-      setPresentIds((prev) => {
-        if (prev.has(passengerId)) return prev;
-        return new Set(prev).add(passengerId);
-      });
-      setAbsentIds((prev) => {
-        if (!prev.has(passengerId)) return prev;
-        const next = new Set(prev);
-        next.delete(passengerId);
-        return next;
-      });
+      if (isCurrentlyPresent) {
+        // Toggle off to unmarked
+        finalStatus = 'unmarked';
+        setPresentIds((prev) => {
+          const next = new Set(prev);
+          next.delete(passengerId);
+          return next;
+        });
+      } else {
+        finalStatus = 'present';
+        setPresentIds((prev) => new Set(prev).add(passengerId));
+        setAbsentIds((prev) => {
+          if (!prev.has(passengerId)) return prev;
+          const next = new Set(prev);
+          next.delete(passengerId);
+          return next;
+        });
+      }
     } else {
-      setAbsentIds((prev) => {
-        if (prev.has(passengerId)) return prev;
-        return new Set(prev).add(passengerId);
-      });
-      setPresentIds((prev) => {
-        if (!prev.has(passengerId)) return prev;
-        const next = new Set(prev);
-        next.delete(passengerId);
-        return next;
-      });
+      if (isCurrentlyAbsent) {
+        // Toggle off to unmarked
+        finalStatus = 'unmarked';
+        setAbsentIds((prev) => {
+          const next = new Set(prev);
+          next.delete(passengerId);
+          return next;
+        });
+      } else {
+        finalStatus = 'absent';
+        setAbsentIds((prev) => new Set(prev).add(passengerId));
+        setPresentIds((prev) => {
+          if (!prev.has(passengerId)) return prev;
+          const next = new Set(prev);
+          next.delete(passengerId);
+          return next;
+        });
+      }
     }
 
     if (selectedVehicleId) {
@@ -930,7 +954,7 @@ export function RepPage() {
         type: 'rider_attendance',
         vehicleId: selectedVehicleId,
         riderId: passengerId,
-        status: wantPresent ? 'present' : 'absent',
+        status: finalStatus,
         repName: repName.trim() || 'Co-rep',
         clientId: clientIdRef.current,
         timestamp: Date.now(),
@@ -939,20 +963,22 @@ export function RepPage() {
       // watching presentIds/absentIds), which safely merges against the freshest server copy.
       // This broadcast alone gives co-reps instant visibility without an extra write per click.
     }
-  }, [selectedVehicleId, key, repName, broadcastLiveAction]);
+  }, [selectedVehicleId, presentIds, absentIds, repName, broadcastLiveAction]);
 
   const handleToggleSponsored = useCallback((passengerId: string) => {
     lastLocalEditTimeRef.current = Date.now();
     recentlyEditedRidersRef.current.set(passengerId, Date.now());
-    let nextVal = false;
+    isUserDirtyRef.current = true;
+
+    const isCurrentlySponsored = sponsoredIds.has(passengerId);
+    const nextVal = !isCurrentlySponsored;
+
     setSponsoredIds((prev) => {
       const next = new Set(prev);
-      if (next.has(passengerId)) {
-        next.delete(passengerId);
-        nextVal = false;
-      } else {
+      if (nextVal) {
         next.add(passengerId);
-        nextVal = true;
+      } else {
+        next.delete(passengerId);
       }
       return next;
     });
@@ -969,20 +995,22 @@ export function RepPage() {
       });
       // Persistence happens via the debounced updateVehicleDraft sync (safe merge against server).
     }
-  }, [selectedVehicleId, key, repName, broadcastLiveAction]);
+  }, [selectedVehicleId, sponsoredIds, repName, broadcastLiveAction]);
 
   const handleToggleUnpaid = useCallback((passengerId: string) => {
     lastLocalEditTimeRef.current = Date.now();
     recentlyEditedRidersRef.current.set(passengerId, Date.now());
-    let nextVal = false;
+    isUserDirtyRef.current = true;
+
+    const isCurrentlyUnpaid = unpaidIds.has(passengerId);
+    const nextVal = !isCurrentlyUnpaid;
+
     setUnpaidIds((prev) => {
       const next = new Set(prev);
-      if (next.has(passengerId)) {
-        next.delete(passengerId);
-        nextVal = false;
-      } else {
+      if (nextVal) {
         next.add(passengerId);
-        nextVal = true;
+      } else {
+        next.delete(passengerId);
       }
       return next;
     });
@@ -999,7 +1027,7 @@ export function RepPage() {
       });
       // Persistence happens via the debounced updateVehicleDraft sync (safe merge against server).
     }
-  }, [selectedVehicleId, key, repName, broadcastLiveAction]);
+  }, [selectedVehicleId, unpaidIds, repName, broadcastLiveAction]);
 
   const handleSetNote = useCallback((passengerId: string, text: string) => {
     lastLocalEditTimeRef.current = Date.now();

@@ -408,10 +408,12 @@ function createResilientSupabaseClient() {
                     console.warn(`[Transport Storage] Remote sync unavailable (${res.error.message}), using local storage.`);
                     return fallbackBuilder.then(onfulfilled, onrejected);
                   }
-                  // On successful remote select/read, sync data to local storage for offline resilience
+                  // On successful remote select/read, upsert rows to local storage for offline resilience without wiping others
                   if (res?.data && Array.isArray(res.data)) {
                     try {
-                      mockStorage.setTable(tableName, res.data as TableRow[]);
+                      for (const row of res.data) {
+                        mockStorage.upsert(tableName, row as TableRow);
+                      }
                     } catch {
                       // ignore
                     }

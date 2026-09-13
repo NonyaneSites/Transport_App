@@ -64,7 +64,7 @@ export function generateWhatsAppRouteManifest(manifest: Manifest, service: Servi
   lines.push(`*${header}*`);
   lines.push(`*${shortDate(sessionDate)}*`);
 
-  const vehiclesToExport = sortVehiclesNatural((manifest?.vehicles || []).filter((v) => !v.submitted));
+  const vehiclesToExport = sortVehiclesNatural(manifest?.vehicles || []);
 
   for (const vehicle of vehiclesToExport) {
     const riders = getRiderPassengers(manifest, vehicle);
@@ -108,7 +108,7 @@ export function generateWhatsAppRepManifest(manifest: Manifest, service: Service
   lines.push(`*${header}*`);
   lines.push(`*${shortDate(sessionDate)}*`);
 
-  const vehiclesToExport = sortVehiclesNatural((manifest?.vehicles || []).filter((v) => !v.submitted));
+  const vehiclesToExport = sortVehiclesNatural(manifest?.vehicles || []);
 
   for (const vehicle of vehiclesToExport) {
     const riders = getRiderPassengers(manifest, vehicle);
