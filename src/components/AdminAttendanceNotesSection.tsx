@@ -67,6 +67,7 @@ interface VehicleGeneralNoteItem {
 export function AdminAttendanceNotesSection({
   manifest,
   onLocateVehicle,
+  onTransferSponsorship,
 }: AdminAttendanceNotesSectionProps) {
   const [activeTab, setActiveTab] = useState<'sponsored' | 'unpaid' | 'absentees' | 'notes' | 'overview'>('sponsored');
   const [searchQuery, setSearchQuery] = useState('');
