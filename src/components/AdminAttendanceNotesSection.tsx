@@ -24,6 +24,7 @@ import { getPassengerStatusBadge } from '@/lib/types';
 interface AdminAttendanceNotesSectionProps {
   manifest: Manifest;
   onLocateVehicle?: (vehicleId: string) => void;
+  onTransferSponsorship?: (passenger: Passenger) => void;
 }
 
 interface SponsoredRiderItem {
@@ -786,16 +787,29 @@ export function AdminAttendanceNotesSection({
                                   </div>
                                 </div>
 
-                                {onLocateVehicle && (
-                                  <button
-                                    type="button"
-                                    onClick={() => onLocateVehicle(v.id)}
-                                    className="rounded p-1 text-muted hover:text-ink hover:bg-card-2 text-[11px]"
-                                    title="Locate vehicle card"
-                                  >
-                                    <ExternalLink className="h-3.5 w-3.5" />
-                                  </button>
-                                )}
+                                <div className="flex items-center gap-1 shrink-0">
+                                  {onTransferSponsorship && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onTransferSponsorship(p)}
+                                      className="rounded p-1 text-amber-300 hover:text-amber-200 hover:bg-amber-500/20 text-[11px] flex items-center gap-1 transition-colors"
+                                      title="Send unaccounted sponsorship to another service type in this session"
+                                    >
+                                      <HeartHandshake className="h-3.5 w-3.5" />
+                                      <span className="hidden sm:inline text-[10px] font-semibold">Send to Service</span>
+                                    </button>
+                                  )}
+                                  {onLocateVehicle && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onLocateVehicle(v.id)}
+                                      className="rounded p-1 text-muted hover:text-ink hover:bg-card-2 text-[11px]"
+                                      title="Locate vehicle card"
+                                    >
+                                      <ExternalLink className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                </div>
                               </div>
 
                               {/* Sponsor Note / Who is paying */}

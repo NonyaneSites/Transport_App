@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
-import { Lock, Trash2, Loader2, AlertTriangle, Calendar, Users, Bus, ArrowUpRight, XCircle, FileSpreadsheet, ChevronDown, ChevronRight, History, Download, FileDown, Eye, Table } from 'lucide-react';
+import { Lock, Trash2, Loader2, AlertTriangle, Calendar, Users, Bus, ArrowUpRight, XCircle, FileSpreadsheet, ChevronDown, ChevronRight, History, Download, FileDown, Eye, Table, CheckCircle2, X } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { ExcelUpload } from '@/components/ExcelUpload';
 import { VehicleAllocation } from '@/components/VehicleAllocation';
+import { TransferSponsorshipModal } from '@/components/TransferSponsorshipModal';
 import { useManifest } from '@/lib/useManifest';
 import { listAllManifests, loadManifest } from '@/lib/manifest';
 import { listLedgerEntries } from '@/lib/ledger';
@@ -63,6 +64,9 @@ export function AdminPage() {
   const [archiveSelected, setArchiveSelected] = useState('');
   const [showHistory, setShowHistory] = useState(false);
   const [exportModalManifest, setExportModalManifest] = useState<{ manifest: Manifest; serviceLabel: string } | null>(null);
+  const [transferModalOpen, setTransferModalOpen] = useState(false);
+  const [transferModalPassenger, setTransferModalPassenger] = useState<Passenger | null>(null);
+  const [transferSuccessNotice, setTransferSuccessNotice] = useState<string | null>(null);
 
   // Initial load on mount only — avoid re-fetching the entire database history on every live tick
   useEffect(() => {
@@ -258,6 +262,21 @@ export function AdminPage() {
           <div className="mt-5 flex items-center gap-2 rounded-lg border border-crimson-500/30 bg-crimson-900/20 p-3 text-sm text-crimson-300">
             <AlertTriangle className="h-4 w-4 shrink-0" />
             Connection error: {error}
+          </div>
+        )}
+
+        {transferSuccessNotice && (
+          <div className="mt-5 flex items-center justify-between gap-2 rounded-xl border border-success/40 bg-success/15 px-4 py-3 text-xs font-semibold text-success-light animate-fade-in shadow-md">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
+              <span>{transferSuccessNotice}</span>
+            </div>
+            <button
+              onClick={() => setTransferSuccessNotice(null)}
+              className="rounded p-1 text-success-light/70 hover:bg-success/20 hover:text-success-light"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
           </div>
         )}
 
@@ -524,6 +543,10 @@ export function AdminPage() {
                   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
                 }
               }}
+              onTransferSponsorship={(p) => {
+                setTransferModalPassenger(p);
+                setTransferModalOpen(true);
+              }}
             />
           </div>
         )}
@@ -586,6 +609,44 @@ export function AdminPage() {
           serviceLabel={exportModalManifest.serviceLabel}
           isOpen={true}
           onClose={() => setExportModalManifest(null)}
+        />
+      )}
+
+      {/* Transfer Sponsorship Modal */}
+      {manifest && (
+        <TransferSponsorshipModal
+          isOpen={transferModalOpen}
+          onClose={() => {
+            setTransferModalOpen(false);
+            setTransferModalPassenger(null);
+          }}
+          manifest={manifest}
+          currentService={service}
+          initialPassenger={transferModalPassenger}
+          onSuccess={(msg, transferredId) => {
+            setTransferSuccessNotice(msg);
+            setTimeout(() => setTransferSuccessNotice(null), 6000);
+            if (transferredId) {
+              const nextSignups = manifest.signups.filter((p) => p.id !== transferredId);
+              const nextVehicles = manifest.vehicles.map((v) => ({
+                ...v,
+                riders: v.riders.filter((id) => id !== transferredId),
+                draftState: v.draftState
+                  ? {
+                      ...v.draftState,
+                      presentIds: v.draftState.presentIds?.filter((id) => id !== transferredId),
+                      absentIds: v.draftState.absentIds?.filter((id) => id !== transferredId),
+                      sponsoredIds: v.draftState.sponsoredIds?.filter((id) => id !== transferredId),
+                    }
+                  : undefined,
+              }));
+              save({
+                ...manifest,
+                signups: nextSignups,
+                vehicles: nextVehicles,
+              }).catch((err) => console.error('Error saving updated manifest after transfer:', err));
+            }
+          }}
         />
       )}
 

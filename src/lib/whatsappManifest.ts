@@ -108,7 +108,12 @@ export function generateWhatsAppRepManifest(manifest: Manifest, service: Service
   lines.push(`*${header}*`);
   lines.push(`*${shortDate(sessionDate)}*`);
 
-  const vehiclesToExport = sortVehiclesNatural(manifest?.vehicles || []);
+  // Rep manifest is strictly for taxis only; buses are excluded even if present in the manifest
+  const vehiclesToExport = sortVehiclesNatural(
+    (manifest?.vehicles || []).filter(
+      (v) => v.type === 'Taxi' || (v.type !== 'Bus' && !v.name.toLowerCase().includes('bus'))
+    )
+  );
 
   for (const vehicle of vehiclesToExport) {
     const riders = getRiderPassengers(manifest, vehicle);

@@ -3,9 +3,10 @@ import {
   Bus, Car, Plus, Trash2, Users, ArrowRight, Undo2, X, UserCog, MoveRight,
   CheckCircle2, ChevronDown, ChevronRight, ChevronUp, MapPin,
   Check, Clock, StickyNote, Sparkles, ArrowUpDown, UserCheck, Download,
-  FileText, Copy, Eye, FileDown, Search, UserX, GitMerge, CornerDownRight, MessageCircle, Pencil
+  FileText, Copy, Eye, FileDown, Search, UserX, GitMerge, CornerDownRight, MessageCircle, Pencil, HeartHandshake
 } from 'lucide-react';
 import { EditVehicleModal } from './EditVehicleModal';
+import { TransferSponsorshipModal } from './TransferSponsorshipModal';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
@@ -171,6 +172,33 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   const [copiedRep, setCopiedRep] = useState(false);
   const [previewManifestType, setPreviewManifestType] = useState<'route' | 'rep' | null>(null);
   const [whatsAppNotice, setWhatsAppNotice] = useState<{ type: 'success' | 'error'; text: string; url?: string } | null>(null);
+
+  // Cross-service unaccounted sponsorship transfer state
+  const [transferModalOpen, setTransferModalOpen] = useState(false);
+  const [transferModalPassenger, setTransferModalPassenger] = useState<Passenger | null>(null);
+
+  const handleTransferSuccess = (message: string, transferredPassengerId?: string) => {
+    setMoveNotification({ text: message, timestamp: Date.now() });
+    const pId = transferredPassengerId || transferModalPassenger?.id;
+    if (pId) {
+      setLocalManifest((prev) => ({
+        ...prev,
+        signups: prev.signups.filter((p) => p.id !== pId),
+        vehicles: prev.vehicles.map((v) => ({
+          ...v,
+          riders: v.riders.filter((id) => id !== pId),
+          draftState: v.draftState
+            ? {
+                ...v.draftState,
+                presentIds: v.draftState.presentIds?.filter((id) => id !== pId),
+                absentIds: v.draftState.absentIds?.filter((id) => id !== pId),
+                sponsoredIds: v.draftState.sponsoredIds?.filter((id) => id !== pId),
+              }
+            : undefined,
+        })),
+      }));
+    }
+  };
 
   /**
    * Performs an immediate synchronous mutation on the local manifest,
@@ -958,6 +986,18 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
               <Users className="h-4 w-4 text-muted" />
               <span className="text-xs font-semibold uppercase tracking-wide text-muted">Unassigned Pool</span>
               <span className="badge bg-crimson-500/15 text-crimson-300">{unassigned.length} waiting</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setTransferModalPassenger(null);
+                  setTransferModalOpen(true);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition-colors shadow-xs"
+                title="Send an unaccounted sponsorship to another service type in the same session"
+              >
+                <HeartHandshake className="h-3.5 w-3.5" />
+                <span>Send Unaccounted Sponsorship to Other Service</span>
+              </button>
             </div>
             {/* Breakdown by Category & Attendee Status */}
             <div className="flex items-center gap-1.5 text-[11px] flex-wrap">
@@ -1362,6 +1402,17 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                       >
                         Move
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTransferModalPassenger(p);
+                          setTransferModalOpen(true);
+                        }}
+                        className="btn-ghost p-1 text-amber-300 hover:text-amber-200 hover:bg-amber-500/20 rounded text-[11px]"
+                        title="Send to another service type as Unaccounted Sponsorship"
+                      >
+                        <HeartHandshake className="h-3.5 w-3.5" />
+                      </button>
                       {assignedVehicle && (
                         <button
                           type="button"
@@ -1505,6 +1556,19 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                       >
                         <ArrowRight className="h-3.5 w-3.5" />
                         Move
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTransferModalPassenger(selectedPassenger || null);
+                          setTransferModalOpen(true);
+                        }}
+                        disabled={!movePassengerId}
+                        className="btn-ghost px-2.5 py-2 text-xs text-amber-300 border border-amber-500/30 hover:bg-amber-500/10 flex items-center gap-1.5 whitespace-nowrap disabled:opacity-40"
+                        title="Send as Unaccounted Sponsorship to another service type in the same session"
+                      >
+                        <HeartHandshake className="h-3.5 w-3.5" />
+                        <span>To Other Service</span>
                       </button>
                     </div>
                   </div>
@@ -2127,6 +2191,18 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                                           type="button"
                                           onClick={(e) => {
                                             e.stopPropagation();
+                                            setTransferModalPassenger(p);
+                                            setTransferModalOpen(true);
+                                          }}
+                                          className="rounded p-1 text-[11px] text-amber-400 hover:text-amber-200 hover:bg-amber-500/20 transition-all"
+                                          title="Send to another service type as Unaccounted Sponsorship"
+                                        >
+                                          <HeartHandshake className="h-3.5 w-3.5" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
                                             unassignRider(vehicle.id, p.id);
                                           }}
                                           className="rounded-md p-1.5 text-muted transition-colors hover:bg-crimson-900/40 hover:text-crimson-300 active:scale-95"
@@ -2306,6 +2382,19 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
           onDelete={removeVehicle}
         />
       )}
+
+      {/* Transfer Unaccounted Sponsorship Modal */}
+      <TransferSponsorshipModal
+        isOpen={transferModalOpen}
+        onClose={() => {
+          setTransferModalOpen(false);
+          setTransferModalPassenger(null);
+        }}
+        manifest={localManifest}
+        currentService={service}
+        initialPassenger={transferModalPassenger}
+        onSuccess={handleTransferSuccess}
+      />
     </div>
   );
 }
