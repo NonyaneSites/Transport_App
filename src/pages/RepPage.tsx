@@ -857,6 +857,8 @@ export function RepPage() {
   // Lifecycle listeners: Flush draft on unexpected tab close, refresh, or mobile app switch
   useEffect(() => {
     const handleFlushOnExit = () => {
+      // If visibilitychange fired because the user returned to the tab, do not flush!
+      if (typeof document !== 'undefined' && !document.hidden) return;
       if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted || !isUserDirtyRef.current) return;
       const currentDraft: VehicleDraftState = {
         presentIds: Array.from(presentIds),

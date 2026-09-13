@@ -9,6 +9,7 @@ import {
   syncVehiclesToDb,
   dbRowToVehicle,
 } from './manifest';
+import { saveManifestToServer } from './serverApi';
 import type { Manifest, Vehicle, Passenger, VehicleDraftState, LiveSyncAction } from './types';
 
 export interface ActiveCoRep {
@@ -59,32 +60,32 @@ export function mergeIncomingManifest(
   const currentActiveVehicle = current.vehicles.find((v) => v.id === activeVehicleId);
   if (!currentActiveVehicle) return incoming;
 
-  // Merge vehicles: adopt authoritative remote draftState from Firestore
+  // Merge vehicles: adopt authoritative remote draftState and riders from server / admin allocation
   const mergedVehicles = incoming.vehicles.map((incV) => {
     if (incV.id !== activeVehicleId) {
       return incV;
     }
 
-    // It's the active vehicle: combine riders and orderedStops
-    const curRiders = new Set(currentActiveVehicle.riders || []);
-    const incRiders = incV.riders || [];
-    const combinedRiders = Array.from(new Set([...curRiders, ...incRiders]));
-    const combinedOrderedStops = Array.from(new Set([...(currentActiveVehicle.orderedStops || []), ...(incV.orderedStops || [])]));
+    // It's the active vehicle: incoming riders from admin allocation is authoritative!
+    // NEVER resurrect riders that were removed or unassigned.
+    const activeRiders = Array.isArray(incV.riders) ? incV.riders : [];
+    const activeRiderSet = new Set(activeRiders);
 
     const incDraft = incV.draftState;
     const curDraft = currentActiveVehicle.draftState;
 
-    // Adopt remote draftState from Firestore as authoritative for shared arrays
-    // (sponsoredIds, unpaidIds, presentIds, absentIds, notes)
-    const nextDraftState: VehicleDraftState = incDraft
+    // Prune any draft presence/absence for riders that are no longer in this vehicle
+    const cleanDraftState: VehicleDraftState = incDraft
       ? {
           ...(curDraft || {}),
           ...incDraft,
-          presentIds: incDraft.presentIds !== undefined ? incDraft.presentIds : (curDraft?.presentIds || []),
-          absentIds: incDraft.absentIds !== undefined ? incDraft.absentIds : (curDraft?.absentIds || []),
-          sponsoredIds: incDraft.sponsoredIds !== undefined ? incDraft.sponsoredIds : (curDraft?.sponsoredIds || []),
-          unpaidIds: incDraft.unpaidIds !== undefined ? incDraft.unpaidIds : (curDraft?.unpaidIds || []),
-          notes: { ...(curDraft?.notes || {}), ...(incDraft.notes || {}) },
+          presentIds: (incDraft.presentIds !== undefined ? incDraft.presentIds : (curDraft?.presentIds || [])).filter((id) => activeRiderSet.has(id)),
+          absentIds: (incDraft.absentIds !== undefined ? incDraft.absentIds : (curDraft?.absentIds || [])).filter((id) => activeRiderSet.has(id)),
+          sponsoredIds: (incDraft.sponsoredIds !== undefined ? incDraft.sponsoredIds : (curDraft?.sponsoredIds || [])).filter((id) => activeRiderSet.has(id)),
+          unpaidIds: (incDraft.unpaidIds !== undefined ? incDraft.unpaidIds : (curDraft?.unpaidIds || [])).filter((id) => activeRiderSet.has(id)),
+          notes: Object.fromEntries(
+            Object.entries({ ...(curDraft?.notes || {}), ...(incDraft.notes || {}) }).filter(([k]) => activeRiderSet.has(k))
+          ),
           updatedAt: incDraft.updatedAt || curDraft?.updatedAt || new Date().toISOString(),
           updatedBy: incDraft.updatedBy || curDraft?.updatedBy,
         }
@@ -92,12 +93,12 @@ export function mergeIncomingManifest(
 
     return {
       ...incV,
-      riders: combinedRiders,
-      orderedStops: combinedOrderedStops,
+      riders: activeRiders,
+      orderedStops: incV.orderedStops || currentActiveVehicle.orderedStops || [],
       submitted: Boolean(incV.submitted || currentActiveVehicle.submitted),
       submittedAt: incV.submittedAt || currentActiveVehicle.submittedAt,
       submittedBy: incV.submittedBy || currentActiveVehicle.submittedBy,
-      draftState: nextDraftState,
+      draftState: cleanDraftState,
     };
   });
 
@@ -556,8 +557,16 @@ export function useManifest(
           if (fresh.updated_at) {
             lastKnownUpdatedAtRef.current = fresh.updated_at;
           }
+          manifestRef.current = fresh;
           setManifest((prev) => mergeIncomingManifest(prev, fresh, activeVehicleIdRef.current));
           setLastSyncedAt(Date.now());
+          if (broadcastChannelRef.current) {
+            try {
+              broadcastChannelRef.current.postMessage({ key: fresh.date, manifest: fresh });
+            } catch {
+              // broadcast failed
+            }
+          }
         }
       } catch (err) {
         console.warn('[useManifest] Error during resume refresh:', err);
@@ -660,9 +669,12 @@ export function useManifest(
     // 5. Persist the reconciled manifest to Supabase (source of truth), with local fallback
     try {
       // Also persist each vehicle individually to transport_vehicles for granular control
-      syncVehiclesToDb(merged.date, merged.vehicles).catch((err) => {
+      await syncVehiclesToDb(merged.date, merged.vehicles).catch((err) => {
         console.warn('[useManifest] Error saving individual vehicles:', err);
       });
+
+      // Also persist to server endpoint for instant multi-client replication
+      saveManifestToServer(merged).catch(() => {});
 
       const { error: upsertError, data } = await supabase
         .from(MANIFESTS_TABLE)

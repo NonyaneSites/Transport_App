@@ -129,22 +129,42 @@ export function reconcileManifestForSave(
   const baseVehiclesMap = new Map(baseline.vehicles.map((v) => [v.id, v]));
   const incVehiclesMap = new Map(incoming.vehicles.map((v) => [v.id, v]));
 
-  // 1. Identify vehicles intentionally deleted by this user (in baseline, missing from incoming)
-  const removedVehicleIds = new Set(
-    baseline.vehicles.filter((v) => !incVehiclesMap.has(v.id)).map((v) => v.id)
-  );
+  // Determine if incoming is a stale snapshot relative to remote.
+  // If remote was updated after incoming, or if multiple vehicles from remote are missing in incoming,
+  // incoming is an older view and MUST NOT wipe out remote vehicles or signups created while away.
+  const remoteTime = remote.updated_at ? new Date(remote.updated_at).getTime() : 0;
+  const incomingTime = incoming.updated_at ? new Date(incoming.updated_at).getTime() : 0;
+  const isIncomingStale = remoteTime > incomingTime && remoteTime > 0 && incomingTime > 0;
+
+  // 1. Identify vehicles intentionally deleted by this user (in baseline, missing from incoming).
+  // CRITICAL: If incoming is stale or missing multiple vehicles, do not treat remote vehicles as deleted!
+  const missingFromInc = baseline.vehicles.filter((v) => !incVehiclesMap.has(v.id));
+  const removedVehicleIds = new Set<string>();
+  if (!isIncomingStale && missingFromInc.length <= 1) {
+    missingFromInc.forEach((v) => removedVehicleIds.add(v.id));
+  }
 
   // 2. Identify brand-new vehicles added by this user (in incoming, not in baseline)
   const addedVehicles = incoming.vehicles.filter((v) => !baseVehiclesMap.has(v.id));
 
-  // Track riders explicitly added to any vehicle by this user so we can guarantee exclusivity
+  // Track riders explicitly added to or unassigned from any vehicle by this user
   const ridersExplicitlyAssignedToVehicle = new Map<string, string>(); // riderId -> targetVehicleId
+  const ridersExplicitlyUnassigned = new Set<string>(); // riderId explicitly removed to unassigned pool
+
+  // Check signups for explicit unassignments:
+  const baseSignupsMap = new Map(baseline.signups.map((p) => [p.id, p]));
+  for (const incP of incoming.signups) {
+    const baseP = baseSignupsMap.get(incP.id);
+    if (baseP && baseP.assignedTo && !incP.assignedTo) {
+      ridersExplicitlyUnassigned.add(incP.id);
+    }
+  }
 
   // 3. Reconcile existing vehicles starting from remote (the freshest ground truth)
   const reconciledVehicles: Vehicle[] = [];
 
   for (const remoteV of remote.vehicles) {
-    // If the user intentionally deleted this vehicle, drop it
+    // If the user intentionally deleted this single vehicle, drop it
     if (removedVehicleIds.has(remoteV.id)) {
       continue;
     }
@@ -152,7 +172,7 @@ export function reconcileManifestForSave(
     const incV = incVehiclesMap.get(remoteV.id);
     const baseV = baseVehiclesMap.get(remoteV.id);
 
-    // If incoming doesn't have it and it wasn't in baseline, it was added by someone else while user was away: KEEP IT!
+    // If incoming doesn't have it, it was added by someone else while user was away or incoming is stale: ALWAYS KEEP IT!
     if (!incV) {
       reconciledVehicles.push(remoteV);
       continue;
@@ -173,6 +193,11 @@ export function reconcileManifestForSave(
     const removedRidersSet = new Set((baseV.riders || []).filter((id) => !incRidersSet.has(id)));
 
     addedRiders.forEach((id) => ridersExplicitlyAssignedToVehicle.set(id, incV.id));
+    removedRidersSet.forEach((id) => {
+      if (!ridersExplicitlyAssignedToVehicle.has(id)) {
+        ridersExplicitlyUnassigned.add(id);
+      }
+    });
 
     // Apply rider diffs on top of remoteV (preserving any riders added by other reps/admins in remote!)
     const nextRiders = (remoteV.riders || []).filter((id) => !removedRidersSet.has(id));
@@ -298,65 +323,78 @@ export function reconcileManifestForSave(
     }
   }
 
-  // 5. Ensure rider exclusivity across vehicles:
-  // If a rider was explicitly assigned to vehicle X by this user, remove them from any other vehicle
+  // 5. Ensure rider exclusivity and process explicit unassignments:
+  // - If a rider was explicitly assigned to vehicle X by this user, remove them from any other vehicle.
+  // - If a rider was explicitly unassigned by this user, remove them from ALL vehicles and clean up draftState!
   const finalVehicles = reconciledVehicles.map((v) => {
     const cleanedRiders = (v.riders || []).filter((rId) => {
+      if (ridersExplicitlyUnassigned.has(rId)) {
+        return false;
+      }
       const explicitTarget = ridersExplicitlyAssignedToVehicle.get(rId);
       if (explicitTarget && explicitTarget !== v.id) {
         return false; // Re-assigned to another vehicle by this user
       }
       return true;
     });
-    return { ...v, riders: cleanedRiders };
+
+    const cleanedDraft = v.draftState
+      ? {
+          ...v.draftState,
+          presentIds: v.draftState.presentIds?.filter((id) => !ridersExplicitlyUnassigned.has(id)),
+          absentIds: v.draftState.absentIds?.filter((id) => !ridersExplicitlyUnassigned.has(id)),
+          sponsoredIds: v.draftState.sponsoredIds?.filter((id) => !ridersExplicitlyUnassigned.has(id)),
+          unpaidIds: v.draftState.unpaidIds?.filter((id) => !ridersExplicitlyUnassigned.has(id)),
+          notes: Object.fromEntries(
+            Object.entries(v.draftState.notes || {}).filter(([k]) => !ridersExplicitlyUnassigned.has(k))
+          ),
+        }
+      : undefined;
+
+    return { ...v, riders: cleanedRiders, draftState: cleanedDraft };
   });
 
   // 6. Granular 3-Way Reconcile for Signups
-  const baseSignupsMap = new Map(baseline.signups.map((p) => [p.id, p]));
   const incSignupsMap = new Map(incoming.signups.map((p) => [p.id, p]));
-
-  // Signups intentionally removed by this user (present in baseline, missing from incoming)
-  const removedSignupIds = new Set(
-    baseline.signups.filter((p) => !incSignupsMap.has(p.id)).map((p) => p.id)
-  );
-
-  // Signups brand-new in incoming (e.g. walk-ins added locally)
   const addedSignups = incoming.signups.filter((p) => !baseSignupsMap.has(p.id));
 
   const reconciledSignups: Passenger[] = [];
   const handledSignupIds = new Set<string>();
 
+  // NEVER drop signups from remote! (Signups are imported rosters or walk-ins)
   for (const remP of remote.signups) {
-    // If intentionally deleted by this user, omit
-    if (removedSignupIds.has(remP.id)) {
-      continue;
-    }
-
     handledSignupIds.add(remP.id);
     const incP = incSignupsMap.get(remP.id);
     const baseP = baseSignupsMap.get(remP.id);
 
     if (!incP) {
-      // Exists in remote, not in incoming, and wasn't in baseline -> added by someone else while user was away! KEEP IT!
+      // Exists in remote, missing in incoming (incoming was stale): KEEP remote signup!
       reconciledSignups.push(remP);
       continue;
     }
 
-    if (baseP && JSON.stringify(baseP) !== JSON.stringify(incP)) {
+    if (ridersExplicitlyUnassigned.has(remP.id)) {
+      // User explicitly unassigned this rider
+      reconciledSignups.push({
+        ...remP,
+        ...incP,
+        assignedTo: null,
+      });
+    } else if (baseP && JSON.stringify(baseP) !== JSON.stringify(incP)) {
       // User explicitly modified fields on this signup: apply changes on top of remote
       reconciledSignups.push({
         ...remP,
         ...incP,
       });
     } else {
-      // User did not touch this signup: keep remote version (including any external sponsorship/attendance status)
+      // User did not touch this signup: keep remote version
       reconciledSignups.push(remP);
     }
   }
 
-  // Append any brand-new signups added by this user that aren't already in remote
+  // Append any brand-new signups added by this user (e.g. walk-ins) that aren't already in remote
   for (const newP of addedSignups) {
-    if (!handledSignupIds.has(newP.id) && !removedSignupIds.has(newP.id)) {
+    if (!handledSignupIds.has(newP.id)) {
       reconciledSignups.push(newP);
       handledSignupIds.add(newP.id);
     }
@@ -597,6 +635,7 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
           const isSubmitted = Boolean(v.submitted || ind.submitted);
           const submittedAt = v.submittedAt || ind.submittedAt;
           const submittedBy = v.submittedBy || ind.submittedBy;
+          const activeRiderIds = new Set(v.riders || []);
           mergedVehicles.push({
             ...ind,
             ...v,
@@ -606,8 +645,13 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
             draftState: {
               ...(ind.draftState || {}),
               ...(v.draftState || {}),
-              presentIds: v.draftState?.presentIds ?? ind.draftState?.presentIds ?? [],
-              absentIds: v.draftState?.absentIds ?? ind.draftState?.absentIds ?? [],
+              presentIds: (v.draftState?.presentIds ?? ind.draftState?.presentIds ?? []).filter((id) => activeRiderIds.has(id)),
+              absentIds: (v.draftState?.absentIds ?? ind.draftState?.absentIds ?? []).filter((id) => activeRiderIds.has(id)),
+              sponsoredIds: (v.draftState?.sponsoredIds ?? ind.draftState?.sponsoredIds ?? []).filter((id) => activeRiderIds.has(id)),
+              unpaidIds: (v.draftState?.unpaidIds ?? ind.draftState?.unpaidIds ?? []).filter((id) => activeRiderIds.has(id)),
+              notes: Object.fromEntries(
+                Object.entries({ ...(ind.draftState?.notes || {}), ...(v.draftState?.notes || {}) }).filter(([k]) => activeRiderIds.has(k))
+              ),
             },
           });
           seenIds.add(v.id);
@@ -762,6 +806,7 @@ export function unassignedPassengers(manifest: Manifest | null): Passenger[] {
   // Identify all passengers already assigned to a vehicle
   const allocatedIds = new Set<string>();
   const allocatedPersons = new Set<string>();
+  const activeVehicleIds = new Set((manifest.vehicles || []).map((v) => v.id));
 
   for (const v of manifest.vehicles || []) {
     for (const rId of v.riders || []) {
@@ -774,8 +819,13 @@ export function unassignedPassengers(manifest: Manifest | null): Passenger[] {
     }
   }
 
-  // Filter raw unassigned signups
-  const rawUnassigned = manifest.signups.filter((p) => !p.assignedTo && !allocatedIds.has(p.id));
+  // Filter raw unassigned signups:
+  // A signup is unassigned if it's not in allocatedIds AND either has no assignedTo OR points to a vehicle that no longer exists
+  const rawUnassigned = manifest.signups.filter((p) => {
+    if (allocatedIds.has(p.id)) return false;
+    if (!p.assignedTo) return true;
+    return !activeVehicleIds.has(p.assignedTo);
+  });
 
   // Deduplicate among unassigned by person: keep only the most recent signup and exclude anyone already allocated
   const personMap = new Map<string, { passenger: Passenger; epoch: number; index: number }>();
@@ -787,7 +837,7 @@ export function unassignedPassengers(manifest: Manifest | null): Passenger[] {
       return;
     }
 
-    // If person already has an assigned vehicle in this manifest, exclude their stale unassigned duplicate
+    // If person currently has an active seat in a vehicle's riders list, exclude their duplicate
     if (allocatedPersons.has(norm)) {
       return;
     }
