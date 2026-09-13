@@ -873,7 +873,7 @@ export function RepPage() {
         manualCancellations,
         externalSponsees,
         recentlyEditedRiders: Object.fromEntries(recentlyEditedRidersRef.current),
-        updatedAt: new Date().toISOString(),
+        updatedAt: new Date(lastLocalEditTimeRef.current || Date.now()).toISOString(),
         updatedBy: clientIdRef.current,
       };
       try {

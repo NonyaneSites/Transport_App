@@ -126,61 +126,247 @@ export function reconcileManifestForSave(
     return incoming;
   }
 
-  function reconcileList<T extends { id: string }>(baseList: T[], incomingList: T[], remoteList: T[]): T[] {
-    const baseMap = new Map(baseList.map((item) => [item.id, item]));
-    const incomingMap = new Map(incomingList.map((item) => [item.id, item]));
+  const baseVehiclesMap = new Map(baseline.vehicles.map((v) => [v.id, v]));
+  const incVehiclesMap = new Map(incoming.vehicles.map((v) => [v.id, v]));
 
-    // Intentional removal: present in baseline, missing from incoming.
-    const removedIds = new Set(baseList.filter((item) => !incomingMap.has(item.id)).map((item) => item.id));
+  // 1. Identify vehicles intentionally deleted by this user (in baseline, missing from incoming)
+  const removedVehicleIds = new Set(
+    baseline.vehicles.filter((v) => !incVehiclesMap.has(v.id)).map((v) => v.id)
+  );
 
-    // Intentional add/edit: new to baseline, or different from baseline's version.
-    const changedOrNew = incomingList.filter((item) => {
-      const baseItem = baseMap.get(item.id);
-      return !baseItem || JSON.stringify(baseItem) !== JSON.stringify(item);
-    });
+  // 2. Identify brand-new vehicles added by this user (in incoming, not in baseline)
+  const addedVehicles = incoming.vehicles.filter((v) => !baseVehiclesMap.has(v.id));
 
-    const mergedMap = new Map(remoteList.filter((item) => !removedIds.has(item.id)).map((item) => [item.id, item]));
-    changedOrNew.forEach((item) => {
-      const remoteItem = mergedMap.get(item.id);
-      // If the remote record is a submitted vehicle, preserve its submission attributes unless explicitly reopened
-      if (
-        remoteItem &&
-        typeof remoteItem === 'object' &&
-        'submitted' in remoteItem &&
-        (remoteItem as { submitted?: boolean }).submitted
-      ) {
-        const incV = item as unknown as Vehicle;
-        const remV = remoteItem as unknown as Vehicle;
-        const preserved: Vehicle = {
-          ...incV,
-          submitted: true,
-          submittedAt: remV.submittedAt || incV.submittedAt,
-          submittedBy: remV.submittedBy || incV.submittedBy,
-          draftState: {
-            ...(incV.draftState || {}),
-            ...(remV.draftState || {}),
-            presentIds: remV.draftState?.presentIds ?? incV.draftState?.presentIds ?? [],
-            absentIds: remV.draftState?.absentIds ?? incV.draftState?.absentIds ?? [],
-          },
-        };
-        mergedMap.set(item.id, preserved as unknown as T);
-      } else {
-        mergedMap.set(item.id, item);
+  // Track riders explicitly added to any vehicle by this user so we can guarantee exclusivity
+  const ridersExplicitlyAssignedToVehicle = new Map<string, string>(); // riderId -> targetVehicleId
+
+  // 3. Reconcile existing vehicles starting from remote (the freshest ground truth)
+  const reconciledVehicles: Vehicle[] = [];
+
+  for (const remoteV of remote.vehicles) {
+    // If the user intentionally deleted this vehicle, drop it
+    if (removedVehicleIds.has(remoteV.id)) {
+      continue;
+    }
+
+    const incV = incVehiclesMap.get(remoteV.id);
+    const baseV = baseVehiclesMap.get(remoteV.id);
+
+    // If incoming doesn't have it and it wasn't in baseline, it was added by someone else while user was away: KEEP IT!
+    if (!incV) {
+      reconciledVehicles.push(remoteV);
+      continue;
+    }
+
+    // If vehicle was not in baseline, treat incoming as brand-new addition
+    if (!baseV) {
+      reconciledVehicles.push(incV);
+      (incV.riders || []).forEach((rId) => ridersExplicitlyAssignedToVehicle.set(rId, incV.id));
+      continue;
+    }
+
+    // BOTH baseline and incoming have this vehicle: calculate EXACT user diffs!
+    const baseRidersSet = new Set(baseV.riders || []);
+    const incRidersSet = new Set(incV.riders || []);
+
+    const addedRiders = (incV.riders || []).filter((id) => !baseRidersSet.has(id));
+    const removedRidersSet = new Set((baseV.riders || []).filter((id) => !incRidersSet.has(id)));
+
+    addedRiders.forEach((id) => ridersExplicitlyAssignedToVehicle.set(id, incV.id));
+
+    // Apply rider diffs on top of remoteV (preserving any riders added by other reps/admins in remote!)
+    const nextRiders = (remoteV.riders || []).filter((id) => !removedRidersSet.has(id));
+    for (const rId of addedRiders) {
+      if (!nextRiders.includes(rId)) {
+        nextRiders.push(rId);
       }
-    });
+    }
 
-    // Preserve remote ordering, then append anything genuinely new at the end.
-    const remoteOrderIds = remoteList.map((item) => item.id).filter((id) => !removedIds.has(id));
-    const newIds = changedOrNew.map((item) => item.id).filter((id) => !remoteOrderIds.includes(id));
-    return [...remoteOrderIds, ...newIds]
-      .map((id) => mergedMap.get(id))
-      .filter((item): item is T => Boolean(item));
+    // Ordered stops diffs
+    const baseStopsSet = new Set(baseV.orderedStops || []);
+    const incStopsSet = new Set(incV.orderedStops || []);
+    const addedStops = (incV.orderedStops || []).filter((s) => !baseStopsSet.has(s));
+    const removedStopsSet = new Set((baseV.orderedStops || []).filter((s) => !incStopsSet.has(s)));
+
+    const nextStops = (remoteV.orderedStops || []).filter((s) => !removedStopsSet.has(s));
+    for (const s of addedStops) {
+      if (!nextStops.includes(s)) {
+        nextStops.push(s);
+      }
+    }
+
+    // Draft state (attendance, notes, rep details)
+    const baseDraftStr = JSON.stringify(baseV.draftState || {});
+    const incDraftStr = JSON.stringify(incV.draftState || {});
+    let nextDraftState: VehicleDraftState | undefined = remoteV.draftState;
+
+    if (baseDraftStr !== incDraftStr) {
+      // User specifically modified draftState on this vehicle!
+      const baseD = baseV.draftState || {};
+      const incD = incV.draftState || {};
+      const remD = remoteV.draftState || {};
+
+      // Present IDs deltas
+      const basePresent = new Set(baseD.presentIds || []);
+      const incPresent = new Set(incD.presentIds || []);
+      const addedPresent = (incD.presentIds || []).filter((id) => !basePresent.has(id));
+      const removedPresent = new Set((baseD.presentIds || []).filter((id) => !incPresent.has(id)));
+      const nextPresent = (remD.presentIds || []).filter((id) => !removedPresent.has(id));
+      addedPresent.forEach((id) => {
+        if (!nextPresent.includes(id)) nextPresent.push(id);
+      });
+
+      // Absent IDs deltas
+      const baseAbsent = new Set(baseD.absentIds || []);
+      const incAbsent = new Set(incD.absentIds || []);
+      const addedAbsent = (incD.absentIds || []).filter((id) => !baseAbsent.has(id));
+      const removedAbsent = new Set((baseD.absentIds || []).filter((id) => !incAbsent.has(id)));
+      const nextAbsent = (remD.absentIds || []).filter((id) => !removedAbsent.has(id));
+      addedAbsent.forEach((id) => {
+        if (!nextAbsent.includes(id)) nextAbsent.push(id);
+      });
+
+      // Sponsored IDs deltas
+      const baseSpon = new Set(baseD.sponsoredIds || []);
+      const incSpon = new Set(incD.sponsoredIds || []);
+      const addedSpon = (incD.sponsoredIds || []).filter((id) => !baseSpon.has(id));
+      const removedSpon = new Set((baseD.sponsoredIds || []).filter((id) => !incSpon.has(id)));
+      const nextSpon = (remD.sponsoredIds || []).filter((id) => !removedSpon.has(id));
+      addedSpon.forEach((id) => {
+        if (!nextSpon.includes(id)) nextSpon.push(id);
+      });
+
+      // Unpaid IDs deltas
+      const baseUnpaid = new Set(baseD.unpaidIds || []);
+      const incUnpaid = new Set(incD.unpaidIds || []);
+      const addedUnpaid = (incD.unpaidIds || []).filter((id) => !baseUnpaid.has(id));
+      const removedUnpaid = new Set((baseD.unpaidIds || []).filter((id) => !incUnpaid.has(id)));
+      const nextUnpaid = (remD.unpaidIds || []).filter((id) => !removedUnpaid.has(id));
+      addedUnpaid.forEach((id) => {
+        if (!nextUnpaid.includes(id)) nextUnpaid.push(id);
+      });
+
+      nextDraftState = {
+        ...remD,
+        ...incD,
+        presentIds: nextPresent,
+        absentIds: nextAbsent,
+        sponsoredIds: nextSpon,
+        unpaidIds: nextUnpaid,
+        notes: { ...(remD.notes || {}), ...(incD.notes || {}) },
+        repName: incD.repName !== baseD.repName ? (incD.repName || remD.repName) : remD.repName,
+        licensePlate: incD.licensePlate !== baseD.licensePlate ? (incD.licensePlate || remD.licensePlate) : remD.licensePlate,
+        generalNotes: incD.generalNotes !== baseD.generalNotes ? incD.generalNotes : (remD.generalNotes ?? incD.generalNotes),
+        updatedAt: incD.updatedAt || new Date().toISOString(),
+        updatedBy: incD.updatedBy || remD.updatedBy,
+      };
+    }
+
+    // Submission status: if user explicitly reopened (base was submitted, inc is not submitted), reopen.
+    // Otherwise, if remote was submitted, ALWAYS PRESERVE submission!
+    const explicitlyReopened = Boolean(baseV.submitted && !incV.submitted);
+    const isSubmitted = explicitlyReopened ? false : Boolean(remoteV.submitted || incV.submitted);
+
+    // Metadata fields: use incoming value if user explicitly edited it, otherwise keep remote
+    const name = incV.name !== baseV.name ? incV.name : remoteV.name;
+    const type = incV.type !== baseV.type ? incV.type : remoteV.type;
+    const repName = incV.repName !== baseV.repName ? incV.repName : (remoteV.repName || incV.repName);
+    const licensePlate = incV.licensePlate !== baseV.licensePlate ? incV.licensePlate : (remoteV.licensePlate || incV.licensePlate);
+    const generalNotes = incV.generalNotes !== baseV.generalNotes ? incV.generalNotes : (remoteV.generalNotes ?? incV.generalNotes);
+
+    reconciledVehicles.push({
+      ...remoteV,
+      name,
+      type,
+      repName,
+      licensePlate,
+      generalNotes,
+      riders: nextRiders,
+      orderedStops: nextStops,
+      submitted: isSubmitted,
+      submittedAt: isSubmitted ? (remoteV.submittedAt || incV.submittedAt) : undefined,
+      submittedBy: isSubmitted ? (remoteV.submittedBy || incV.submittedBy) : undefined,
+      draftState: nextDraftState,
+    });
+  }
+
+  // 4. Append brand-new vehicles added by this user
+  for (const newV of addedVehicles) {
+    if (!reconciledVehicles.some((v) => v.id === newV.id)) {
+      reconciledVehicles.push(newV);
+      (newV.riders || []).forEach((rId) => ridersExplicitlyAssignedToVehicle.set(rId, newV.id));
+    }
+  }
+
+  // 5. Ensure rider exclusivity across vehicles:
+  // If a rider was explicitly assigned to vehicle X by this user, remove them from any other vehicle
+  const finalVehicles = reconciledVehicles.map((v) => {
+    const cleanedRiders = (v.riders || []).filter((rId) => {
+      const explicitTarget = ridersExplicitlyAssignedToVehicle.get(rId);
+      if (explicitTarget && explicitTarget !== v.id) {
+        return false; // Re-assigned to another vehicle by this user
+      }
+      return true;
+    });
+    return { ...v, riders: cleanedRiders };
+  });
+
+  // 6. Granular 3-Way Reconcile for Signups
+  const baseSignupsMap = new Map(baseline.signups.map((p) => [p.id, p]));
+  const incSignupsMap = new Map(incoming.signups.map((p) => [p.id, p]));
+
+  // Signups intentionally removed by this user (present in baseline, missing from incoming)
+  const removedSignupIds = new Set(
+    baseline.signups.filter((p) => !incSignupsMap.has(p.id)).map((p) => p.id)
+  );
+
+  // Signups brand-new in incoming (e.g. walk-ins added locally)
+  const addedSignups = incoming.signups.filter((p) => !baseSignupsMap.has(p.id));
+
+  const reconciledSignups: Passenger[] = [];
+  const handledSignupIds = new Set<string>();
+
+  for (const remP of remote.signups) {
+    // If intentionally deleted by this user, omit
+    if (removedSignupIds.has(remP.id)) {
+      continue;
+    }
+
+    handledSignupIds.add(remP.id);
+    const incP = incSignupsMap.get(remP.id);
+    const baseP = baseSignupsMap.get(remP.id);
+
+    if (!incP) {
+      // Exists in remote, not in incoming, and wasn't in baseline -> added by someone else while user was away! KEEP IT!
+      reconciledSignups.push(remP);
+      continue;
+    }
+
+    if (baseP && JSON.stringify(baseP) !== JSON.stringify(incP)) {
+      // User explicitly modified fields on this signup: apply changes on top of remote
+      reconciledSignups.push({
+        ...remP,
+        ...incP,
+      });
+    } else {
+      // User did not touch this signup: keep remote version (including any external sponsorship/attendance status)
+      reconciledSignups.push(remP);
+    }
+  }
+
+  // Append any brand-new signups added by this user that aren't already in remote
+  for (const newP of addedSignups) {
+    if (!handledSignupIds.has(newP.id) && !removedSignupIds.has(newP.id)) {
+      reconciledSignups.push(newP);
+      handledSignupIds.add(newP.id);
+    }
   }
 
   return {
     ...incoming,
-    vehicles: reconcileList(baseline.vehicles, incoming.vehicles, remote.vehicles),
-    signups: reconcileList(baseline.signups, incoming.signups, remote.signups),
+    vehicles: finalVehicles,
+    signups: reconciledSignups,
+    updated_at: new Date().toISOString(),
   };
 }
 
