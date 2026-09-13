@@ -17,12 +17,15 @@ import {
   type Vehicle,
   type VehicleDraftState,
   type LiveSyncAction,
+  type Manifest,
 } from '@/lib/types';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { vehicleRiders } from '@/lib/manifest';
 import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, type LedgerEntry } from '@/lib/ledger';
 import { submitVehicleToServer, reopenVehicleOnServer, type SubmitVehiclePayload } from '@/lib/serverApi';
+import { extractVehicleStats } from '@/lib/statsExport';
+import { syncVehicleStatsToGoogleSheet } from '@/lib/googleSheetsSync';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
 import { RepStatsCopyCard } from '@/components/RepStatsCopyCard';
 import { CancellationSearchModal } from '@/components/CancellationSearchModal';
@@ -1603,6 +1606,19 @@ export function RepPage() {
       }
 
       await save(submittedManifest);
+
+      // Auto-sync this vehicle's stats to the live Google Sheet (no-ops
+      // silently if VITE_GOOGLE_SHEETS_WEBHOOK_URL isn't configured).
+      try {
+        const submittedVehicle = submittedManifest.vehicles.find((v) => v.id === selectedVehicle.id);
+        if (submittedVehicle) {
+          const sheetPassengerLookup = (id: string) => submittedManifest!.signups.find((p) => p.id === id);
+          const vehicleStats = extractVehicleStats(submittedVehicle, sheetPassengerLookup);
+          syncVehicleStatsToGoogleSheet(vehicleStats, prettyDate(parsedDate), serviceLabel).catch(() => {});
+        }
+      } catch (err) {
+        console.warn('[RepPage] Google Sheets sync skipped:', err);
+      }
 
       // Insert absentees into secondary store as well
       await insertAbsentees(
