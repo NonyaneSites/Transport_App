@@ -25,7 +25,7 @@ import { vehicleRiders } from '@/lib/manifest';
 import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, type LedgerEntry } from '@/lib/ledger';
 import { submitVehicleToServer, reopenVehicleOnServer, type SubmitVehiclePayload } from '@/lib/serverApi';
 import { extractVehicleStats } from '@/lib/statsExport';
-import { syncVehicleStatsToGoogleSheet } from '@/lib/googleSheetsSync';
+import { syncVehicleStatsToGoogleSheet, sheetDateLabel } from '@/lib/googleSheetsSync';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
 import { RepStatsCopyCard } from '@/components/RepStatsCopyCard';
 import { CancellationSearchModal } from '@/components/CancellationSearchModal';
@@ -297,7 +297,7 @@ export function RepPage() {
   const prevVehicleIdRef = useRef<string | null>(null);
 
   const serviceLabel = SERVICE_TYPES.find((s) => s.value === service)?.label ?? service;
-  const { date: parsedDate } = parseManifestKey(key);
+  const { date: parsedDate, service: parsedServiceLabel } = parseManifestKey(key);
 
   const selectedVehicle = useMemo(
     () => manifest?.vehicles.find((v) => v.id === selectedVehicleId) ?? null,
@@ -1614,7 +1614,7 @@ export function RepPage() {
         if (submittedVehicle) {
           const sheetPassengerLookup = (id: string) => submittedManifest!.signups.find((p) => p.id === id);
           const vehicleStats = extractVehicleStats(submittedVehicle, sheetPassengerLookup);
-          syncVehicleStatsToGoogleSheet(vehicleStats, prettyDate(parsedDate), serviceLabel).catch(() => {});
+          syncVehicleStatsToGoogleSheet(vehicleStats, sheetDateLabel(parsedDate), parsedServiceLabel || serviceLabel).catch(() => {});
         }
       } catch (err) {
         console.warn('[RepPage] Google Sheets sync skipped:', err);
