@@ -131,7 +131,16 @@ export function extractVehicleStats(
 
   const presentListStr = joinPassengerStats(presentRiders);
   const ftvListStr = joinPassengerStats(ftvRiders);
-  const sponsoredListStr = joinPassengerStats(sponsoredRiders);
+  const sponsoredListStr =
+    sponsoredRiders.length === 0
+      ? 'None'
+      : sponsoredRiders
+          .map((p) => {
+            const base = formatPassengerStat(p);
+            const sNote = (p.sponsorNote || notesMap[p.id] || '').trim();
+            return sNote ? `${base} (paid by ${sNote})` : base;
+          })
+          .join(', ');
   const cancellationListStr = joinPassengerStats(absentRiders);
 
   // R40 per present passenger (Buses free or 0 fare)

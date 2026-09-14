@@ -11,11 +11,13 @@ app.use(express.json({ limit: '10mb' }));
 const DATA_DIR = path.join(process.cwd(), 'data');
 const MANIFESTS_DIR = path.join(DATA_DIR, 'manifests');
 const LEDGER_FILE = path.join(DATA_DIR, 'ledger.json');
+const SPONSORSHIPS_FILE = path.join(DATA_DIR, 'sponsorship_audits.json');
 
 // Ensure directories exist
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(MANIFESTS_DIR)) fs.mkdirSync(MANIFESTS_DIR, { recursive: true });
 if (!fs.existsSync(LEDGER_FILE)) fs.writeFileSync(LEDGER_FILE, JSON.stringify([]), 'utf-8');
+if (!fs.existsSync(SPONSORSHIPS_FILE)) fs.writeFileSync(SPONSORSHIPS_FILE, JSON.stringify([]), 'utf-8');
 
 // Atomic write helper
 function atomicWriteJson(filePath: string, data: unknown): void {
@@ -163,6 +165,7 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
     generalNotes,
     draftState,
     absentees,
+    sponsoredRiders,
     allRiderNames,
     serviceLabel,
     parsedDate,
@@ -275,9 +278,87 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
 
   atomicWriteJson(LEDGER_FILE, ledger);
 
-  // 4. Broadcast live updates to all clients
+  // 4. Record reported sponsorships for cancellation admin audit
+  const audits = readJsonFile<Array<{
+    id: string;
+    manifest_key: string;
+    date: string;
+    service: string;
+    passenger_id?: string;
+    passenger_name: string;
+    structure: string;
+    stop?: string;
+    vehicle_name: string;
+    rep_name: string;
+    sponsor_note: string;
+    status: 'pending' | 'actually_sponsored' | 'unpaid_sponsorship' | 'unaccounted_sponsorship';
+    status_updated_at?: string;
+    ledger_entry_id?: string;
+    submitted_at: string;
+  }>>(SPONSORSHIPS_FILE, []);
+
+  const rawSponsored = Array.isArray(sponsoredRiders) ? sponsoredRiders : [];
+  const draftSponIds = new Set(Array.isArray((draftState as { sponsoredIds?: string[] })?.sponsoredIds) ? (draftState as { sponsoredIds?: string[] }).sponsoredIds : []);
+  const draftNotes = (draftState as { notes?: Record<string, string> })?.notes || {};
+
+  const collectedSponsees: Array<{ id?: string; fullName: string; structure?: string; stop?: string; sponsorNote?: string }> = [...rawSponsored];
+  if (collectedSponsees.length === 0 && draftSponIds.size > 0 && Array.isArray(manifest.signups)) {
+    for (const s of manifest.signups) {
+      if (draftSponIds.has(s.id)) {
+        collectedSponsees.push({
+          id: s.id,
+          fullName: s.fullName,
+          structure: (s as { structure?: string }).structure || '',
+          stop: (s as { stop?: string }).stop || '',
+          sponsorNote: (draftNotes[s.id] ?? (s as { sponsorNote?: string }).sponsorNote ?? '').trim(),
+        });
+      }
+    }
+  }
+
+  for (const sp of collectedSponsees) {
+    if (!sp.fullName || !sp.fullName.trim()) continue;
+    const cleanName = sp.fullName.trim();
+    const auditId = `sp_${key}_${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
+    const existingIdx = audits.findIndex((a) => a.id === auditId || (a.manifest_key === key && a.passenger_name.toLowerCase() === cleanName.toLowerCase()));
+
+    if (existingIdx >= 0) {
+      audits[existingIdx] = {
+        ...audits[existingIdx],
+        passenger_id: sp.id || audits[existingIdx].passenger_id,
+        structure: sp.structure || audits[existingIdx].structure,
+        stop: sp.stop || audits[existingIdx].stop,
+        vehicle_name: targetVehicleName || audits[existingIdx].vehicle_name,
+        rep_name: (repName || '').trim() || audits[existingIdx].rep_name,
+        sponsor_note: sp.sponsorNote || audits[existingIdx].sponsor_note,
+        date: parsedDate || key,
+        service: serviceLabel || 'Service',
+      };
+    } else {
+      audits.push({
+        id: auditId,
+        manifest_key: key,
+        date: parsedDate || key,
+        service: serviceLabel || 'Service',
+        passenger_id: sp.id,
+        passenger_name: cleanName,
+        structure: sp.structure || '',
+        stop: sp.stop || '',
+        vehicle_name: targetVehicleName,
+        rep_name: (repName || '').trim(),
+        sponsor_note: sp.sponsorNote || '',
+        status: 'pending',
+        submitted_at: nowIso,
+      });
+    }
+  }
+
+  atomicWriteJson(SPONSORSHIPS_FILE, audits);
+
+  // 5. Broadcast live updates to all clients
   broadcastSse('manifest_updated', { key, manifest, timestamp: Date.now() });
   broadcastSse('ledger_updated', { timestamp: Date.now() });
+  broadcastSse('sponsorships_updated', { timestamp: Date.now() });
 
   res.json({
     success: true,
@@ -379,6 +460,215 @@ app.post('/api/manifests/:key/draft', (req, res) => {
 // ----------------------------------------------------
 // LEDGER API
 // ----------------------------------------------------
+
+// List reported sponsorships for cancellation admin audit
+app.get('/api/ledger/sponsorships', (req, res) => {
+  const audits = readJsonFile<Array<{
+    id: string;
+    manifest_key: string;
+    date: string;
+    service: string;
+    passenger_id?: string;
+    passenger_name: string;
+    structure: string;
+    stop?: string;
+    vehicle_name: string;
+    rep_name: string;
+    sponsor_note: string;
+    status: 'pending' | 'actually_sponsored' | 'unpaid_sponsorship' | 'unaccounted_sponsorship';
+    status_updated_at?: string;
+    ledger_entry_id?: string;
+    submitted_at: string;
+  }>>(SPONSORSHIPS_FILE, []);
+
+  // Auto-scan manifests to find any sponsored passengers from submitted vehicles
+  // so all existing historical submitted vehicle data is instantly visible
+  try {
+    const files = fs.readdirSync(MANIFESTS_DIR).filter((f) => f.endsWith('.json'));
+    let addedCount = 0;
+    for (const file of files) {
+      const key = file.replace(/\.json$/, '');
+      const m = readJsonFile<{
+        date?: string;
+        signups?: Array<{ id: string; fullName: string; structure?: string; stop?: string; sponsored?: boolean; sponsorNote?: string }>;
+        vehicles?: Array<{
+          id: string;
+          name: string;
+          submitted?: boolean;
+          repName?: string;
+          submittedBy?: string;
+          draftState?: { sponsoredIds?: string[]; notes?: Record<string, string> };
+        }>;
+      }>(path.join(MANIFESTS_DIR, file), {});
+
+      const submittedVehicles = (m.vehicles || []).filter((v) => v.submitted);
+      for (const v of submittedVehicles) {
+        const sponIds = new Set(v.draftState?.sponsoredIds || []);
+        const sponNotes = v.draftState?.notes || {};
+        const signups = m.signups || [];
+        for (const s of signups) {
+          if (sponIds.has(s.id) || (s.sponsored && v.submitted)) {
+            const cleanName = (s.fullName || '').trim();
+            if (!cleanName) continue;
+            const auditId = `sp_${key}_${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
+            const exists = audits.some((a) => a.id === auditId || (a.manifest_key === key && a.passenger_name.toLowerCase() === cleanName.toLowerCase()));
+            if (!exists) {
+              audits.push({
+                id: auditId,
+                manifest_key: key,
+                date: m.date || key,
+                service: 'Service',
+                passenger_id: s.id,
+                passenger_name: cleanName,
+                structure: s.structure || '',
+                stop: s.stop || '',
+                vehicle_name: v.name,
+                rep_name: v.repName || v.submittedBy || 'Rep',
+                sponsor_note: (sponNotes[s.id] ?? s.sponsorNote ?? '').trim(),
+                status: 'pending',
+                submitted_at: new Date().toISOString(),
+              });
+              addedCount++;
+            }
+          }
+        }
+      }
+    }
+    if (addedCount > 0) {
+      atomicWriteJson(SPONSORSHIPS_FILE, audits);
+    }
+  } catch (err) {
+    console.warn('[Server] Manifest scan for sponsorships note:', err);
+  }
+
+  // Sort: newest first
+  audits.sort((a, b) => (b.submitted_at || '').localeCompare(a.submitted_at || ''));
+  res.json(audits);
+});
+
+// Verify sponsorship status (cancellation admin action)
+app.post('/api/ledger/verify-sponsorship', (req, res) => {
+  const { sponsorshipId, status } = req.body || {};
+  if (!sponsorshipId || !status) {
+    res.status(400).json({ error: 'sponsorshipId and status are required' });
+    return;
+  }
+
+  interface AuditItem {
+    id: string;
+    manifest_key: string;
+    date: string;
+    service: string;
+    passenger_id?: string;
+    passenger_name: string;
+    structure: string;
+    stop?: string;
+    vehicle_name: string;
+    rep_name: string;
+    sponsor_note: string;
+    status: 'pending' | 'actually_sponsored' | 'unpaid_sponsorship' | 'unaccounted_sponsorship';
+    status_updated_at?: string;
+    ledger_entry_id?: string | null;
+    submitted_at: string;
+  }
+
+  interface LedgerItem {
+    id: string;
+    manifest_key: string;
+    date: string;
+    service: string;
+    passenger_name: string;
+    stop: string;
+    structure: string;
+    vehicle_name: string;
+    submitted_by: string;
+    rep_name: string;
+    license_plate: string;
+    sponsored: boolean;
+    sponsor_note: string;
+    structure_debt: number;
+    general_notes: string;
+    submitted_at: string;
+  }
+
+  const audits = readJsonFile<AuditItem[]>(SPONSORSHIPS_FILE, []);
+  const sponIndex = audits.findIndex((a) => a.id === sponsorshipId);
+  if (sponIndex < 0) {
+    res.status(404).json({ error: 'Sponsorship record not found' });
+    return;
+  }
+
+  const spon = audits[sponIndex];
+  spon.status = status;
+  spon.status_updated_at = new Date().toISOString();
+
+  let ledger = readJsonFile<LedgerItem[]>(LEDGER_FILE, []);
+  let ledgerChanged = false;
+
+  if (status === 'unpaid_sponsorship' || status === 'unaccounted_sponsorship') {
+    const categoryName = status === 'unpaid_sponsorship' ? 'Unpaid Sponsorship' : 'Unaccounted Sponsorship';
+    const noteText = spon.sponsor_note ? `${categoryName} (Reported sponsor: ${spon.sponsor_note})` : categoryName;
+
+    // Check if debt entry already exists for this sponsorship
+    const existingLedgerIdx = ledger.findIndex((e) =>
+      (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
+      (e.manifest_key === spon.manifest_key && e.passenger_name.toLowerCase() === spon.passenger_name.toLowerCase() && Boolean(e.sponsored))
+    );
+
+    if (existingLedgerIdx >= 0) {
+      ledger[existingLedgerIdx].general_notes = noteText;
+      ledger[existingLedgerIdx].sponsor_note = spon.sponsor_note || '';
+      ledger[existingLedgerIdx].sponsored = true;
+      ledger[existingLedgerIdx].structure_debt = 40;
+      spon.ledger_entry_id = ledger[existingLedgerIdx].id;
+      ledgerChanged = true;
+    } else {
+      const newEntryId = `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const newEntry = {
+        id: newEntryId,
+        manifest_key: spon.manifest_key,
+        date: spon.date,
+        service: spon.service || 'Service',
+        passenger_name: spon.passenger_name,
+        stop: spon.stop || '',
+        structure: spon.structure || '',
+        vehicle_name: spon.vehicle_name,
+        submitted_by: 'Cancellation Admin',
+        rep_name: spon.rep_name,
+        license_plate: '',
+        sponsored: true,
+        sponsor_note: spon.sponsor_note || '',
+        structure_debt: 40,
+        general_notes: noteText,
+        submitted_at: new Date().toISOString(),
+      };
+      ledger.unshift(newEntry);
+      spon.ledger_entry_id = newEntryId;
+      ledgerChanged = true;
+    }
+  } else if (status === 'actually_sponsored' || status === 'pending') {
+    // If they are actually sponsored, nothing else happens, so clear any debt entry!
+    if (spon.ledger_entry_id) {
+      ledger = ledger.filter((e) => e.id !== spon.ledger_entry_id);
+      spon.ledger_entry_id = null;
+      ledgerChanged = true;
+    } else {
+      const beforeLen = ledger.length;
+      ledger = ledger.filter((e) => !(e.manifest_key === spon.manifest_key && e.passenger_name.toLowerCase() === spon.passenger_name.toLowerCase() && Boolean(e.sponsored)));
+      if (ledger.length !== beforeLen) ledgerChanged = true;
+    }
+  }
+
+  audits[sponIndex] = spon;
+  atomicWriteJson(SPONSORSHIPS_FILE, audits);
+  if (ledgerChanged) {
+    atomicWriteJson(LEDGER_FILE, ledger);
+    broadcastSse('ledger_updated', { timestamp: Date.now() });
+  }
+  broadcastSse('sponsorships_updated', { timestamp: Date.now() });
+
+  res.json({ success: true, sponsorship: spon, ledgerUpdated: ledgerChanged });
+});
 
 // List all ledger entries
 app.get('/api/ledger', (req, res) => {

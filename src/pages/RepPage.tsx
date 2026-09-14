@@ -664,7 +664,12 @@ export function RepPage() {
       setAbsentIds(initialAbsent);
       setSponsoredIds(initialSponsored);
       setUnpaidIds(initialUnpaid);
-      setNotes({});
+      const initialNotes: Record<string, string> = {};
+      currentRiders.forEach((r) => {
+        if (r.sponsorNote) initialNotes[r.id] = r.sponsorNote;
+        else if (r.unpaidNote) initialNotes[r.id] = r.unpaidNote;
+      });
+      setNotes(initialNotes);
       setGeneralNotes(vehicle.generalNotes ?? '');
       setCoReps(vehicle.coReps ?? []);
       setExternalSponsees([]);
@@ -754,11 +759,15 @@ export function RepPage() {
 
   const allTouched = riders.length > 0 && touchedCount === riders.length;
 
-  const sponsoredMissingNotes = useMemo(() => {
-    return riders.some(
-      (r) => absentIds.has(r.id) && sponsoredIds.has(r.id) && !(notes[r.id] ?? '').trim()
-    );
-  }, [riders, absentIds, sponsoredIds, notes]);
+  const sponsoredRidersMissingInfo = useMemo(() => {
+    return riders.filter((r) => {
+      if (!sponsoredIds.has(r.id)) return false;
+      const note = (notes[r.id] ?? r.sponsorNote ?? '').trim();
+      return note.length === 0;
+    });
+  }, [riders, sponsoredIds, notes]);
+
+  const sponsoredMissingNotes = sponsoredRidersMissingInfo.length > 0;
 
   const canSubmit =
     repName.trim().length > 0 &&
@@ -1477,6 +1486,12 @@ export function RepPage() {
     if (!manifest || !selectedVehicle) return;
     if (!repName.trim() || !licensePlate.trim()) return;
 
+    if (sponsoredMissingNotes) {
+      const names = sponsoredRidersMissingInfo.map((r) => r.fullName).join(', ');
+      setSubmitMsg(`Error: Cannot submit. Please write down who is sponsoring each sponsored person (${names}).`);
+      return;
+    }
+
     if (pendingSyncTimerRef.current) {
       clearTimeout(pendingSyncTimerRef.current);
       pendingSyncTimerRef.current = null;
@@ -1492,7 +1507,7 @@ export function RepPage() {
           ...r,
           present: false,
           sponsored: sponsoredIds.has(r.id),
-          sponsorNote: notes[r.id] ?? '',
+          sponsorNote: notes[r.id] ?? r.sponsorNote ?? '',
         }));
 
       const repDisplayName = [repName.trim(), ...coReps.map((c) => c.trim()).filter(Boolean)].join(' & ');
@@ -1512,6 +1527,10 @@ export function RepPage() {
       const allSettledInfo = [...settledNames, ...manualCancSummaries];
       const settledNote = allSettledInfo.length > 0
         ? `Past cancellations collected in cash: ${allSettledInfo.join(', ')}. `
+        : '';
+      const sponsoredRidersList = riders.filter((r) => sponsoredIds.has(r.id));
+      const sponsorshipNote = sponsoredRidersList.length > 0
+        ? `Sponsorships: ${sponsoredRidersList.map((r) => `${r.fullName}${r.structure ? ` (${r.structure})` : ''} - paid by: ${(notes[r.id] ?? r.sponsorNote ?? '').trim() || 'unspecified'}`).join('; ')}. `
         : '';
 
       const finalizedDraft: VehicleDraftState = {
@@ -1538,24 +1557,34 @@ export function RepPage() {
             ...p,
             present: true,
             sponsored: sponsoredIds.has(p.id),
-            sponsorNote: notes[p.id] || p.sponsorNote || '',
+            sponsorNote: (notes[p.id] ?? p.sponsorNote ?? '').trim(),
             didNotPay: unpaidIds.has(p.id),
-            unpaidNote: notes[p.id] || p.unpaidNote || '',
+            unpaidNote: (notes[p.id] ?? p.unpaidNote ?? '').trim(),
           };
         }
         if (absentIds.has(p.id)) {
           return {
             ...p,
             present: false,
-            sponsored: false,
+            sponsored: sponsoredIds.has(p.id),
             didNotPay: false,
-            sponsorNote: notes[p.id] || p.sponsorNote || '',
+            sponsorNote: (notes[p.id] ?? p.sponsorNote ?? '').trim(),
           };
         }
         return p;
       });
 
-      const fullGeneralNotes = `${coRepNote}${cashNote}${sponseeNote}${settledNote}${generalNotes.trim()}`.trim();
+      const fullGeneralNotes = `${coRepNote}${cashNote}${sponseeNote}${settledNote}${sponsorshipNote}${generalNotes.trim()}`.trim();
+
+      const sponsoredRiders = riders
+        .filter((r) => sponsoredIds.has(r.id))
+        .map((r) => ({
+          id: r.id,
+          fullName: r.fullName,
+          structure: r.structure || '',
+          stop: r.stop || '',
+          sponsorNote: (notes[r.id] ?? r.sponsorNote ?? '').trim(),
+        }));
 
       // Atomic submission payload to central server
       const submitPayload: SubmitVehiclePayload = {
@@ -1566,6 +1595,7 @@ export function RepPage() {
         generalNotes: fullGeneralNotes,
         draftState: finalizedDraft,
         absentees,
+        sponsoredRiders,
         allRiderNames: riders.map((r) => r.fullName),
         serviceLabel,
         parsedDate,
@@ -2412,9 +2442,28 @@ export function RepPage() {
                     )}
 
                     {sponsoredMissingNotes && (
-                      <div className="flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
-                        <AlertTriangle className="h-4 w-4 shrink-0" />
-                        All sponsored passengers must have a note saying who is paying for them.
+                      <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-3.5 text-xs text-amber-200 space-y-2">
+                        <div className="flex items-center gap-2 font-bold text-amber-300">
+                          <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
+                          <span>Sponsor Information Required Before Submitting</span>
+                        </div>
+                        <p className="text-muted leading-relaxed">
+                          You must write down who is paying for the following {sponsoredRidersMissingInfo.length === 1 ? 'sponsored passenger' : 'sponsored passengers'} before submission:
+                        </p>
+                        <div className="flex flex-wrap gap-1.5 pt-0.5">
+                          {sponsoredRidersMissingInfo.map((r) => (
+                            <span
+                              key={r.id}
+                              className="inline-flex items-center gap-1 rounded-md bg-amber-500/20 px-2.5 py-1 text-xs font-semibold text-amber-200 border border-amber-500/40"
+                            >
+                              <HeartHandshake className="h-3.5 w-3.5 text-amber-400" />
+                              {r.fullName} {r.structure ? `(${r.structure})` : ''}
+                            </span>
+                          ))}
+                        </div>
+                        <p className="text-[11px] text-amber-400/90 italic">
+                          Scroll to their name in the manifest above and fill in who is paying in the highlighted note field.
+                        </p>
                       </div>
                     )}
 
@@ -2437,6 +2486,11 @@ export function RepPage() {
                         </span>
                       )}
                     </button>
+                    {!canSubmit && sponsoredMissingNotes && (
+                      <p className="text-center text-xs font-medium text-amber-400">
+                        Enter who is paying for {sponsoredRidersMissingInfo.map((r) => r.fullName).join(', ')} to enable submission.
+                      </p>
+                    )}
                     {!canSubmit && !sponsoredMissingNotes && allTouched && (
                       <p className="text-center text-xs text-muted">
                         Enter your name and license plate above to enable submission.
@@ -3178,7 +3232,9 @@ const PassengerRow = React.memo(function PassengerRow({
   collectedCancellationIds?: Set<string>;
   onToggleCancellation?: (id: string) => void;
 }) {
+  const isMissingSponsorInfo = isSponsored && !noteText.trim();
   const [showNote, setShowNote] = useState(isSponsored || isUnpaid || !!noteText);
+  const isNoteVisible = showNote || isMissingSponsorInfo;
   const [showDebtBreakdown, setShowDebtBreakdown] = useState(false);
 
   const totalDebtAmount = useMemo(() => {
@@ -3241,6 +3297,12 @@ const PassengerRow = React.memo(function PassengerRow({
                 (unmarked)
               </span>
             )}
+            {isMissingSponsorInfo && (
+              <span className="inline-flex items-center gap-1 rounded bg-amber-500/25 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/40 animate-pulse">
+                <AlertTriangle className="h-3 w-3 text-amber-400" />
+                Sponsor info required
+              </span>
+            )}
           </div>
         </div>
 
@@ -3288,13 +3350,20 @@ const PassengerRow = React.memo(function PassengerRow({
           disabled={disabled}
           className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-all active:scale-95 ${
             isSponsored
-              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold'
+              ? isMissingSponsorInfo
+                ? 'bg-amber-500/25 text-amber-300 border border-amber-500/60 font-semibold ring-1 ring-amber-500/40'
+                : 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold'
               : 'bg-card-2/60 text-muted border border-line hover:text-ink'
           }`}
           title="Mark if someone else is paying for this passenger"
         >
           <HeartHandshake className="h-3 w-3 text-amber-400" />
-          {isSponsored ? 'Sponsored' : 'Sponsored'}
+          <span>Sponsored</span>
+          {isMissingSponsorInfo && (
+            <span className="ml-0.5 rounded bg-amber-500/40 px-1 py-0.2 text-[9px] font-bold text-amber-200">
+              Needs info
+            </span>
+          )}
         </button>
 
         {/* Didn't Pay Toggle */}
@@ -3348,12 +3417,16 @@ const PassengerRow = React.memo(function PassengerRow({
             type="button"
             onClick={() => setShowNote(!showNote)}
             disabled={disabled}
-            className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium border border-line bg-card-2/60 transition-all ${
-              showNote ? 'text-ink border-line-bright' : 'text-muted hover:text-ink'
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium border transition-all ${
+              isMissingSponsorInfo
+                ? 'border-amber-500/60 bg-amber-500/20 text-amber-300 font-semibold'
+                : isNoteVisible
+                ? 'text-ink border-line-bright bg-card-2'
+                : 'text-muted border-line bg-card-2/60 hover:text-ink'
             }`}
           >
             <StickyNote className="h-3 w-3" />
-            {showNote ? 'Hide Note' : 'Note'}
+            {isMissingSponsorInfo ? 'Sponsor Info (Required)' : isNoteVisible ? 'Hide Note' : 'Note'}
           </button>
         )}
       </div>
@@ -3469,8 +3542,8 @@ const PassengerRow = React.memo(function PassengerRow({
       )}
 
       {/* Note input */}
-      {showNote && (
-        <div className="mt-2 animate-fade-in">
+      {isNoteVisible && (
+        <div className="mt-2 animate-fade-in space-y-1">
           <input
             type="text"
             value={noteText}
@@ -3478,20 +3551,36 @@ const PassengerRow = React.memo(function PassengerRow({
             disabled={disabled}
             placeholder={
               isSponsored
-                ? 'Required: Who is paying for this person? (e.g. Person A in Taxi 1)'
+                ? 'Required: Who is paying for this person? (e.g. John Doe in Taxi 2, or Structure S3)'
                 : isUnpaid
                 ? 'Note on unpaid fare (e.g. forgot cash, will pay next Sunday)'
                 : 'Note for this passenger...'
             }
-            className="input-field text-xs"
+            className={`input-field text-xs transition-all ${
+              isMissingSponsorInfo
+                ? 'border-amber-500/80 bg-amber-500/10 text-ink placeholder:text-amber-400/60 ring-1 ring-amber-500/40 focus:border-amber-400 focus:ring-amber-500/60'
+                : ''
+            }`}
           />
-          <p className="mt-1 text-[10px] text-muted">
-            {isSponsored
-              ? 'This note is included in the stats and cancellation ledger so we know who covers the cost.'
-              : isUnpaid
-              ? "Flagged for admin visibility under unpaid attendance records."
-              : 'Note visible to reps and admin.'}
-          </p>
+          {isMissingSponsorInfo ? (
+            <p className="flex items-center gap-1 text-[11px] font-semibold text-amber-300">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+              <span>Who is paying for {passenger.fullName}? (Required before you can submit attendance)</span>
+            </p>
+          ) : isSponsored && noteText.trim() ? (
+            <p className="flex items-center gap-1 text-[10px] text-emerald-400 font-medium">
+              <Check className="h-3 w-3 shrink-0" />
+              <span>Sponsor recorded: {noteText.trim()}</span>
+            </p>
+          ) : (
+            <p className="mt-1 text-[10px] text-muted">
+              {isSponsored
+                ? 'This note is included in the stats and cancellation ledger so we know who covers the cost.'
+                : isUnpaid
+                ? 'Flagged for admin visibility under unpaid attendance records.'
+                : 'Note visible to reps and admin.'}
+            </p>
+          )}
         </div>
       )}
     </div>

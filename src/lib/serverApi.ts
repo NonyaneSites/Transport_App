@@ -9,10 +9,37 @@ export interface SubmitVehiclePayload {
   generalNotes?: string;
   draftState: VehicleDraftState;
   absentees: AbsenteeInput[];
+  sponsoredRiders?: Array<{
+    id: string;
+    fullName: string;
+    structure?: string;
+    stop?: string;
+    sponsorNote?: string;
+  }>;
   allRiderNames: string[];
   serviceLabel: string;
   parsedDate: string;
   updatedSignups?: Manifest['signups'];
+}
+
+export type SponsorshipStatus = 'pending' | 'actually_sponsored' | 'unpaid_sponsorship' | 'unaccounted_sponsorship';
+
+export interface ReportedSponsorship {
+  id: string;
+  manifest_key: string;
+  date: string;
+  service: string;
+  passenger_id?: string;
+  passenger_name: string;
+  structure: string;
+  stop?: string;
+  vehicle_name: string;
+  rep_name: string;
+  sponsor_note: string;
+  status: SponsorshipStatus;
+  status_updated_at?: string;
+  ledger_entry_id?: string;
+  submitted_at: string;
 }
 
 export interface ReopenVehiclePayload {
@@ -282,11 +309,45 @@ export async function updateDebtorOnServer(payload: {
   }
 }
 
+// Fetch reported sponsorships from server
+export async function listReportedSponsorshipsFromServer(): Promise<ReportedSponsorship[]> {
+  try {
+    const res = await fetch('/api/ledger/sponsorships');
+    if (!res.ok) return [];
+    return (await res.json()) as ReportedSponsorship[];
+  } catch (err) {
+    console.warn('[ServerAPI] listReportedSponsorships error:', err);
+    return [];
+  }
+}
+
+// Verify or update a reported sponsorship status
+export async function verifySponsorshipOnServer(
+  sponsorshipId: string,
+  status: SponsorshipStatus
+): Promise<{ success: boolean; sponsorship?: ReportedSponsorship; ledgerUpdated?: boolean }> {
+  try {
+    const res = await fetch('/api/ledger/verify-sponsorship', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sponsorshipId, status }),
+    });
+    if (!res.ok) {
+      return { success: false };
+    }
+    return (await res.json()) as { success: boolean; sponsorship?: ReportedSponsorship; ledgerUpdated?: boolean };
+  } catch (err) {
+    console.warn('[ServerAPI] verifySponsorship error:', err);
+    return { success: false };
+  }
+}
+
 // Server-Sent Events (SSE) live connection
 export function connectSyncEvents(
   onManifestUpdate: (data: { key: string; manifest?: Manifest }) => void,
   onLedgerUpdate?: () => void,
-  onDraftDelta?: (data: { key: string; vehicleId: string; draftState: VehicleDraftState }) => void
+  onDraftDelta?: (data: { key: string; vehicleId: string; draftState: VehicleDraftState }) => void,
+  onSponsorshipsUpdate?: () => void
 ): () => void {
   if (typeof window === 'undefined' || !window.EventSource) {
     return () => {};
@@ -311,6 +372,10 @@ export function connectSyncEvents(
 
       es.addEventListener('ledger_updated', () => {
         onLedgerUpdate?.();
+      });
+
+      es.addEventListener('sponsorships_updated', () => {
+        onSponsorshipsUpdate?.();
       });
 
       es.addEventListener('vehicle_draft_delta', (e) => {

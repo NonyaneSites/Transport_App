@@ -6,11 +6,16 @@ import {
   addManualLedgerOnServer,
   deleteLedgerOnServer,
   updateDebtorOnServer,
+  listReportedSponsorshipsFromServer,
+  verifySponsorshipOnServer,
 } from './serverApi';
+import type { ReportedSponsorship, SponsorshipStatus } from './serverApi';
 import type { Passenger, Vehicle } from './types';
 import { CANCELLATION_FEE } from './types';
 import { naturalCompare } from './sort';
 import { shortDate } from './dates';
+
+export type { ReportedSponsorship, SponsorshipStatus };
 
 /**
  * Normalizes structure strings to canonical structure codes.
@@ -1560,4 +1565,105 @@ export function downloadSessionStatsExcel(
   }
 
   XLSX.writeFile(wb, fileName);
+}
+
+const LOCAL_SPONSORSHIPS_KEY = 'crc_sponsorship_audits';
+
+export async function listReportedSponsorships(): Promise<ReportedSponsorship[]> {
+  try {
+    const serverSponsees = await listReportedSponsorshipsFromServer();
+    if (serverSponsees && serverSponsees.length > 0) {
+      try {
+        localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(serverSponsees));
+      } catch {
+        /* ignore storage full */
+      }
+      return serverSponsees;
+    }
+  } catch (err) {
+    console.debug('[Ledger] Server fetch sponsorships note:', err);
+  }
+
+  // Fallback to local cache
+  try {
+    const raw = localStorage.getItem(LOCAL_SPONSORSHIPS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {
+    /* ignore */
+  }
+
+  return [];
+}
+
+export async function verifySponsorshipStatus(
+  sponsorshipId: string,
+  status: SponsorshipStatus
+): Promise<{ success: boolean; sponsorship?: ReportedSponsorship; ledgerUpdated?: boolean }> {
+  try {
+    const res = await verifySponsorshipOnServer(sponsorshipId, status);
+    if (res.success) {
+      // Sync local cache
+      try {
+        const raw = localStorage.getItem(LOCAL_SPONSORSHIPS_KEY);
+        if (raw) {
+          const list = JSON.parse(raw) as ReportedSponsorship[];
+          const idx = list.findIndex((s) => s.id === sponsorshipId);
+          if (idx >= 0) {
+            list[idx].status = status;
+            list[idx].status_updated_at = new Date().toISOString();
+            localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(list));
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+      return res;
+    }
+  } catch (err) {
+    console.warn('[Ledger] verifySponsorshipStatus server note:', err);
+  }
+
+  // Offline / local fallback
+  try {
+    const raw = localStorage.getItem(LOCAL_SPONSORSHIPS_KEY);
+    if (raw) {
+      const list = JSON.parse(raw) as ReportedSponsorship[];
+      const idx = list.findIndex((s) => s.id === sponsorshipId);
+      if (idx >= 0) {
+        list[idx].status = status;
+        list[idx].status_updated_at = new Date().toISOString();
+        localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(list));
+
+        // If unpaid or unaccounted, ensure added to local ledger table
+        if (status === 'unpaid_sponsorship' || status === 'unaccounted_sponsorship') {
+          const item = list[idx];
+          const cat = status === 'unpaid_sponsorship' ? 'Unpaid Sponsorship' : 'Unaccounted Sponsorship';
+          await insertAbsentees([
+            {
+              id: item.id,
+              fullName: item.passenger_name,
+              structure: item.structure,
+              stop: item.stop || '',
+              phone: '',
+              present: false,
+              sponsored: true,
+              sponsorNote: item.sponsor_note,
+            },
+          ], item.manifest_key, item.date, item.service, {
+            repName: item.rep_name,
+            vehicleName: item.vehicle_name,
+            generalNotes: `${cat} (${item.sponsor_note || 'Reported sponsor'})`,
+          });
+        }
+        return { success: true, sponsorship: list[idx], ledgerUpdated: true };
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  return { success: false };
 }

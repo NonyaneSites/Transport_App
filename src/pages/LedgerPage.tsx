@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Loader2, AlertTriangle, FileSpreadsheet, Search, Filter, XCircle,
   ChevronDown, ChevronRight, Upload, CheckCircle2, FileText, Banknote, X, UserPlus, Plus,
-  Pencil, Trash2,
+  Pencil, Trash2, HeartHandshake, Clock,
 } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
@@ -12,8 +12,10 @@ import {
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
   recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch,
   updateDebtorWithInstances, normalizeDateToYMD, normalizeStructureCode, structureSortComparator,
+  listReportedSponsorships, verifySponsorshipStatus,
   type DebtorInstanceUpdateItem,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
+  type ReportedSponsorship, type SponsorshipStatus,
 } from '@/lib/ledger';
 import { downloadCancellationDebtPdf } from '@/lib/pdfExport';
 
@@ -61,6 +63,7 @@ export function LedgerPage() {
   const [editDebt, setEditDebt] = useState('');
   const [editNotes, setEditNotes] = useState('');
   const [editIsSponsored, setEditIsSponsored] = useState(false);
+  const [editDebtType, setEditDebtType] = useState<'cancellation' | 'unaccounted_sponsorship' | 'unpaid_sponsorship'>('cancellation');
   const [editInstances, setEditInstances] = useState<DebtorInstanceUpdateItem[]>([]);
   const [savingEdit, setSavingEdit] = useState(false);
   const [deletingDebtor, setDeletingDebtor] = useState(false);
@@ -77,9 +80,17 @@ export function LedgerPage() {
   const [addDate, setAddDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [addNotes, setAddNotes] = useState('');
   const [addIsSponsored, setAddIsSponsored] = useState(false);
+  const [addDebtType, setAddDebtType] = useState<'cancellation' | 'unaccounted_sponsorship' | 'unpaid_sponsorship'>('cancellation');
   const [addingDebtor, setAddingDebtor] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
   const [addSuccessMessage, setAddSuccessMessage] = useState<string | null>(null);
+
+  // Reported Sponsorships Audit State
+  const [sponsorships, setSponsorships] = useState<ReportedSponsorship[]>([]);
+  const [sponsorshipFilter, setSponsorshipFilter] = useState<'all' | 'pending' | 'actually_sponsored' | 'debt'>('all');
+  const [sponsorshipSectionOpen, setSponsorshipSectionOpen] = useState(true);
+  const [sponsorshipUpdatingId, setSponsorshipUpdatingId] = useState<string | null>(null);
+  const [sponsorshipNotice, setSponsorshipNotice] = useState<{ id: string; text: string; type: 'success' | 'warn' } | null>(null);
 
   // Historical Cancellation Import
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -92,8 +103,15 @@ export function LedgerPage() {
     let mounted = true;
     (async () => {
       try {
-        const data = await listLedgerEntries();
-        if (mounted) { setEntries(data); setLoading(false); }
+        const [data, sponData] = await Promise.all([
+          listLedgerEntries(),
+          listReportedSponsorships(),
+        ]);
+        if (mounted) {
+          setEntries(data);
+          setSponsorships(sponData);
+          setLoading(false);
+        }
       } catch (e) {
         if (mounted) {
           setError(e instanceof Error ? e.message : String(e));
@@ -104,9 +122,17 @@ export function LedgerPage() {
 
     const disconnectSSE = connectSyncEvents(
       undefined,
-      (ledgerData) => {
-        if (mounted && Array.isArray(ledgerData)) {
-          setEntries(ledgerData);
+      async () => {
+        if (mounted) {
+          const refreshed = await listLedgerEntries();
+          setEntries(refreshed);
+        }
+      },
+      undefined,
+      async () => {
+        if (mounted) {
+          const sponRefreshed = await listReportedSponsorships();
+          setSponsorships(sponRefreshed);
         }
       }
     );
@@ -149,6 +175,39 @@ export function LedgerPage() {
   }, [entries, search, structureFilter]);
 
   const totalDebt = filtered.reduce((sum, e) => sum + Number(e.structure_debt), 0);
+
+  const sponsorshipStats = useMemo(() => {
+    const total = sponsorships.length;
+    const pending = sponsorships.filter((s) => s.status === 'pending').length;
+    const confirmed = sponsorships.filter((s) => s.status === 'actually_sponsored').length;
+    const debt = sponsorships.filter((s) => s.status === 'unaccounted_sponsorship' || s.status === 'unpaid_sponsorship').length;
+    return { total, pending, confirmed, debt };
+  }, [sponsorships]);
+
+  const filteredSponsorships = useMemo(() => {
+    let list = sponsorships;
+    if (structureFilter) {
+      list = list.filter((s) => normalizeStructureCode(s.structure) === structureFilter);
+    }
+    if (sponsorshipFilter === 'pending') {
+      list = list.filter((s) => s.status === 'pending');
+    } else if (sponsorshipFilter === 'actually_sponsored') {
+      list = list.filter((s) => s.status === 'actually_sponsored');
+    } else if (sponsorshipFilter === 'debt') {
+      list = list.filter((s) => s.status === 'unaccounted_sponsorship' || s.status === 'unpaid_sponsorship');
+    }
+    const q = search.trim().toLowerCase();
+    if (q) {
+      list = list.filter((s) =>
+        s.passenger_name.toLowerCase().includes(q) ||
+        s.structure.toLowerCase().includes(q) ||
+        s.vehicle_name.toLowerCase().includes(q) ||
+        s.sponsor_note.toLowerCase().includes(q) ||
+        s.rep_name.toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [sponsorships, structureFilter, sponsorshipFilter, search]);
 
   // Shared with the download (see aggregateLedgerEntries in lib/ledger) so
   // the web view and the exported "SZ Cancellation List" never drift apart.
@@ -255,6 +314,12 @@ export function LedgerPage() {
     setEditDebt(String(row.amount));
     setEditNotes(row.notes);
     setEditIsSponsored(row.isSponsorshipOrUnpaid);
+    if (row.isSponsorshipOrUnpaid) {
+      const isUnpaid = (row.notes || '').toLowerCase().includes('unpaid') || (row.sponsor_note || '').toLowerCase().includes('unpaid');
+      setEditDebtType(isUnpaid ? 'unpaid_sponsorship' : 'unaccounted_sponsorship');
+    } else {
+      setEditDebtType('cancellation');
+    }
     // Initialize editable instances list from row.instances with normalized dates
     const initialInstances: DebtorInstanceUpdateItem[] = row.instances.map((inst) => ({
       id: inst.id,
@@ -374,21 +439,25 @@ export function LedgerPage() {
     setSavingEdit(true);
     setEditError(null);
     try {
+      const isSpon = editDebtType !== 'cancellation';
+      const defaultNote = editDebtType === 'unpaid_sponsorship' ? 'Unpaid Sponsorship' : 'Unaccounted Sponsorship';
+      const finalNotes = isSpon ? (editNotes.trim() || defaultNote) : '';
+
       if (editInstances.length === 0 || rawDebt === 0) {
         // If user deleted all date instances or set debt to 0, completely settle/remove debtor
         await updateDebtorWithInstances(editTarget.entryIds, {
           name: editName.trim(),
           structure: targetStructure,
-          isSponsored: editIsSponsored,
-          notes: editIsSponsored ? editNotes.trim() : '',
+          isSponsored: isSpon,
+          notes: finalNotes,
           instances: [],
         });
       } else {
         await updateDebtorWithInstances(editTarget.entryIds, {
           name: editName.trim(),
           structure: targetStructure,
-          isSponsored: editIsSponsored,
-          notes: editIsSponsored ? editNotes.trim() : '',
+          isSponsored: isSpon,
+          notes: finalNotes,
           instances: editInstances,
         });
       }
@@ -436,6 +505,7 @@ export function LedgerPage() {
     setAddDate(new Date().toISOString().slice(0, 10));
     setAddNotes('');
     setAddIsSponsored(false);
+    setAddDebtType('cancellation');
     setAddError(null);
     setAddSuccessMessage(null);
     setShowAddModal(true);
@@ -473,6 +543,10 @@ export function LedgerPage() {
     setAddingDebtor(true);
     setAddError(null);
     try {
+      const isSpon = addDebtType !== 'cancellation';
+      const defaultNote = addDebtType === 'unpaid_sponsorship' ? 'Unpaid Sponsorship' : 'Unaccounted Sponsorship';
+      const finalNotes = isSpon ? (addNotes.trim() || defaultNote) : '';
+
       await addManualLedgerEntry({
         firstName: addFirstName,
         surname: addSurname,
@@ -480,8 +554,8 @@ export function LedgerPage() {
         service: addService,
         amount: amtNum,
         date: addDate,
-        notes: addIsSponsored ? (addNotes.trim() || 'Unaccounted Sponsorship') : '',
-        isSponsored: addIsSponsored,
+        notes: finalNotes,
+        isSponsored: isSpon,
       });
 
       const refreshed = await listLedgerEntries();
@@ -494,6 +568,54 @@ export function LedgerPage() {
       setAddError(e instanceof Error ? e.message : String(e));
     } finally {
       setAddingDebtor(false);
+    }
+  }
+
+  async function handleVerifySponsorship(id: string, newStatus: SponsorshipStatus) {
+    setSponsorshipUpdatingId(id);
+    try {
+      const res = await verifySponsorshipStatus(id, newStatus);
+      if (res.success) {
+        const [updatedSpon, updatedLedger] = await Promise.all([
+          listReportedSponsorships(),
+          listLedgerEntries(),
+        ]);
+        setSponsorships(updatedSpon);
+        setEntries(updatedLedger);
+
+        const target = updatedSpon.find((s) => s.id === id);
+        const name = target ? target.passenger_name : 'Passenger';
+        if (newStatus === 'actually_sponsored') {
+          setSponsorshipNotice({
+            id,
+            text: `Confirmed: ${name} was actually sponsored. No debt added to ledger.`,
+            type: 'success',
+          });
+        } else if (newStatus === 'unpaid_sponsorship') {
+          setSponsorshipNotice({
+            id,
+            text: `Recorded ${name} as Unpaid Sponsorship (R40 debt) on ${target?.structure || 'structure'} ledger.`,
+            type: 'warn',
+          });
+        } else if (newStatus === 'unaccounted_sponsorship') {
+          setSponsorshipNotice({
+            id,
+            text: `Recorded ${name} as Unaccounted Sponsorship (R40 debt) on ${target?.structure || 'structure'} ledger.`,
+            type: 'warn',
+          });
+        } else {
+          setSponsorshipNotice({
+            id,
+            text: `Reset ${name} sponsorship status to Pending Verification.`,
+            type: 'warn',
+          });
+        }
+        setTimeout(() => setSponsorshipNotice(null), 6000);
+      }
+    } catch (err) {
+      console.error('Failed to verify sponsorship:', err);
+    } finally {
+      setSponsorshipUpdatingId(null);
     }
   }
 
@@ -554,20 +676,25 @@ export function LedgerPage() {
             <AlertTriangle className="h-4 w-4 shrink-0" />
             {error}
           </div>
-        ) : entries.length === 0 ? (
+        ) : entries.length === 0 && sponsorships.length === 0 ? (
           <div className="flex flex-col items-center gap-3 rounded-xl border border-line bg-card py-20 text-center">
             <XCircle className="h-10 w-10 text-line" />
-            <p className="text-sm text-muted">No cancellations recorded yet.</p>
-            <p className="text-xs text-muted">Absentees appear here once a transport rep submits attendance from the Rep Portal.</p>
+            <p className="text-sm text-muted">No cancellations or reported sponsorships recorded yet.</p>
+            <p className="text-xs text-muted">Absentees and sponsorships appear here once a transport rep submits attendance from the Rep Portal.</p>
           </div>
         ) : (
           <>
             {/* Summary + download */}
             <div className="mb-4 sm:mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="grid grid-cols-3 gap-2 sm:gap-3">
-                <SummaryStat label="Total Entries" value={entries.length} />
-                <SummaryStat label="Filtered" value={filtered.length} accent="crimson" />
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
+                <SummaryStat label="Total Debts" value={entries.length} />
+                <SummaryStat label="Filtered Debts" value={filtered.length} accent="crimson" />
                 <SummaryStat label="Total Debt" value={`R${totalDebt}`} accent="warning" />
+                <SummaryStat
+                  label="Sponsorships"
+                  value={sponsorships.length > 0 ? `${sponsorshipStats.total} (${sponsorshipStats.pending} pending)` : '0'}
+                  accent={sponsorshipStats.pending > 0 ? 'warning' : 'success'}
+                />
               </div>
 
               {/* Action buttons: prominent Add Debtor, compact touch-friendly exports on phone */}
@@ -764,6 +891,246 @@ export function LedgerPage() {
                   Collapse All
                 </button>
               </div>
+            </div>
+
+            {/* Reported Sponsorships Verification Section */}
+            <div className="mb-5 rounded-xl border border-amber-500/30 bg-card shadow-sm overflow-hidden">
+              <div
+                className="flex items-center justify-between px-4 py-3 bg-amber-500/10 cursor-pointer select-none transition-colors hover:bg-amber-500/15"
+                onClick={() => setSponsorshipSectionOpen(!sponsorshipSectionOpen)}
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <HeartHandshake className="h-5 w-5 text-amber-400 shrink-0" />
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="text-sm font-bold text-ink">
+                        Reported Sponsorships (Vehicle Attendance)
+                      </h3>
+                      <span className="rounded-full bg-amber-500/20 border border-amber-500/40 px-2 py-0.5 text-[11px] font-bold text-amber-300">
+                        {sponsorships.length} reported
+                      </span>
+                      {sponsorshipStats.pending > 0 && (
+                        <span className="rounded-full bg-crimson-500/20 border border-crimson-500/40 px-2 py-0.5 text-[11px] font-bold text-crimson-300 animate-pulse">
+                          {sponsorshipStats.pending} pending audit
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-muted truncate mt-0.5">
+                      Verify if passengers were actually sponsored, or place them onto the ledger as unpaid / unaccounted debt.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    className="p-1 rounded-md text-muted hover:text-ink hover:bg-card-2 transition-colors"
+                    aria-label="Toggle sponsorships section"
+                  >
+                    {sponsorshipSectionOpen ? (
+                      <ChevronDown className="h-4 w-4" />
+                    ) : (
+                      <ChevronRight className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {sponsorshipSectionOpen && (
+                <div className="p-3 sm:p-4 space-y-3">
+                  {/* Status announcement notice */}
+                  {sponsorshipNotice && (
+                    <div
+                      className={`flex items-center gap-2 rounded-lg p-2.5 text-xs font-semibold animate-in fade-in duration-150 ${
+                        sponsorshipNotice.type === 'success'
+                          ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-300'
+                          : 'bg-amber-500/15 border border-amber-500/30 text-amber-300'
+                      }`}
+                    >
+                      {sponsorshipNotice.type === 'success' ? (
+                        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                      ) : (
+                        <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
+                      )}
+                      <span>{sponsorshipNotice.text}</span>
+                    </div>
+                  )}
+
+                  {/* Filter tabs */}
+                  <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs no-scrollbar">
+                    <button
+                      type="button"
+                      onClick={() => setSponsorshipFilter('all')}
+                      className={`shrink-0 rounded-lg px-2.5 py-1 font-semibold transition-all border ${
+                        sponsorshipFilter === 'all'
+                          ? 'bg-ink text-canvas border-ink shadow-xs'
+                          : 'bg-card-2 border-line text-muted hover:text-ink'
+                      }`}
+                    >
+                      All ({sponsorshipStats.total})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSponsorshipFilter('pending')}
+                      className={`shrink-0 rounded-lg px-2.5 py-1 font-semibold transition-all border ${
+                        sponsorshipFilter === 'pending'
+                          ? 'bg-amber-500 text-black border-amber-500 shadow-xs'
+                          : 'bg-card-2 border-line text-muted hover:text-ink'
+                      }`}
+                    >
+                      Pending Check ({sponsorshipStats.pending})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSponsorshipFilter('actually_sponsored')}
+                      className={`shrink-0 rounded-lg px-2.5 py-1 font-semibold transition-all border ${
+                        sponsorshipFilter === 'actually_sponsored'
+                          ? 'bg-emerald-500 text-black border-emerald-500 shadow-xs'
+                          : 'bg-card-2 border-line text-muted hover:text-ink'
+                      }`}
+                    >
+                      Actually Sponsored ({sponsorshipStats.confirmed})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSponsorshipFilter('debt')}
+                      className={`shrink-0 rounded-lg px-2.5 py-1 font-semibold transition-all border ${
+                        sponsorshipFilter === 'debt'
+                          ? 'bg-crimson-500 text-white border-crimson-500 shadow-xs'
+                          : 'bg-card-2 border-line text-muted hover:text-ink'
+                      }`}
+                    >
+                      Added to Ledger ({sponsorshipStats.debt})
+                    </button>
+                  </div>
+
+                  {/* Sponsorship items list */}
+                  {filteredSponsorships.length === 0 ? (
+                    <div className="py-6 text-center text-xs text-muted border border-line/60 rounded-lg bg-card-2/30">
+                      {sponsorships.length === 0
+                        ? 'No sponsored passengers reported in submitted attendance yet.'
+                        : 'No sponsorships match the current search or filter criteria.'}
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-line/60 rounded-lg border border-line/70 bg-card-2/20 overflow-hidden">
+                      {filteredSponsorships.map((s) => {
+                        const isUpdating = sponsorshipUpdatingId === s.id;
+                        return (
+                          <div
+                            key={s.id}
+                            className="p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3 transition-colors hover:bg-card-2/40"
+                          >
+                            {/* Passenger information */}
+                            <div className="space-y-1 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-semibold text-sm text-ink">
+                                  <HighlightMatch text={s.passenger_name} query={search} />
+                                </span>
+                                {s.structure && (
+                                  <span className="rounded bg-card-2 border border-line/70 px-1.5 py-0.5 text-[11px] font-mono font-bold text-ink">
+                                    {normalizeStructureCode(s.structure)}
+                                  </span>
+                                )}
+                                {s.stop && (
+                                  <span className="text-[11px] text-muted">
+                                    Stop: {s.stop}
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex items-center gap-2 text-xs text-muted flex-wrap">
+                                <span>{s.date} ({s.service})</span>
+                                <span>•</span>
+                                <span>{s.vehicle_name}</span>
+                                <span>•</span>
+                                <span>Rep: {s.rep_name || 'Transport Rep'}</span>
+                              </div>
+
+                              {s.sponsor_note && (
+                                <div className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/25 bg-amber-500/10 px-2 py-1 text-xs text-amber-200">
+                                  <span className="font-bold text-amber-300">Sponsor Details:</span>
+                                  <span>{s.sponsor_note}</span>
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Drop box & verification actions */}
+                            <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 shrink-0">
+                              <div className="flex flex-col gap-1">
+                                <label
+                                  htmlFor={`spon_drop_${s.id}`}
+                                  className="text-[10px] font-bold uppercase tracking-wider text-muted"
+                                >
+                                  Sponsored (Drop Box)
+                                </label>
+                                <div className="flex items-center gap-2">
+                                  <select
+                                    id={`spon_drop_${s.id}`}
+                                    value={s.status}
+                                    disabled={isUpdating}
+                                    onChange={(e) =>
+                                      handleVerifySponsorship(s.id, e.target.value as SponsorshipStatus)
+                                    }
+                                    className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold border transition-all cursor-pointer ${
+                                      s.status === 'actually_sponsored'
+                                        ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'
+                                        : s.status === 'unpaid_sponsorship'
+                                        ? 'bg-crimson-500/20 border-crimson-500/50 text-crimson-300'
+                                        : s.status === 'unaccounted_sponsorship'
+                                        ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
+                                        : 'bg-card border-amber-500/40 text-amber-200'
+                                    }`}
+                                  >
+                                    <option value="pending" className="bg-card text-ink">
+                                      ⏳ Pending Verification
+                                    </option>
+                                    <option value="actually_sponsored" className="bg-card text-emerald-400 font-semibold">
+                                      ✓ Actually Sponsored (No Action)
+                                    </option>
+                                    <option value="unaccounted_sponsorship" className="bg-card text-amber-400 font-semibold">
+                                      ⚠️ Unaccounted Sponsorship (Add R40 Debt)
+                                    </option>
+                                    <option value="unpaid_sponsorship" className="bg-card text-crimson-400 font-semibold">
+                                      ❌ Unpaid Sponsorship (Add R40 Debt)
+                                    </option>
+                                  </select>
+                                  {isUpdating && (
+                                    <Loader2 className="h-4 w-4 animate-spin text-muted" />
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* State badge indicator */}
+                              <div className="min-w-[170px]">
+                                {s.status === 'actually_sponsored' ? (
+                                  <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
+                                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                                    <span>Actually sponsored</span>
+                                  </div>
+                                ) : s.status === 'unpaid_sponsorship' ? (
+                                  <div className="flex items-center gap-1.5 text-xs font-semibold text-crimson-400">
+                                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                                    <span>In Ledger: Unpaid (R40)</span>
+                                  </div>
+                                ) : s.status === 'unaccounted_sponsorship' ? (
+                                  <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-400">
+                                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                                    <span>In Ledger: Unaccounted (R40)</span>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-1.5 text-xs text-muted">
+                                    <Clock className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+                                    <span>Awaiting check</span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Grouped by structure — strict alphanumeric order (S1, S2, S9, S13) */}
@@ -1460,36 +1827,56 @@ export function LedgerPage() {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 rounded-lg bg-card-2/60 p-2.5 border border-line/60">
-                      <input
-                        type="checkbox"
-                        id="isSponsoredCheckbox"
-                        checked={addIsSponsored}
-                        onChange={(e) => setAddIsSponsored(e.target.checked)}
-                        className="rounded border-line bg-card text-crimson-500 focus:ring-crimson-500 h-4 w-4"
-                      />
-                      <label htmlFor="isSponsoredCheckbox" className="text-xs text-ink cursor-pointer select-none">
-                        Mark as <span className="font-semibold text-amber-300">Unaccounted Sponsorship / Unpaid</span>
+                    <div className="space-y-1.5">
+                      <label htmlFor="addDebtTypeSelect" className="block text-xs font-bold uppercase tracking-wider text-muted">
+                        Debt Classification / Drop Box <span className="text-crimson-400">*</span>
                       </label>
+                      <select
+                        id="addDebtTypeSelect"
+                        value={addDebtType}
+                        onChange={(e) => {
+                          const val = e.target.value as 'cancellation' | 'unaccounted_sponsorship' | 'unpaid_sponsorship';
+                          setAddDebtType(val);
+                          setAddIsSponsored(val !== 'cancellation');
+                          if (val === 'unaccounted_sponsorship' && (!addNotes || addNotes === 'Unpaid Sponsorship')) {
+                            setAddNotes('Unaccounted Sponsorship');
+                          } else if (val === 'unpaid_sponsorship' && (!addNotes || addNotes === 'Unaccounted Sponsorship')) {
+                            setAddNotes('Unpaid Sponsorship');
+                          } else if (val === 'cancellation' && (addNotes === 'Unaccounted Sponsorship' || addNotes === 'Unpaid Sponsorship')) {
+                            setAddNotes('');
+                          }
+                        }}
+                        className="input-field w-full text-xs sm:text-sm py-2 bg-card-2"
+                      >
+                        <option value="cancellation" className="bg-card text-ink">
+                          Regular Cancellation (Absentee)
+                        </option>
+                        <option value="unaccounted_sponsorship" className="bg-card text-amber-300 font-semibold">
+                          Unaccounted Sponsorship
+                        </option>
+                        <option value="unpaid_sponsorship" className="bg-card text-amber-300 font-semibold">
+                          Unpaid Sponsorship
+                        </option>
+                      </select>
                     </div>
 
                     {/* Only show reason/notes if marked as Unaccounted Sponsorship / Unpaid */}
                     {addIsSponsored && (
                       <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 space-y-1.5 animate-in fade-in duration-150">
                         <label className="block text-xs font-bold uppercase tracking-wider text-amber-300">
-                          Sponsorship / Unpaid Reason <span className="text-crimson-400">*</span>
+                          Sponsorship / Unpaid Reason & Notes <span className="text-crimson-400">*</span>
                         </label>
                         <input
                           type="text"
                           value={addNotes}
                           onChange={(e) => setAddNotes(e.target.value)}
-                          placeholder="e.g. Unaccounted Sponsorship, Did not pay, Unpaid"
+                          placeholder="e.g. Unaccounted Sponsorship, Sponsor did not pay, Unpaid"
                           className="input-field w-full text-xs py-2"
                           required={addIsSponsored}
                           autoFocus
                         />
                         <p className="text-[10px] text-amber-200/70">
-                          Reason or note for grouping this person under unaccounted sponsorship / unpaid debt.
+                          Reason or note for grouping this person under unaccounted sponsorship or unpaid debt.
                         </p>
                       </div>
                     )}
@@ -1703,24 +2090,44 @@ export function LedgerPage() {
                       )}
                     </div>
 
-                    <div className="flex items-center gap-2 rounded-lg bg-card-2/60 p-2.5 border border-line/60">
-                      <input
-                        type="checkbox"
-                        id="editIsSponsoredCheckbox"
-                        checked={editIsSponsored}
-                        onChange={(e) => setEditIsSponsored(e.target.checked)}
-                        className="rounded border-line bg-card text-crimson-500 focus:ring-crimson-500 h-4 w-4"
-                      />
-                      <label htmlFor="editIsSponsoredCheckbox" className="text-xs text-ink cursor-pointer select-none">
-                        Mark as <span className="font-semibold text-amber-300">Unaccounted Sponsorship / Unpaid</span>
+                    <div className="space-y-1.5">
+                      <label htmlFor="editDebtTypeSelect" className="block text-xs font-bold uppercase tracking-wider text-muted">
+                        Debt Classification / Drop Box <span className="text-crimson-400">*</span>
                       </label>
+                      <select
+                        id="editDebtTypeSelect"
+                        value={editDebtType}
+                        onChange={(e) => {
+                          const val = e.target.value as 'cancellation' | 'unaccounted_sponsorship' | 'unpaid_sponsorship';
+                          setEditDebtType(val);
+                          setEditIsSponsored(val !== 'cancellation');
+                          if (val === 'unaccounted_sponsorship' && (!editNotes || editNotes === 'Unpaid Sponsorship')) {
+                            setEditNotes('Unaccounted Sponsorship');
+                          } else if (val === 'unpaid_sponsorship' && (!editNotes || editNotes === 'Unaccounted Sponsorship')) {
+                            setEditNotes('Unpaid Sponsorship');
+                          } else if (val === 'cancellation' && (editNotes === 'Unaccounted Sponsorship' || editNotes === 'Unpaid Sponsorship')) {
+                            setEditNotes('');
+                          }
+                        }}
+                        className="input-field w-full text-xs sm:text-sm py-2 bg-card-2"
+                      >
+                        <option value="cancellation" className="bg-card text-ink">
+                          Regular Cancellation (Absentee)
+                        </option>
+                        <option value="unaccounted_sponsorship" className="bg-card text-amber-300 font-semibold">
+                          Unaccounted Sponsorship
+                        </option>
+                        <option value="unpaid_sponsorship" className="bg-card text-amber-300 font-semibold">
+                          Unpaid Sponsorship
+                        </option>
+                      </select>
                     </div>
 
                     {/* Only show reason/notes if marked as Unaccounted Sponsorship / Unpaid */}
                     {editIsSponsored && (
                       <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 space-y-1.5 animate-in fade-in duration-150">
                         <label className="block text-xs font-bold uppercase tracking-wider text-amber-300">
-                          Sponsorship / Unpaid Reason <span className="text-crimson-400">*</span>
+                          Sponsorship / Unpaid Reason & Remarks <span className="text-crimson-400">*</span>
                         </label>
                         <input
                           type="text"

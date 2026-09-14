@@ -117,15 +117,22 @@ export function RepStatsCopyCard({
     return riders.filter((r) => absentIds.has(r.id));
   }, [riders, absentIds]);
 
-  function formatList(passengers: Passenger[], delimiter: 'comma' | 'newline' = formatStyle): string {
+  function formatList(passengers: Passenger[], delimiter: 'comma' | 'newline' = formatStyle, isSponsored = false): string {
     if (passengers.length === 0) return '';
-    const formatted = passengers.map(formatPassengerStat);
+    const formatted = passengers.map((p) => {
+      const base = formatPassengerStat(p);
+      if (isSponsored) {
+        const sNote = (notes[p.id] || p.sponsorNote || '').trim();
+        return sNote ? `${base} (paid by ${sNote})` : base;
+      }
+      return base;
+    });
     return delimiter === 'comma' ? formatted.join(', ') : formatted.join('\n');
   }
 
   const presentText = formatList(presentPassengers);
   const ftvText = formatList(ftvPassengers);
-  const sponsoredText = formatList(sponsoredPassengers);
+  const sponsoredText = formatList(sponsoredPassengers, formatStyle, true);
   const unpaidText = formatList(unpaidPassengers);
   const absenteeText = formatList(absenteePassengers);
 
