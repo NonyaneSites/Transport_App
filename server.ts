@@ -403,16 +403,21 @@ app.post('/api/manifests/:key/reopen-vehicle', (req, res) => {
   manifest.updated_at = nowIso;
   atomicWriteJson(filePath, manifest);
 
-  // Withdraw ledger entries for these riders
+  // Withdraw ledger entries and pending sponsorships for these riders
   if (Array.isArray(allRiderNames) && allRiderNames.length > 0) {
     const riderSet = new Set(allRiderNames);
     let ledger = readJsonFile<Array<{ manifest_key: string; passenger_name: string }>>(LEDGER_FILE, []);
     ledger = ledger.filter((entry) => !(entry.manifest_key === key && riderSet.has(entry.passenger_name)));
     atomicWriteJson(LEDGER_FILE, ledger);
+
+    let audits = readJsonFile<Array<{ manifest_key: string; passenger_name: string; status: string }>>(SPONSORSHIPS_FILE, []);
+    audits = audits.filter((entry) => !(entry.manifest_key === key && riderSet.has(entry.passenger_name) && entry.status === 'pending'));
+    atomicWriteJson(SPONSORSHIPS_FILE, audits);
   }
 
   broadcastSse('manifest_updated', { key, manifest, timestamp: Date.now() });
   broadcastSse('ledger_updated', { timestamp: Date.now() });
+  broadcastSse('sponsorships_updated', { timestamp: Date.now() });
 
   res.json({ success: true, manifest });
 });

@@ -22,7 +22,7 @@ import {
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { vehicleRiders } from '@/lib/manifest';
-import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, type LedgerEntry } from '@/lib/ledger';
+import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, recordReportedSponsorships, withdrawReportedSponsorships, type LedgerEntry } from '@/lib/ledger';
 import { submitVehicleToServer, reopenVehicleOnServer, type SubmitVehiclePayload } from '@/lib/serverApi';
 import { extractVehicleStats } from '@/lib/statsExport';
 import { syncVehicleStatsToGoogleSheet, sheetDateLabel } from '@/lib/googleSheetsSync';
@@ -1664,6 +1664,19 @@ export function RepPage() {
         fullGeneralNotes
       ).catch(() => {});
 
+      // Record reported sponsorships into ledger audit store
+      await recordReportedSponsorships(
+        key,
+        parsedDate,
+        serviceLabel,
+        sponsoredRiders,
+        riders.map((r) => r.fullName),
+        selectedVehicle.name,
+        repDisplayName
+      ).catch((err) => {
+        console.warn('[RepPage] recordReportedSponsorships error:', err);
+      });
+
       const matchingLedgerIds = pastCancellations
         .filter((e) => manualCancellations.some((m) => m.passengerName.trim() && m.passengerName.trim().toLowerCase() === e.passenger_name.trim().toLowerCase()))
         .map((e) => e.id);
@@ -1682,13 +1695,12 @@ export function RepPage() {
         // storage unavailable
       }
 
+      const sponNote = sponsoredRiders.length > 0 ? `, ${sponsoredRiders.length} sponsored` : '';
+      const absenteeSummary = absentees.length > 0 ? ` ${absentees.length} absentee(s) recorded in cancellation ledger.` : '';
       setSubmitMsg(
         serverSaved
-          ? `✓ Successfully submitted and saved to server! ${presentCount} present, ${absentCount} absent. ` +
-            `${absentees.length > 0 ? `${absentees.length} absentee(s) recorded in transport ledger.` : ''} ` +
-            `Thank you, ${repDisplayName}.`
-          : `✓ Submitted & saved locally! (14 present, 2 absent). Syncing with server in background. ` +
-            `Thank you, ${repDisplayName}.`
+          ? `✓ Successfully submitted and saved to server! ${presentCount} present, ${absentCount} absent${sponNote}.${absenteeSummary} Thank you, ${repDisplayName}.`
+          : `✓ Successfully submitted & saved! ${presentCount} present, ${absentCount} absent${sponNote}.${absenteeSummary} Thank you, ${repDisplayName}.`
       );
     } catch (e) {
       setSubmitMsg(`Error: ${e instanceof Error ? e.message : String(e)}`);
@@ -1709,6 +1721,7 @@ export function RepPage() {
       }).catch(() => {});
 
       await withdrawAbsentees(key, vehicleRiderNames);
+      await withdrawReportedSponsorships(key, vehicleRiderNames).catch(() => {});
 
       const updatedVehicles = manifest.vehicles.map((v) =>
         v.id === selectedVehicle.id

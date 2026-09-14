@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { supabase } from './supabase';
+import { supabase, mockStorage, MANIFESTS_TABLE } from './supabase';
 import {
   listLedgerFromServer,
   settleLedgerOnServer,
@@ -1569,33 +1569,300 @@ export function downloadSessionStatsExcel(
 
 const LOCAL_SPONSORSHIPS_KEY = 'crc_sponsorship_audits';
 
+export interface RecordSponsorshipInput {
+  id: string;
+  fullName: string;
+  structure?: string;
+  stop?: string;
+  sponsorNote?: string;
+}
+
+/**
+ * Records reported sponsorships from attendance check-in into the local/central audit store.
+ * Re-submitting or updating attendance replaces any previous pending records cleanly.
+ */
+export async function recordReportedSponsorships(
+  manifestKey: string,
+  date: string,
+  serviceLabel: string,
+  sponsoredRiders: RecordSponsorshipInput[],
+  allRiderNames: string[],
+  vehicleName: string,
+  repName: string
+): Promise<void> {
+  let list: ReportedSponsorship[] = [];
+  try {
+    const raw = localStorage.getItem(LOCAL_SPONSORSHIPS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) list = parsed;
+    }
+  } catch {
+    list = [];
+  }
+
+  // Remove any previously recorded pending sponsorships for this vehicle session
+  // belonging to riders on this roster (preserving already-verified ones)
+  if (allRiderNames.length > 0) {
+    const normalizedRoster = new Set(allRiderNames.map((n) => n.trim().toLowerCase()));
+    list = list.filter(
+      (s) =>
+        !(
+          s.manifest_key === manifestKey &&
+          normalizedRoster.has((s.passenger_name || '').trim().toLowerCase()) &&
+          s.status === 'pending'
+        )
+    );
+  }
+
+  const now = new Date().toISOString();
+  for (const r of sponsoredRiders) {
+    const normName = (r.fullName || '').trim().toLowerCase();
+    const existingIndex = list.findIndex(
+      (s) => s.manifest_key === manifestKey && (s.passenger_name || '').trim().toLowerCase() === normName
+    );
+
+    if (existingIndex >= 0) {
+      list[existingIndex] = {
+        ...list[existingIndex],
+        structure: r.structure || list[existingIndex].structure,
+        stop: r.stop || list[existingIndex].stop,
+        vehicle_name: vehicleName || list[existingIndex].vehicle_name,
+        rep_name: repName || list[existingIndex].rep_name,
+        sponsor_note: (r.sponsorNote || list[existingIndex].sponsor_note || '').trim(),
+      };
+    } else {
+      const cleanKey = manifestKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const cleanName = encodeURIComponent(r.fullName).replace(/%/g, '');
+      const id = `spon_${cleanKey}_${r.id || cleanName}_${Date.now()}`;
+      list.push({
+        id,
+        manifest_key: manifestKey,
+        date,
+        service: serviceLabel,
+        passenger_id: r.id,
+        passenger_name: r.fullName.trim(),
+        structure: (r.structure || '').trim(),
+        stop: (r.stop || '').trim(),
+        vehicle_name: vehicleName,
+        rep_name: repName,
+        sponsor_note: (r.sponsorNote || '').trim(),
+        status: 'pending',
+        submitted_at: now,
+      });
+    }
+  }
+
+  try {
+    localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(list));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: list }));
+    }
+  } catch (err) {
+    console.warn('[Ledger] Failed to save reported sponsorships to localStorage:', err);
+  }
+}
+
+/**
+ * Withdraws pending reported sponsorships when a rep reopens attendance for editing.
+ */
+export async function withdrawReportedSponsorships(
+  manifestKey: string,
+  riderNames: string[]
+): Promise<void> {
+  if (riderNames.length === 0) return;
+  try {
+    const raw = localStorage.getItem(LOCAL_SPONSORSHIPS_KEY);
+    if (!raw) return;
+    const list = JSON.parse(raw) as ReportedSponsorship[];
+    const normalizedRoster = new Set(riderNames.map((n) => n.trim().toLowerCase()));
+    const filtered = list.filter(
+      (s) =>
+        !(
+          s.manifest_key === manifestKey &&
+          normalizedRoster.has((s.passenger_name || '').trim().toLowerCase()) &&
+          s.status === 'pending'
+        )
+    );
+    localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(filtered));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: filtered }));
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Retrieves all reported sponsorships for administrative verification.
+ * Automatically harvests sponsorships from existing submitted manifests/drafts
+ * so any sponsorships already submitted immediately appear!
+ */
 export async function listReportedSponsorships(): Promise<ReportedSponsorship[]> {
+  let list: ReportedSponsorship[] = [];
+
+  // 1. Try server fetch if available
   try {
     const serverSponsees = await listReportedSponsorshipsFromServer();
     if (serverSponsees && serverSponsees.length > 0) {
-      try {
-        localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(serverSponsees));
-      } catch {
-        /* ignore storage full */
-      }
-      return serverSponsees;
+      list = serverSponsees;
     }
   } catch (err) {
     console.debug('[Ledger] Server fetch sponsorships note:', err);
   }
 
-  // Fallback to local cache
-  try {
-    const raw = localStorage.getItem(LOCAL_SPONSORSHIPS_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
+  // 2. Read from local storage cache
+  if (list.length === 0) {
+    try {
+      const raw = localStorage.getItem(LOCAL_SPONSORSHIPS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) list = parsed;
+      }
+    } catch {
+      /* ignore */
     }
-  } catch {
-    /* ignore */
   }
 
-  return [];
+  // 3. Self-healing harvest: recover any sponsorships from submitted manifests in local storage
+  try {
+    let harvestedNew = false;
+    const existingKeys = new Set(
+      list.map((s) => `${s.manifest_key}::${(s.passenger_name || '').trim().toLowerCase()}`)
+    );
+
+    // A. Check mockStorage manifests
+    interface StoredManifest {
+      date: string;
+      signups?: Array<{ id: string; fullName: string; structure?: string; stop?: string; sponsored?: boolean; sponsorNote?: string }>;
+      vehicles?: Array<{
+        id: string;
+        name: string;
+        submitted?: boolean;
+        submittedAt?: string;
+        submittedBy?: string;
+        repName?: string;
+        riders?: string[];
+        draftState?: { sponsoredIds?: string[]; notes?: Record<string, string>; submitted?: boolean };
+      }>;
+    }
+
+    const manifestsTable = (mockStorage.getTable(MANIFESTS_TABLE) as StoredManifest[]) || [];
+    for (const m of manifestsTable) {
+      if (!m.date) continue;
+      const parsedDate = m.date.split('_')[0] || m.date;
+      const parsedService = m.date.split('_')[1]?.replace(/_/g, ' ') || 'Service';
+      const allSignups = Array.isArray(m.signups) ? m.signups : [];
+
+      for (const v of m.vehicles || []) {
+        const isSubmitted = v.submitted || v.draftState?.submitted;
+        if (!isSubmitted) continue;
+
+        const vehicleRiderIds = new Set(v.riders || []);
+        const vehicleSignups = allSignups.filter((p) => vehicleRiderIds.has(p.id));
+        const activeSignups = vehicleSignups.length > 0 ? vehicleSignups : allSignups;
+        const rep = v.repName || v.submittedBy || 'Transport Rep';
+        const sponsoredIds = new Set(v.draftState?.sponsoredIds || []);
+        const notes = v.draftState?.notes || {};
+
+        for (const p of activeSignups) {
+          const isSponsored = p.sponsored || sponsoredIds.has(p.id);
+          if (!isSponsored) continue;
+
+          const lookupKey = `${m.date}::${p.fullName.trim().toLowerCase()}`;
+          if (existingKeys.has(lookupKey)) continue;
+
+          const sponsorNote = (notes[p.id] || p.sponsorNote || '').trim();
+          const cleanKey = m.date.replace(/[^a-zA-Z0-9_-]/g, '_');
+          const id = `spon_${cleanKey}_${p.id || encodeURIComponent(p.fullName).replace(/%/g, '')}_${Date.now()}`;
+          list.push({
+            id,
+            manifest_key: m.date,
+            date: parsedDate,
+            service: parsedService,
+            passenger_id: p.id,
+            passenger_name: p.fullName.trim(),
+            structure: (p.structure || '').trim(),
+            stop: (p.stop || '').trim(),
+            vehicle_name: v.name || 'Vehicle',
+            rep_name: rep,
+            sponsor_note: sponsorNote,
+            status: 'pending',
+            submitted_at: v.submittedAt || new Date().toISOString(),
+          });
+          existingKeys.add(lookupKey);
+          harvestedNew = true;
+        }
+      }
+    }
+
+    // B. Check raw localStorage for any crc_rep_draft_* entries
+    if (typeof localStorage !== 'undefined') {
+      for (let i = 0; i < localStorage.length; i++) {
+        const storageKey = localStorage.key(i);
+        if (!storageKey || !storageKey.startsWith('crc_rep_draft_')) continue;
+
+        try {
+          const rawDraft = localStorage.getItem(storageKey);
+          if (!rawDraft) continue;
+          const draft = JSON.parse(rawDraft);
+          if (!draft.submitted && !draft.repName) continue;
+          if (!Array.isArray(draft.sponsoredIds) || draft.sponsoredIds.length === 0) continue;
+
+          const parts = storageKey.replace('crc_rep_draft_', '').split('_');
+          const manifestKey = parts.slice(0, -1).join('_') || storageKey;
+          const parsedDate = manifestKey.split('_')[0] || manifestKey;
+          const parsedService = manifestKey.split('_')[1]?.replace(/_/g, ' ') || 'Service';
+
+          const mMatch = manifestsTable.find((m) => m.date === manifestKey);
+          const allSignups = mMatch?.signups || [];
+          const rep = draft.repName || 'Transport Rep';
+
+          for (const sponId of draft.sponsoredIds) {
+            const p = allSignups.find((s) => s.id === sponId);
+            const fullName = p ? p.fullName : `Passenger ${sponId}`;
+            const lookupKey = `${manifestKey}::${fullName.trim().toLowerCase()}`;
+            if (existingKeys.has(lookupKey)) continue;
+
+            const note = (draft.notes?.[sponId] || p?.sponsorNote || '').trim();
+            const cleanKey = manifestKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+            const id = `spon_${cleanKey}_${sponId}_${Date.now()}`;
+            list.push({
+              id,
+              manifest_key: manifestKey,
+              date: parsedDate,
+              service: parsedService,
+              passenger_id: sponId,
+              passenger_name: fullName,
+              structure: p?.structure || '',
+              stop: p?.stop || '',
+              vehicle_name: 'Vehicle',
+              rep_name: rep,
+              sponsor_note: note,
+              status: 'pending',
+              submitted_at: new Date().toISOString(),
+            });
+            existingKeys.add(lookupKey);
+            harvestedNew = true;
+          }
+        } catch {
+          /* ignore parse errors */
+        }
+      }
+    }
+
+    if (harvestedNew) {
+      try {
+        localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(list));
+      } catch {
+        /* ignore storage full */
+      }
+    }
+  } catch (err) {
+    console.warn('[Ledger] Auto-harvest sponsorships error:', err);
+  }
+
+  return list;
 }
 
 export async function verifySponsorshipStatus(
@@ -1635,34 +1902,56 @@ export async function verifySponsorshipStatus(
       if (idx >= 0) {
         list[idx].status = status;
         list[idx].status_updated_at = new Date().toISOString();
+        const item = list[idx];
+
+        // If unpaid or unaccounted, add/ensure entry in LEDGER_TABLE
+        if (status === 'unpaid_sponsorship' || status === 'unaccounted_sponsorship') {
+          const cat = status === 'unpaid_sponsorship' ? 'Unpaid Sponsorship' : 'Unaccounted Sponsorship';
+          const entryNote = item.sponsor_note ? `${cat}: ${item.sponsor_note}` : cat;
+          const ledgerEntryId = item.ledger_entry_id || `spon_debt_${item.id}`;
+          item.ledger_entry_id = ledgerEntryId;
+
+          const row = {
+            id: ledgerEntryId,
+            manifest_key: item.manifest_key,
+            date: item.date,
+            service: item.service,
+            passenger_name: item.passenger_name,
+            stop: item.stop || '',
+            structure: item.structure || '',
+            vehicle_name: item.vehicle_name,
+            submitted_by: item.rep_name,
+            rep_name: item.rep_name,
+            license_plate: '',
+            sponsored: true,
+            sponsor_note: entryNote,
+            structure_debt: CANCELLATION_FEE,
+            general_notes: entryNote,
+            submitted_at: new Date().toISOString(),
+          };
+
+          await supabase.from(LEDGER_TABLE).upsert(row, { onConflict: 'id' });
+        } else if (status === 'actually_sponsored' || status === 'pending') {
+          // If marked actually sponsored or reverted to pending, remove debt row if any
+          if (item.ledger_entry_id) {
+            await supabase.from(LEDGER_TABLE).delete().eq('id', item.ledger_entry_id);
+            item.ledger_entry_id = null;
+          }
+          await supabase.from(LEDGER_TABLE).delete().eq('id', `spon_debt_${item.id}`);
+        }
+
         localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(list));
 
-        // If unpaid or unaccounted, ensure added to local ledger table
-        if (status === 'unpaid_sponsorship' || status === 'unaccounted_sponsorship') {
-          const item = list[idx];
-          const cat = status === 'unpaid_sponsorship' ? 'Unpaid Sponsorship' : 'Unaccounted Sponsorship';
-          await insertAbsentees([
-            {
-              id: item.id,
-              fullName: item.passenger_name,
-              structure: item.structure,
-              stop: item.stop || '',
-              phone: '',
-              present: false,
-              sponsored: true,
-              sponsorNote: item.sponsor_note,
-            },
-          ], item.manifest_key, item.date, item.service, {
-            repName: item.rep_name,
-            vehicleName: item.vehicle_name,
-            generalNotes: `${cat} (${item.sponsor_note || 'Reported sponsor'})`,
-          });
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: list }));
+          window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
         }
+
         return { success: true, sponsorship: list[idx], ledgerUpdated: true };
       }
     }
-  } catch {
-    /* ignore */
+  } catch (err) {
+    console.error('[Ledger] verifySponsorshipStatus error:', err);
   }
 
   return { success: false };

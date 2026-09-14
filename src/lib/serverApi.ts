@@ -342,29 +342,44 @@ export async function verifySponsorshipOnServer(
   }
 }
 
-// Server-Sent Events (SSE) live connection
+// Server-Sent Events (SSE) live connection with local event sync
 export function connectSyncEvents(
-  onManifestUpdate: (data: { key: string; manifest?: Manifest }) => void,
+  onManifestUpdate?: (data: { key: string; manifest?: Manifest }) => void,
   onLedgerUpdate?: () => void,
   onDraftDelta?: (data: { key: string; vehicleId: string; draftState: VehicleDraftState }) => void,
   onSponsorshipsUpdate?: () => void
 ): () => void {
-  if (typeof window === 'undefined' || !window.EventSource) {
+  if (typeof window === 'undefined') {
     return () => {};
   }
 
   let es: EventSource | null = null;
   let isClosed = false;
 
+  // Local window and cross-tab storage listeners for instant updates
+  const handleSponsorshipsEvent = () => onSponsorshipsUpdate?.();
+  const handleLedgerEvent = () => onLedgerUpdate?.();
+  const handleStorageEvent = (e: StorageEvent) => {
+    if (e.key === 'crc_sponsorship_audits') {
+      onSponsorshipsUpdate?.();
+    } else if (e.key?.includes('cancellation_ledger')) {
+      onLedgerUpdate?.();
+    }
+  };
+
+  window.addEventListener('crc_sponsorships_updated', handleSponsorshipsEvent);
+  window.addEventListener('crc_ledger_updated', handleLedgerEvent);
+  window.addEventListener('storage', handleStorageEvent);
+
   function connect() {
-    if (isClosed) return;
+    if (isClosed || !window.EventSource) return;
     try {
       es = new EventSource('/api/sync/events');
 
       es.addEventListener('manifest_updated', (e) => {
         try {
           const data = JSON.parse(e.data);
-          onManifestUpdate(data);
+          onManifestUpdate?.(data);
         } catch {
           /* ignore parse error */
         }
@@ -405,5 +420,8 @@ export function connectSyncEvents(
   return () => {
     isClosed = true;
     es?.close();
+    window.removeEventListener('crc_sponsorships_updated', handleSponsorshipsEvent);
+    window.removeEventListener('crc_ledger_updated', handleLedgerEvent);
+    window.removeEventListener('storage', handleStorageEvent);
   };
 }
