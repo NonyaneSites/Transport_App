@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { X, Bus, Car, Save, Trash2, AlertCircle } from 'lucide-react';
 import type { Vehicle } from '@/lib/types';
-import { saveFleetVehicle } from '@/lib/fleet';
 
 interface EditVehicleModalProps {
   vehicle: Vehicle;
@@ -21,7 +20,6 @@ export function EditVehicleModal({ vehicle, onSave, onClose, onDelete }: EditVeh
   );
   const [repName, setRepName] = useState(vehicle.repName || '');
   const [generalNotes, setGeneralNotes] = useState(vehicle.generalNotes || '');
-  const [saveToFleet, setSaveToFleet] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -30,33 +28,16 @@ export function EditVehicleModal({ vehicle, onSave, onClose, onDelete }: EditVeh
     if (!cleanName) return;
 
     const parsedCap = parseInt(capacity, 10);
-    const validCap = !isNaN(parsedCap) && parsedCap > 0 ? parsedCap : (type === 'Taxi' ? 15 : 60);
-
     const updates: Partial<Vehicle> = {
       name: cleanName,
       type,
       licensePlate: licensePlate.trim() || undefined,
       driverName: driverName.trim() || undefined,
       driverPhone: driverPhone.trim() || undefined,
-      capacity: validCap,
+      capacity: !isNaN(parsedCap) && parsedCap > 0 ? parsedCap : (type === 'Taxi' ? 15 : 60),
       repName: repName.trim() || undefined,
       generalNotes: generalNotes.trim() || undefined,
     };
-
-    if (saveToFleet) {
-      saveFleetVehicle({
-        id: vehicle.fleetVehicleId,
-        name: cleanName,
-        type,
-        capacity: validCap,
-        license_plate: licensePlate.trim() || undefined,
-        driver_name: driverName.trim() || undefined,
-        driver_phone: driverPhone.trim() || undefined,
-        default_rep: repName.trim() || undefined,
-        notes: generalNotes.trim() || undefined,
-        is_active: true,
-      }).catch((err) => console.warn('Failed to save to fleet:', err));
-    }
 
     onSave(vehicle.id, updates);
     onClose();
@@ -227,23 +208,6 @@ export function EditVehicleModal({ vehicle, onSave, onClose, onDelete }: EditVeh
               placeholder="Instructions for driver or passengers..."
               className="input-field w-full text-xs"
             />
-          </div>
-
-          {/* Sync to Master Fleet Checkbox */}
-          <div className="rounded-xl border border-accent/30 bg-accent/5 p-3 flex items-center gap-2.5">
-            <input
-              type="checkbox"
-              id="saveToFleetCheckbox"
-              checked={saveToFleet}
-              onChange={(e) => setSaveToFleet(e.target.checked)}
-              className="h-4 w-4 rounded border-line text-accent focus:ring-accent accent-accent cursor-pointer"
-            />
-            <label htmlFor="saveToFleetCheckbox" className="text-xs text-ink cursor-pointer select-none">
-              <span className="font-semibold text-accent">Save/Update in Master Fleet Table</span>
-              <span className="block text-[11px] text-muted">
-                Stores this vehicle name, capacity, driver, plate & rep permanently in Supabase for reuse across dates.
-              </span>
-            </label>
           </div>
 
           {/* Actions & Delete Confirmation */}

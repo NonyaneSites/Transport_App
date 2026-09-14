@@ -129,22 +129,6 @@ export interface VehicleDraftState {
   updatedBy?: string;
 }
 
-export interface FleetVehicle {
-  id: string;
-  name: string;
-  type: 'Bus' | 'Taxi';
-  capacity: number;
-  license_plate?: string;
-  driver_name?: string;
-  driver_phone?: string;
-  default_rep?: string;
-  default_stop?: string;
-  notes?: string;
-  is_active: boolean;
-  created_at?: string;
-  updated_at?: string;
-}
-
 export interface Vehicle {
   id: string;
   name: string;
@@ -161,10 +145,6 @@ export interface Vehicle {
   submittedAt?: string;
   submittedBy?: string;
   licensePlate?: string;
-  driverName?: string;
-  driverPhone?: string;
-  capacity?: number;
-  fleetVehicleId?: string;
   repName?: string;
   coReps?: string[];
   generalNotes?: string;

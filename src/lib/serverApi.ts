@@ -347,8 +347,7 @@ export function connectSyncEvents(
   onManifestUpdate?: (data: { key: string; manifest?: Manifest }) => void,
   onLedgerUpdate?: () => void,
   onDraftDelta?: (data: { key: string; vehicleId: string; draftState: VehicleDraftState }) => void,
-  onSponsorshipsUpdate?: () => void,
-  onFleetUpdate?: () => void
+  onSponsorshipsUpdate?: () => void
 ): () => void {
   if (typeof window === 'undefined') {
     return () => {};
@@ -360,20 +359,16 @@ export function connectSyncEvents(
   // Local window and cross-tab storage listeners for instant updates
   const handleSponsorshipsEvent = () => onSponsorshipsUpdate?.();
   const handleLedgerEvent = () => onLedgerUpdate?.();
-  const handleFleetEvent = () => onFleetUpdate?.();
   const handleStorageEvent = (e: StorageEvent) => {
     if (e.key === 'crc_sponsorship_audits') {
       onSponsorshipsUpdate?.();
     } else if (e.key?.includes('cancellation_ledger')) {
       onLedgerUpdate?.();
-    } else if (e.key?.includes('fleet_vehicles')) {
-      onFleetUpdate?.();
     }
   };
 
   window.addEventListener('crc_sponsorships_updated', handleSponsorshipsEvent);
   window.addEventListener('crc_ledger_updated', handleLedgerEvent);
-  window.addEventListener('crc_fleet_updated', handleFleetEvent);
   window.addEventListener('storage', handleStorageEvent);
 
   function connect() {
@@ -396,10 +391,6 @@ export function connectSyncEvents(
 
       es.addEventListener('sponsorships_updated', () => {
         onSponsorshipsUpdate?.();
-      });
-
-      es.addEventListener('fleet_updated', () => {
-        onFleetUpdate?.();
       });
 
       es.addEventListener('vehicle_draft_delta', (e) => {
@@ -431,7 +422,6 @@ export function connectSyncEvents(
     es?.close();
     window.removeEventListener('crc_sponsorships_updated', handleSponsorshipsEvent);
     window.removeEventListener('crc_ledger_updated', handleLedgerEvent);
-    window.removeEventListener('crc_fleet_updated', handleFleetEvent);
     window.removeEventListener('storage', handleStorageEvent);
   };
 }
