@@ -135,7 +135,16 @@ export function extractVehicleStats(
   const cancellationListStr = joinPassengerStats(absentRiders);
 
   // R40 per present passenger (Buses free or 0 fare)
-  const fareCollected = (vehicle?.type || 'Taxi') === 'Bus' ? 0 : presentRiders.length * 40;
+  const draftCash = vehicle?.draftState?.cashCollected;
+  const actualCashTotal = draftCash
+    ? (Number(draftCash.base) || 0) + (Number(draftCash.external) || 0) + (Number(draftCash.pastCancellations) || 0)
+    : undefined;
+
+  // R40 per present passenger for Taxis. Buses previously always showed 0
+  const fareCollected =
+    (vehicle?.type || 'Taxi') === 'Bus'
+      ? (actualCashTotal ?? 0)
+      : presentRiders.length * 40;
 
   return {
     vehicleId: vehicle?.id || '',
