@@ -205,3 +205,18 @@ export async function syncVehicleStatsToGoogleSheet(
 export function isGoogleSheetsSyncConfigured(): boolean {
   return isConfigured();
 }
+
+/**
+ * Formats a yyyy-mm-dd date as "23 August 2026" — matching the plain-text
+ * style already used in the "Date" column of the live Google Sheet (no
+ * weekday, no leading zero), so new rows look identical to existing ones.
+ */
+export function sheetDateLabel(yyyyMmDd?: string | null): string {
+  if (!yyyyMmDd || typeof yyyyMmDd !== 'string') return '—';
+  const trimmed = yyyyMmDd.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  const [year, month, day] = trimmed.split('-').map(Number);
+  const d = new Date(year, month - 1, day);
+  if (isNaN(d.getTime())) return trimmed;
+  return d.toLocaleDateString('en-ZA', { day: 'numeric', month: 'long', year: 'numeric' });
+}
