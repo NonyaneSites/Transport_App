@@ -113,6 +113,43 @@ export function structureSortComparator(a: string, b: string): number {
   return naturalCompare(aNorm, bNorm);
 }
 
+/**
+ * Cleans slug-like or corrupted names such as "Passenger bonolo-ngejane-dfc-bus-stop"
+ * into a proper title-cased name like "Bonolo Ngejane".
+ */
+export function sanitizePassengerDisplayName(rawName: string | null | undefined): string {
+  if (!rawName) return '';
+  let name = rawName.trim();
+
+  // Strip accidental "Passenger " prefix
+  if (/^passenger\s+/i.test(name)) {
+    name = name.replace(/^passenger\s+/i, '').trim();
+  }
+
+  // If it's a hyphenated slug (e.g. "bonolo-ngejane-dfc-bus-stop")
+  if (/^[a-z0-9]+(-[a-z0-9]+)+$/i.test(name)) {
+    const stopSlugs = [
+      '-dfc-bus-stop', '-dfc', '-sunnyside', '-amic-deck', '-david-webster',
+      '-barnato', '-midrand', '-braamfontein', '-auckland-park', '-kingsway',
+      '-bunting-road', '-soweto', '-park-station', '-parktown'
+    ];
+    let cleanedSlug = name;
+    for (const slug of stopSlugs) {
+      if (cleanedSlug.toLowerCase().endsWith(slug)) {
+        cleanedSlug = cleanedSlug.slice(0, -slug.length);
+        break;
+      }
+    }
+    name = cleanedSlug
+      .split('-')
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+      .join(' ');
+  }
+
+  return name;
+}
+
 export const BANK_DETAILS = {
   accountName: 'CRCY&SJHB',
   bank: 'ABSA',
@@ -490,10 +527,11 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
     }
   }
 
-  // Ensure all structures are normalized to canonical codes (fixing any historical 'sunidentified' or malformed codes)
+  // Ensure all structures are normalized to canonical codes and passenger names are cleanly formatted
   return entries.map((e) => ({
     ...e,
     structure: normalizeStructureCode(e.structure),
+    passenger_name: sanitizePassengerDisplayName(e.passenger_name),
   }));
 }
 
@@ -1577,6 +1615,113 @@ export interface RecordSponsorshipInput {
   sponsorNote?: string;
 }
 
+export interface StructureSponsorshipGroup {
+  structure: string;
+  items: ReportedSponsorship[];
+  pendingCount: number;
+}
+
+/**
+ * Groups sponsorships by structure for clear administrative review.
+ */
+export function groupSponsorshipsByStructure(
+  items: ReportedSponsorship[]
+): StructureSponsorshipGroup[] {
+  const map = new Map<string, ReportedSponsorship[]>();
+
+  for (const item of items) {
+    const struct = normalizeStructureCode(item.structure);
+    if (!map.has(struct)) {
+      map.set(struct, []);
+    }
+    map.get(struct)!.push(item);
+  }
+
+  const groups: StructureSponsorshipGroup[] = [];
+  for (const [structure, groupItems] of map.entries()) {
+    // Sort items within group: pending first, then alphabetically by name
+    groupItems.sort((a, b) => {
+      if (a.status === 'pending' && b.status !== 'pending') return -1;
+      if (a.status !== 'pending' && b.status === 'pending') return 1;
+      return a.passenger_name.localeCompare(b.passenger_name);
+    });
+
+    const pendingCount = groupItems.filter((i) => i.status === 'pending').length;
+    groups.push({
+      structure,
+      items: groupItems,
+      pendingCount,
+    });
+  }
+
+  return groups.sort((a, b) => structureSortComparator(a.structure, b.structure));
+}
+
+/**
+ * Normalizes passenger names, fills in structure/stop details, and merges duplicates
+ * so corrupted slug names like "Passenger bonolo-ngejane-dfc-bus-stop" are purged.
+ */
+export function cleanAndDeduplicateSponsorships(
+  items: ReportedSponsorship[],
+  knownSignups?: Array<{ id: string; fullName: string; stop?: string; structure?: string }>
+): ReportedSponsorship[] {
+  const result: ReportedSponsorship[] = [];
+  const indexMap = new Map<string, number>();
+
+  for (const item of items) {
+    let cleanName = sanitizePassengerDisplayName(item.passenger_name);
+    let structure = normalizeStructureCode(item.structure);
+    let stop = (item.stop || '').trim();
+
+    // Match with known signups to recover structure and proper capitalization
+    if (knownSignups && knownSignups.length > 0) {
+      const match = knownSignups.find((s) => {
+        if (item.passenger_id && s.id.toLowerCase() === item.passenger_id.toLowerCase()) return true;
+        const normSignupName = s.fullName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+        const normItemName = cleanName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+        return normSignupName === normItemName || s.fullName.trim().toLowerCase() === cleanName.toLowerCase();
+      });
+      if (match) {
+        cleanName = match.fullName.trim();
+        if ((!structure || structure === 'No Structure' || structure === 'Unidentified') && match.structure) {
+          structure = normalizeStructureCode(match.structure);
+        }
+        if (!stop && match.stop) {
+          stop = match.stop.trim();
+        }
+      }
+    }
+
+    const dedupKey = `${item.manifest_key || ''}::${cleanName.toLowerCase()}`;
+    if (indexMap.has(dedupKey)) {
+      const existingIdx = indexMap.get(dedupKey)!;
+      const existing = result[existingIdx];
+      result[existingIdx] = {
+        ...existing,
+        passenger_name: cleanName,
+        structure: (existing.structure && existing.structure !== 'No Structure') ? existing.structure : structure,
+        stop: existing.stop || stop,
+        sponsor_note: existing.sponsor_note || item.sponsor_note || '',
+        status: existing.status !== 'pending' ? existing.status : item.status,
+        status_updated_at: existing.status_updated_at || item.status_updated_at,
+        ledger_entry_id: existing.ledger_entry_id || item.ledger_entry_id,
+        vehicle_name: existing.vehicle_name || item.vehicle_name,
+        rep_name: existing.rep_name || item.rep_name,
+      };
+    } else {
+      indexMap.set(dedupKey, result.length);
+      result.push({
+        ...item,
+        passenger_name: cleanName,
+        structure,
+        stop,
+      });
+    }
+  }
+
+  return result;
+}
+
 /**
  * Records reported sponsorships from attendance check-in into the local/central audit store.
  * Re-submitting or updating attendance replaces any previous pending records cleanly.
@@ -1604,12 +1749,12 @@ export async function recordReportedSponsorships(
   // Remove any previously recorded pending sponsorships for this vehicle session
   // belonging to riders on this roster (preserving already-verified ones)
   if (allRiderNames.length > 0) {
-    const normalizedRoster = new Set(allRiderNames.map((n) => n.trim().toLowerCase()));
+    const normalizedRoster = new Set(allRiderNames.map((n) => sanitizePassengerDisplayName(n).toLowerCase()));
     list = list.filter(
       (s) =>
         !(
           s.manifest_key === manifestKey &&
-          normalizedRoster.has((s.passenger_name || '').trim().toLowerCase()) &&
+          normalizedRoster.has(sanitizePassengerDisplayName(s.passenger_name).toLowerCase()) &&
           s.status === 'pending'
         )
     );
@@ -1617,15 +1762,18 @@ export async function recordReportedSponsorships(
 
   const now = new Date().toISOString();
   for (const r of sponsoredRiders) {
-    const normName = (r.fullName || '').trim().toLowerCase();
+    const cleanName = sanitizePassengerDisplayName(r.fullName);
+    if (!cleanName) continue;
+    const normName = cleanName.toLowerCase();
     const existingIndex = list.findIndex(
-      (s) => s.manifest_key === manifestKey && (s.passenger_name || '').trim().toLowerCase() === normName
+      (s) => s.manifest_key === manifestKey && sanitizePassengerDisplayName(s.passenger_name).toLowerCase() === normName
     );
 
     if (existingIndex >= 0) {
       list[existingIndex] = {
         ...list[existingIndex],
-        structure: r.structure || list[existingIndex].structure,
+        passenger_name: cleanName,
+        structure: normalizeStructureCode(r.structure) || list[existingIndex].structure,
         stop: r.stop || list[existingIndex].stop,
         vehicle_name: vehicleName || list[existingIndex].vehicle_name,
         rep_name: repName || list[existingIndex].rep_name,
@@ -1633,16 +1781,16 @@ export async function recordReportedSponsorships(
       };
     } else {
       const cleanKey = manifestKey.replace(/[^a-zA-Z0-9_-]/g, '_');
-      const cleanName = encodeURIComponent(r.fullName).replace(/%/g, '');
-      const id = `spon_${cleanKey}_${r.id || cleanName}_${Date.now()}`;
+      const safeSlug = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '_');
+      const id = `spon_${cleanKey}_${safeSlug}_${Date.now()}`;
       list.push({
         id,
         manifest_key: manifestKey,
         date,
         service: serviceLabel,
         passenger_id: r.id,
-        passenger_name: r.fullName.trim(),
-        structure: (r.structure || '').trim(),
+        passenger_name: cleanName,
+        structure: normalizeStructureCode(r.structure),
         stop: (r.stop || '').trim(),
         vehicle_name: vehicleName,
         rep_name: repName,
@@ -1652,6 +1800,8 @@ export async function recordReportedSponsorships(
       });
     }
   }
+
+  list = cleanAndDeduplicateSponsorships(list);
 
   try {
     localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(list));
@@ -1675,12 +1825,12 @@ export async function withdrawReportedSponsorships(
     const raw = localStorage.getItem(LOCAL_SPONSORSHIPS_KEY);
     if (!raw) return;
     const list = JSON.parse(raw) as ReportedSponsorship[];
-    const normalizedRoster = new Set(riderNames.map((n) => n.trim().toLowerCase()));
+    const normalizedRoster = new Set(riderNames.map((n) => sanitizePassengerDisplayName(n).toLowerCase()));
     const filtered = list.filter(
       (s) =>
         !(
           s.manifest_key === manifestKey &&
-          normalizedRoster.has((s.passenger_name || '').trim().toLowerCase()) &&
+          normalizedRoster.has(sanitizePassengerDisplayName(s.passenger_name).toLowerCase()) &&
           s.status === 'pending'
         )
     );
@@ -1724,30 +1874,44 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
     }
   }
 
+  // Collect all known signups across stored manifests for rich name/structure recovery
+  interface StoredManifest {
+    date: string;
+    signups?: Array<{ id: string; fullName: string; structure?: string; stop?: string; sponsored?: boolean; sponsorNote?: string }>;
+    vehicles?: Array<{
+      id: string;
+      name: string;
+      submitted?: boolean;
+      submittedAt?: string;
+      submittedBy?: string;
+      repName?: string;
+      riders?: string[];
+      draftState?: { sponsoredIds?: string[]; notes?: Record<string, string>; submitted?: boolean };
+    }>;
+  }
+  const manifestsTable = (mockStorage.getTable(MANIFESTS_TABLE) as StoredManifest[]) || [];
+  const allKnownSignups: Array<{ id: string; fullName: string; stop?: string; structure?: string }> = [];
+  for (const m of manifestsTable) {
+    if (Array.isArray(m.signups)) {
+      for (const s of m.signups) {
+        allKnownSignups.push({
+          id: s.id,
+          fullName: s.fullName,
+          stop: s.stop,
+          structure: s.structure,
+        });
+      }
+    }
+  }
+
   // 3. Self-healing harvest: recover any sponsorships from submitted manifests in local storage
   try {
     let harvestedNew = false;
     const existingKeys = new Set(
-      list.map((s) => `${s.manifest_key}::${(s.passenger_name || '').trim().toLowerCase()}`)
+      list.map((s) => `${s.manifest_key}::${sanitizePassengerDisplayName(s.passenger_name).toLowerCase()}`)
     );
 
     // A. Check mockStorage manifests
-    interface StoredManifest {
-      date: string;
-      signups?: Array<{ id: string; fullName: string; structure?: string; stop?: string; sponsored?: boolean; sponsorNote?: string }>;
-      vehicles?: Array<{
-        id: string;
-        name: string;
-        submitted?: boolean;
-        submittedAt?: string;
-        submittedBy?: string;
-        repName?: string;
-        riders?: string[];
-        draftState?: { sponsoredIds?: string[]; notes?: Record<string, string>; submitted?: boolean };
-      }>;
-    }
-
-    const manifestsTable = (mockStorage.getTable(MANIFESTS_TABLE) as StoredManifest[]) || [];
     for (const m of manifestsTable) {
       if (!m.date) continue;
       const parsedDate = m.date.split('_')[0] || m.date;
@@ -1769,20 +1933,23 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
           const isSponsored = p.sponsored || sponsoredIds.has(p.id);
           if (!isSponsored) continue;
 
-          const lookupKey = `${m.date}::${p.fullName.trim().toLowerCase()}`;
+          const cleanName = sanitizePassengerDisplayName(p.fullName);
+          if (!cleanName) continue;
+          const lookupKey = `${m.date}::${cleanName.toLowerCase()}`;
           if (existingKeys.has(lookupKey)) continue;
 
           const sponsorNote = (notes[p.id] || p.sponsorNote || '').trim();
           const cleanKey = m.date.replace(/[^a-zA-Z0-9_-]/g, '_');
-          const id = `spon_${cleanKey}_${p.id || encodeURIComponent(p.fullName).replace(/%/g, '')}_${Date.now()}`;
+          const safeSlug = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '_');
+          const id = `spon_${cleanKey}_${safeSlug}_${Date.now()}`;
           list.push({
             id,
             manifest_key: m.date,
             date: parsedDate,
             service: parsedService,
             passenger_id: p.id,
-            passenger_name: p.fullName.trim(),
-            structure: (p.structure || '').trim(),
+            passenger_name: cleanName,
+            structure: normalizeStructureCode(p.structure),
             stop: (p.stop || '').trim(),
             vehicle_name: v.name || 'Vehicle',
             rep_name: rep,
@@ -1819,22 +1986,30 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
           const rep = draft.repName || 'Transport Rep';
 
           for (const sponId of draft.sponsoredIds) {
-            const p = allSignups.find((s) => s.id === sponId);
-            const fullName = p ? p.fullName : `Passenger ${sponId}`;
-            const lookupKey = `${manifestKey}::${fullName.trim().toLowerCase()}`;
+            let p = allSignups.find((s) => s.id === sponId);
+            if (!p) {
+              for (const otherM of manifestsTable) {
+                p = (otherM.signups || []).find((s) => s.id === sponId);
+                if (p) break;
+              }
+            }
+            const cleanName = p ? p.fullName.trim() : sanitizePassengerDisplayName(sponId);
+            if (!cleanName) continue;
+            const lookupKey = `${manifestKey}::${cleanName.toLowerCase()}`;
             if (existingKeys.has(lookupKey)) continue;
 
             const note = (draft.notes?.[sponId] || p?.sponsorNote || '').trim();
             const cleanKey = manifestKey.replace(/[^a-zA-Z0-9_-]/g, '_');
-            const id = `spon_${cleanKey}_${sponId}_${Date.now()}`;
+            const safeSlug = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '_');
+            const id = `spon_${cleanKey}_${safeSlug}_${Date.now()}`;
             list.push({
               id,
               manifest_key: manifestKey,
               date: parsedDate,
               service: parsedService,
               passenger_id: sponId,
-              passenger_name: fullName,
-              structure: p?.structure || '',
+              passenger_name: cleanName,
+              structure: normalizeStructureCode(p?.structure),
               stop: p?.stop || '',
               vehicle_name: 'Vehicle',
               rep_name: rep,
@@ -1852,6 +2027,7 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
     }
 
     if (harvestedNew) {
+      list = cleanAndDeduplicateSponsorships(list, allKnownSignups);
       try {
         localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(list));
       } catch {
@@ -1860,6 +2036,16 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
     }
   } catch (err) {
     console.warn('[Ledger] Auto-harvest sponsorships error:', err);
+  }
+
+  // Final deduplication & name cleanup pass
+  list = cleanAndDeduplicateSponsorships(list, allKnownSignups);
+
+  // Sync back cleaned list to localStorage
+  try {
+    localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(list));
+  } catch {
+    /* ignore */
   }
 
   return list;

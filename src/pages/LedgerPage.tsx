@@ -12,7 +12,7 @@ import {
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
   recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch,
   updateDebtorWithInstances, normalizeDateToYMD, normalizeStructureCode, structureSortComparator,
-  listReportedSponsorships, verifySponsorshipStatus,
+  listReportedSponsorships, verifySponsorshipStatus, groupSponsorshipsByStructure, sanitizePassengerDisplayName,
   type DebtorInstanceUpdateItem,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
   type ReportedSponsorship, type SponsorshipStatus,
@@ -85,10 +85,18 @@ export function LedgerPage() {
   const [addError, setAddError] = useState<string | null>(null);
   const [addSuccessMessage, setAddSuccessMessage] = useState<string | null>(null);
 
+  // Top Tab State: Cancellations & Debtors vs Reported Sponsorships
+  const [activeTab, setActiveTab] = useState<'cancellations' | 'sponsorships'>(() => {
+    if (typeof window !== 'undefined' && window.location.hash === '#sponsorships') {
+      return 'sponsorships';
+    }
+    return 'cancellations';
+  });
+
   // Reported Sponsorships Audit State
   const [sponsorships, setSponsorships] = useState<ReportedSponsorship[]>([]);
-  const [sponsorshipFilter, setSponsorshipFilter] = useState<'all' | 'pending' | 'actually_sponsored' | 'debt'>('all');
-  const [sponsorshipSectionOpen, setSponsorshipSectionOpen] = useState(true);
+  const [sponsorshipFilter, setSponsorshipFilter] = useState<'pending' | 'actually_sponsored' | 'debt' | 'all'>('pending');
+  const [closedSponsorshipStructures, setClosedSponsorshipStructures] = useState<Set<string>>(new Set());
   const [sponsorshipUpdatingId, setSponsorshipUpdatingId] = useState<string | null>(null);
   const [sponsorshipNotice, setSponsorshipNotice] = useState<{ id: string; text: string; type: 'success' | 'warn' } | null>(null);
 
@@ -98,6 +106,18 @@ export function LedgerPage() {
   const [importResult, setImportResult] = useState<HistoricalImportResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importFileName, setImportFileName] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handleHashChange = () => {
+      if (window.location.hash === '#sponsorships') {
+        setActiveTab('sponsorships');
+      } else {
+        setActiveTab('cancellations');
+      }
+    };
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -148,8 +168,11 @@ export function LedgerPage() {
     entries.forEach((e) => {
       if (e.structure) set.add(normalizeStructureCode(e.structure));
     });
+    sponsorships.forEach((s) => {
+      if (s.structure) set.add(normalizeStructureCode(s.structure));
+    });
     return Array.from(set).sort(structureSortComparator);
-  }, [entries]);
+  }, [entries, sponsorships]);
 
   const filtered = useMemo(() => {
     const q = search.trim();
@@ -185,9 +208,14 @@ export function LedgerPage() {
   }, [sponsorships]);
 
   const filteredSponsorships = useMemo(() => {
-    let list = sponsorships;
+    let list = sponsorships.map((s) => ({
+      ...s,
+      passenger_name: sanitizePassengerDisplayName(s.passenger_name),
+      structure: normalizeStructureCode(s.structure),
+    }));
+
     if (structureFilter) {
-      list = list.filter((s) => normalizeStructureCode(s.structure) === structureFilter);
+      list = list.filter((s) => s.structure === structureFilter);
     }
     if (sponsorshipFilter === 'pending') {
       list = list.filter((s) => s.status === 'pending');
@@ -196,6 +224,7 @@ export function LedgerPage() {
     } else if (sponsorshipFilter === 'debt') {
       list = list.filter((s) => s.status === 'unaccounted_sponsorship' || s.status === 'unpaid_sponsorship');
     }
+
     const q = search.trim().toLowerCase();
     if (q) {
       list = list.filter((s) =>
@@ -203,11 +232,16 @@ export function LedgerPage() {
         s.structure.toLowerCase().includes(q) ||
         s.vehicle_name.toLowerCase().includes(q) ||
         s.sponsor_note.toLowerCase().includes(q) ||
-        s.rep_name.toLowerCase().includes(q)
+        s.rep_name.toLowerCase().includes(q) ||
+        (s.stop || '').toLowerCase().includes(q)
       );
     }
     return list;
   }, [sponsorships, structureFilter, sponsorshipFilter, search]);
+
+  const groupedSponsorships = useMemo(() => {
+    return groupSponsorshipsByStructure(filteredSponsorships);
+  }, [filteredSponsorships]);
 
   // Shared with the download (see aggregateLedgerEntries in lib/ledger) so
   // the web view and the exported "SZ Cancellation List" never drift apart.
@@ -293,6 +327,28 @@ export function LedgerPage() {
 
   function collapseAllStructures() {
     setOpenStructures(new Set());
+  }
+
+  function toggleSponsorshipStructure(s: string) {
+    setClosedSponsorshipStructures((prev) => {
+      const next = new Set(prev);
+      if (next.has(s)) next.delete(s);
+      else next.add(s);
+      return next;
+    });
+  }
+
+  function isSponsorshipStructureOpen(s: string) {
+    if (search.trim()) return true;
+    return !closedSponsorshipStructures.has(s);
+  }
+
+  function expandAllSponsorshipStructures() {
+    setClosedSponsorshipStructures(new Set());
+  }
+
+  function collapseAllSponsorshipStructures() {
+    setClosedSponsorshipStructures(new Set(groupedSponsorships.map((g) => g.structure)));
   }
 
   function openPaymentModal(row: AggregatedLedgerRow) {
@@ -572,7 +628,44 @@ export function LedgerPage() {
   }
 
   async function handleVerifySponsorship(id: string, newStatus: SponsorshipStatus) {
+    const target = sponsorships.find((s) => s.id === id);
+    const rawName = target ? target.passenger_name : 'Passenger';
+    const name = sanitizePassengerDisplayName(rawName);
+    const struct = target ? normalizeStructureCode(target.structure) : 'Structure';
+
+    // Optimistic UI state update: immediately reflect change so it disappears from Pending view!
+    setSponsorships((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, status: newStatus, status_updated_at: new Date().toISOString() } : s))
+    );
     setSponsorshipUpdatingId(id);
+
+    if (newStatus === 'actually_sponsored') {
+      setSponsorshipNotice({
+        id,
+        text: `✓ Confirmed: ${name} was actually sponsored. Cleared from pending queue.`,
+        type: 'success',
+      });
+    } else if (newStatus === 'unpaid_sponsorship') {
+      setSponsorshipNotice({
+        id,
+        text: `Recorded ${name} as Unpaid Sponsorship (R40 debt) on ${struct} ledger.`,
+        type: 'warn',
+      });
+    } else if (newStatus === 'unaccounted_sponsorship') {
+      setSponsorshipNotice({
+        id,
+        text: `Recorded ${name} as Unaccounted Sponsorship (R40 debt) on ${struct} ledger.`,
+        type: 'warn',
+      });
+    } else {
+      setSponsorshipNotice({
+        id,
+        text: `Reset ${name} sponsorship status to Pending Verification.`,
+        type: 'warn',
+      });
+    }
+    setTimeout(() => setSponsorshipNotice(null), 5000);
+
     try {
       const res = await verifySponsorshipStatus(id, newStatus);
       if (res.success) {
@@ -582,35 +675,6 @@ export function LedgerPage() {
         ]);
         setSponsorships(updatedSpon);
         setEntries(updatedLedger);
-
-        const target = updatedSpon.find((s) => s.id === id);
-        const name = target ? target.passenger_name : 'Passenger';
-        if (newStatus === 'actually_sponsored') {
-          setSponsorshipNotice({
-            id,
-            text: `Confirmed: ${name} was actually sponsored. No debt added to ledger.`,
-            type: 'success',
-          });
-        } else if (newStatus === 'unpaid_sponsorship') {
-          setSponsorshipNotice({
-            id,
-            text: `Recorded ${name} as Unpaid Sponsorship (R40 debt) on ${target?.structure || 'structure'} ledger.`,
-            type: 'warn',
-          });
-        } else if (newStatus === 'unaccounted_sponsorship') {
-          setSponsorshipNotice({
-            id,
-            text: `Recorded ${name} as Unaccounted Sponsorship (R40 debt) on ${target?.structure || 'structure'} ledger.`,
-            type: 'warn',
-          });
-        } else {
-          setSponsorshipNotice({
-            id,
-            text: `Reset ${name} sponsorship status to Pending Verification.`,
-            type: 'warn',
-          });
-        }
-        setTimeout(() => setSponsorshipNotice(null), 6000);
       }
     } catch (err) {
       console.error('Failed to verify sponsorship:', err);
@@ -666,6 +730,57 @@ export function LedgerPage() {
           </div>
         </div>
 
+        {/* Top-Level Navigation Tabs */}
+        <div className="mb-4 sm:mb-6 flex items-center border-b border-line gap-1 sm:gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab('cancellations');
+              if (typeof window !== 'undefined') {
+                history.replaceState(null, '', window.location.pathname + window.location.search);
+              }
+            }}
+            className={`flex items-center gap-2 pb-3 px-2 sm:px-3 text-xs sm:text-sm font-bold border-b-2 transition-all ${
+              activeTab === 'cancellations'
+                ? 'border-crimson-500 text-ink'
+                : 'border-transparent text-muted hover:text-ink'
+            }`}
+          >
+            <FileSpreadsheet className="h-4 w-4 shrink-0" />
+            <span>Cancellations & Debtors</span>
+            <span className="rounded-full bg-card-2 border border-line px-2 py-0.5 text-[11px] font-semibold text-muted">
+              {entries.length}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab('sponsorships');
+              if (typeof window !== 'undefined') {
+                history.replaceState(null, '', window.location.pathname + window.location.search + '#sponsorships');
+              }
+            }}
+            className={`flex items-center gap-2 pb-3 px-2 sm:px-3 text-xs sm:text-sm font-bold border-b-2 transition-all ${
+              activeTab === 'sponsorships'
+                ? 'border-amber-500 text-ink'
+                : 'border-transparent text-muted hover:text-ink'
+            }`}
+          >
+            <HeartHandshake className="h-4 w-4 shrink-0 text-amber-400" />
+            <span>Reported Sponsorships</span>
+            {sponsorshipStats.pending > 0 ? (
+              <span className="rounded-full bg-amber-500/20 border border-amber-500/40 px-2 py-0.5 text-[11px] font-bold text-amber-300 animate-pulse">
+                {sponsorshipStats.pending} pending
+              </span>
+            ) : (
+              <span className="rounded-full bg-card-2 border border-line px-2 py-0.5 text-[11px] font-semibold text-muted">
+                {sponsorshipStats.total}
+              </span>
+            )}
+          </button>
+        </div>
+
         {loading ? (
           <div className="flex flex-col items-center gap-3 py-20">
             <Loader2 className="h-8 w-8 animate-spin text-crimson-400" />
@@ -684,17 +799,56 @@ export function LedgerPage() {
           </div>
         ) : (
           <>
+            {activeTab === 'cancellations' ? (
+          <>
+            {/* Review Queue Prompt if there are pending sponsorships */}
+            {sponsorshipStats.pending > 0 && (
+              <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs text-amber-200 shadow-sm">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <HeartHandshake className="h-4 w-4 text-amber-400 shrink-0" />
+                  <span>
+                    <strong>{sponsorshipStats.pending}</strong> reported sponsorship{sponsorshipStats.pending === 1 ? '' : 's'} waiting for administrative audit.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('sponsorships');
+                    if (typeof window !== 'undefined') {
+                      history.replaceState(null, '', window.location.pathname + window.location.search + '#sponsorships');
+                    }
+                  }}
+                  className="shrink-0 inline-flex items-center gap-1 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-bold text-black hover:bg-amber-400 transition-colors self-start sm:self-auto"
+                >
+                  <span>Review Sponsorships Queue</span>
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+
             {/* Summary + download */}
             <div className="mb-4 sm:mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
                 <SummaryStat label="Total Debts" value={entries.length} />
                 <SummaryStat label="Filtered Debts" value={filtered.length} accent="crimson" />
                 <SummaryStat label="Total Debt" value={`R${totalDebt}`} accent="warning" />
-                <SummaryStat
-                  label="Sponsorships"
-                  value={sponsorships.length > 0 ? `${sponsorshipStats.total} (${sponsorshipStats.pending} pending)` : '0'}
-                  accent={sponsorshipStats.pending > 0 ? 'warning' : 'success'}
-                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('sponsorships');
+                    if (typeof window !== 'undefined') {
+                      history.replaceState(null, '', window.location.pathname + window.location.search + '#sponsorships');
+                    }
+                  }}
+                  className="text-left w-full"
+                  title="Switch to Reported Sponsorships review"
+                >
+                  <SummaryStat
+                    label="Sponsorships"
+                    value={sponsorships.length > 0 ? `${sponsorshipStats.total} (${sponsorshipStats.pending} pending)` : '0'}
+                    accent={sponsorshipStats.pending > 0 ? 'warning' : 'success'}
+                  />
+                </button>
               </div>
 
               {/* Action buttons: prominent Add Debtor, compact touch-friendly exports on phone */}
@@ -891,246 +1045,6 @@ export function LedgerPage() {
                   Collapse All
                 </button>
               </div>
-            </div>
-
-            {/* Reported Sponsorships Verification Section */}
-            <div className="mb-5 rounded-xl border border-amber-500/30 bg-card shadow-sm overflow-hidden">
-              <div
-                className="flex items-center justify-between px-4 py-3 bg-amber-500/10 cursor-pointer select-none transition-colors hover:bg-amber-500/15"
-                onClick={() => setSponsorshipSectionOpen(!sponsorshipSectionOpen)}
-              >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <HeartHandshake className="h-5 w-5 text-amber-400 shrink-0" />
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="text-sm font-bold text-ink">
-                        Reported Sponsorships (Vehicle Attendance)
-                      </h3>
-                      <span className="rounded-full bg-amber-500/20 border border-amber-500/40 px-2 py-0.5 text-[11px] font-bold text-amber-300">
-                        {sponsorships.length} reported
-                      </span>
-                      {sponsorshipStats.pending > 0 && (
-                        <span className="rounded-full bg-crimson-500/20 border border-crimson-500/40 px-2 py-0.5 text-[11px] font-bold text-crimson-300 animate-pulse">
-                          {sponsorshipStats.pending} pending audit
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[11px] text-muted truncate mt-0.5">
-                      Verify if passengers were actually sponsored, or place them onto the ledger as unpaid / unaccounted debt.
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    className="p-1 rounded-md text-muted hover:text-ink hover:bg-card-2 transition-colors"
-                    aria-label="Toggle sponsorships section"
-                  >
-                    {sponsorshipSectionOpen ? (
-                      <ChevronDown className="h-4 w-4" />
-                    ) : (
-                      <ChevronRight className="h-4 w-4" />
-                    )}
-                  </button>
-                </div>
-              </div>
-
-              {sponsorshipSectionOpen && (
-                <div className="p-3 sm:p-4 space-y-3">
-                  {/* Status announcement notice */}
-                  {sponsorshipNotice && (
-                    <div
-                      className={`flex items-center gap-2 rounded-lg p-2.5 text-xs font-semibold animate-in fade-in duration-150 ${
-                        sponsorshipNotice.type === 'success'
-                          ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-300'
-                          : 'bg-amber-500/15 border border-amber-500/30 text-amber-300'
-                      }`}
-                    >
-                      {sponsorshipNotice.type === 'success' ? (
-                        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
-                      ) : (
-                        <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
-                      )}
-                      <span>{sponsorshipNotice.text}</span>
-                    </div>
-                  )}
-
-                  {/* Filter tabs */}
-                  <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs no-scrollbar">
-                    <button
-                      type="button"
-                      onClick={() => setSponsorshipFilter('all')}
-                      className={`shrink-0 rounded-lg px-2.5 py-1 font-semibold transition-all border ${
-                        sponsorshipFilter === 'all'
-                          ? 'bg-ink text-canvas border-ink shadow-xs'
-                          : 'bg-card-2 border-line text-muted hover:text-ink'
-                      }`}
-                    >
-                      All ({sponsorshipStats.total})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSponsorshipFilter('pending')}
-                      className={`shrink-0 rounded-lg px-2.5 py-1 font-semibold transition-all border ${
-                        sponsorshipFilter === 'pending'
-                          ? 'bg-amber-500 text-black border-amber-500 shadow-xs'
-                          : 'bg-card-2 border-line text-muted hover:text-ink'
-                      }`}
-                    >
-                      Pending Check ({sponsorshipStats.pending})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSponsorshipFilter('actually_sponsored')}
-                      className={`shrink-0 rounded-lg px-2.5 py-1 font-semibold transition-all border ${
-                        sponsorshipFilter === 'actually_sponsored'
-                          ? 'bg-emerald-500 text-black border-emerald-500 shadow-xs'
-                          : 'bg-card-2 border-line text-muted hover:text-ink'
-                      }`}
-                    >
-                      Actually Sponsored ({sponsorshipStats.confirmed})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSponsorshipFilter('debt')}
-                      className={`shrink-0 rounded-lg px-2.5 py-1 font-semibold transition-all border ${
-                        sponsorshipFilter === 'debt'
-                          ? 'bg-crimson-500 text-white border-crimson-500 shadow-xs'
-                          : 'bg-card-2 border-line text-muted hover:text-ink'
-                      }`}
-                    >
-                      Added to Ledger ({sponsorshipStats.debt})
-                    </button>
-                  </div>
-
-                  {/* Sponsorship items list */}
-                  {filteredSponsorships.length === 0 ? (
-                    <div className="py-6 text-center text-xs text-muted border border-line/60 rounded-lg bg-card-2/30">
-                      {sponsorships.length === 0
-                        ? 'No sponsored passengers reported in submitted attendance yet.'
-                        : 'No sponsorships match the current search or filter criteria.'}
-                    </div>
-                  ) : (
-                    <div className="divide-y divide-line/60 rounded-lg border border-line/70 bg-card-2/20 overflow-hidden">
-                      {filteredSponsorships.map((s) => {
-                        const isUpdating = sponsorshipUpdatingId === s.id;
-                        return (
-                          <div
-                            key={s.id}
-                            className="p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3 transition-colors hover:bg-card-2/40"
-                          >
-                            {/* Passenger information */}
-                            <div className="space-y-1 min-w-0">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <span className="font-semibold text-sm text-ink">
-                                  <HighlightMatch text={s.passenger_name} query={search} />
-                                </span>
-                                {s.structure && (
-                                  <span className="rounded bg-card-2 border border-line/70 px-1.5 py-0.5 text-[11px] font-mono font-bold text-ink">
-                                    {normalizeStructureCode(s.structure)}
-                                  </span>
-                                )}
-                                {s.stop && (
-                                  <span className="text-[11px] text-muted">
-                                    Stop: {s.stop}
-                                  </span>
-                                )}
-                              </div>
-
-                              <div className="flex items-center gap-2 text-xs text-muted flex-wrap">
-                                <span>{s.date} ({s.service})</span>
-                                <span>•</span>
-                                <span>{s.vehicle_name}</span>
-                                <span>•</span>
-                                <span>Rep: {s.rep_name || 'Transport Rep'}</span>
-                              </div>
-
-                              {s.sponsor_note && (
-                                <div className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/25 bg-amber-500/10 px-2 py-1 text-xs text-amber-200">
-                                  <span className="font-bold text-amber-300">Sponsor Details:</span>
-                                  <span>{s.sponsor_note}</span>
-                                </div>
-                              )}
-                            </div>
-
-                            {/* Drop box & verification actions */}
-                            <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 shrink-0">
-                              <div className="flex flex-col gap-1">
-                                <label
-                                  htmlFor={`spon_drop_${s.id}`}
-                                  className="text-[10px] font-bold uppercase tracking-wider text-muted"
-                                >
-                                  Sponsored (Drop Box)
-                                </label>
-                                <div className="flex items-center gap-2">
-                                  <select
-                                    id={`spon_drop_${s.id}`}
-                                    value={s.status}
-                                    disabled={isUpdating}
-                                    onChange={(e) =>
-                                      handleVerifySponsorship(s.id, e.target.value as SponsorshipStatus)
-                                    }
-                                    className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold border transition-all cursor-pointer ${
-                                      s.status === 'actually_sponsored'
-                                        ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'
-                                        : s.status === 'unpaid_sponsorship'
-                                        ? 'bg-crimson-500/20 border-crimson-500/50 text-crimson-300'
-                                        : s.status === 'unaccounted_sponsorship'
-                                        ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
-                                        : 'bg-card border-amber-500/40 text-amber-200'
-                                    }`}
-                                  >
-                                    <option value="pending" className="bg-card text-ink">
-                                      ⏳ Pending Verification
-                                    </option>
-                                    <option value="actually_sponsored" className="bg-card text-emerald-400 font-semibold">
-                                      ✓ Actually Sponsored (No Action)
-                                    </option>
-                                    <option value="unaccounted_sponsorship" className="bg-card text-amber-400 font-semibold">
-                                      ⚠️ Unaccounted Sponsorship (Add R40 Debt)
-                                    </option>
-                                    <option value="unpaid_sponsorship" className="bg-card text-crimson-400 font-semibold">
-                                      ❌ Unpaid Sponsorship (Add R40 Debt)
-                                    </option>
-                                  </select>
-                                  {isUpdating && (
-                                    <Loader2 className="h-4 w-4 animate-spin text-muted" />
-                                  )}
-                                </div>
-                              </div>
-
-                              {/* State badge indicator */}
-                              <div className="min-w-[170px]">
-                                {s.status === 'actually_sponsored' ? (
-                                  <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
-                                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                                    <span>Actually sponsored</span>
-                                  </div>
-                                ) : s.status === 'unpaid_sponsorship' ? (
-                                  <div className="flex items-center gap-1.5 text-xs font-semibold text-crimson-400">
-                                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                                    <span>In Ledger: Unpaid (R40)</span>
-                                  </div>
-                                ) : s.status === 'unaccounted_sponsorship' ? (
-                                  <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-400">
-                                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                                    <span>In Ledger: Unaccounted (R40)</span>
-                                  </div>
-                                ) : (
-                                  <div className="flex items-center gap-1.5 text-xs text-muted">
-                                    <Clock className="h-3.5 w-3.5 shrink-0 text-amber-400" />
-                                    <span>Awaiting check</span>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
 
             {/* Grouped by structure — strict alphanumeric order (S1, S2, S9, S13) */}
@@ -1521,6 +1435,352 @@ export function LedgerPage() {
                 );
               })}
             </div>
+          </>
+        ) : (
+          /* Reported Sponsorships Audit View (Grouped by Structure) */
+          <div className="space-y-4 sm:space-y-6">
+            {/* Sponsorship Summary Stats */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
+              <SummaryStat label="Total Reported" value={sponsorshipStats.total} />
+              <SummaryStat
+                label="Pending Audit"
+                value={sponsorshipStats.pending}
+                accent={sponsorshipStats.pending > 0 ? 'warning' : 'neutral'}
+              />
+              <SummaryStat label="Actually Sponsored" value={sponsorshipStats.confirmed} accent="success" />
+              <SummaryStat label="Added to Debt Ledger" value={sponsorshipStats.debt} accent="crimson" />
+            </div>
+
+            {/* Status Announcement Notice */}
+            {sponsorshipNotice && (
+              <div
+                className={`flex items-center gap-2 rounded-xl p-3 text-xs font-semibold animate-in fade-in duration-150 ${
+                  sponsorshipNotice.type === 'success'
+                    ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-300'
+                    : 'bg-amber-500/15 border border-amber-500/30 text-amber-300'
+                }`}
+              >
+                {sponsorshipNotice.type === 'success' ? (
+                  <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                ) : (
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
+                )}
+                <span>{sponsorshipNotice.text}</span>
+              </div>
+            )}
+
+            {/* Filter Tabs & Search Controls */}
+            <div className="rounded-xl border border-line bg-card p-3 sm:p-4 space-y-3 shadow-xs">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                {/* Status Filter Tabs */}
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs no-scrollbar">
+                  <button
+                    type="button"
+                    onClick={() => setSponsorshipFilter('pending')}
+                    className={`shrink-0 rounded-lg px-3 py-1.5 font-bold transition-all border ${
+                      sponsorshipFilter === 'pending'
+                        ? 'bg-amber-500 text-black border-amber-500 shadow-xs'
+                        : 'bg-card-2 border-line text-muted hover:text-ink'
+                    }`}
+                  >
+                    Pending Review ({sponsorshipStats.pending})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSponsorshipFilter('all')}
+                    className={`shrink-0 rounded-lg px-3 py-1.5 font-bold transition-all border ${
+                      sponsorshipFilter === 'all'
+                        ? 'bg-ink text-canvas border-ink shadow-xs'
+                        : 'bg-card-2 border-line text-muted hover:text-ink'
+                    }`}
+                  >
+                    All ({sponsorshipStats.total})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSponsorshipFilter('actually_sponsored')}
+                    className={`shrink-0 rounded-lg px-3 py-1.5 font-bold transition-all border ${
+                      sponsorshipFilter === 'actually_sponsored'
+                        ? 'bg-emerald-500 text-black border-emerald-500 shadow-xs'
+                        : 'bg-card-2 border-line text-muted hover:text-ink'
+                    }`}
+                  >
+                    Actually Sponsored ({sponsorshipStats.confirmed})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSponsorshipFilter('debt')}
+                    className={`shrink-0 rounded-lg px-3 py-1.5 font-bold transition-all border ${
+                      sponsorshipFilter === 'debt'
+                        ? 'bg-crimson-500 text-white border-crimson-500 shadow-xs'
+                        : 'bg-card-2 border-line text-muted hover:text-ink'
+                    }`}
+                  >
+                    Added to Ledger ({sponsorshipStats.debt})
+                  </button>
+                </div>
+
+                {/* Search Bar */}
+                <div className="relative w-full md:w-72">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted pointer-events-none" />
+                  <input
+                    type="text"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search passenger, rep, stop…"
+                    className="w-full rounded-lg border border-line bg-card-2 pl-9 pr-8 py-1.5 text-xs text-ink placeholder:text-muted focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                  />
+                  {search && (
+                    <button
+                      type="button"
+                      onClick={() => setSearch('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted hover:text-ink"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Expand / Collapse Controls */}
+              <div className="flex items-center justify-between pt-1 border-t border-line/60 text-xs text-muted">
+                <span>
+                  {groupedSponsorships.length} structure{groupedSponsorships.length === 1 ? '' : 's'} · {filteredSponsorships.length} passenger{filteredSponsorships.length === 1 ? '' : 's'}
+                </span>
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                  <button
+                    type="button"
+                    onClick={expandAllSponsorshipStructures}
+                    className="rounded-md border border-line/60 bg-card-2 px-2.5 py-1 text-xs font-medium text-ink hover:bg-card transition-colors"
+                  >
+                    Expand All
+                  </button>
+                  <button
+                    type="button"
+                    onClick={collapseAllSponsorshipStructures}
+                    className="rounded-md border border-line/60 bg-card-2 px-2.5 py-1 text-xs font-medium text-ink hover:bg-card transition-colors"
+                  >
+                    Collapse All
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Grouped by Structure Sponsorship Cards */}
+            {groupedSponsorships.length === 0 ? (
+              <div className="flex flex-col items-center gap-3 rounded-xl border border-line bg-card py-16 text-center">
+                <HeartHandshake className="h-10 w-10 text-line" />
+                <p className="text-sm text-muted font-medium">
+                  {sponsorships.length === 0
+                    ? 'No sponsored passengers reported in submitted attendance yet.'
+                    : 'No reported sponsorships match the current search or filter.'}
+                </p>
+                {sponsorshipFilter !== 'all' && (
+                  <button
+                    type="button"
+                    onClick={() => setSponsorshipFilter('all')}
+                    className="rounded-lg border border-line px-3 py-1.5 text-xs font-bold text-ink hover:bg-card-2 transition-colors"
+                  >
+                    Show All Sponsorships
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-3 sm:space-y-4">
+                {groupedSponsorships.map((group) => {
+                  const isOpen = isSponsorshipStructureOpen(group.structure);
+                  const isSpecial = group.structure === 'No Structure' || group.structure === 'Unidentified';
+                  const structureLabel = isSpecial ? group.structure : `Structure ${group.structure}`;
+
+                  return (
+                    <div
+                      key={group.structure}
+                      className="overflow-hidden rounded-xl sm:rounded-2xl border border-line bg-card shadow-sm"
+                    >
+                      {/* Structure Accordion Header */}
+                      <button
+                        type="button"
+                        onClick={() => toggleSponsorshipStructure(group.structure)}
+                        className="w-full flex items-center justify-between p-3.5 sm:p-4 text-left hover:bg-card-2/60 active:bg-card-2 transition-colors select-none"
+                      >
+                        <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+                          <div className="flex h-7 w-7 sm:h-8 sm:w-8 items-center justify-center rounded-lg bg-amber-500/15 text-amber-400 font-mono font-bold text-xs sm:text-sm shrink-0">
+                            {normalizeStructureCode(group.structure).slice(0, 3)}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h3 className="text-sm sm:text-base font-bold text-ink">
+                                {structureLabel}
+                              </h3>
+                              <span className="rounded-full bg-card-2 border border-line px-2 py-0.5 text-[11px] font-semibold text-muted">
+                                {group.items.length} {group.items.length === 1 ? 'passenger' : 'passengers'}
+                              </span>
+                              {group.pendingCount > 0 && (
+                                <span className="rounded-full bg-amber-500/20 border border-amber-500/40 px-2 py-0.5 text-[11px] font-bold text-amber-300 animate-pulse">
+                                  {group.pendingCount} pending audit
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-3 shrink-0">
+                          <div className="hidden sm:flex items-center gap-2 text-xs text-muted">
+                            {group.actuallySponsoredCount > 0 && (
+                              <span className="text-emerald-400 font-medium">
+                                {group.actuallySponsoredCount} confirmed
+                              </span>
+                            )}
+                            {group.debtCount > 0 && (
+                              <span className="text-crimson-400 font-medium">
+                                {group.debtCount} on ledger
+                              </span>
+                            )}
+                          </div>
+                          <div className="rounded-lg p-1 text-muted hover:text-ink">
+                            {isOpen ? (
+                              <ChevronDown className="h-4 w-4" />
+                            ) : (
+                              <ChevronRight className="h-4 w-4" />
+                            )}
+                          </div>
+                        </div>
+                      </button>
+
+                      {/* Accordion Body: Passenger Items */}
+                      {isOpen && (
+                        <div className="border-t border-line/70 divide-y divide-line/60 bg-card-2/20">
+                          {group.items.map((s) => {
+                            const isUpdating = sponsorshipUpdatingId === s.id;
+                            const cleanName = sanitizePassengerDisplayName(s.passenger_name);
+
+                            return (
+                              <div
+                                key={s.id}
+                                className="p-3.5 sm:p-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 transition-colors hover:bg-card-2/40"
+                              >
+                                {/* Passenger Information */}
+                                <div className="space-y-1.5 min-w-0">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="font-bold text-sm sm:text-base text-ink">
+                                      <HighlightMatch text={cleanName} query={search} />
+                                    </span>
+                                    {s.structure && (
+                                      <span className="rounded bg-card-2 border border-line/70 px-1.5 py-0.5 text-[11px] font-mono font-bold text-ink">
+                                        {normalizeStructureCode(s.structure)}
+                                      </span>
+                                    )}
+                                    {s.service && (
+                                      <span className="rounded bg-card-2 border border-line/60 px-1.5 py-0.5 text-[10px] font-bold text-muted uppercase">
+                                        {s.service}
+                                      </span>
+                                    )}
+                                    {s.stop && (
+                                      <span className="text-xs text-muted">
+                                        Stop: <strong className="text-ink font-medium">{s.stop}</strong>
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div className="flex items-center gap-2 text-xs text-muted flex-wrap">
+                                    <span>Date: {s.date}</span>
+                                    <span>•</span>
+                                    <span>Vehicle: {s.vehicle_name}</span>
+                                    <span>•</span>
+                                    <span>Reported by: {s.rep_name || 'Transport Rep'}</span>
+                                  </div>
+
+                                  {s.sponsor_note && (
+                                    <div className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-1 text-xs text-amber-200 mt-0.5">
+                                      <span className="font-bold text-amber-300">Sponsor Note:</span>
+                                      <span>{s.sponsor_note}</span>
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Verification Drop Box Controls */}
+                                <div className="flex flex-col sm:flex-row sm:items-center gap-2.5 sm:gap-3 shrink-0 pt-2 lg:pt-0 border-t lg:border-t-0 border-line/40">
+                                  <div className="flex flex-col gap-1">
+                                    <label
+                                      htmlFor={`group_spon_${s.id}`}
+                                      className="text-[10px] font-bold uppercase tracking-wider text-muted"
+                                    >
+                                      Sponsorship Action (Drop Box)
+                                    </label>
+                                    <div className="flex items-center gap-2">
+                                      <select
+                                        id={`group_spon_${s.id}`}
+                                        value={s.status}
+                                        disabled={isUpdating}
+                                        onChange={(e) =>
+                                          handleVerifySponsorship(s.id, e.target.value as SponsorshipStatus)
+                                        }
+                                        className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold border transition-all cursor-pointer ${
+                                          s.status === 'actually_sponsored'
+                                            ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'
+                                            : s.status === 'unpaid_sponsorship'
+                                            ? 'bg-crimson-500/20 border-crimson-500/50 text-crimson-300'
+                                            : s.status === 'unaccounted_sponsorship'
+                                            ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
+                                            : 'bg-card border-amber-500/40 text-amber-200'
+                                        }`}
+                                      >
+                                        <option value="pending" className="bg-card text-ink">
+                                          ⏳ Pending Verification
+                                        </option>
+                                        <option value="actually_sponsored" className="bg-card text-emerald-400 font-semibold">
+                                          ✓ Actually Sponsored (No Action)
+                                        </option>
+                                        <option value="unaccounted_sponsorship" className="bg-card text-amber-400 font-semibold">
+                                          ⚠️ Unaccounted Sponsorship (Add R40 Debt)
+                                        </option>
+                                        <option value="unpaid_sponsorship" className="bg-card text-crimson-400 font-semibold">
+                                          ❌ Unpaid Sponsorship (Add R40 Debt)
+                                        </option>
+                                      </select>
+                                      {isUpdating && (
+                                        <Loader2 className="h-4 w-4 animate-spin text-muted" />
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {/* Visual Status Indicator */}
+                                  <div className="min-w-[170px]">
+                                    {s.status === 'actually_sponsored' ? (
+                                      <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
+                                        <CheckCircle2 className="h-4 w-4 shrink-0" />
+                                        <span>Actually sponsored</span>
+                                      </div>
+                                    ) : s.status === 'unpaid_sponsorship' ? (
+                                      <div className="flex items-center gap-1.5 text-xs font-semibold text-crimson-400">
+                                        <AlertTriangle className="h-4 w-4 shrink-0" />
+                                        <span>In Ledger: Unpaid (R40)</span>
+                                      </div>
+                                    ) : s.status === 'unaccounted_sponsorship' ? (
+                                      <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-400">
+                                        <AlertTriangle className="h-4 w-4 shrink-0" />
+                                        <span>In Ledger: Unaccounted (R40)</span>
+                                      </div>
+                                    ) : (
+                                      <div className="flex items-center gap-1.5 text-xs text-amber-300 font-medium">
+                                        <Clock className="h-4 w-4 shrink-0 text-amber-400" />
+                                        <span>Awaiting check</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
 
             {/* Payment Modal */}
             {paymentTarget && (

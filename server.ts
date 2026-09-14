@@ -466,9 +466,41 @@ app.post('/api/manifests/:key/draft', (req, res) => {
 // LEDGER API
 // ----------------------------------------------------
 
+// Helper to clean slug/synthetic names like "Passenger bonolo-ngejane-dfc-bus-stop" into "Bonolo Ngejane"
+function sanitizePassengerDisplayName(rawName: string): string {
+  if (!rawName) return '';
+  let name = rawName.trim();
+
+  if (/^passenger\s+/i.test(name)) {
+    name = name.replace(/^passenger\s+/i, '').trim();
+  }
+
+  if (/^[a-z0-9]+(-[a-z0-9]+)+$/i.test(name)) {
+    const stopSlugs = [
+      '-dfc-bus-stop', '-dfc', '-sunnyside', '-amic-deck', '-david-webster',
+      '-barnato', '-midrand', '-braamfontein', '-auckland-park', '-kingsway',
+      '-bunting-road', '-soweto', '-park-station', '-parktown'
+    ];
+    let cleanedSlug = name;
+    for (const slug of stopSlugs) {
+      if (cleanedSlug.toLowerCase().endsWith(slug)) {
+        cleanedSlug = cleanedSlug.slice(0, -slug.length);
+        break;
+      }
+    }
+    name = cleanedSlug
+      .split('-')
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+      .join(' ');
+  }
+
+  return name;
+}
+
 // List reported sponsorships for cancellation admin audit
 app.get('/api/ledger/sponsorships', (req, res) => {
-  const audits = readJsonFile<Array<{
+  let audits = readJsonFile<Array<{
     id: string;
     manifest_key: string;
     date: string;
@@ -513,7 +545,7 @@ app.get('/api/ledger/sponsorships', (req, res) => {
         const signups = m.signups || [];
         for (const s of signups) {
           if (sponIds.has(s.id) || (s.sponsored && v.submitted)) {
-            const cleanName = (s.fullName || '').trim();
+            const cleanName = sanitizePassengerDisplayName(s.fullName || '');
             if (!cleanName) continue;
             const auditId = `sp_${key}_${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
             const exists = audits.some((a) => a.id === auditId || (a.manifest_key === key && a.passenger_name.toLowerCase() === cleanName.toLowerCase()));
@@ -545,6 +577,34 @@ app.get('/api/ledger/sponsorships', (req, res) => {
   } catch (err) {
     console.warn('[Server] Manifest scan for sponsorships note:', err);
   }
+
+  // Deduplicate and sanitize any leftover "Passenger <slug>" records
+  const deduped: typeof audits = [];
+  const seenMap = new Map<string, number>();
+  for (const a of audits) {
+    const cleanName = sanitizePassengerDisplayName(a.passenger_name);
+    const key = `${a.manifest_key}::${cleanName.toLowerCase()}`;
+    if (seenMap.has(key)) {
+      const idx = seenMap.get(key)!;
+      deduped[idx] = {
+        ...deduped[idx],
+        passenger_name: cleanName,
+        structure: deduped[idx].structure || a.structure,
+        stop: deduped[idx].stop || a.stop,
+        sponsor_note: deduped[idx].sponsor_note || a.sponsor_note,
+        status: deduped[idx].status !== 'pending' ? deduped[idx].status : a.status,
+      };
+    } else {
+      seenMap.set(key, deduped.length);
+      deduped.push({
+        ...a,
+        passenger_name: cleanName,
+      });
+    }
+  }
+
+  audits = deduped;
+  atomicWriteJson(SPONSORSHIPS_FILE, audits);
 
   // Sort: newest first
   audits.sort((a, b) => (b.submitted_at || '').localeCompare(a.submitted_at || ''));
