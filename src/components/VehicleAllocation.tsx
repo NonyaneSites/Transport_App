@@ -7,7 +7,9 @@ import {
 } from 'lucide-react';
 import { EditVehicleModal } from './EditVehicleModal';
 import { TransferSponsorshipModal } from './TransferSponsorshipModal';
-import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
+import { FleetManagementModal } from './FleetManagementModal';
+import type { Manifest, Passenger, Vehicle, ServiceType, FleetVehicle } from '@/lib/types';
+import { listFleetVehicles } from '@/lib/fleet';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { passengersByStop, passengersByPoolGroup, unassignedPassengers, deleteVehicleFromDb } from '@/lib/manifest';
@@ -306,6 +308,19 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     return [...orderedLabels, ...extraLabels].map((label) => ({ label, riders: groups[label] || [] }));
   }
 
+  // Fleet modal & selector state
+  const [fleetModalOpen, setFleetModalOpen] = useState(false);
+  const [fleetVehicles, setFleetVehicles] = useState<FleetVehicle[]>([]);
+
+  useEffect(() => {
+    listFleetVehicles().then(setFleetVehicles).catch(() => {});
+    const handleFleetUpdate = () => {
+      listFleetVehicles().then(setFleetVehicles).catch(() => {});
+    };
+    window.addEventListener('crc_fleet_updated', handleFleetUpdate);
+    return () => window.removeEventListener('crc_fleet_updated', handleFleetUpdate);
+  }, []);
+
   function addVehicle() {
     if (!newName.trim()) return;
     const vehicle: Vehicle = {
@@ -320,6 +335,32 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       vehicles: sortVehiclesNatural([...prev.vehicles, vehicle]),
     }));
     setNewName('');
+  }
+
+  function addVehicleFromFleet(fleetV: FleetVehicle) {
+    const vehicle: Vehicle = {
+      id: `veh-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: fleetV.name,
+      type: fleetV.type,
+      capacity: fleetV.capacity,
+      licensePlate: fleetV.license_plate,
+      driverName: fleetV.driver_name,
+      driverPhone: fleetV.driver_phone,
+      repName: fleetV.default_rep,
+      fleetVehicleId: fleetV.id,
+      riders: [],
+      orderedStops: fleetV.default_stop ? [fleetV.default_stop] : [],
+    };
+
+    mutateAndSave((prev) => ({
+      ...prev,
+      vehicles: sortVehiclesNatural([...prev.vehicles, vehicle]),
+    }));
+
+    setMoveNotification({
+      text: `Added "${fleetV.name}" (${fleetV.capacity} seats) from Supabase fleet table to this session`,
+      timestamp: Date.now(),
+    });
   }
 
   function removeVehicle(vehicleId: string) {
@@ -1063,34 +1104,96 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
         </div>
       )}
 
-      {/* Add vehicle */}
-      <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-end">
-        <div className="flex-1">
-          <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Vehicle Name</label>
-          <input
-            type="text"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && addVehicle()}
-            placeholder="e.g. Bus 1, Taxi 7"
-            className="input-field"
-          />
-        </div>
-        <div>
-          <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">Type</label>
-          <select
-            value={newType}
-            onChange={(e) => setNewType(e.target.value as 'Bus' | 'Taxi')}
-            className="input-field"
+      {/* Add vehicle / Select from Fleet */}
+      <div className="mb-5 rounded-xl border border-line bg-card p-3.5 sm:p-4">
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-ink">Add Vehicles to Service</span>
+            <span className="badge bg-card-2 text-ink-muted border border-line text-[10px]">
+              Supabase Fleet Connected
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setFleetModalOpen(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg border border-accent/30 bg-accent/10 text-accent hover:bg-accent/20 transition-colors shadow-xs"
           >
-            <option value="Bus" className="bg-card-2">Bus</option>
-            <option value="Taxi" className="bg-card-2">Taxi</option>
-          </select>
+            <Car className="h-3.5 w-3.5" />
+            <span>Manage Master Fleet</span>
+          </button>
         </div>
-        <button onClick={addVehicle} disabled={!newName.trim()} className="btn-crimson">
-          <Plus className="h-4 w-4" />
-          Add Vehicle
-        </button>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pb-3 border-b border-line/60">
+          {/* Option A: Quick-add from registered fleet */}
+          <div>
+            <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-muted">
+              Select Registered Taxi / Bus from Fleet
+            </label>
+            <div className="flex items-center gap-2">
+              <select
+                onChange={(e) => {
+                  const selectedId = e.target.value;
+                  if (!selectedId) return;
+                  const v = fleetVehicles.find((fv) => fv.id === selectedId);
+                  if (v) addVehicleFromFleet(v);
+                  e.target.value = '';
+                }}
+                defaultValue=""
+                className="input-field text-xs flex-1"
+              >
+                <option value="" disabled>
+                  -- Choose from Fleet Table ({fleetVehicles.length} vehicles) --
+                </option>
+                {fleetVehicles.map((fv) => {
+                  const alreadyIn = localManifest.vehicles.some(
+                    (v) => v.name.toLowerCase() === fv.name.toLowerCase() || v.fleetVehicleId === fv.id
+                  );
+                  return (
+                    <option key={fv.id} value={fv.id}>
+                      {fv.type === 'Bus' ? '🚌 ' : '🚕 '}
+                      {fv.name} ({fv.capacity} seats{fv.license_plate ? `, ${fv.license_plate}` : ''})
+                      {alreadyIn ? ' [Already in session]' : ''}
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+          </div>
+
+          {/* Option B: Manual custom vehicle */}
+          <div>
+            <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-muted">
+              Or Create Custom Vehicle
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && addVehicle()}
+                placeholder="e.g. Extra Taxi 9"
+                className="input-field text-xs flex-1"
+              />
+              <select
+                value={newType}
+                onChange={(e) => setNewType(e.target.value as 'Bus' | 'Taxi')}
+                className="input-field text-xs w-24"
+              >
+                <option value="Bus">Bus</option>
+                <option value="Taxi">Taxi</option>
+              </select>
+              <button
+                onClick={addVehicle}
+                disabled={!newName.trim()}
+                className="btn-crimson text-xs py-1.5 px-3 flex items-center gap-1 shrink-0"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>Add</span>
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Unassigned pool overview — raw sub-stop level, regardless of vehicle type */}
@@ -2509,6 +2612,13 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
         currentService={service}
         initialPassenger={transferModalPassenger}
         onSuccess={handleTransferSuccess}
+      />
+
+      {/* Fleet Management Modal */}
+      <FleetManagementModal
+        isOpen={fleetModalOpen}
+        onClose={() => setFleetModalOpen(false)}
+        onSelectVehicleForService={(fv) => addVehicleFromFleet(fv)}
       />
     </div>
   );

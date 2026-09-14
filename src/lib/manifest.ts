@@ -420,6 +420,10 @@ export function vehicleToDbRow(manifestKey: string, v: Vehicle): Record<string, 
     submitted_at: v.submittedAt || null,
     submitted_by: v.submittedBy || null,
     license_plate: v.licensePlate || null,
+    driver_name: v.driverName || null,
+    driver_phone: v.driverPhone || null,
+    capacity: typeof v.capacity === 'number' ? v.capacity : null,
+    fleet_vehicle_id: v.fleetVehicleId || null,
     rep_name: v.repName || null,
     co_reps: Array.isArray(v.coReps) ? v.coReps : null,
     general_notes: v.generalNotes || null,
@@ -446,6 +450,14 @@ export function dbRowToVehicle(row: Record<string, unknown>): Vehicle {
     submittedAt: (row.submitted_at || row.submittedAt) ? String(row.submitted_at || row.submittedAt) : undefined,
     submittedBy: (row.submitted_by || row.submittedBy) ? String(row.submitted_by || row.submittedBy) : undefined,
     licensePlate: (row.license_plate || row.licensePlate) ? String(row.license_plate || row.licensePlate) : undefined,
+    driverName: (row.driver_name || row.driverName) ? String(row.driver_name || row.driverName) : undefined,
+    driverPhone: (row.driver_phone || row.driverPhone) ? String(row.driver_phone || row.driverPhone) : undefined,
+    capacity: typeof row.capacity === 'number'
+      ? row.capacity
+      : typeof row.target_capacity === 'number'
+      ? row.target_capacity
+      : undefined,
+    fleetVehicleId: (row.fleet_vehicle_id || row.fleetVehicleId) ? String(row.fleet_vehicle_id || row.fleetVehicleId) : undefined,
     repName: (row.rep_name || row.repName) ? String(row.rep_name || row.repName) : undefined,
     coReps: Array.isArray(row.co_reps)
       ? (row.co_reps as string[])

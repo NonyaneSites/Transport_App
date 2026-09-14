@@ -2047,6 +2047,26 @@ export function RepPage() {
               )}
             </div>
 
+            {selectedVehicle && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-card-2/40 px-3.5 py-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-ink">{selectedVehicle.name}</span>
+                  <span className="badge bg-card text-muted border border-line text-[10px]">{selectedVehicle.type}</span>
+                  {selectedVehicle.capacity && (
+                    <span className="badge bg-card text-ink font-mono border border-line text-[10px]">
+                      {selectedVehicle.capacity} seats max
+                    </span>
+                  )}
+                </div>
+                {(selectedVehicle.driverName || selectedVehicle.driverPhone) && (
+                  <div className="flex items-center gap-2 text-[11px] text-muted">
+                    {selectedVehicle.driverName && <span>Driver: <strong className="text-ink">{selectedVehicle.driverName}</strong></span>}
+                    {selectedVehicle.driverPhone && <span className="font-mono text-ink">({selectedVehicle.driverPhone})</span>}
+                  </div>
+                )}
+              </div>
+            )}
+
             {selectedVehicle && draftRestored && (
               <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-2.5 text-xs text-success-light animate-fade-in">
                 <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />

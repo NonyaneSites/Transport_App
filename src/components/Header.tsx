@@ -1,8 +1,11 @@
+import React, { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Bus, BookOpen, ShieldCheck } from 'lucide-react';
+import { Bus, BookOpen, ShieldCheck, Car } from 'lucide-react';
+import { FleetManagementModal } from '@/components/FleetManagementModal';
 
 export function Header() {
   const location = useLocation();
+  const [fleetModalOpen, setFleetModalOpen] = useState(false);
 
   const isCurrent = (path: string) => {
     if (path === '/admin') return location.pathname === '/admin' || location.pathname === '/';
@@ -66,8 +69,23 @@ export function Header() {
             <BookOpen className="h-3.5 w-3.5" />
             <span>Ledger</span>
           </Link>
+
+          <button
+            type="button"
+            onClick={() => setFleetModalOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-accent hover:text-ink hover:bg-card/80 transition-all border border-accent/20 hover:border-accent/40"
+            title="Manage Fleet Vehicles (Supabase table: fleet_vehicles)"
+          >
+            <Car className="h-3.5 w-3.5" />
+            <span>Fleet</span>
+          </button>
         </nav>
       </div>
+
+      <FleetManagementModal
+        isOpen={fleetModalOpen}
+        onClose={() => setFleetModalOpen(false)}
+      />
     </header>
   );
 }

@@ -12,12 +12,24 @@ const DATA_DIR = path.join(process.cwd(), 'data');
 const MANIFESTS_DIR = path.join(DATA_DIR, 'manifests');
 const LEDGER_FILE = path.join(DATA_DIR, 'ledger.json');
 const SPONSORSHIPS_FILE = path.join(DATA_DIR, 'sponsorship_audits.json');
+const FLEET_FILE = path.join(DATA_DIR, 'fleet_vehicles.json');
 
 // Ensure directories exist
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(MANIFESTS_DIR)) fs.mkdirSync(MANIFESTS_DIR, { recursive: true });
 if (!fs.existsSync(LEDGER_FILE)) fs.writeFileSync(LEDGER_FILE, JSON.stringify([]), 'utf-8');
 if (!fs.existsSync(SPONSORSHIPS_FILE)) fs.writeFileSync(SPONSORSHIPS_FILE, JSON.stringify([]), 'utf-8');
+if (!fs.existsSync(FLEET_FILE)) {
+  const initialFleet = [
+    { id: 'fleet-1', name: 'Quantum 1', type: 'Taxi', capacity: 15, default_stop: 'Braamfontein', is_active: true },
+    { id: 'fleet-2', name: 'Quantum 2', type: 'Taxi', capacity: 15, default_stop: 'Braamfontein', is_active: true },
+    { id: 'fleet-3', name: 'Quantum 3', type: 'Taxi', capacity: 15, default_stop: 'Braamfontein', is_active: true },
+    { id: 'fleet-4', name: 'Quantum 4', type: 'Taxi', capacity: 15, default_stop: 'Braamfontein', is_active: true },
+    { id: 'fleet-5', name: 'Main Bus 1', type: 'Bus', capacity: 60, default_stop: 'Soweto Hub', is_active: true },
+    { id: 'fleet-6', name: 'Main Bus 2', type: 'Bus', capacity: 60, default_stop: 'Soweto Hub', is_active: true },
+  ];
+  fs.writeFileSync(FLEET_FILE, JSON.stringify(initialFleet, null, 2), 'utf-8');
+}
 
 // Atomic write helper
 function atomicWriteJson(filePath: string, data: unknown): void {
@@ -882,6 +894,60 @@ app.post('/api/ledger/update-debtor', (req, res) => {
   atomicWriteJson(LEDGER_FILE, ledger);
   broadcastSse('ledger_updated', { timestamp: Date.now() });
   res.json({ success: true, count: ledger.length });
+});
+
+// ----------------------------------------------------
+// FLEET VEHICLES API (Taxis & Buses)
+// ----------------------------------------------------
+
+// List all fleet vehicles
+app.get('/api/fleet', (req, res) => {
+  const fleet = readJsonFile<Array<Record<string, unknown>>>(FLEET_FILE, []);
+  res.json(fleet);
+});
+
+// Create or update a fleet vehicle
+app.post('/api/fleet', (req, res) => {
+  const vehicle = req.body;
+  if (!vehicle || !vehicle.name) {
+    res.status(400).json({ error: 'Vehicle name is required' });
+    return;
+  }
+
+  const fleet = readJsonFile<Array<Record<string, unknown>>>(FLEET_FILE, []);
+  const now = new Date().toISOString();
+  const id = vehicle.id || `fleet-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const fullVehicle = {
+    ...vehicle,
+    id,
+    name: String(vehicle.name).trim(),
+    type: vehicle.type === 'Bus' ? 'Bus' : 'Taxi',
+    capacity: typeof vehicle.capacity === 'number' && vehicle.capacity > 0 ? vehicle.capacity : (vehicle.type === 'Bus' ? 60 : 15),
+    is_active: vehicle.is_active !== false,
+    updated_at: now,
+    created_at: vehicle.created_at || now,
+  };
+
+  const existingIdx = fleet.findIndex((v) => String(v.id) === id);
+  if (existingIdx !== -1) {
+    fleet[existingIdx] = fullVehicle;
+  } else {
+    fleet.push(fullVehicle);
+  }
+
+  atomicWriteJson(FLEET_FILE, fleet);
+  broadcastSse('fleet_updated', { vehicle: fullVehicle });
+  res.json({ success: true, vehicle: fullVehicle });
+});
+
+// Delete a fleet vehicle
+app.delete('/api/fleet/:id', (req, res) => {
+  const { id } = req.params;
+  const fleet = readJsonFile<Array<Record<string, unknown>>>(FLEET_FILE, []);
+  const filtered = fleet.filter((v) => String(v.id) !== id);
+  atomicWriteJson(FLEET_FILE, filtered);
+  broadcastSse('fleet_updated', { id, deleted: true });
+  res.json({ success: true, deleted: id });
 });
 
 // ----------------------------------------------------
