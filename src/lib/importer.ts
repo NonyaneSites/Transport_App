@@ -133,6 +133,11 @@ export function sanitizePhone(raw: unknown): string | undefined {
   if (hasPlus) {
     return `+${digitsOnly}`;
   }
+  // If 9 digits starting with 6, 7, or 8 (standard South African mobile numbers
+  // where Excel / SheetJS stripped the leading zero as numeric), restore leading '0'
+  if (digitsOnly.length === 9 && /^[678]/.test(digitsOnly)) {
+    return `0${digitsOnly}`;
+  }
   if (hasLeadingZero && !digitsOnly.startsWith('0')) {
     return `0${digitsOnly}`;
   }
@@ -468,6 +473,18 @@ export function parseGoogleSheetSignups(
         }
       }
 
+      // Homecell Leader detection
+      const rawHomecellLeader = findValue([
+        "Homecell Leader's Name",
+        'Homecell Leader Name',
+        'Homecell Leader',
+        'Leader Name',
+        'Homecell',
+      ]);
+      const homecellLeader = rawHomecellLeader && rawHomecellLeader.trim() && !['N/A', 'Na', 'none', '-'].includes(rawHomecellLeader.trim())
+        ? toTitleCase(rawHomecellLeader.trim())
+        : undefined;
+
       const id = `p-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 6)}`;
 
       return {
@@ -483,6 +500,7 @@ export function parseGoogleSheetSignups(
         category,
         ministry: rawMinistry || (category === 'Ushers' ? 'Usher (Early)' : undefined),
         memberType,
+        homecellLeader,
         assignedTo: null,
         present: false,
         cancellationFeeOwed: false,

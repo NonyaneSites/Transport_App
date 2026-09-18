@@ -11,6 +11,7 @@ export interface Passenger {
   category?: 'Ushers' | 'Serving' | 'Normal';
   ministry?: string;
   memberType?: 'M' | 'V' | 'FTV';
+  homecellLeader?: string;
   assignedTo: string | null;
   present: boolean;
   cancellationFeeOwed: boolean;

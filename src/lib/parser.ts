@@ -309,11 +309,17 @@ function findColumn(headers: string[], patterns: string[]): string | null {
 }
 
 function extractFullName(row: RawRow, headers: string[]): string {
-  const surnameCol = findColumn(headers, ['surname', 'last name', 'lastname', 'family name']);
+  // Avoid picking leader/homecell columns for passenger name
+  const candidateHeaders = headers.filter((h) => {
+    const lh = lower(clean(h));
+    return !lh.includes('leader') && !lh.includes('homecell');
+  });
+
+  const surnameCol = findColumn(candidateHeaders, ['surname', 'last name', 'lastname', 'family name']);
   const surname = surnameCol ? clean(row[surnameCol]) : '';
 
   // Look for first name / name columns (distinct from surname)
-  const nameCol = findColumn(headers, ['name', 'first name', 'firstname', 'name1', 'name 1', 'name2', 'name 2', 'passenger name', 'full name']);
+  const nameCol = findColumn(candidateHeaders, ['name', 'first name', 'firstname', 'name1', 'name 1', 'name2', 'name 2', 'passenger name', 'full name']);
   const name = nameCol ? clean(row[nameCol]) : '';
 
   if (name && surname) {
@@ -329,8 +335,8 @@ function extractFullName(row: RawRow, headers: string[]): string {
   if (name) return toTitleCase(name);
   if (surname) return toTitleCase(surname);
 
-  // Fallback: any column with "name" in it that isn't surname
-  for (const h of headers) {
+  // Fallback: any column with "name" in it that isn't surname or leader
+  for (const h of candidateHeaders) {
     const lh = lower(h);
     if (lh.includes('name') && !lh.includes('surname') && clean(row[h])) {
       return toTitleCase(clean(row[h]));
@@ -481,10 +487,40 @@ function extractPhone(row: RawRow, headers: string[]): string | undefined {
 }
 
 function extractEmail(row: RawRow, headers: string[]): string | undefined {
+  // First pass: look for any email header containing a valid '@' address
+  const emailCols = headers.filter((h) => {
+    const lh = lower(clean(h));
+    return lh.includes('email') || lh.includes('mail');
+  });
+  for (const col of emailCols) {
+    const val = clean(row[col]);
+    if (val && val.includes('@')) {
+      return val.toLowerCase();
+    }
+  }
+
+  // Fallback: standard column pattern match
   const col = findColumn(headers, ['email address', 'email', 'user email', 'mail']);
   if (!col) return undefined;
   const raw = clean(row[col]);
-  return raw ? raw.toLowerCase() : undefined;
+  return raw && raw.includes('@') ? raw.toLowerCase() : undefined;
+}
+
+function extractHomecellLeader(row: RawRow, headers: string[]): string | undefined {
+  const col = findColumn(headers, [
+    "homecell leader's name",
+    "homecell leader name",
+    "homecell leader",
+    "leader's name",
+    "leader name",
+  ]);
+  if (col) {
+    const val = clean(row[col]);
+    if (val && !['N/A', 'Na', 'none', '-', 'Option 1'].includes(val)) {
+      return toTitleCase(val);
+    }
+  }
+  return undefined;
 }
 
 function extractTimestamp(row: RawRow, headers: string[]): string | undefined {
@@ -549,9 +585,10 @@ export function extractRowDate(input: unknown, headers?: string[]): string | nul
   // 1. Handle native Date instances (e.g. from SheetJS cellDates: true)
   if (raw instanceof Date) {
     if (isNaN(raw.getTime())) return null;
-    const y = raw.getFullYear();
-    const m = String(raw.getMonth() + 1).padStart(2, '0');
-    const d = String(raw.getDate()).padStart(2, '0');
+    const isUtcMidnight = raw.getUTCHours() === 0 && raw.getUTCMinutes() === 0 && raw.getUTCSeconds() === 0;
+    const y = isUtcMidnight ? raw.getUTCFullYear() : raw.getFullYear();
+    const m = String((isUtcMidnight ? raw.getUTCMonth() : raw.getMonth()) + 1).padStart(2, '0');
+    const d = String(isUtcMidnight ? raw.getUTCDate() : raw.getDate()).padStart(2, '0');
     return `${y}-${m}-${d}`;
   }
 
@@ -662,10 +699,11 @@ function matchesDate(row: RawRow, headers: string[], selectedDate: string): bool
     'date',
   ]);
   if (!col) return true; // no date column — don't filter by date
-  const raw = clean(row[col]);
-  if (!raw) return true; // empty date value — don't filter
+  const rawVal = row[col];
+  if (rawVal === undefined || rawVal === null) return true; // empty date value — don't filter
+  if (typeof rawVal === 'string' && !rawVal.trim()) return true;
 
-  const parsedDate = extractRowDate(raw);
+  const parsedDate = extractRowDate(rawVal);
   if (parsedDate) {
     // We parsed a real date — only include if it matches the selected service date
     return parsedDate === selectedDate;
@@ -899,6 +937,7 @@ interface RawCandidate {
   category: 'Ushers' | 'Serving' | 'Normal';
   ministry: string;
   memberType?: 'M' | 'V' | 'FTV';
+  homecellLeader?: string;
   id: string;
   sheetName: string;
   rowIndex: number;
@@ -1016,6 +1055,7 @@ function processExtractedCandidates(
         category: c.category,
         ministry: c.ministry,
         memberType: c.memberType,
+        homecellLeader: c.homecellLeader,
         assignedTo: null,
         present: false,
         cancellationFeeOwed: false,
@@ -1071,8 +1111,9 @@ function processExtractedCandidates(
  * Filters out computed/dashboard sheets, trims trailing blank rows,
  * parses unanchored date values, and returns ParseResult with skippedSheets.
  */
-export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResult {
-  const wb = XLSX.read(file, { type: 'array', cellDates: true });
+export function parseWorkbook(file: ArrayBuffer | Uint8Array | string, opts: ParseOptions): ParseResult {
+  const readType = typeof file === 'string' ? 'string' : 'array';
+  const wb = XLSX.read(file, { type: readType, cellDates: true });
   if (!wb.SheetNames || wb.SheetNames.length === 0) {
     return {
       passengers: [],
@@ -1150,6 +1191,7 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
       const hub = hubDisplayName('Taxi', stop);
       const { category, ministry } = extractCategoryAndMinistry(row, headers, sheetName);
       const memberType = extractMemberType(row, headers, structure);
+      const homecellLeader = extractHomecellLeader(row, headers);
       const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
       const wantsTrans = wantsTransport(row, headers);
@@ -1172,6 +1214,7 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
         category,
         ministry,
         memberType,
+        homecellLeader,
         id,
         sheetName,
         rowIndex: totalRows,
@@ -1188,11 +1231,12 @@ export function parseWorkbook(file: ArrayBuffer, opts: ParseOptions): ParseResul
  * allows progress indicators to update smoothly.
  */
 export async function parseWorkbookAsync(
-  file: ArrayBuffer,
+  file: ArrayBuffer | Uint8Array | string,
   opts: ParseOptions,
   onProgress?: ParseProgressCallback
 ): Promise<ParseResult> {
-  const wb = XLSX.read(file, { type: 'array', cellDates: true });
+  const readType = typeof file === 'string' ? 'string' : 'array';
+  const wb = XLSX.read(file, { type: readType, cellDates: true });
   if (!wb.SheetNames || wb.SheetNames.length === 0) {
     return {
       passengers: [],
@@ -1286,6 +1330,7 @@ export async function parseWorkbookAsync(
       const hub = hubDisplayName('Taxi', stop);
       const { category, ministry } = extractCategoryAndMinistry(row, headers, sheetName);
       const memberType = extractMemberType(row, headers, structure);
+      const homecellLeader = extractHomecellLeader(row, headers);
       const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
       const wantsTrans = wantsTransport(row, headers);
@@ -1308,6 +1353,7 @@ export async function parseWorkbookAsync(
         category,
         ministry,
         memberType,
+        homecellLeader,
         id,
         sheetName,
         rowIndex: totalRows,

@@ -289,3 +289,54 @@ test('AM Normal minimum threshold is 14: 13 auto-merges into AM Serving, 14 does
   assert.strictEqual(resNormal14.passengers.length, 14);
   assert.ok(resNormal14.warnings.some((w) => w.includes('✓ 14 AM Normal signups available')));
 });
+
+test('parseWorkbook() accurately parses updated sheets format (CSV & XLSX)', () => {
+  const csvData = [
+    'Timestamp,Email,Service Date,Name,Surname,Phone Number,Area Stops2,Auckland Park Stops,Braamfontein Stops,Doornfontein Stops,CBD/Maboneng/Marshalltown,Fordsburg Stops,Milpark/ Richmond/ Cottesloe Stops,Parktown Stops,Westdene/ Melville Stops,Other stops,Which service are you attending?,Are you serving?,Are you a member or visitor,Homecell Leader\'s Name,Homecell Leader\'s Contact,Zone,Structure,Email Address',
+    '8/19/2026 21:28:03,,23 August 2026,Moses,Mashilo,693084231,Braamfontein Stops,,Apex,,,,,,,,AM Service,No,"Yes, I am a member",Nelly,0821234567,SZ1,S1,thatomashilo789@gmail.com',
+    '8/17/2026 9:38:52,tsiloane941@gmail.com,23 August 2026,Nelly,Tsiloane,718675364,Braamfontein Stops,,Apex,,,,,,,,AM Service,Yes,"Yes, I am a member",Option 1,,SZ1,S1,',
+    '8/16/2026 21:40:43,,23 August 2026,Khensani,Mhlanga,812345678,Auckland Park Stops,APK McDonald\'s,,,,,,,,,AM Service,No,"No, it is my first time visiting",Lindiwe,0831234567,YZ,YA,khensani@gmail.com',
+  ].join('\n');
+
+  // Test 1: Direct CSV string parsing
+  const csvRes = parseWorkbook(csvData, {
+    selectedDate: '2026-08-23',
+    selectedService: 'AM_Serving',
+  });
+
+  assert.strictEqual(csvRes.passengers.length, 3);
+
+  // Moses Mashilo: check name, phone restoration with 0, stop, leader, memberType
+  const moses = csvRes.passengers.find((p) => p.fullName === 'Moses Mashilo');
+  assert.ok(moses, 'Moses Mashilo should be found');
+  assert.strictEqual(moses.phone, '0693084231', '9-digit phone must have leading 0 restored');
+  assert.strictEqual(moses.stop, 'Apex');
+  assert.strictEqual(moses.homecellLeader, 'Nelly');
+  assert.strictEqual(moses.memberType, 'M');
+  assert.strictEqual(moses.userEmail, 'thatomashilo789@gmail.com');
+
+  // Nelly Tsiloane: check serving status, leader filtered (Option 1 filtered out)
+  const nelly = csvRes.passengers.find((p) => p.fullName === 'Nelly Tsiloane');
+  assert.ok(nelly, 'Nelly Tsiloane should be found');
+  assert.strictEqual(nelly.category, 'Serving');
+  assert.strictEqual(nelly.phone, '0718675364');
+  assert.strictEqual(nelly.homecellLeader, undefined, 'Option 1 should be treated as empty leader');
+
+  // Khensani Mhlanga: FTV visitor
+  const khensani = csvRes.passengers.find((p) => p.fullName === 'Khensani Mhlanga');
+  assert.ok(khensani, 'Khensani Mhlanga should be found');
+  assert.strictEqual(khensani.memberType, 'FTV');
+  assert.strictEqual(khensani.homecellLeader, 'Lindiwe');
+
+  // Test 2: XLSX workbook parsing with identical data
+  const wb = XLSX.read(csvData, { type: 'string' });
+  const xlsxBuf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+  const xlsxRes = parseWorkbook(xlsxBuf, {
+    selectedDate: '2026-08-23',
+    selectedService: 'AM_Serving',
+  });
+  assert.strictEqual(xlsxRes.passengers.length, 3);
+  const mosesXlsx = xlsxRes.passengers.find((p) => p.fullName === 'Moses Mashilo');
+  assert.ok(mosesXlsx);
+  assert.strictEqual(mosesXlsx.phone, '0693084231');
+});

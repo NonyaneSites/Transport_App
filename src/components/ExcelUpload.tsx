@@ -97,9 +97,9 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
             </div>
             <div>
               <p className="text-sm font-semibold text-ink">
-                Drop Microsoft Forms export here or click to browse
+                Drop Google Sheets / Excel export here or click to browse
               </p>
-              <p className="mt-0.5 text-xs text-muted">Supports .xlsx, .xls, .csv</p>
+              <p className="mt-0.5 text-xs text-muted">Supports .xlsx, .xls, and .csv files</p>
             </div>
           </div>
         )}
