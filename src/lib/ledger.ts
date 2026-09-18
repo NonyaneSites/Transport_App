@@ -527,12 +527,21 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
     }
   }
 
-  // Ensure all structures are normalized to canonical codes and passenger names are cleanly formatted
-  return entries.map((e) => ({
-    ...e,
-    structure: normalizeStructureCode(e.structure),
-    passenger_name: sanitizePassengerDisplayName(e.passenger_name),
-  }));
+  // Ensure all structures are normalized to canonical codes, passenger names are cleanly formatted,
+  // and exclude any entries whose debt has been reduced to zero
+  return entries
+    .filter((e) => {
+      if (e.structure_debt !== undefined && e.structure_debt !== null) {
+        const d = Number(e.structure_debt);
+        if (Number.isFinite(d) && d <= 0) return false;
+      }
+      return true;
+    })
+    .map((e) => ({
+      ...e,
+      structure: normalizeStructureCode(e.structure),
+      passenger_name: sanitizePassengerDisplayName(e.passenger_name),
+    }));
 }
 
 export async function listLedgerByDate(date: string): Promise<LedgerEntry[]> {
@@ -574,6 +583,11 @@ export async function settleLedgerEntries(ids: string[]): Promise<void> {
 }
 
 export async function updateLedgerEntry(id: string, updates: Partial<LedgerEntry>): Promise<void> {
+  // If the debt for this entry is reduced to zero or less, remove the debt entry
+  if (updates.structure_debt !== undefined && Number(updates.structure_debt) <= 0) {
+    await deleteLedgerEntry(id);
+    return;
+  }
   const { error } = await supabase.from(LEDGER_TABLE).update(updates).eq('id', id);
   if (error) throw error;
 }
@@ -679,6 +693,12 @@ export async function updateDebtorWithInstances(
   const isSponsored = !!updates.isSponsored;
   const noteText = isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '';
 
+  // If the person's debt for a particular date or service was reduced to zero, remove that debt
+  const activeInstances = (updates.instances || []).filter((inst) => {
+    const rawAmt = typeof inst.amount === 'number' ? inst.amount : Number(inst.amount);
+    return Number.isFinite(rawAmt) && rawAmt > 0;
+  });
+
   // Synchronize to server
   try {
     await updateDebtorOnServer({
@@ -688,15 +708,15 @@ export async function updateDebtorWithInstances(
         structure: structCode,
         isSponsored,
         notes: noteText,
-        instances: updates.instances,
+        instances: activeInstances,
       },
     });
   } catch (err) {
     console.debug('[Ledger] Server updateDebtor error:', err);
   }
 
-  // If no instances remain, remove all debtor entries completely
-  if (!updates.instances || updates.instances.length === 0) {
+  // If no instances remain (or all debts were reduced to zero), remove all debtor entries completely
+  if (activeInstances.length === 0) {
     if (existingEntryIds.length > 0) {
       await supabase.from(LEDGER_TABLE).delete().in('id', existingEntryIds);
     }
@@ -715,8 +735,8 @@ export async function updateDebtorWithInstances(
   const updatedIds = new Set<string>();
 
   // Process each instance in the update payload
-  for (const inst of updates.instances) {
-    const validAmount = Number.isFinite(inst.amount) && inst.amount >= 0 ? inst.amount : 40;
+  for (const inst of activeInstances) {
+    const validAmount = typeof inst.amount === 'number' ? inst.amount : Number(inst.amount);
     const validDate = inst.date ? inst.date.trim() : '';
     const validService = inst.service ? inst.service.trim() : 'PM';
 
@@ -841,17 +861,22 @@ export async function updateDebtorDetails(
           debtPool -= rowDebt;
         }
 
-        await supabase
-          .from(LEDGER_TABLE)
-          .update({
-            passenger_name: updates.name ? updates.name.trim() : ent.passenger_name,
-            structure: structCode ?? ent.structure,
-            structure_debt: rowDebt,
-            general_notes: updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '',
-            sponsored: !!updates.isSponsored,
-            sponsor_note: updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '',
-          })
-          .eq('id', ent.id);
+        if (rowDebt <= 0) {
+          // If debt for this date or service is reduced to zero, remove it completely
+          await deleteLedgerEntry(ent.id);
+        } else {
+          await supabase
+            .from(LEDGER_TABLE)
+            .update({
+              passenger_name: updates.name ? updates.name.trim() : ent.passenger_name,
+              structure: structCode ?? ent.structure,
+              structure_debt: rowDebt,
+              general_notes: updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '',
+              sponsored: !!updates.isSponsored,
+              sponsor_note: updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '',
+            })
+            .eq('id', ent.id);
+        }
       }
     }
   } else {
@@ -907,7 +932,11 @@ export async function recordPartialPayment(entryIds: string[], amountPaid: numbe
       // Partial deduction on this entry
       const newDebt = currentDebt - remainingToDeduct;
       remainingToDeduct = 0;
-      await updateLedgerEntry(entry.id, { structure_debt: newDebt });
+      if (newDebt <= 0) {
+        await deleteLedgerEntry(entry.id);
+      } else {
+        await updateLedgerEntry(entry.id, { structure_debt: newDebt });
+      }
     }
   }
 }
@@ -1297,6 +1326,11 @@ export function isEntrySponsorshipOrUnpaid(e: {
 export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedgerGroup[] {
   const byStructure = new Map<string, LedgerEntry[]>();
   for (const e of entries) {
+    // If debt for this entry is 0 or less, exclude it completely
+    if (e.structure_debt !== undefined && e.structure_debt !== null) {
+      const d = Number(e.structure_debt);
+      if (Number.isFinite(d) && d <= 0) continue;
+    }
     const key = normalizeStructureCode(e.structure);
     if (!byStructure.has(key)) byStructure.set(key, []);
     byStructure.get(key)!.push({
@@ -1330,7 +1364,12 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
 
       // Collect distinct service codes
       const serviceCodesSet = new Set<string>();
-      const instances: AggregatedLedgerInstance[] = sorted.map((e) => {
+      const instances: AggregatedLedgerInstance[] = sorted
+        .filter((e) => {
+          const rawD = Number(e.structure_debt);
+          return !Number.isFinite(rawD) || rawD > 0;
+        })
+        .map((e) => {
         const code = extractServiceCode(e.service) || 'PM';
         serviceCodesSet.add(code);
 
@@ -1383,7 +1422,9 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
         isSponsorshipOrUnpaid,
         notes: combinedNotes,
       };
-    }).sort((a, b) => {
+    })
+    .filter((r) => r.amount > 0 && r.instances.length > 0)
+    .sort((a, b) => {
       // Order people with highest debt at the top (descending debt amount)
       if (b.amount !== a.amount) {
         return b.amount - a.amount;

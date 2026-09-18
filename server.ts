@@ -737,8 +737,15 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
 
 // List all ledger entries
 app.get('/api/ledger', (req, res) => {
-  const ledger = readJsonFile(LEDGER_FILE, []);
-  res.json(ledger);
+  const ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+  // If a debt for a particular date or service was reduced to zero, it is removed
+  const activeLedger = ledger.filter((entry) => {
+    if (typeof entry.structure_debt === 'number') {
+      return entry.structure_debt > 0;
+    }
+    return true;
+  });
+  res.json(activeLedger);
 });
 
 // Settle / Delete Ledger Entries
@@ -823,16 +830,21 @@ app.post('/api/ledger/update-debtor', (req, res) => {
   const notes = updates?.notes ? String(updates.notes).trim() : (isSponsored ? 'Unaccounted Sponsorship' : '');
 
   const instances = Array.isArray(updates?.instances) ? updates.instances : [];
+  // If the person's debt for a particular date or service was reduced to zero, remove that debt
+  const activeInstances = instances.filter((inst) => {
+    const amt = typeof inst.amount === 'number' ? inst.amount : Number(inst.amount);
+    return Number.isFinite(amt) && amt > 0;
+  });
 
-  if (instances.length === 0) {
-    // Settle/remove all entries for this debtor
+  if (activeInstances.length === 0) {
+    // Settle/remove all entries for this debtor when debt is reduced to zero
     ledger = ledger.filter((e) => !existingSet.has(e.id));
   } else {
     const template = ledger.find((e) => existingSet.has(e.id)) || {};
     const updatedIds = new Set<string>();
 
-    for (const inst of instances) {
-      const validAmt = typeof inst.amount === 'number' && inst.amount >= 0 ? inst.amount : 40;
+    for (const inst of activeInstances) {
+      const validAmt = typeof inst.amount === 'number' ? inst.amount : Number(inst.amount);
       const validDate = inst.date ? String(inst.date).trim() : '';
       const validService = inst.service ? String(inst.service).trim() : 'PM';
 
@@ -876,6 +888,7 @@ app.post('/api/ledger/update-debtor', (req, res) => {
       }
     }
 
+    // Remove any entries that were reduced to zero or omitted
     ledger = ledger.filter((e) => !existingSet.has(e.id) || updatedIds.has(e.id));
   }
 

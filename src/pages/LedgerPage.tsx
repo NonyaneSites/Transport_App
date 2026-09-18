@@ -371,7 +371,7 @@ export function LedgerPage() {
     setEditNotes(row.notes);
     setEditIsSponsored(row.isSponsorshipOrUnpaid);
     if (row.isSponsorshipOrUnpaid) {
-      const isUnpaid = (row.notes || '').toLowerCase().includes('unpaid') || (row.sponsor_note || '').toLowerCase().includes('unpaid');
+      const isUnpaid = (row.notes || '').toLowerCase().includes('unpaid');
       setEditDebtType(isUnpaid ? 'unpaid_sponsorship' : 'unaccounted_sponsorship');
     } else {
       setEditDebtType('cancellation');
@@ -499,8 +499,14 @@ export function LedgerPage() {
       const defaultNote = editDebtType === 'unpaid_sponsorship' ? 'Unpaid Sponsorship' : 'Unaccounted Sponsorship';
       const finalNotes = isSpon ? (editNotes.trim() || defaultNote) : '';
 
-      if (editInstances.length === 0 || rawDebt === 0) {
-        // If user deleted all date instances or set debt to 0, completely settle/remove debtor
+      // If the person's debt for a particular date or service was reduced to zero, remove that debt instance
+      const nonZeroInstances = editInstances.filter((inst) => {
+        const amt = Number(inst.amount);
+        return Number.isFinite(amt) && amt > 0;
+      });
+
+      if (nonZeroInstances.length === 0 || rawDebt === 0) {
+        // If all date instances were reduced to zero or removed, remove debtor completely
         await updateDebtorWithInstances(editTarget.entryIds, {
           name: editName.trim(),
           structure: targetStructure,
@@ -514,7 +520,7 @@ export function LedgerPage() {
           structure: targetStructure,
           isSponsored: isSpon,
           notes: finalNotes,
-          instances: editInstances,
+          instances: nonZeroInstances,
         });
       }
 
@@ -2473,7 +2479,9 @@ export function LedgerPage() {
                                       step="5"
                                       value={inst.amount}
                                       onChange={(e) => handleUpdateInstanceAmount(idx, e.target.value)}
-                                      className="input-field w-full text-xs py-1.5 pl-6 pr-2 font-mono font-bold text-crimson-400"
+                                      className={`input-field w-full text-xs py-1.5 pl-6 pr-2 font-mono font-bold ${
+                                        inst.amount === 0 ? 'text-amber-400 border-amber-500/40 bg-amber-500/10' : 'text-crimson-400'
+                                      }`}
                                     />
                                   </div>
                                   <button
@@ -2485,6 +2493,11 @@ export function LedgerPage() {
                                     <span>Remove</span>
                                   </button>
                                 </div>
+                                {inst.amount === 0 && (
+                                  <p className="text-[10px] font-semibold text-amber-400">
+                                    Reduced to R0 — this date will be removed when saved.
+                                  </p>
+                                )}
                               </div>
                             ))}
                           </div>
@@ -2529,6 +2542,12 @@ export function LedgerPage() {
                                   </select>
                                 </div>
 
+                                {inst.amount === 0 && (
+                                  <span className="text-[10px] font-semibold text-amber-400 bg-amber-400/10 border border-amber-400/20 px-1.5 py-0.5 rounded whitespace-nowrap">
+                                    R0 (will remove)
+                                  </span>
+                                )}
+
                                 {/* Debt amount for this specific date */}
                                 <div className="w-18 shrink-0 relative">
                                   <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[10px] font-bold text-muted">
@@ -2540,7 +2559,9 @@ export function LedgerPage() {
                                     step="5"
                                     value={inst.amount}
                                     onChange={(e) => handleUpdateInstanceAmount(idx, e.target.value)}
-                                    className="input-field w-full text-xs py-1 pl-4 pr-1 text-right font-mono font-bold text-crimson-400"
+                                    className={`input-field w-full text-xs py-1 pl-4 pr-1 text-right font-mono font-bold ${
+                                      inst.amount === 0 ? 'text-amber-400 border-amber-500/40 bg-amber-500/10' : 'text-crimson-400'
+                                    }`}
                                     title="Fee for this specific cancellation date"
                                   />
                                 </div>
