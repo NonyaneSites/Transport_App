@@ -134,6 +134,7 @@ export function TransferSponsorshipModal({
       isSponsored,
       sponsorNote: sponsorNote.trim() || 'Unaccounted Sponsorship',
       markPresent: passengerToTransfer?.present ?? false,
+      sourceManifest: manifest,
     });
 
     setSubmitting(false);

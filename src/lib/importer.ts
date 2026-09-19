@@ -120,7 +120,7 @@ export function toTitleCase(str: string): string {
  */
 export function sanitizePhone(raw: unknown): string | undefined {
   if (raw === null || raw === undefined) return undefined;
-  const str = String(raw).trim();
+  const str = String(raw).replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E]/g, '').trim();
   if (!str) return undefined;
 
   const hasPlus = str.startsWith('+');
@@ -128,7 +128,7 @@ export function sanitizePhone(raw: unknown): string | undefined {
 
   // Strip all non-digit characters except leading plus
   const digitsOnly = str.replace(/\D/g, '');
-  if (!digitsOnly) return undefined;
+  if (!digitsOnly || digitsOnly.length < 7 || /^0+$/.test(digitsOnly)) return undefined;
 
   if (hasPlus) {
     return `+${digitsOnly}`;

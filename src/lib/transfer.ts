@@ -19,20 +19,19 @@ export function getServicePeriod(service: ServiceType | string): ServicePeriod {
 
 /**
  * Returns all compatible service types for a given service period.
+ * Allows transferring across any configured service for full operational flexibility.
  */
-export function getCompatibleServices(service: ServiceType | string): ServiceType[] {
-  const period = getServicePeriod(service);
-  if (period === 'PM') {
-    return ['PM_Serving', 'PM_Normal'];
-  }
-  return ['AM_Serving', 'AM_Ushers', 'AM_Normal'];
+export function getCompatibleServices(service?: ServiceType | string): ServiceType[] {
+  void service;
+  return ['AM_Serving', 'AM_Ushers', 'AM_Normal', 'PM_Serving', 'PM_Normal'];
 }
 
 /**
- * Checks if two services are in the same time session window.
+ * Checks if two services are compatible for transfer.
+ * Allows transfers across any services.
  */
 export function areServicesTransferCompatible(serviceA: ServiceType | string, serviceB: ServiceType | string): boolean {
-  return getServicePeriod(serviceA) === getServicePeriod(serviceB);
+  return Boolean(serviceA && serviceB);
 }
 
 /**
@@ -322,6 +321,7 @@ export async function transferPassengerAcrossServices(params: {
   isSponsored?: boolean;
   sponsorNote?: string;
   markPresent?: boolean;
+  sourceManifest?: Manifest;
 }): Promise<{ success: boolean; error?: string; passenger?: Passenger }> {
   const {
     date,
@@ -334,16 +334,10 @@ export async function transferPassengerAcrossServices(params: {
     isSponsored,
     sponsorNote,
     markPresent,
+    sourceManifest,
   } = params;
 
-  // Validation: Must be in the same period
-  if (!areServicesTransferCompatible(fromService, toService)) {
-    return {
-      success: false,
-      error: `Transfers are only allowed within the same time window (AM Service: Serving, Ushers, Normal; PM Service: Serving, Normal). Cannot transfer from ${fromService} to ${toService}.`,
-    };
-  }
-
+  const sPassengerId = String(passengerId);
   const fromKey = manifestKey(date, fromService);
   const toKey = manifestKey(date, toService);
   const isUnassigning = toVehicleId === 'unassigned' || !toVehicleId;
@@ -351,10 +345,10 @@ export async function transferPassengerAcrossServices(params: {
   try {
     // Case 1: Same manifest transfer (same service)
     if (fromKey === toKey) {
-      const currentManifest = await loadManifest(toKey);
+      const currentManifest = sourceManifest || (await loadManifest(toKey));
       if (!currentManifest) return { success: false, error: 'Destination manifest not found.' };
 
-      const passenger = currentManifest.signups.find((p) => p.id === passengerId);
+      const passenger = currentManifest.signups.find((p) => String(p.id) === sPassengerId);
       if (!passenger) return { success: false, error: 'Passenger not found in manifest.' };
 
       const targetVehicle = !isUnassigning
@@ -366,7 +360,9 @@ export async function transferPassengerAcrossServices(params: {
 
       const updatedVehicles = currentManifest.vehicles.map((v) => {
         if (!isUnassigning && v.id === toVehicleId) {
-          const nextRiders = v.riders.includes(passenger.id) ? v.riders : [...v.riders, passenger.id];
+          const nextRiders = v.riders.some((id) => String(id) === sPassengerId)
+            ? v.riders
+            : [...v.riders, passenger.id];
           const nextStops = (v.orderedStops || []).includes(stopLabel)
             ? v.orderedStops || []
             : [...(v.orderedStops || []), stopLabel];
@@ -374,14 +370,14 @@ export async function transferPassengerAcrossServices(params: {
           const pIds = curDraft.presentIds || [];
           const willMarkPresent = markPresent ?? passenger.present;
           const nextPIds = willMarkPresent
-            ? (pIds.includes(passenger.id) ? pIds : [...pIds, passenger.id])
+            ? (pIds.some((id) => String(id) === sPassengerId) ? pIds : [...pIds, passenger.id])
             : pIds;
           const nextAIds = willMarkPresent
-            ? (curDraft.absentIds || []).filter((id) => id !== passenger.id)
+            ? (curDraft.absentIds || []).filter((id) => String(id) !== sPassengerId)
             : (curDraft.absentIds || []);
           const sIds = curDraft.sponsoredIds || [];
           const nextSIds = isSponsored || passenger.sponsored
-            ? (sIds.includes(passenger.id) ? sIds : [...sIds, passenger.id])
+            ? (sIds.some((id) => String(id) === sPassengerId) ? sIds : [...sIds, passenger.id])
             : sIds;
           const nextNotes = { ...(curDraft.notes || {}) };
           if (isSponsored || sponsorNote) {
@@ -406,14 +402,18 @@ export async function transferPassengerAcrossServices(params: {
         }
 
         // Remove from other vehicles in the same manifest
-        if (v.riders.includes(passenger.id)) {
-          const nextRiders = v.riders.filter((id) => id !== passenger.id);
+        if (v.riders.some((id) => String(id) === sPassengerId)) {
+          const nextRiders = v.riders.filter((id) => String(id) !== sPassengerId);
           const curDraft = v.draftState;
           const cleanedDraft = curDraft ? {
             ...curDraft,
-            presentIds: curDraft.presentIds?.filter((id) => id !== passenger.id),
-            absentIds: curDraft.absentIds?.filter((id) => id !== passenger.id),
-            sponsoredIds: curDraft.sponsoredIds?.filter((id) => id !== passenger.id),
+            presentIds: curDraft.presentIds?.filter((id) => String(id) !== sPassengerId),
+            absentIds: curDraft.absentIds?.filter((id) => String(id) !== sPassengerId),
+            sponsoredIds: curDraft.sponsoredIds?.filter((id) => String(id) !== sPassengerId),
+            unpaidIds: curDraft.unpaidIds?.filter((id) => String(id) !== sPassengerId),
+            notes: Object.fromEntries(
+              Object.entries(curDraft.notes || {}).filter(([k]) => String(k) !== sPassengerId)
+            ),
           } : undefined;
           return { ...v, riders: nextRiders, draftState: cleanedDraft };
         }
@@ -422,7 +422,7 @@ export async function transferPassengerAcrossServices(params: {
       });
 
       const updatedSignups = currentManifest.signups.map((p) =>
-        p.id === passenger.id
+        String(p.id) === sPassengerId
           ? {
               ...p,
               assignedTo: isUnassigning ? null : toVehicleId,
@@ -439,19 +439,17 @@ export async function transferPassengerAcrossServices(params: {
       };
 
       await upsertManifest(updatedManifest);
-      return { success: true, passenger: updatedSignups.find((p) => p.id === passengerId) };
+      return { success: true, passenger: updatedSignups.find((p) => String(p.id) === sPassengerId) };
     }
 
-    // Case 2: Cross-service transfer (e.g. PM_Serving -> PM_Normal)
-    const [fromManifest, loadedToManifest] = await Promise.all([
-      loadManifest(fromKey),
-      loadManifest(toKey),
-    ]);
+    // Case 2: Cross-service transfer (e.g. PM_Serving -> PM_Normal, or AM -> PM)
+    const fromManifest = sourceManifest || (await loadManifest(fromKey));
+    const loadedToManifest = await loadManifest(toKey);
 
     if (!fromManifest) return { success: false, error: `Source manifest (${fromService}) not found.` };
     const toManifest = loadedToManifest || { date: toKey, signups: [], vehicles: [] };
 
-    const passengerToMove = fromManifest.signups.find((p) => p.id === passengerId);
+    const passengerToMove = fromManifest.signups.find((p) => String(p.id) === sPassengerId);
     if (!passengerToMove) {
       return { success: false, error: `Passenger not found in ${fromService}.` };
     }
@@ -465,26 +463,31 @@ export async function transferPassengerAcrossServices(params: {
 
     // 1. Remove from source manifest
     const cleanedSourceVehicles = fromManifest.vehicles.map((v) => {
-      if (v.riders.includes(passengerId)) {
-        const nextRiders = v.riders.filter((id) => id !== passengerId);
+      if (v.riders.some((id) => String(id) === sPassengerId)) {
+        const nextRiders = v.riders.filter((id) => String(id) !== sPassengerId);
         const curDraft = v.draftState;
         const cleanedDraft = curDraft ? {
           ...curDraft,
-          presentIds: curDraft.presentIds?.filter((id) => id !== passengerId),
-          absentIds: curDraft.absentIds?.filter((id) => id !== passengerId),
-          sponsoredIds: curDraft.sponsoredIds?.filter((id) => id !== passengerId),
+          presentIds: curDraft.presentIds?.filter((id) => String(id) !== sPassengerId),
+          absentIds: curDraft.absentIds?.filter((id) => String(id) !== sPassengerId),
+          sponsoredIds: curDraft.sponsoredIds?.filter((id) => String(id) !== sPassengerId),
+          unpaidIds: curDraft.unpaidIds?.filter((id) => String(id) !== sPassengerId),
+          notes: Object.fromEntries(
+            Object.entries(curDraft.notes || {}).filter(([k]) => String(k) !== sPassengerId)
+          ),
         } : undefined;
         return { ...v, riders: nextRiders, draftState: cleanedDraft };
       }
       return v;
     });
 
-    const cleanedSourceSignups = fromManifest.signups.filter((p) => p.id !== passengerId);
+    const cleanedSourceSignups = fromManifest.signups.filter((p) => String(p.id) !== sPassengerId);
 
     const updatedSourceManifest: Manifest = {
       ...fromManifest,
       signups: cleanedSourceSignups,
       vehicles: cleanedSourceVehicles,
+      updated_at: new Date().toISOString(),
     };
 
     // 2. Add to destination manifest
@@ -504,7 +507,7 @@ export async function transferPassengerAcrossServices(params: {
 
     const updatedDestVehicles = toManifest.vehicles.map((v) => {
       if (!isUnassigning && v.id === toVehicleId) {
-        const nextRiders = v.riders.includes(destinationPassenger.id)
+        const nextRiders = v.riders.some((id) => String(id) === sPassengerId)
           ? v.riders
           : [...v.riders, destinationPassenger.id];
         const nextStops = (v.orderedStops || []).includes(stopLabel)
@@ -513,14 +516,14 @@ export async function transferPassengerAcrossServices(params: {
         const curDraft = v.draftState || {};
         const pIds = curDraft.presentIds || [];
         const nextPIds = willMarkPresent
-          ? (pIds.includes(destinationPassenger.id) ? pIds : [...pIds, destinationPassenger.id])
+          ? (pIds.some((id) => String(id) === sPassengerId) ? pIds : [...pIds, destinationPassenger.id])
           : pIds;
         const nextAIds = willMarkPresent
-          ? (curDraft.absentIds || []).filter((id) => id !== destinationPassenger.id)
+          ? (curDraft.absentIds || []).filter((id) => String(id) !== sPassengerId)
           : (curDraft.absentIds || []);
         const sIds = curDraft.sponsoredIds || [];
         const nextSIds = effectiveIsSponsored
-          ? (sIds.includes(destinationPassenger.id) ? sIds : [...sIds, destinationPassenger.id])
+          ? (sIds.some((id) => String(id) === sPassengerId) ? sIds : [...sIds, destinationPassenger.id])
           : sIds;
         const nextNotes = { ...(curDraft.notes || {}) };
         if (effectiveIsSponsored || effectiveSponsorNote) {
@@ -546,7 +549,7 @@ export async function transferPassengerAcrossServices(params: {
       return v;
     });
 
-    const existingSignupIdx = toManifest.signups.findIndex((p) => p.id === destinationPassenger.id);
+    const existingSignupIdx = toManifest.signups.findIndex((p) => String(p.id) === sPassengerId);
     const updatedDestSignups = [...toManifest.signups];
     if (existingSignupIdx >= 0) {
       updatedDestSignups[existingSignupIdx] = destinationPassenger;
@@ -558,6 +561,7 @@ export async function transferPassengerAcrossServices(params: {
       ...toManifest,
       signups: updatedDestSignups,
       vehicles: updatedDestVehicles,
+      updated_at: new Date().toISOString(),
     };
 
     // 3. Save both manifests concurrently

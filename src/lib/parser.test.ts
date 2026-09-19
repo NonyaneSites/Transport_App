@@ -340,3 +340,81 @@ test('parseWorkbook() accurately parses updated sheets format (CSV & XLSX)', () 
   assert.ok(mosesXlsx);
   assert.strictEqual(mosesXlsx.phone, '0693084231');
 });
+
+test('parseWorkbook() accurately parses PM version spreadsheet (CSV and XLSX)', () => {
+  const pmCsv = [
+    `Timestamp,Email,Service Date,Name,Surname,Cellphone,PM Service Type,Ministry,Are you a Member,Zone,SZ1 Structures,SZ2 Structures,YZ Structures,Do you need transport?,Area Stops,Braam Stops,Auckland Park Stops,CBD Stops,Parktown Stops,Midrand Stops,Soweto Stops,JHB North & West Stops,"Terms",Email Address,Homecell Leader's Name,Homecell Leader's Name,Homecell Leader's Name`,
+    `8/19/2026 22:08:22,refentseh514gmail.com,23 August 2026,Refentse,Tlhabudugwane ,0676418606,Serving,Usher,"Yes, I am a member",Zone S1 - Ps Edson,S6,,,Yes,Braam Stops,56 Jorissen,,,,,,,I agree,refentseh514@gmail.com,,,`,
+    `8/19/2026 20:16:44,Obarei09@gmail.com,23 August 2026,Onalerona ,Barei ,0684262985,Normal,,"Yes, I am a member",Zone S1 - Ps Edson,S21,,,Yes,JHB West & North Stops,,,,,,,Florida Lake,I agree,onaleronabareilesejane@gmail.com,,,`,
+    `9/14/2026 16:31:15,,20 September 2026,Nthabiseng,Mosekidi,0766616397,Normal,,"Yes, I am a member",Zone S1 - Ps Edson,S1,,,Yes,CBD Stops,,,Focus 1,,,,,I agree,mosekidin@gmail.com,Tebatso,,`,
+    `9/14/2026 19:10:11,,20 September 2026,Kgalalelo ,Seema,842493929,Normal,,"Yes, I am a member",Zone S2 - Kabelo,,S16,,Yes,Parktown Stops,,,,EOH,,,,I agree,klseema.07@gmail.com,,Matodzi ,`,
+    `9/17/2026 21:08:31,,20 September 2026,Mhlengi,Mdluli,+27 0 71 061 7587,Normal,,I am still a visitor,Zone Y - Ps Edson,,,YZ,Yes,Braam Stops,56 Jorissen,,,,,,,I agree,mhlengimdluli23@gmail.com,,,Gao`
+  ].join('\n');
+
+  // Convert to XLSX buffer
+  const wb = XLSX.read(pmCsv, { type: 'string' });
+  const xlsxBuf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+
+  // 1. PM_Serving on 23 August 2026
+  const resServing = parseWorkbook(xlsxBuf, {
+    selectedDate: '2026-08-23',
+    selectedService: 'PM_Serving',
+  });
+  assert.strictEqual(resServing.passengers.length, 1);
+  const refentse = resServing.passengers[0];
+  assert.ok(refentse);
+  assert.strictEqual(refentse!.fullName, 'Refentse Tlhabudugwane');
+  assert.strictEqual(refentse!.category, 'Serving');
+  assert.strictEqual(refentse!.ministry, 'Usher');
+  assert.strictEqual(refentse!.stop, '56 Jorissen');
+  assert.strictEqual(refentse!.structure, 'S6');
+  assert.strictEqual(refentse!.memberType, 'M');
+
+  // 2. PM_Normal on 23 August 2026
+  const resNormal = parseWorkbook(xlsxBuf, {
+    selectedDate: '2026-08-23',
+    selectedService: 'PM_Normal',
+  });
+  assert.strictEqual(resNormal.passengers.length, 1);
+  const onalerona = resNormal.passengers[0];
+  assert.ok(onalerona);
+  assert.strictEqual(onalerona!.fullName, 'Onalerona Barei');
+  assert.strictEqual(onalerona!.stop, 'Florida Lake');
+  assert.strictEqual(onalerona!.structure, 'S21');
+
+  // 3. PM_Normal on 20 September 2026 — check multiple Homecell Leader columns
+  const resSep = parseWorkbook(xlsxBuf, {
+    selectedDate: '2026-09-20',
+    selectedService: 'PM_Normal',
+  });
+  assert.strictEqual(resSep.passengers.length, 3);
+
+  // Column 1 leader (Tebatso)
+  const nthabiseng = resSep.passengers.find((p) => p.fullName === 'Nthabiseng Mosekidi');
+  assert.ok(nthabiseng);
+  assert.strictEqual(nthabiseng!.homecellLeader, 'Tebatso');
+  assert.strictEqual(nthabiseng!.stop, 'Focus 1');
+  assert.strictEqual(nthabiseng!.structure, 'S1');
+
+  // Column 2 leader (Matodzi) with 9-digit phone restored to 10-digit
+  const kgalalelo = resSep.passengers.find((p) => p.fullName === 'Kgalalelo Seema');
+  assert.ok(kgalalelo);
+  assert.strictEqual(kgalalelo!.homecellLeader, 'Matodzi');
+  assert.strictEqual(kgalalelo!.phone, '0842493929');
+  assert.strictEqual(kgalalelo!.stop, 'EOH');
+  assert.strictEqual(kgalalelo!.structure, 'S16');
+
+  // Column 3 leader (Gao) with visitor status
+  const mhlengi = resSep.passengers.find((p) => p.fullName === 'Mhlengi Mdluli');
+  assert.ok(mhlengi);
+  assert.strictEqual(mhlengi!.homecellLeader, 'Gao');
+  assert.strictEqual(mhlengi!.memberType, 'V');
+  assert.strictEqual(mhlengi!.structure, 'YZ');
+
+  // 4. AM selection on PM sheet should return 0 passengers
+  const resAM = parseWorkbook(xlsxBuf, {
+    selectedDate: '2026-08-23',
+    selectedService: 'AM_Serving',
+  });
+  assert.strictEqual(resAM.passengers.length, 0);
+});

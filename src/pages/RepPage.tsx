@@ -1445,6 +1445,7 @@ export function RepPage() {
           toVehicleId: selectedVehicle.id,
           repName,
           licensePlate,
+          markPresent: true,
         });
 
         if (!res.success) {
@@ -1452,6 +1453,8 @@ export function RepPage() {
           setTimeout(() => setBatchActionMsg(null), 6000);
           return;
         }
+
+        await refresh();
 
         setPresentIds((prev) => new Set(prev).add(transferPrompt.passenger.id));
         setAbsentIds((prev) => {

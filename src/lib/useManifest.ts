@@ -8,6 +8,7 @@ import {
   saveVehicleToDb,
   syncVehiclesToDb,
   dbRowToVehicle,
+  resetManifest,
 } from './manifest';
 import { saveManifestToServer } from './serverApi';
 import type { Manifest, Vehicle, Passenger, VehicleDraftState, LiveSyncAction } from './types';
@@ -717,6 +718,41 @@ export function useManifest(
     setManifest((prev) => mergeIncomingManifest(prev, merged, activeVehicleIdRef.current));
   }
 
+  async function reset(): Promise<void> {
+    if (!key) return;
+    const emptyManifest: Manifest = {
+      date: key,
+      signups: [],
+      vehicles: [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    // 1. Clear local state immediately
+    manifestRef.current = emptyManifest;
+    setManifest(emptyManifest);
+    setLastSyncedAt(Date.now());
+
+    // 2. Broadcast across browser tabs
+    if (broadcastChannelRef.current) {
+      try {
+        broadcastChannelRef.current.postMessage({ key, manifest: emptyManifest });
+      } catch {
+        // ignore
+      }
+    }
+
+    // 3. Broadcast across connected devices via channel
+    safeChannelSend({
+      type: 'broadcast',
+      event: 'manifest_updated',
+      payload: { date: key, manifest: emptyManifest },
+    });
+
+    // 4. Wipe from backend / DB
+    await resetManifest(key);
+  }
+
   /**
    * Conflict-safe multi-device vehicle draft update:
    * 1. Reads the latest remote manifest from the server to avoid overwriting changes
@@ -1002,6 +1038,7 @@ export function useManifest(
     activeCoReps,
     refresh,
     save,
+    reset,
     updateVehicleDraft,
     appendWalkIn,
     broadcastLiveAction,

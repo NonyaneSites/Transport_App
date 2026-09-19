@@ -507,6 +507,36 @@ function extractEmail(row: RawRow, headers: string[]): string | undefined {
 }
 
 function extractHomecellLeader(row: RawRow, headers: string[]): string | undefined {
+  // Find all candidate headers that represent a leader name (excluding contact/phone columns)
+  const leaderCols = headers.filter((h) => {
+    const lh = lower(clean(h));
+    const isLeader =
+      lh.includes('homecell leader') ||
+      lh.includes('leader name') ||
+      lh.includes("leader's name") ||
+      lh === 'homecell leader' ||
+      lh.startsWith('homecell leader');
+    const isContact =
+      lh.includes('contact') ||
+      lh.includes('phone') ||
+      lh.includes('number') ||
+      lh.includes('cellphone') ||
+      (lh.includes('cell') && !lh.includes('homecell'));
+    return isLeader && !isContact;
+  });
+
+  for (const col of leaderCols) {
+    const val = clean(row[col]);
+    if (
+      val &&
+      !['n/a', 'na', 'none', '-', 'option 1', 'null', 'nil'].includes(lower(val)) &&
+      !/^\+?\d[\d\s-]{6,}$/.test(val)
+    ) {
+      return toTitleCase(val);
+    }
+  }
+
+  // Fallback: standard findColumn pattern match
   const col = findColumn(headers, [
     "homecell leader's name",
     "homecell leader name",
@@ -516,7 +546,11 @@ function extractHomecellLeader(row: RawRow, headers: string[]): string | undefin
   ]);
   if (col) {
     const val = clean(row[col]);
-    if (val && !['N/A', 'Na', 'none', '-', 'Option 1'].includes(val)) {
+    if (
+      val &&
+      !['n/a', 'na', 'none', '-', 'option 1', 'null', 'nil'].includes(lower(val)) &&
+      !/^\+?\d[\d\s-]{6,}$/.test(val)
+    ) {
       return toTitleCase(val);
     }
   }
@@ -732,17 +766,29 @@ export function matchesService(
   }
 
   // Check row service column for AM / PM indicators
-  const serviceCol = findColumn(headers, [
-    'which service are you attending',
-    'service attending',
-    'service',
-    'am service type',
-    'pm service type',
-    'service type',
-    'servicetype',
-  ]);
+  const serviceCol =
+    findColumn(headers, [
+      'am service type',
+      'pm service type',
+      'service type',
+      'servicetype',
+      'which service are you attending',
+      'service attending',
+    ]) ||
+    headers.find((h) => {
+      const lh = lower(clean(h));
+      return (lh === 'service' || lh.startsWith('service ')) && !lh.includes('date');
+    });
 
   if (serviceCol) {
+    const colNameLower = lower(clean(serviceCol));
+    if (colNameLower.includes('pm') && !colNameLower.includes('am') && selectedPeriod === 'AM') {
+      return false;
+    }
+    if (colNameLower.includes('am') && !colNameLower.includes('pm') && selectedPeriod === 'PM') {
+      return false;
+    }
+
     const val = lower(clean(row[serviceCol]));
     if (val) {
       if (

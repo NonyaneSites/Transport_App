@@ -37,7 +37,7 @@ export function AdminPage() {
     }
   });
   const key = manifestKey(date, service);
-  const { manifest, loading, error, save } = useManifest(key);
+  const { manifest, loading, error, save, reset } = useManifest(key);
 
   useEffect(() => {
     try {
@@ -175,16 +175,18 @@ export function AdminPage() {
   }
 
   async function handleReset() {
-    if (resetPwd !== RESET_PASSWORD) {
+    if (resetPwd.trim() !== RESET_PASSWORD) {
       setResetErr(true);
       return;
     }
     setResetting(true);
     try {
-      await save({ date: key, signups: [], vehicles: [] });
+      await reset();
       setResetOpen(false);
       setResetPwd('');
       setResetErr(false);
+    } catch (err) {
+      console.error('Failed to reset manifest:', err);
     } finally {
       setResetting(false);
     }
@@ -627,16 +629,21 @@ export function AdminPage() {
             setTransferSuccessNotice(msg);
             setTimeout(() => setTransferSuccessNotice(null), 6000);
             if (transferredId) {
-              const nextSignups = manifest.signups.filter((p) => p.id !== transferredId);
+              const sTransId = String(transferredId);
+              const nextSignups = manifest.signups.filter((p) => String(p.id) !== sTransId);
               const nextVehicles = manifest.vehicles.map((v) => ({
                 ...v,
-                riders: v.riders.filter((id) => id !== transferredId),
+                riders: v.riders.filter((id) => String(id) !== sTransId),
                 draftState: v.draftState
                   ? {
                       ...v.draftState,
-                      presentIds: v.draftState.presentIds?.filter((id) => id !== transferredId),
-                      absentIds: v.draftState.absentIds?.filter((id) => id !== transferredId),
-                      sponsoredIds: v.draftState.sponsoredIds?.filter((id) => id !== transferredId),
+                      presentIds: v.draftState.presentIds?.filter((id) => String(id) !== sTransId),
+                      absentIds: v.draftState.absentIds?.filter((id) => String(id) !== sTransId),
+                      sponsoredIds: v.draftState.sponsoredIds?.filter((id) => String(id) !== sTransId),
+                      unpaidIds: v.draftState.unpaidIds?.filter((id) => String(id) !== sTransId),
+                      notes: Object.fromEntries(
+                        Object.entries(v.draftState.notes || {}).filter(([k]) => String(k) !== sTransId)
+                      ),
                     }
                   : undefined,
               }));
