@@ -110,65 +110,32 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     }
   }, [manifest]);
 
-  // Flush any pending save on unmount, refresh, or tab exit, and instantly unblock updates when returning
+  // Flush any pending save on unmount, refresh, or tab exit to guarantee zero data loss
   useEffect(() => {
     const handleExitFlush = () => {
-      if (typeof document !== 'undefined' && document.hidden) {
-        if (saveDebounceTimerRef.current || isLocalMutationPendingRef.current) {
-          if (saveDebounceTimerRef.current) {
-            clearTimeout(saveDebounceTimerRef.current);
-            saveDebounceTimerRef.current = null;
-          }
-          isLocalMutationPendingRef.current = false;
-          if (latestManifestRef.current && latestManifestRef.current.date === manifest.date) {
-            try {
-              localStorage.setItem(`crc_admin_manifest_${latestManifestRef.current.date}`, JSON.stringify(latestManifestRef.current));
-            } catch {
-              // localStorage full or disabled
-            }
-            onSave(latestManifestRef.current).catch(() => {});
-          }
-        }
-      } else {
-        // App returning to foreground: unblock pending locks so fresh remote state is adopted immediately
-        isLocalMutationPendingRef.current = false;
-        if (saveDebounceTimerRef.current) {
-          clearTimeout(saveDebounceTimerRef.current);
-          saveDebounceTimerRef.current = null;
-        }
-        setSaving(false);
-        if (manifest && latestManifestRef.current !== manifest) {
-          latestManifestRef.current = manifest;
-          setLocalManifest(manifest);
-        }
-      }
-    };
-
-    const handleFocusResume = () => {
-      isLocalMutationPendingRef.current = false;
       if (saveDebounceTimerRef.current) {
         clearTimeout(saveDebounceTimerRef.current);
         saveDebounceTimerRef.current = null;
-      }
-      setSaving(false);
-      if (manifest && latestManifestRef.current !== manifest) {
-        latestManifestRef.current = manifest;
-        setLocalManifest(manifest);
+        isLocalMutationPendingRef.current = false;
+        if (latestManifestRef.current && latestManifestRef.current.date === manifest.date) {
+          try {
+            localStorage.setItem(`crc_admin_manifest_${latestManifestRef.current.date}`, JSON.stringify(latestManifestRef.current));
+          } catch {
+            // localStorage full or disabled
+          }
+          onSave(latestManifestRef.current).catch(() => {});
+        }
       }
     };
 
     window.addEventListener('beforeunload', handleExitFlush);
     window.addEventListener('pagehide', handleExitFlush);
     document.addEventListener('visibilitychange', handleExitFlush);
-    window.addEventListener('focus', handleFocusResume);
-    window.addEventListener('pageshow', handleFocusResume);
 
     return () => {
       window.removeEventListener('beforeunload', handleExitFlush);
       window.removeEventListener('pagehide', handleExitFlush);
       document.removeEventListener('visibilitychange', handleExitFlush);
-      window.removeEventListener('focus', handleFocusResume);
-      window.removeEventListener('pageshow', handleFocusResume);
       if (saveDebounceTimerRef.current) {
         clearTimeout(saveDebounceTimerRef.current);
         saveDebounceTimerRef.current = null;

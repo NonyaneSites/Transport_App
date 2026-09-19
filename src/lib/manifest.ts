@@ -133,17 +133,10 @@ export function reconcileManifestForSave(
   const baseVehiclesMap = new Map(baseline.vehicles.map((v) => [v.id, v]));
   const incVehiclesMap = new Map(incoming.vehicles.map((v) => [v.id, v]));
 
-  // Determine if incoming is a stale snapshot relative to remote.
-  const remoteTime = remote.updated_at ? new Date(remote.updated_at).getTime() : 0;
-  const incomingTime = incoming.updated_at ? new Date(incoming.updated_at).getTime() : 0;
-  const isIncomingStale = remoteTime > incomingTime && remoteTime > 0 && incomingTime > 0;
-
   // 1. Identify vehicles intentionally deleted by this user (in baseline, missing from incoming).
   const missingFromInc = baseline.vehicles.filter((v) => !incVehiclesMap.has(v.id));
   const removedVehicleIds = new Set<string>();
-  if (!isIncomingStale && missingFromInc.length <= 1) {
-    missingFromInc.forEach((v) => removedVehicleIds.add(v.id));
-  }
+  missingFromInc.forEach((v) => removedVehicleIds.add(v.id));
 
   // 2. Identify brand-new vehicles added by this user (in incoming, not in baseline)
   const addedVehicles = incoming.vehicles.filter((v) => !baseVehiclesMap.has(v.id));
@@ -197,7 +190,7 @@ export function reconcileManifestForSave(
     }
   }
 
-  // 3. Reconcile existing vehicles starting from remote (the freshest ground truth)
+  // 3. Reconcile existing vehicles starting from remote
   const reconciledVehicles: Vehicle[] = [];
 
   for (const remoteV of remote.vehicles) {
@@ -209,9 +202,11 @@ export function reconcileManifestForSave(
     const incV = incVehiclesMap.get(remoteV.id);
     const baseV = baseVehiclesMap.get(remoteV.id);
 
-    // If incoming doesn't have it, it was added by someone else while user was away: KEEP IT
+    // If incoming doesn't have it, check if it was truly added concurrently by someone else (not in baseline)
     if (!incV) {
-      reconciledVehicles.push(remoteV);
+      if (!baseVehiclesMap.has(remoteV.id)) {
+        reconciledVehicles.push(remoteV);
+      }
       continue;
     }
 
@@ -231,7 +226,7 @@ export function reconcileManifestForSave(
       }
     }
 
-    // Draft state (attendance, notes, rep details)
+    // Draft state (attendance, notes, rep details): preserve concurrent mobile attendance checks
     const baseDraftStr = JSON.stringify(baseV?.draftState || {});
     const incDraftStr = JSON.stringify(incV.draftState || {});
     let nextDraftState: VehicleDraftState | undefined = remoteV.draftState;
@@ -296,21 +291,12 @@ export function reconcileManifestForSave(
     const explicitlyReopened = Boolean(baseV?.submitted && !incV.submitted);
     const isSubmitted = explicitlyReopened ? false : Boolean(remoteV.submitted || incV.submitted);
 
-    const name = incV.name !== baseV?.name ? incV.name : remoteV.name;
-    const type = incV.type !== baseV?.type ? incV.type : remoteV.type;
-    const repName = incV.repName !== baseV?.repName ? incV.repName : (remoteV.repName || incV.repName);
-    const licensePlate = incV.licensePlate !== baseV?.licensePlate ? incV.licensePlate : (remoteV.licensePlate || incV.licensePlate);
-    const generalNotes = incV.generalNotes !== baseV?.generalNotes ? incV.generalNotes : (remoteV.generalNotes ?? incV.generalNotes);
-
+    // CRITICAL: Spread incV OVER remoteV so user's changes to capacity, drivers, notes, plates are never lost!
     reconciledVehicles.push({
       ...remoteV,
-      name,
-      type,
-      repName,
-      licensePlate,
-      generalNotes,
+      ...incV,
       riders: incV.riders || [],
-      orderedStops: nextStops,
+      orderedStops: nextStops.length > 0 ? nextStops : (incV.orderedStops || []),
       submitted: isSubmitted,
       submittedAt: isSubmitted ? (remoteV.submittedAt || incV.submittedAt) : undefined,
       submittedBy: isSubmitted ? (remoteV.submittedBy || incV.submittedBy) : undefined,
@@ -373,7 +359,6 @@ export function reconcileManifestForSave(
     }
 
     const incP = incSignupsMap.get(sId);
-    const baseP = baseSignupsMap.get(sId);
 
     if (!incP) {
       // Exists in remote, missing in incoming (incoming was stale): KEEP remote signup
@@ -381,36 +366,31 @@ export function reconcileManifestForSave(
       continue;
     }
 
-    if (ridersExplicitlyUnassigned.has(sId)) {
-      // User explicitly unassigned this rider
-      reconciledSignups.push({
-        ...remP,
-        ...incP,
-        assignedTo: null,
-      });
-    } else if (incP.assignedTo !== remP.assignedTo) {
-      // User modified vehicle assignment
-      reconciledSignups.push({
-        ...remP,
-        ...incP,
-        assignedTo: incP.assignedTo,
-      });
-    } else if (baseP && JSON.stringify(baseP) !== JSON.stringify(incP)) {
-      // User explicitly modified fields on this signup
-      reconciledSignups.push({
-        ...remP,
-        ...incP,
-      });
-    } else {
-      reconciledSignups.push(remP);
-    }
+    const targetAssignedTo = ridersExplicitlyUnassigned.has(sId)
+      ? null
+      : (ridersExplicitlyAssignedToVehicle.get(sId) ?? incP.assignedTo);
+
+    reconciledSignups.push({
+      ...remP,
+      ...incP,
+      assignedTo: targetAssignedTo,
+    });
   }
 
-  // Append brand-new signups added by this user (e.g. walk-ins)
+  // Append brand-new signups added by this user (e.g. walk-ins or imported passengers)
   for (const newP of addedSignups) {
     const sId = String(newP.id);
     if (!handledSignupIds.has(sId)) {
       reconciledSignups.push(newP);
+      handledSignupIds.add(sId);
+    }
+  }
+
+  // Also include any incoming signups not yet in handledSignupIds (e.g. from Excel imports)
+  for (const incP of incoming.signups) {
+    const sId = String(incP.id);
+    if (!handledSignupIds.has(sId)) {
+      reconciledSignups.push(incP);
       handledSignupIds.add(sId);
     }
   }
@@ -567,7 +547,7 @@ export async function syncVehiclesToDb(manifestKey: string, vehicles: Vehicle[])
   if (!manifestKey) return;
   const currentVehicleIds = new Set(vehicles.map((v) => v.id));
 
-  // Prune any deleted vehicles
+  // Prune any deleted vehicles from local storage
   try {
     const localExisting = mockStorage.getTable(VEHICLES_TABLE).filter((r) => String(r.manifest_key) === manifestKey);
     const toDeleteIds = localExisting.filter((r) => !currentVehicleIds.has(String(r.id))).map((r) => String(r.id));
@@ -575,7 +555,24 @@ export async function syncVehiclesToDb(manifestKey: string, vehicles: Vehicle[])
       await deleteVehicleFromDb(manifestKey, delId);
     }
   } catch (e) {
-    console.warn('[Manifest] Error pruning deleted vehicles:', e);
+    console.warn('[Manifest] Error pruning deleted vehicles locally:', e);
+  }
+
+  // Prune any deleted vehicles from remote Supabase transport_vehicles
+  try {
+    const { data: remoteExisting } = await supabase
+      .from(VEHICLES_TABLE)
+      .select('id')
+      .eq('manifest_key', manifestKey);
+    if (Array.isArray(remoteExisting)) {
+      for (const row of remoteExisting) {
+        if (!currentVehicleIds.has(String(row.id))) {
+          await deleteVehicleFromDb(manifestKey, String(row.id));
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Manifest] Error pruning remote deleted vehicles:', err);
   }
 
   // Save each vehicle individually
@@ -675,11 +672,14 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
           seenIds.add(v.id);
         }
       }
-      // Add any newly created individual vehicles that were not in the manifest row
-      for (const v of individualVehicles) {
-        if (!seenIds.has(v.id)) {
-          mergedVehicles.push(v);
-          seenIds.add(v.id);
+
+      // ONLY populate from individual vehicles if the manifest row had no vehicles at all
+      if (manifest.vehicles.length === 0 && !loadedFromRemote) {
+        for (const v of individualVehicles) {
+          if (!seenIds.has(v.id)) {
+            mergedVehicles.push(v);
+            seenIds.add(v.id);
+          }
         }
       }
       manifest.vehicles = mergedVehicles;

@@ -399,7 +399,11 @@ export function useManifest(
             const row = payload.new as (Partial<Manifest> & { updated_at?: string }) | null;
             if (!row) return;
 
-            // Suppress echoes of our own saves
+            // Suppress echoes of our own recent saves
+            if (Date.now() - lastLocalSaveTimeRef.current < 4000) {
+              return;
+            }
+
             if (
               lastSavedUpdatedAtRef.current &&
               row.updated_at === lastSavedUpdatedAtRef.current
@@ -423,6 +427,11 @@ export function useManifest(
           { event: '*', schema: 'public', table: VEHICLES_TABLE, filter: `manifest_key=eq.${key}` },
           (payload) => {
             if (keyRef.current !== key) return;
+            // Suppress echoes of our own recent saves
+            if (Date.now() - lastLocalSaveTimeRef.current < 4000) {
+              return;
+            }
+
             const row = payload.new as Record<string, unknown> | null;
             if (!row || !row.id) return;
             const incomingVehicle = dbRowToVehicle(row);
@@ -508,6 +517,7 @@ export function useManifest(
     // Guarantees cross-device sync even when mobile devices throttle websockets or if replication is disabled
     const pollCheck = async () => {
       if (!key || keyRef.current !== key) return;
+      if (Date.now() - lastLocalSaveTimeRef.current < 5000) return;
       try {
         const { data, error: pollError } = await supabase
           .from(MANIFESTS_TABLE)
@@ -540,11 +550,10 @@ export function useManifest(
       pollCheck();
     }, 15000);
 
-    // 5. Immediate trigger on window focus, tab visible, network online, or pageshow:
-    // Guarantees that anyone returning after being away has their stale view replaced
-    // immediately with the true latest server state, and reconnects any dead websocket!
+    // 5. Trigger on tab visible, network online, or pageshow (guarded against overwriting local saves):
     const handleResume = async () => {
       if (!key || keyRef.current !== key) return;
+      if (Date.now() - lastLocalSaveTimeRef.current < 5000) return;
 
       // Reconnect websocket if dropped or disconnected
       if (!isChannelSubscribedRef.current) {
@@ -579,9 +588,6 @@ export function useManifest(
         handleResume();
       }
     };
-    const handleFocus = () => {
-      handleResume();
-    };
     const handleOnline = () => {
       handleResume();
     };
@@ -593,7 +599,6 @@ export function useManifest(
       document.addEventListener('visibilitychange', handleVisibilityChange);
     }
     if (typeof window !== 'undefined') {
-      window.addEventListener('focus', handleFocus);
       window.addEventListener('online', handleOnline);
       window.addEventListener('pageshow', handlePageShow);
     }
@@ -605,7 +610,6 @@ export function useManifest(
         document.removeEventListener('visibilitychange', handleVisibilityChange);
       }
       if (typeof window !== 'undefined') {
-        window.removeEventListener('focus', handleFocus);
         window.removeEventListener('online', handleOnline);
         window.removeEventListener('pageshow', handlePageShow);
       }
@@ -635,18 +639,21 @@ export function useManifest(
     // difference between "this is what I intentionally changed" and "this is stale data I
     // never touched" once we reconcile against the freshest copy of the row below.
     const baseline = manifestRef.current;
+    manifestRef.current = normalized;
+    lastLocalSaveTimeRef.current = Date.now();
 
     // 1. Optimistically update local state immediately for zero-lag UI
     setManifest(normalized);
     setLastSyncedAt(Date.now());
 
-    // 2. Fetch the freshest possible copy of the row and reconcile: this is what prevents one
-    // rep's save from silently erasing another rep's concurrent vehicle add/delete/submit.
+    // 2. Fetch the freshest possible copy of the row and reconcile
     let merged = normalized;
     try {
       // Load complete remote manifest including individual vehicles from transport_vehicles
       const remote = await loadManifest(key).catch(() => null);
-      merged = reconcileManifestForSave(baseline, normalized, remote);
+      if (remote && remote.date === key) {
+        merged = reconcileManifestForSave(baseline, normalized, remote);
+      }
     } catch (err) {
       console.warn('[useManifest] Could not fetch latest manifest before saving, saving as-is:', err);
     }
@@ -667,7 +674,12 @@ export function useManifest(
       payload: { date: merged.date, manifest: merged },
     });
 
-    // 5. Persist the reconciled manifest to Supabase (source of truth), with local fallback
+    // 5. Update local state and timestamp with the authoritative reconciled result
+    manifestRef.current = merged;
+    lastLocalSaveTimeRef.current = Date.now();
+    setManifest(merged);
+
+    // 6. Persist the reconciled manifest to Supabase (source of truth), with local fallback
     try {
       // Also persist each vehicle individually to transport_vehicles for granular control
       await syncVehiclesToDb(merged.date, merged.vehicles).catch((err) => {
@@ -711,11 +723,6 @@ export function useManifest(
         updated_at: new Date().toISOString(),
       });
     }
-
-    // 6. Reflect the reconciled result locally (without blowing away this device's actively
-    // open vehicle edit), so the UI shows the true, merged outcome rather than the pre-merge guess.
-    manifestRef.current = merged;
-    setManifest((prev) => mergeIncomingManifest(prev, merged, activeVehicleIdRef.current));
   }
 
   async function reset(): Promise<void> {
@@ -728,6 +735,7 @@ export function useManifest(
       updated_at: new Date().toISOString(),
     };
 
+    lastLocalSaveTimeRef.current = Date.now();
     // 1. Clear local state immediately
     manifestRef.current = emptyManifest;
     setManifest(emptyManifest);
