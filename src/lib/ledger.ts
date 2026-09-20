@@ -1660,6 +1660,8 @@ export interface StructureSponsorshipGroup {
   structure: string;
   items: ReportedSponsorship[];
   pendingCount: number;
+  actuallySponsoredCount: number;
+  debtCount: number;
 }
 
 /**
@@ -1688,10 +1690,14 @@ export function groupSponsorshipsByStructure(
     });
 
     const pendingCount = groupItems.filter((i) => i.status === 'pending').length;
+    const actuallySponsoredCount = groupItems.filter((i) => i.status === 'actually_sponsored').length;
+    const debtCount = groupItems.filter((i) => i.status === 'unpaid_sponsorship' || i.status === 'unaccounted_sponsorship').length;
     groups.push({
       structure,
       items: groupItems,
       pendingCount,
+      actuallySponsoredCount,
+      debtCount,
     });
   }
 
@@ -1930,7 +1936,7 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
       draftState?: { sponsoredIds?: string[]; notes?: Record<string, string>; submitted?: boolean };
     }>;
   }
-  const manifestsTable = (mockStorage.getTable(MANIFESTS_TABLE) as StoredManifest[]) || [];
+  const manifestsTable = (mockStorage.getTable(MANIFESTS_TABLE) as unknown as StoredManifest[]) || [];
   const allKnownSignups: Array<{ id: string; fullName: string; stop?: string; structure?: string }> = [];
   for (const m of manifestsTable) {
     if (Array.isArray(m.signups)) {
@@ -2162,7 +2168,7 @@ export async function verifySponsorshipStatus(
           // If marked actually sponsored or reverted to pending, remove debt row if any
           if (item.ledger_entry_id) {
             await supabase.from(LEDGER_TABLE).delete().eq('id', item.ledger_entry_id);
-            item.ledger_entry_id = null;
+            item.ledger_entry_id = undefined;
           }
           await supabase.from(LEDGER_TABLE).delete().eq('id', `spon_debt_${item.id}`);
         }

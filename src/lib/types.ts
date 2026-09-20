@@ -19,6 +19,7 @@ export interface Passenger {
   sponsorNote?: string;
   didNotPay?: boolean;
   unpaidNote?: string;
+  walkIn?: boolean;
 }
 
 /**
@@ -150,6 +151,10 @@ export interface Vehicle {
   coReps?: string[];
   generalNotes?: string;
   repCount?: number;
+  capacity?: number;
+  driverName?: string;
+  driverPhone?: string;
+  notes?: string;
   /**
    * Manually-set pickup time (e.g. "15:00") per stop/hub label, keyed the
    * same way as `orderedStops` entries. Used to render bold times in the
@@ -185,7 +190,7 @@ export type LiveSyncAction =
       type: 'rider_attendance';
       vehicleId: string;
       riderId: string;
-      status: 'present' | 'absent' | 'unticked';
+      status: 'present' | 'absent' | 'unticked' | 'unmarked';
       repName: string;
       clientId: string;
       timestamp: number;
@@ -223,6 +228,23 @@ export type LiveSyncAction =
       repName?: string;
       licensePlate?: string;
       generalNotes?: string;
+      clientId: string;
+      timestamp: number;
+    }
+  | {
+      type: 'vehicle_license_plate';
+      vehicleId: string;
+      licensePlate: string;
+      repName?: string;
+      clientId: string;
+      timestamp: number;
+    }
+  | {
+      type: 'vehicle_general_notes';
+      vehicleId: string;
+      notes?: string;
+      generalNotes?: string;
+      repName?: string;
       clientId: string;
       timestamp: number;
     }
@@ -451,7 +473,7 @@ export function hubDisplayName(vehicleType: 'Bus' | 'Taxi', stop?: string | null
  * Returns the effective stop label for a passenger in a vehicle,
  * accounting for admin stop redirects/merges (e.g. Saratoga -> DFC bus stop).
  */
-export function getEffectiveStop(vehicle?: Vehicle | null, rawStop?: string | null): string {
+export function getEffectiveStop(vehicle?: Partial<Vehicle> | null, rawStop?: string | null): string {
   if (!rawStop) return 'Unassigned Stop';
   const vehType = vehicle?.type || 'Taxi';
   const baseLabel = hubDisplayName(vehType, rawStop);

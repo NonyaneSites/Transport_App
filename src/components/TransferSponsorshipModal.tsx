@@ -4,12 +4,21 @@ import {
   HeartHandshake,
   Loader2,
   AlertTriangle,
+  FileText,
+  Share2,
 } from 'lucide-react';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
-import { SERVICE_TYPES } from '@/lib/types';
+import { SERVICE_TYPES, CANCELLATION_FEE } from '@/lib/types';
 import { parseManifestKey } from '@/lib/dates';
 import { sortVehiclesNatural } from '@/lib/sort';
 import { getCompatibleServices, getServiceVehicles, transferPassengerAcrossServices } from '@/lib/transfer';
+import { supabase } from '@/lib/supabase';
+import {
+  LEDGER_TABLE,
+  recordReportedSponsorships,
+  sanitizePassengerDisplayName,
+  normalizeStructureCode,
+} from '@/lib/ledger';
 
 interface TransferSponsorshipModalProps {
   isOpen: boolean;
@@ -39,6 +48,7 @@ export function TransferSponsorshipModal({
   const [selectedPassengerId, setSelectedPassengerId] = useState<string>(
     initialPassenger?.id || ''
   );
+  const [destinationType, setDestinationType] = useState<'ledger' | 'service'>('ledger');
   const [targetService, setTargetService] = useState<ServiceType>(
     compatibleServices[0] || 'PM_Normal'
   );
@@ -59,15 +69,26 @@ export function TransferSponsorshipModal({
       setTargetService(defaultTarget);
       setTargetVehicleId('unassigned');
       setIsSponsored(true);
+
+      // Preserve existing passenger note if attached
+      const p = initialPassenger || manifest.signups.find((item) => item.id === pId);
+      let existingNote = p?.sponsorNote || '';
+      if (!existingNote && p) {
+        const v = manifest.vehicles.find((veh) => veh.riders?.includes(p.id));
+        if (v?.draftState?.notes?.[p.id]) {
+          existingNote = v.draftState.notes[p.id];
+        }
+      }
+
       const fromDef = SERVICE_TYPES.find((s) => s.value === currentService);
-      setSponsorNote(`Unaccounted Sponsorship (from ${fromDef?.mode || currentService})`);
+      setSponsorNote(existingNote || `Unaccounted Sponsorship (from ${fromDef?.mode || currentService})`);
       setError(null);
     }
-  }, [isOpen, initialPassenger, currentService, manifest.signups, compatibleServices]);
+  }, [isOpen, initialPassenger, currentService, manifest.signups, manifest.vehicles, compatibleServices]);
 
   // Load vehicles of the target service whenever targetService changes
   useEffect(() => {
-    if (!isOpen || !sessionDate || !targetService) return;
+    if (!isOpen || !sessionDate || !targetService || destinationType !== 'service') return;
 
     let cancelled = false;
     setLoadingVehicles(true);
@@ -96,7 +117,7 @@ export function TransferSponsorshipModal({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, sessionDate, targetService]);
+  }, [isOpen, sessionDate, targetService, destinationType]);
 
   if (!isOpen) return null;
 
@@ -112,79 +133,147 @@ export function TransferSponsorshipModal({
       setError('Please select a passenger to transfer.');
       return;
     }
-    if (!targetService) {
-      setError('Please select a target service.');
-      return;
-    }
 
     setSubmitting(true);
     setError(null);
 
     const passengerToTransfer = manifest.signups.find((p) => p.id === selectedPassengerId);
-    const targetVehObj = targetVehicles.find((v) => v.id === targetVehicleId);
-    const targetVehName = targetVehicleId === 'unassigned' ? 'Unassigned Pool' : (targetVehObj?.name || 'Vehicle');
-    const targetServiceDef = SERVICE_TYPES.find((s) => s.value === targetService);
-
-    const res = await transferPassengerAcrossServices({
-      date: sessionDate,
-      fromService: currentService,
-      toService: targetService,
-      passengerId: selectedPassengerId,
-      toVehicleId: targetVehicleId,
-      isSponsored,
-      sponsorNote: sponsorNote.trim() || 'Unaccounted Sponsorship',
-      markPresent: passengerToTransfer?.present ?? false,
-      sourceManifest: manifest,
-    });
-
-    setSubmitting(false);
-
-    if (!res.success) {
-      setError(res.error || 'Failed to transfer passenger.');
-      return;
-    }
-
     const pName = passengerToTransfer?.fullName || 'Passenger';
-    onSuccess(
-      `Successfully moved ${pName} to ${targetServiceDef?.label || targetService} (${targetVehName})${
-        isSponsored ? ' as an Unaccounted Sponsorship' : ''
-      }.`,
-      selectedPassengerId
-    );
-    onClose();
+    const struct = normalizeStructureCode(passengerToTransfer?.structure);
+    const cleanName = sanitizePassengerDisplayName(pName);
+    const effectiveNote = sponsorNote.trim() || 'Unaccounted Sponsorship';
+
+    try {
+      if (destinationType === 'ledger') {
+        const parentVeh = manifest.vehicles.find((v) => v.riders?.includes(selectedPassengerId));
+        const ledgerEntryId = `spon_debt_${selectedPassengerId}_${Date.now()}`;
+        const entryNote = `Unaccounted Sponsorship: ${effectiveNote}`;
+
+        const row = {
+          id: ledgerEntryId,
+          manifest_key: manifest.date,
+          date: sessionDate,
+          service: currentDef?.label || currentService,
+          passenger_name: cleanName,
+          stop: passengerToTransfer?.stop || '',
+          structure: struct || '',
+          vehicle_name: parentVeh?.name || 'Vehicle',
+          submitted_by: parentVeh?.repName || 'Admin',
+          rep_name: parentVeh?.repName || 'Admin',
+          license_plate: parentVeh?.licensePlate || '',
+          sponsored: true,
+          sponsor_note: entryNote,
+          structure_debt: CANCELLATION_FEE,
+          general_notes: entryNote,
+          submitted_at: new Date().toISOString(),
+        };
+
+        await supabase.from(LEDGER_TABLE).upsert(row, { onConflict: 'id' });
+
+        await recordReportedSponsorships(
+          manifest.date,
+          sessionDate,
+          currentDef?.label || currentService,
+          [{
+            id: String(selectedPassengerId),
+            fullName: cleanName,
+            structure: struct,
+            stop: passengerToTransfer?.stop || '',
+            sponsorNote: effectiveNote,
+          }],
+          [cleanName],
+          parentVeh?.name || 'Vehicle',
+          parentVeh?.repName || 'Admin'
+        );
+
+        setSubmitting(false);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
+          window.dispatchEvent(new CustomEvent('crc_sponsorships_updated'));
+        }
+
+        onSuccess(
+          `Successfully recorded ${cleanName} on Structure ${struct || 'Unassigned'} Ledger (R40 Debt) with note: "${effectiveNote}".`,
+          selectedPassengerId
+        );
+        onClose();
+        return;
+      }
+
+      // Destination is another service
+      if (!targetService) {
+        setError('Please select a target service.');
+        setSubmitting(false);
+        return;
+      }
+
+      const targetVehObj = targetVehicles.find((v) => v.id === targetVehicleId);
+      const targetVehName = targetVehicleId === 'unassigned' ? 'Unassigned Pool' : (targetVehObj?.name || 'Vehicle');
+      const targetServiceDef = SERVICE_TYPES.find((s) => s.value === targetService);
+
+      const res = await transferPassengerAcrossServices({
+        date: sessionDate,
+        fromService: currentService,
+        toService: targetService,
+        passengerId: selectedPassengerId,
+        toVehicleId: targetVehicleId,
+        isSponsored,
+        sponsorNote: effectiveNote,
+        markPresent: passengerToTransfer?.present ?? false,
+        sourceManifest: manifest,
+      });
+
+      setSubmitting(false);
+
+      if (!res.success) {
+        setError(res.error || 'Failed to transfer passenger.');
+        return;
+      }
+
+      onSuccess(
+        `Successfully moved ${pName} to ${targetServiceDef?.label || targetService} (${targetVehName})${
+          isSponsored ? ' as an Unaccounted Sponsorship' : ''
+        }.`,
+        selectedPassengerId
+      );
+      onClose();
+    } catch (transferErr) {
+      setSubmitting(false);
+      setError(transferErr instanceof Error ? transferErr.message : 'Transfer failed unexpectedly.');
+    }
   }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-fade-in">
       <div className="w-full max-w-lg rounded-2xl border border-line bg-card shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-line px-5 py-4 bg-card-2/60">
+        <div className="flex items-center justify-between border-b border-line px-5 py-4 bg-card-2/50">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-500/15 text-amber-300 border border-amber-500/30">
+            <div className="rounded-xl bg-amber-500/15 p-2 text-amber-300 border border-amber-500/30">
               <HeartHandshake className="h-5 w-5" />
             </div>
             <div>
-              <h3 className="font-display text-sm font-bold text-ink">
-                Send as Unaccounted Sponsorship
+              <h3 className="font-display text-base font-bold text-ink">
+                Transfer Sponsorship & Debt
               </h3>
-              <p className="text-[11px] text-muted">
-                Move a person across service types in the same session
+              <p className="text-xs text-muted">
+                {currentDef?.label || currentService} · {sessionDate}
               </p>
             </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink transition-colors"
+            className="rounded-lg p-1.5 text-muted hover:bg-card hover:text-ink transition-colors"
           >
-            <X className="h-4 w-4" />
+            <X className="h-5 w-5" />
           </button>
         </div>
 
         {/* Content */}
-        <div className="p-5 space-y-4 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
           {error && (
-            <div className="flex items-center gap-2 rounded-xl border border-crimson-500/30 bg-crimson-900/20 p-3 text-xs text-crimson-300">
+            <div className="flex items-center gap-2 rounded-xl border border-crimson-500/30 bg-crimson-500/10 p-3 text-xs text-crimson-300 animate-shake">
               <AlertTriangle className="h-4 w-4 shrink-0" />
               <span>{error}</span>
             </div>
@@ -193,17 +282,20 @@ export function TransferSponsorshipModal({
           {/* 1. Passenger Selection */}
           <div>
             <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-muted">
-              Select Passenger ({manifest.signups.length} total signups in {currentDef?.mode || currentService})
+              Select Passenger
             </label>
             <select
               value={selectedPassengerId}
               onChange={(e) => {
                 setSelectedPassengerId(e.target.value);
                 const p = manifest.signups.find((item) => item.id === e.target.value);
-                if (p?.sponsored || isSponsored) {
-                  const fromDef = SERVICE_TYPES.find((s) => s.value === currentService);
-                  setSponsorNote(p?.sponsorNote || `Unaccounted Sponsorship (from ${fromDef?.mode || currentService})`);
+                let existing = p?.sponsorNote || '';
+                if (!existing && p) {
+                  const v = manifest.vehicles.find((veh) => veh.riders?.includes(p.id));
+                  if (v?.draftState?.notes?.[p.id]) existing = v.draftState.notes[p.id];
                 }
+                const fromDef = SERVICE_TYPES.find((s) => s.value === currentService);
+                setSponsorNote(existing || `Unaccounted Sponsorship (from ${fromDef?.mode || currentService})`);
               }}
               className="input-field py-2 text-xs w-full bg-card-2"
             >
@@ -242,7 +334,7 @@ export function TransferSponsorshipModal({
               <div>
                 <div className="font-semibold text-ink">{selectedPassenger.fullName}</div>
                 <div className="text-muted text-[11px] mt-0.5">
-                  Stop: <span className="text-ink">{selectedPassenger.stop}</span> · Structure: <span className="text-ink">{selectedPassenger.structure || '—'}</span>
+                  Stop: <span className="text-ink">{selectedPassenger.stop}</span> · Structure: <span className="text-ink font-semibold text-amber-300">{selectedPassenger.structure || '—'}</span>
                 </div>
               </div>
               <div>
@@ -259,110 +351,148 @@ export function TransferSponsorshipModal({
             </div>
           )}
 
-          {/* 2. Source -> Target Service Mapping */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
-            {/* From Service */}
-            <div className="rounded-xl border border-line bg-card-2/30 p-3">
-              <span className="block text-[10px] font-semibold uppercase tracking-wider text-muted mb-1">
-                From Service
-              </span>
-              <div className="font-bold text-ink text-xs flex items-center gap-1.5">
-                <span className="h-2 w-2 rounded-full bg-crimson-500" />
-                {currentDef?.label || currentService}
-              </div>
-            </div>
+          {/* Transfer Mode Tabs */}
+          <div>
+            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-muted">
+              Transfer Destination
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setDestinationType('ledger')}
+                className={`flex items-center justify-center gap-2 rounded-xl border p-2.5 text-xs font-semibold transition-all ${
+                  destinationType === 'ledger'
+                    ? 'border-crimson-500 bg-crimson-500/15 text-crimson-300 shadow-sm'
+                    : 'border-line bg-card-2/40 text-muted hover:text-ink'
+                }`}
+              >
+                <FileText className="h-4 w-4" />
+                <span>Structure Debt Ledger (R40)</span>
+              </button>
 
-            {/* To Service */}
+              <button
+                type="button"
+                onClick={() => setDestinationType('service')}
+                className={`flex items-center justify-center gap-2 rounded-xl border p-2.5 text-xs font-semibold transition-all ${
+                  destinationType === 'service'
+                    ? 'border-amber-500 bg-amber-500/15 text-amber-300 shadow-sm'
+                    : 'border-line bg-card-2/40 text-muted hover:text-ink'
+                }`}
+              >
+                <Share2 className="h-4 w-4" />
+                <span>To Other Service</span>
+              </button>
+            </div>
+          </div>
+
+          {destinationType === 'ledger' ? (
+            <div className="rounded-xl border border-crimson-500/30 bg-crimson-950/20 p-3.5 space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-muted">Target Ledger:</span>
+                <span className="font-bold text-amber-300">Structure {selectedPassenger?.structure || 'Unassigned'}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted">Debt Amount:</span>
+                <span className="font-bold text-crimson-400">R40.00 (Unaccounted Sponsorship)</span>
+              </div>
+              <p className="text-[11px] text-muted pt-1 border-t border-line/50">
+                Immediately records this sponsorship as an outstanding debt under this passenger's structure in the Cancellation & Debt Ledger.
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* Source -> Target Service Mapping */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+                {/* From Service */}
+                <div className="rounded-xl border border-line bg-card-2/30 p-3">
+                  <span className="block text-[10px] font-semibold uppercase tracking-wider text-muted mb-1">
+                    From Service
+                  </span>
+                  <div className="font-bold text-ink text-xs flex items-center gap-1.5">
+                    <span className="h-2 w-2 rounded-full bg-crimson-500" />
+                    {currentDef?.label || currentService}
+                  </div>
+                </div>
+
+                {/* To Service */}
+                <div>
+                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-muted">
+                    To Service (Same Session)
+                  </label>
+                  <select
+                    value={targetService}
+                    onChange={(e) => setTargetService(e.target.value as ServiceType)}
+                    className="input-field py-2 text-xs w-full bg-card-2 font-medium"
+                  >
+                    {compatibleServices.map((st) => {
+                      const def = SERVICE_TYPES.find((s) => s.value === st);
+                      return (
+                        <option key={st} value={st} className="bg-card-2">
+                          {def?.label || st}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+              </div>
+
+              {/* Destination Vehicle Selection */}
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-muted flex items-center justify-between">
+                  <span>Target Vehicle in {SERVICE_TYPES.find((s) => s.value === targetService)?.mode || targetService}</span>
+                  {loadingVehicles && (
+                    <span className="flex items-center gap-1 text-[11px] text-muted font-normal">
+                      <Loader2 className="h-3 w-3 animate-spin text-amber-400" />
+                      Loading vehicles...
+                    </span>
+                  )}
+                </label>
+
+                <select
+                  value={targetVehicleId}
+                  onChange={(e) => setTargetVehicleId(e.target.value)}
+                  disabled={loadingVehicles}
+                  className="input-field py-2 text-xs w-full bg-card-2"
+                >
+                  <option value="unassigned" className="bg-card-2 text-crimson-300 font-semibold">
+                    ⏳ Unassigned Pool (Transfer to destination unassigned queue)
+                  </option>
+
+                  {targetVehicles.map((v) => {
+                    const repLabel = v.repName ? ` · Rep: ${v.repName}` : '';
+                    return (
+                      <option key={v.id} value={v.id} className="bg-card-2 text-ink">
+                        {v.type === 'Bus' ? '🚌' : '🚕'} {v.name} ({v.riders.length} riders{repLabel})
+                      </option>
+                    );
+                  })}
+                </select>
+                {targetVehicles.length === 0 && !loadingVehicles && (
+                  <p className="mt-1 text-[11px] text-muted">
+                    No vehicles configured in {targetService} yet. Passenger will be placed in the Unassigned Pool.
+                  </p>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* Sponsorship & Notes Settings */}
+          <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3.5 space-y-3">
             <div>
               <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-muted">
-                To Service (Same Session)
+                Sponsorship / Note Details
               </label>
-              <select
-                value={targetService}
-                onChange={(e) => setTargetService(e.target.value as ServiceType)}
-                className="input-field py-2 text-xs w-full bg-card-2 font-medium"
-              >
-                {compatibleServices.map((st) => {
-                  const def = SERVICE_TYPES.find((s) => s.value === st);
-                  return (
-                    <option key={st} value={st} className="bg-card-2">
-                      {def?.label || st}
-                    </option>
-                  );
-                })}
-              </select>
-            </div>
-          </div>
-
-          {/* 3. Destination Vehicle Selection */}
-          <div>
-            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-muted flex items-center justify-between">
-              <span>Target Vehicle in {SERVICE_TYPES.find((s) => s.value === targetService)?.mode || targetService}</span>
-              {loadingVehicles && (
-                <span className="flex items-center gap-1 text-[11px] text-muted font-normal">
-                  <Loader2 className="h-3 w-3 animate-spin text-amber-400" />
-                  Loading vehicles...
-                </span>
-              )}
-            </label>
-
-            <select
-              value={targetVehicleId}
-              onChange={(e) => setTargetVehicleId(e.target.value)}
-              disabled={loadingVehicles}
-              className="input-field py-2 text-xs w-full bg-card-2"
-            >
-              <option value="unassigned" className="bg-card-2 text-crimson-300 font-semibold">
-                ⏳ Unassigned Pool (Transfer to destination unassigned queue)
-              </option>
-
-              {targetVehicles.map((v) => {
-                const repLabel = v.repName ? ` · Rep: ${v.repName}` : '';
-                return (
-                  <option key={v.id} value={v.id} className="bg-card-2 text-ink">
-                    {v.type === 'Bus' ? '🚌' : '🚕'} {v.name} ({v.riders.length} riders{repLabel})
-                  </option>
-                );
-              })}
-            </select>
-            {targetVehicles.length === 0 && !loadingVehicles && (
-              <p className="mt-1 text-[11px] text-muted">
-                No vehicles configured in {targetService} yet. Passenger will be placed in the Unassigned Pool.
-              </p>
-            )}
-          </div>
-
-          {/* 4. Sponsorship & Notes Settings */}
-          <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3.5 space-y-3">
-            <label className="flex items-center gap-2 cursor-pointer select-none">
               <input
-                type="checkbox"
-                checked={isSponsored}
-                onChange={(e) => setIsSponsored(e.target.checked)}
-                className="h-4 w-4 rounded border-line text-amber-500 focus:ring-amber-400/20 bg-card-2"
+                type="text"
+                value={sponsorNote}
+                onChange={(e) => setSponsorNote(e.target.value)}
+                placeholder="e.g. Paid in cash, John in Taxi 2, Unaccounted"
+                className="input-field py-1.5 text-xs w-full bg-card-2"
               />
-              <span className="text-xs font-semibold text-amber-200">
-                Mark as Unaccounted Sponsorship
-              </span>
-            </label>
-
-            {isSponsored && (
-              <div>
-                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-muted">
-                  Sponsorship / Destination Note
-                </label>
-                <input
-                  type="text"
-                  value={sponsorNote}
-                  onChange={(e) => setSponsorNote(e.target.value)}
-                  placeholder="e.g. Unaccounted Sponsorship (from PM Serving)"
-                  className="input-field py-1.5 text-xs w-full bg-card-2"
-                />
-                <p className="mt-1 text-[10px] text-muted">
-                  Recorded on the destination vehicle roster and transport ledger as an unaccounted sponsorship.
-                </p>
-              </div>
-            )}
+              <p className="mt-1 text-[10px] text-muted">
+                This note will be permanently recorded in the ledger and visible during financial reconciliation.
+              </p>
+            </div>
           </div>
         </div>
 
@@ -386,7 +516,12 @@ export function TransferSponsorshipModal({
             {submitting ? (
               <>
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                <span>Transferring...</span>
+                <span>Processing...</span>
+              </>
+            ) : destinationType === 'ledger' ? (
+              <>
+                <FileText className="h-4 w-4" />
+                <span>Transfer to Ledger (R40)</span>
               </>
             ) : (
               <>
@@ -400,3 +535,4 @@ export function TransferSponsorshipModal({
     </div>
   );
 }
+

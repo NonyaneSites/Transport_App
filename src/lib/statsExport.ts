@@ -209,7 +209,7 @@ export function downloadTaxiStatsExcel(manifest: Manifest, customFileName?: stri
     'Money Collector Name & Surname': s.repName !== '—' ? s.repName : '',
     'Date': sessionDate,
     'Service': sessionService || 'Service',
-    'Vehicle type': s.type,
+    'Vehicle type': s.type as string,
     'Vehicle Number Plate': s.licensePlate !== '—' ? s.licensePlate : '',
     'Taxi No./Bus No.': s.name,
     'Members & Visitors list (Name & Surname - As written when booking)': s.presentListStr,

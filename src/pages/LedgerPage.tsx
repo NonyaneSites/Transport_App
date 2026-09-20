@@ -2666,8 +2666,15 @@ export function LedgerPage() {
   );
 }
 
-function SummaryStat({ label, value, accent }: { label: string; value: string | number; accent?: 'crimson' | 'warning' }) {
-  const color = accent === 'crimson' ? 'text-crimson-400' : accent === 'warning' ? 'text-warning' : 'text-ink';
+function SummaryStat({ label, value, accent }: { label: string; value: string | number; accent?: 'crimson' | 'warning' | 'success' | 'neutral' }) {
+  const color =
+    accent === 'crimson'
+      ? 'text-crimson-400'
+      : accent === 'warning'
+      ? 'text-warning'
+      : accent === 'success'
+      ? 'text-emerald-400'
+      : 'text-ink';
   return (
     <div className="card flex items-center gap-3 p-3">
       <div>

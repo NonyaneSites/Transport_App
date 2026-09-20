@@ -219,10 +219,10 @@ export async function crossCheckPassengerAcrossDate(
       .ilike('date', `${date}%`);
 
     if (!error && Array.isArray(data) && data.length > 0) {
-      rawManifests = data.map((d) => ({
-        date: d.date,
-        signups: Array.isArray(d.signups) ? d.signups : [],
-        vehicles: Array.isArray(d.vehicles) ? d.vehicles : [],
+      rawManifests = (data as Array<{ date?: string; signups?: unknown; vehicles?: unknown }>).map((d) => ({
+        date: String(d.date || ''),
+        signups: Array.isArray(d.signups) ? (d.signups as Passenger[]) : [],
+        vehicles: Array.isArray(d.vehicles) ? (d.vehicles as Vehicle[]) : [],
       }));
     } else {
       // Check local storage fallback

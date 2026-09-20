@@ -130,6 +130,7 @@ export function useManifest(
   activeCoReps: ActiveCoRep[];
   refresh: () => Promise<void>;
   save: (m: Manifest) => Promise<void>;
+  reset: () => Promise<void>;
   updateVehicleDraft: (
     vehicleId: string,
     draftState: Vehicle['draftState'],
@@ -138,6 +139,11 @@ export function useManifest(
     presentIds?: string[],
     absentIds?: string[]
   ) => Promise<void>;
+  appendWalkIn: (
+    vehicleId: string,
+    newPassenger: Passenger,
+    draftUpdate?: Partial<Vehicle['draftState']>
+  ) => Promise<Manifest>;
   broadcastLiveAction: (action: LiveSyncAction) => void;
 } {
   const [manifest, setManifest] = useState<Manifest | null>(null);
@@ -485,17 +491,20 @@ export function useManifest(
             return { ...prev, vehicles: updatedVehicles };
           });
           setLastSyncedAt(Date.now());
-        })
-        .on('broadcast', { event: 'live_action' }, (msg: { payload?: LiveSyncAction }) => {
+        });
+
+      (channel as unknown as { on: (event: string, filter: unknown, cb: (msg: { payload?: unknown }) => void) => typeof channel })
+        .on('broadcast', { event: 'live_action' }, (msg: { payload?: unknown }) => {
           if (keyRef.current !== key || !msg.payload) return;
-          handleIncomingLiveAction(msg.payload);
+          handleIncomingLiveAction(msg.payload as LiveSyncAction);
         })
-        .on('broadcast', { event: 'manifest_updated' }, (msg: { payload?: { manifest?: Partial<Manifest>; updated_at?: string } }) => {
+        .on('broadcast', { event: 'manifest_updated' }, (msg: { payload?: unknown }) => {
           if (keyRef.current !== key) return;
-          const incoming = normalizeManifestData(msg.payload?.manifest);
+          const typedMsg = msg.payload as { manifest?: Partial<Manifest>; updated_at?: string } | undefined;
+          const incoming = normalizeManifestData(typedMsg?.manifest);
           if (incoming) {
-            if (msg.payload?.updated_at) {
-              lastKnownUpdatedAtRef.current = msg.payload.updated_at;
+            if (typedMsg?.updated_at) {
+              lastKnownUpdatedAtRef.current = typedMsg.updated_at;
             }
             setManifest((prev) => mergeIncomingManifest(prev, incoming, activeVehicleIdRef.current));
             setLastSyncedAt(Date.now());
@@ -875,11 +884,11 @@ export function useManifest(
     const finalPresentSet = new Set(mergedDraft?.presentIds ?? []);
     const finalAbsentSet = new Set(mergedDraft?.absentIds ?? []);
 
-    const updatedSignups = remoteManifest.signups.map((p) => {
+    const updatedSignups: Passenger[] = remoteManifest.signups.map((p): Passenger => {
       if (vehicleRiderSet.has(p.id)) {
         if (finalPresentSet.has(p.id)) return { ...p, present: true };
         if (finalAbsentSet.has(p.id)) return { ...p, present: false };
-        return { ...p, present: undefined };
+        return { ...p, present: p.present ?? false };
       }
       return p;
     });

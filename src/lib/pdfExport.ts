@@ -1,5 +1,5 @@
 import { jsPDF } from 'jspdf';
-import autoTable from 'jspdf-autotable';
+import autoTable, { type RowInput } from 'jspdf-autotable';
 import { type LedgerEntry, BANK_DETAILS, extractServiceCode, extractNameAndService, isEntrySponsorshipOrUnpaid } from './ledger';
 import { naturalCompare } from './sort';
 
@@ -354,7 +354,7 @@ export function downloadCancellationDebtPdf(
     margin: { left: leftMargin, right: rightMargin, top: topMargin, bottom: bottomMargin },
     theme: 'striped',
     head: [['Debtor Name', 'Missed Dates & Sessions', 'Amount Owing']],
-    body: tableRows as unknown[][],
+    body: tableRows as unknown as RowInput[],
     headStyles: {
       fillColor: [30, 41, 59], // slate-800
       textColor: [255, 255, 255],

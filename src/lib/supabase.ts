@@ -1,4 +1,4 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
 const supabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
@@ -216,7 +216,7 @@ export class MockQueryBuilder {
           updated_at: now,
           created_at: item.created_at || now,
         };
-        const idx = current.findIndex((r) => String(r[keyField] ?? '') === String(fullItem[keyField] ?? ''));
+        const idx = current.findIndex((r) => String((r as Record<string, unknown>)[keyField] ?? '') === String((fullItem as Record<string, unknown>)[keyField] ?? ''));
         if (idx !== -1) {
           current[idx] = { ...current[idx], ...fullItem };
           mockStorage.notify(this.tableName, 'UPDATE', current[idx]);
@@ -402,7 +402,7 @@ function createResilientSupabaseClient() {
               onfulfilled?: ((val: unknown) => unknown) | null,
               onrejected?: ((reason: unknown) => unknown) | null
             ) => {
-              return target
+              return (target as unknown as Promise<{ data?: unknown; error?: { message?: string } | null }>)
                 .then((res: { data?: unknown; error?: { message?: string } | null }) => {
                   if (res?.error && isNetworkFetchError(res.error)) {
                     console.warn(`[Transport Storage] Remote sync unavailable (${res.error.message}), using local storage.`);
@@ -434,7 +434,7 @@ function createResilientSupabaseClient() {
           if (prop === 'maybeSingle' || prop === 'single') {
             return async () => {
               try {
-                const res = await (target as unknown as { maybeSingle: () => Promise<{ data?: unknown; error?: { message?: string } | null }> })[prop as 'maybeSingle' | 'single']();
+                const res = await (target as unknown as Record<string, () => Promise<{ data?: unknown; error?: { message?: string } | null }>>)[prop]?.();
                 if (res?.error && isNetworkFetchError(res.error)) {
                   return fallbackBuilder[prop as 'maybeSingle' | 'single']();
                 }
@@ -500,5 +500,6 @@ function isNetworkFetchError(err: unknown): boolean {
   );
 }
 
-export const supabase = createResilientSupabaseClient();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const supabase: SupabaseClient<any, string, any> = createResilientSupabaseClient() as unknown as SupabaseClient<any, string, any>;
 

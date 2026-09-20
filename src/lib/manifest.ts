@@ -2,6 +2,7 @@ import { supabase, MANIFESTS_TABLE, VEHICLES_TABLE, mockStorage } from './supaba
 import type { Manifest, Passenger, Vehicle, VehicleDraftState } from './types';
 import { hubDisplayName } from './types';
 import { normalizePassengerText, getSubmissionTimestampEpoch } from './importer';
+import { saveManifestToServer } from './serverApi';
 export { parseGoogleSheetSignups, type RawSheetRow } from './importer';
 
 /**
@@ -44,7 +45,7 @@ export function applyWalkInToManifest(
   }
 
   const poolKey = hubDisplayName(
-    currentManifest.vehicles.find((v) => v.id === vehicleId)?.type,
+    currentManifest.vehicles.find((v) => v.id === vehicleId)?.type || 'Taxi',
     walkInPassenger.stop || 'Walk-In'
   );
 

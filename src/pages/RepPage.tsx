@@ -6,6 +6,7 @@ import {
   Sparkles, ArrowDownAZ, RotateCcw, Check, AlertCircle, Calendar,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
+import { Header } from '@/components/Header';
 import { useManifest } from '@/lib/useManifest';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey, shortDate } from '@/lib/dates';
 import {
@@ -21,7 +22,7 @@ import {
 } from '@/lib/types';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
-import { vehicleRiders } from '@/lib/manifest';
+import { vehicleRiders, saveVehicleToDb } from '@/lib/manifest';
 import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, recordReportedSponsorships, withdrawReportedSponsorships, type LedgerEntry } from '@/lib/ledger';
 import { submitVehicleToServer, reopenVehicleOnServer, type SubmitVehiclePayload } from '@/lib/serverApi';
 import { extractVehicleStats } from '@/lib/statsExport';
@@ -1847,8 +1848,9 @@ export function RepPage() {
 
   return (
     <div className="min-h-screen bg-bg">
-      <header className="sticky top-0 z-40 border-b border-line bg-bg/95 backdrop-blur-md">
-        <div className="mx-auto flex max-w-lg items-center gap-3 px-4 py-3">
+      <Header current="rep" />
+      <header className="sticky top-[53px] z-30 border-b border-line bg-bg/95 backdrop-blur-md">
+        <div className="mx-auto flex max-w-lg items-center gap-3 px-4 py-2.5">
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-success/15 border border-success/30">
             <Smartphone className="h-4 w-4 text-success-light" />
           </div>

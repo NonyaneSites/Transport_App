@@ -11,6 +11,7 @@ import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { passengersByStop, passengersByPoolGroup, unassignedPassengers, deleteVehicleFromDb } from '@/lib/manifest';
+import { normalizePassengerText } from '@/lib/importer';
 import { parseManifestKey } from '@/lib/dates';
 import { allocateSubStopsIntact } from '@/lib/allocation';
 import { detectVehicleRep, detectAllVehicleReps, getRepStructure, isPassengerRepOfVehicle, matchRiderToOfficialRep } from '@/lib/officialReps';
