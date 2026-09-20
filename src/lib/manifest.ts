@@ -305,7 +305,7 @@ export function reconcileManifestForSave(
       ...remoteV,
       ...incV,
       riders: incV.riders || [],
-      orderedStops: nextStops.length > 0 ? nextStops : (incV.orderedStops || []),
+      orderedStops: incV.orderedStops !== undefined ? incV.orderedStops : (remoteV.orderedStops || []),
       submitted: isSubmitted,
       submittedAt: isSubmitted ? (incV.submittedAt || remoteV.submittedAt || new Date().toISOString()) : undefined,
       submittedBy: isSubmitted ? (incV.submittedBy || remoteV.submittedBy || incV.repName) : undefined,
@@ -370,8 +370,11 @@ export function reconcileManifestForSave(
     const incP = incSignupsMap.get(sId);
 
     if (!incP) {
-      // Exists in remote, missing in incoming (incoming was stale): KEEP remote signup
-      reconciledSignups.push(remP);
+      // Only keep remote signup if it was a real-time mobile walk-in recorded on the ground
+      if (remP.walkIn) {
+        reconciledSignups.push(remP);
+      }
+      // Otherwise, the admin intentionally removed/deleted them from incoming signups: DO NOT RESURRECT!
       continue;
     }
 

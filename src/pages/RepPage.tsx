@@ -3,7 +3,7 @@ import {
   Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
   Smartphone, ChevronDown, ChevronRight, MapPin, Send,
   HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus, Search, Banknote,
-  Sparkles, ArrowDownAZ, RotateCcw, Check, AlertCircle, Calendar,
+  Sparkles, ArrowDownAZ, RotateCcw, Check, AlertCircle, Calendar, Pencil, UserMinus,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { Header } from '@/components/Header';
@@ -1762,6 +1762,7 @@ export function RepPage() {
           : v
       );
       await save({ ...manifest, vehicles: updatedVehicles });
+      isUserDirtyRef.current = true;
 
       setSubmitMsg(
         `✓ Attendance reopened for editing. Unconfirmed absentees have been withdrawn from the cancellation ledger until you submit again.`
@@ -1772,6 +1773,81 @@ export function RepPage() {
       setSubmitting(false);
     }
   }
+
+  const handleRemoveRiderFromVehicle = useCallback(
+    async (passengerId: string) => {
+      if (!manifest || !selectedVehicle) return;
+      const targetPassenger = manifest.signups.find((p) => String(p.id) === String(passengerId));
+      if (!targetPassenger) return;
+
+      const isWalkIn = targetPassenger.id.startsWith('walkin-') || targetPassenger.stop === 'Walk-In';
+
+      // 1. Update signups: if walk-in, delete it; otherwise return to unassigned pool (assignedTo: null)
+      const updatedSignups = isWalkIn
+        ? manifest.signups.filter((p) => String(p.id) !== String(passengerId))
+        : manifest.signups.map((p) =>
+            String(p.id) === String(passengerId) ? { ...p, assignedTo: null } : p
+          );
+
+      // 2. Remove from current vehicle's riders and clean draftState
+      const updatedVehicles = manifest.vehicles.map((v) => {
+        if (v.id !== selectedVehicle.id) return v;
+        const nextRiders = v.riders.filter((id) => String(id) !== String(passengerId));
+        const cleanedDraft = v.draftState
+          ? {
+              ...v.draftState,
+              presentIds: v.draftState.presentIds?.filter((id) => String(id) !== String(passengerId)),
+              absentIds: v.draftState.absentIds?.filter((id) => String(id) !== String(passengerId)),
+              sponsoredIds: v.draftState.sponsoredIds?.filter((id) => String(id) !== String(passengerId)),
+              unpaidIds: v.draftState.unpaidIds?.filter((id) => String(id) !== String(passengerId)),
+              notes: Object.fromEntries(
+                Object.entries(v.draftState.notes || {}).filter(([k]) => String(k) !== String(passengerId))
+              ),
+            }
+          : undefined;
+        return { ...v, riders: nextRiders, draftState: cleanedDraft };
+      });
+
+      // 3. Clean local state
+      setPresentIds((prev) => {
+        const next = new Set(prev);
+        next.delete(passengerId);
+        return next;
+      });
+      setAbsentIds((prev) => {
+        const next = new Set(prev);
+        next.delete(passengerId);
+        return next;
+      });
+      setSponsoredIds((prev) => {
+        const next = new Set(prev);
+        next.delete(passengerId);
+        return next;
+      });
+      setUnpaidIds((prev) => {
+        const next = new Set(prev);
+        next.delete(passengerId);
+        return next;
+      });
+      setNotes((prev) => {
+        const next = { ...prev };
+        delete next[passengerId];
+        return next;
+      });
+
+      isUserDirtyRef.current = true;
+      const newManifest = { ...manifest, signups: updatedSignups, vehicles: updatedVehicles };
+      await save(newManifest);
+
+      setBatchActionMsg(
+        isWalkIn
+          ? `✓ Removed walk-in "${targetPassenger.fullName}".`
+          : `✓ Returned "${targetPassenger.fullName}" to unassigned pool.`
+      );
+      setTimeout(() => setBatchActionMsg(null), 5000);
+    },
+    [manifest, selectedVehicle, save]
+  );
 
   const handleSelectVehicle = (newVehicleId: string) => {
     // 1. Immediately persist outgoing vehicle's draft if dirty
@@ -2115,20 +2191,63 @@ export function RepPage() {
                   <StatCard label="Absent" value={absentCount} icon={<AlertTriangle className="h-4 w-4" />} accent="crimson" />
                 </div>
 
-                {isSubmitted && (
-                  <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-3 text-sm text-success-light">
-                    <CheckCircle2 className="h-4 w-4 shrink-0" />
-                    <div>
-                      <div className="font-semibold">Attendance submitted</div>
-                      <div className="text-xs text-muted">
-                        Submitted by {selectedVehicle.submittedBy || 'rep'}
-                        {selectedVehicle.licensePlate && ` · Plate: ${selectedVehicle.licensePlate}`}
-                        {selectedVehicle.submittedAt &&
-                          ` at ${new Date(selectedVehicle.submittedAt).toLocaleString('en-ZA', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })}`}
+                {isSubmitted ? (
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-success/40 bg-success/15 p-3.5 text-sm text-success-light shadow-md">
+                    <div className="flex items-start gap-3">
+                      <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-success" />
+                      <div>
+                        <div className="font-bold text-success-light text-sm flex items-center gap-2">
+                          <span>Attendance Submitted & Locked</span>
+                          <span className="rounded-full bg-success/25 px-2 py-0.5 text-[10px] font-mono font-bold text-success uppercase">
+                            Submitted
+                          </span>
+                        </div>
+                        <div className="text-xs text-muted mt-0.5">
+                          Submitted by <strong className="text-ink">{selectedVehicle.submittedBy || 'rep'}</strong>
+                          {selectedVehicle.licensePlate && <span> · Plate: <strong className="text-ink">{selectedVehicle.licensePlate}</strong></span>}
+                          {selectedVehicle.submittedAt && (
+                            <span>
+                              {' '}·{' '}
+                              {new Date(selectedVehicle.submittedAt).toLocaleString('en-ZA', {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                                day: '2-digit',
+                                month: 'short',
+                              })}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
+                    <button
+                      type="button"
+                      onClick={handleReopen}
+                      disabled={submitting}
+                      className="btn-crimson shrink-0 px-3.5 py-1.5 text-xs font-bold shadow-sm flex items-center justify-center gap-1.5 hover:scale-[1.02] active:scale-95 transition-all"
+                    >
+                      {submitting ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          <span>Unlocking…</span>
+                        </>
+                      ) : (
+                        <>
+                          <Pencil className="h-3.5 w-3.5" />
+                          <span>Edit / Resubmit Stats</span>
+                        </>
+                      )}
+                    </button>
                   </div>
-                )}
+                ) : selectedVehicle?.submittedAt ? (
+                  <div className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-300">
+                    <div className="flex items-center gap-2">
+                      <Pencil className="h-4 w-4 text-amber-400 shrink-0" />
+                      <span>
+                        Vehicle unlocked for editing. Make your changes below and click <strong>Resubmit Vehicle Stats</strong> when finished.
+                      </span>
+                    </div>
+                  </div>
+                ) : null}
 
                 {/* Quick Actions: Walk-in & Settle Cancellation */}
                 {!isSubmitted && (
@@ -2394,6 +2513,7 @@ export function RepPage() {
                     riderDebtsMap={riderDebtsMap}
                     collectedCancellationIds={collectedCancellationIds}
                     onToggleCancellation={toggleCollectedCancellation}
+                    onRemoveRider={handleRemoveRiderFromVehicle}
                   />
                 ) : (
                   <AlphabeticalChecklist
@@ -2413,6 +2533,7 @@ export function RepPage() {
                     riderDebtsMap={riderDebtsMap}
                     collectedCancellationIds={collectedCancellationIds}
                     onToggleCancellation={toggleCollectedCancellation}
+                    onRemoveRider={handleRemoveRiderFromVehicle}
                   />
                 )}
 
@@ -2517,8 +2638,8 @@ export function RepPage() {
                     <button
                       onClick={handleSubmit}
                       disabled={!canSubmit}
-                      className={`w-full py-3.5 text-base ${
-                        canSubmit ? 'btn-crimson' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted'
+                      className={`w-full py-3.5 text-base font-bold shadow-md transition-all ${
+                        canSubmit ? 'btn-crimson hover:scale-[1.01] active:scale-95' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted'
                       }`}
                     >
                       {submitting ? (
@@ -2529,7 +2650,7 @@ export function RepPage() {
                       ) : (
                         <span className="flex items-center justify-center gap-2">
                           <Send className="h-5 w-5" />
-                          Submit Attendance
+                          {selectedVehicle?.submittedAt ? 'Resubmit Vehicle Stats / Save Updates' : 'Submit Attendance'}
                         </span>
                       )}
                     </button>
@@ -2569,15 +2690,18 @@ export function RepPage() {
                   <button
                     onClick={handleReopen}
                     disabled={submitting}
-                    className="btn-ghost w-full text-xs"
+                    className="btn-crimson w-full py-3.5 text-base font-bold shadow-md flex items-center justify-center gap-2 hover:scale-[1.01] active:scale-95 transition-all"
                   >
                     {submitting ? (
-                      <span className="flex items-center justify-center gap-1.5">
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        Reopening…
-                      </span>
+                      <>
+                        <Loader2 className="h-5 w-5 animate-spin" />
+                        <span>Unlocking for editing…</span>
+                      </>
                     ) : (
-                      'Re-open for editing (withdraws unconfirmed absentees)'
+                      <>
+                        <Pencil className="h-5 w-5" />
+                        <span>Edit / Resubmit Vehicle Stats</span>
+                      </>
                     )}
                   </button>
                 )}
@@ -3048,7 +3172,7 @@ function CashCalculatorCard({
 
 function StopGroupedChecklist({
   riders, vehicleType, orderedStops, stopRedirects, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
-  riderDebtsMap, collectedCancellationIds, onToggleCancellation,
+  riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider,
 }: {
   riders: Passenger[];
   vehicleType: 'Bus' | 'Taxi';
@@ -3067,6 +3191,7 @@ function StopGroupedChecklist({
   riderDebtsMap?: Record<string, LedgerEntry[]>;
   collectedCancellationIds?: Set<string>;
   onToggleCancellation?: (id: string) => void;
+  onRemoveRider?: (id: string) => void;
 }) {
   const byStop = useMemo(() => {
     const groups: Record<string, Passenger[]> = {};
@@ -3180,6 +3305,7 @@ function StopGroupedChecklist({
                       outstandingDebts={riderDebtsMap?.[p.id] || riderDebtsMap?.[String(p.id)]}
                       collectedCancellationIds={collectedCancellationIds}
                       onToggleCancellation={onToggleCancellation}
+                      onRemoveRider={onRemoveRider}
                     />
                   );
                 })}
@@ -3194,7 +3320,7 @@ function StopGroupedChecklist({
 
 function AlphabeticalChecklist({
   riders, vehicleType, stopRedirects, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
-  riderDebtsMap, collectedCancellationIds, onToggleCancellation,
+  riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider,
 }: {
   riders: Passenger[];
   vehicleType?: 'Bus' | 'Taxi';
@@ -3212,6 +3338,7 @@ function AlphabeticalChecklist({
   riderDebtsMap?: Record<string, LedgerEntry[]>;
   collectedCancellationIds?: Set<string>;
   onToggleCancellation?: (id: string) => void;
+  onRemoveRider?: (id: string) => void;
 }) {
   const sorted = useMemo(() => {
     return [...riders].sort((a, b) => naturalCompare(a.fullName, b.fullName));
@@ -3251,6 +3378,7 @@ function AlphabeticalChecklist({
             outstandingDebts={riderDebtsMap?.[p.id] || riderDebtsMap?.[String(p.id)]}
             collectedCancellationIds={collectedCancellationIds}
             onToggleCancellation={onToggleCancellation}
+            onRemoveRider={onRemoveRider}
           />
         );
       })}
@@ -3260,7 +3388,7 @@ function AlphabeticalChecklist({
 
 const PassengerRow = React.memo(function PassengerRow({
   passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, isSponsored, isUnpaid, noteText, redirectedFrom, disabled,
-  outstandingDebts, collectedCancellationIds, onToggleCancellation,
+  outstandingDebts, collectedCancellationIds, onToggleCancellation, onRemoveRider,
 }: {
   passenger: Passenger;
   isPresent: boolean;
@@ -3278,6 +3406,7 @@ const PassengerRow = React.memo(function PassengerRow({
   outstandingDebts?: LedgerEntry[];
   collectedCancellationIds?: Set<string>;
   onToggleCancellation?: (id: string) => void;
+  onRemoveRider?: (id: string) => void;
 }) {
   const isMissingSponsorInfo = isSponsored && !noteText.trim();
   const [showNote, setShowNote] = useState(isSponsored || isUnpaid || !!noteText);
@@ -3480,6 +3609,23 @@ const PassengerRow = React.memo(function PassengerRow({
           >
             <StickyNote className="h-3 w-3" />
             {isMissingSponsorInfo ? 'Sponsor Info (Required)' : isNoteVisible ? 'Hide Note' : 'Note'}
+          </button>
+        )}
+
+        {/* Remove rider from vehicle (returns to unassigned pool) */}
+        {onRemoveRider && !disabled && (
+          <button
+            type="button"
+            onClick={() => onRemoveRider(passenger.id)}
+            className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-muted hover:text-amber-400 hover:bg-amber-500/15 border border-line/60 hover:border-amber-500/30 transition-all active:scale-95"
+            title={
+              passenger.id.startsWith('walkin-') || passenger.stop === 'Walk-In'
+                ? 'Remove walk-in'
+                : 'Mistakenly added? Remove from vehicle (returns to unassigned pool)'
+            }
+          >
+            <UserMinus className="h-3 w-3 text-amber-400" />
+            <span className="hidden sm:inline">Remove</span>
           </button>
         )}
       </div>

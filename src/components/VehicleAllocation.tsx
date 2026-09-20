@@ -3,10 +3,13 @@ import {
   Bus, Car, Plus, Trash2, Users, ArrowRight, Undo2, X, UserCog, MoveRight,
   CheckCircle2, ChevronDown, ChevronRight, ChevronUp, MapPin,
   Check, Clock, StickyNote, Sparkles, ArrowUpDown, UserCheck, Download,
-  FileText, Copy, Eye, FileDown, Search, UserX, GitMerge, CornerDownRight, MessageCircle, Pencil, HeartHandshake
+  FileText, Copy, Eye, FileDown, Search, UserX, GitMerge, CornerDownRight, MessageCircle, Pencil, HeartHandshake,
+  ArrowRightLeft, UserMinus, RotateCcw
 } from 'lucide-react';
 import { EditVehicleModal } from './EditVehicleModal';
 import { TransferSponsorshipModal } from './TransferSponsorshipModal';
+import { ChangeServiceModal } from './ChangeServiceModal';
+import { ChangeStopModal } from './ChangeStopModal';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
@@ -177,28 +180,20 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   const [transferModalOpen, setTransferModalOpen] = useState(false);
   const [transferModalPassenger, setTransferModalPassenger] = useState<Passenger | null>(null);
 
-  const handleTransferSuccess = (message: string, transferredPassengerId?: string) => {
-    setMoveNotification({ text: message, timestamp: Date.now() });
-    const pId = transferredPassengerId || transferModalPassenger?.id;
-    if (pId) {
-      setLocalManifest((prev) => ({
-        ...prev,
-        signups: prev.signups.filter((p) => p.id !== pId),
-        vehicles: prev.vehicles.map((v) => ({
-          ...v,
-          riders: v.riders.filter((id) => id !== pId),
-          draftState: v.draftState
-            ? {
-                ...v.draftState,
-                presentIds: v.draftState.presentIds?.filter((id) => id !== pId),
-                absentIds: v.draftState.absentIds?.filter((id) => id !== pId),
-                sponsoredIds: v.draftState.sponsoredIds?.filter((id) => id !== pId),
-              }
-            : undefined,
-        })),
-      }));
-    }
-  };
+  // Dedicated Change Sunday Service Modal state
+  const [changeServiceModalOpen, setChangeServiceModalOpen] = useState(false);
+  const [changeServicePassenger, setChangeServicePassenger] = useState<Passenger | null>(null);
+
+  // Dedicated Change Pickup Stop Modal state
+  const [changeStopModalOpen, setChangeStopModalOpen] = useState(false);
+  const [changeStopPassenger, setChangeStopPassenger] = useState<Passenger | null>(null);
+
+  // Adding stop to vehicle route inline state
+  const [addingStopVehicleId, setAddingStopVehicleId] = useState<string | null>(null);
+  const [newStopInput, setNewStopInput] = useState<string>('');
+
+  // Unassigned pool view toggle
+  const [showUnassignedList, setShowUnassignedList] = useState(false);
 
   /**
    * Performs an immediate synchronous mutation on the local manifest,
@@ -228,6 +223,223 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       }
     }, 150);
   }, [onSave]);
+
+  const handleTransferSuccess = (message: string, transferredPassengerId?: string) => {
+    setMoveNotification({ text: message, timestamp: Date.now() });
+    const pId = transferredPassengerId || transferModalPassenger?.id || changeServicePassenger?.id;
+    if (pId) {
+      const sId = String(pId);
+      mutateAndSave((prev) => ({
+        ...prev,
+        signups: prev.signups.filter((p) => String(p.id) !== sId),
+        vehicles: prev.vehicles.map((v) => ({
+          ...v,
+          riders: v.riders.filter((id) => String(id) !== sId),
+          draftState: v.draftState
+            ? {
+                ...v.draftState,
+                presentIds: v.draftState.presentIds?.filter((id) => String(id) !== sId),
+                absentIds: v.draftState.absentIds?.filter((id) => String(id) !== sId),
+                sponsoredIds: v.draftState.sponsoredIds?.filter((id) => String(id) !== sId),
+                unpaidIds: v.draftState.unpaidIds?.filter((id) => String(id) !== sId),
+                notes: Object.fromEntries(
+                  Object.entries(v.draftState.notes || {}).filter(([k]) => String(k) !== sId)
+                ),
+              }
+            : undefined,
+        })),
+      }));
+    }
+  };
+
+  /** Remove a passenger from the manifest entirely (signups and all vehicles) */
+  const removePassenger = useCallback((passengerId: string | number) => {
+    const sId = String(passengerId);
+    const target = localManifest.signups.find((p) => String(p.id) === sId);
+    const name = target?.fullName || 'this passenger';
+    if (!window.confirm(`Are you sure you want to remove "${name}" from the manifest? This will delete them from the signups list.`)) {
+      return;
+    }
+    mutateAndSave((prev) => {
+      const nextSignups = prev.signups.filter((p) => String(p.id) !== sId);
+      const nextVehicles = prev.vehicles.map((v) => {
+        if (!v.riders.some((id) => String(id) === sId)) return v;
+        const nextRiders = v.riders.filter((id) => String(id) !== sId);
+        const cleanedDraft = v.draftState
+          ? {
+              ...v.draftState,
+              presentIds: v.draftState.presentIds?.filter((id) => String(id) !== sId),
+              absentIds: v.draftState.absentIds?.filter((id) => String(id) !== sId),
+              sponsoredIds: v.draftState.sponsoredIds?.filter((id) => String(id) !== sId),
+              unpaidIds: v.draftState.unpaidIds?.filter((id) => String(id) !== sId),
+              notes: Object.fromEntries(
+                Object.entries(v.draftState.notes || {}).filter(([k]) => String(k) !== sId)
+              ),
+            }
+          : undefined;
+        return { ...v, riders: nextRiders, draftState: cleanedDraft };
+      });
+      return { ...prev, signups: nextSignups, vehicles: nextVehicles };
+    });
+    setMoveNotification({ text: `✓ Removed ${name} from manifest`, timestamp: Date.now() });
+  }, [localManifest.signups, mutateAndSave]);
+
+  /** Change pickup stop for an individual passenger */
+  const changePassengerStop = useCallback((passengerId: string | number, newStop: string) => {
+    const cleanStop = newStop.trim();
+    if (!cleanStop) return;
+    const sId = String(passengerId);
+    mutateAndSave((prev) => {
+      const updatedSignups = prev.signups.map((p) =>
+        String(p.id) === sId ? { ...p, stop: cleanStop } : p
+      );
+      const updatedVehicles = prev.vehicles.map((v) => {
+        if (v.riders.some((id) => String(id) === sId)) {
+          const hub = hubDisplayName(v.type, cleanStop);
+          const curStops = v.orderedStops ?? [];
+          const nextStops = curStops.includes(hub) ? curStops : [...curStops, hub];
+          return { ...v, orderedStops: nextStops };
+        }
+        return v;
+      });
+      return { ...prev, signups: updatedSignups, vehicles: updatedVehicles };
+    });
+    setMoveNotification({ text: `✓ Updated stop to "${cleanStop}"`, timestamp: Date.now() });
+  }, [mutateAndSave]);
+
+  /** Explicitly add a new stop to a vehicle route sequence */
+  const addStopToVehicle = useCallback((vehicleId: string, stopName: string) => {
+    const clean = stopName.trim();
+    if (!clean) return;
+    mutateAndSave((prev) => {
+      const updatedVehicles = prev.vehicles.map((v) => {
+        if (v.id !== vehicleId) return v;
+        const cur = v.orderedStops ?? [];
+        if (cur.includes(clean)) return v;
+        return { ...v, orderedStops: [...cur, clean] };
+      });
+      return { ...prev, vehicles: updatedVehicles };
+    });
+    setMoveNotification({ text: `✓ Added "${clean}" to vehicle route`, timestamp: Date.now() });
+  }, [mutateAndSave]);
+
+  /** Return all riders of a specific stop on a vehicle back to the unassigned pool */
+  const returnStopRidersToPool = useCallback((vehicleId: string, stopLabel: string) => {
+    let unassignedCount = 0;
+    mutateAndSave((prev) => {
+      const vehicle = prev.vehicles.find((v) => v.id === vehicleId);
+      if (!vehicle) return prev;
+
+      const vehicleRiderIdSet = new Set(vehicle.riders.map(String));
+      const targetPassengers = prev.signups.filter((p) => {
+        if (!vehicleRiderIdSet.has(String(p.id))) return false;
+        const pHub = hubDisplayName(vehicle.type, p.stop);
+        const isRedirectedToThis = (vehicle.stopRedirects ?? {})[pHub] === stopLabel;
+        return pHub === stopLabel || isRedirectedToThis || p.stop === stopLabel;
+      });
+
+      if (targetPassengers.length === 0) return prev;
+      unassignedCount = targetPassengers.length;
+      const targetIdSet = new Set(targetPassengers.map((p) => String(p.id)));
+
+      const updatedSignups = prev.signups.map((p) =>
+        targetIdSet.has(String(p.id)) ? { ...p, assignedTo: null } : p
+      );
+
+      const updatedVehicles = prev.vehicles.map((v) => {
+        if (v.id !== vehicleId) return v;
+        const nextRiders = v.riders.filter((id) => !targetIdSet.has(String(id)));
+        const cleanedDraft = v.draftState
+          ? {
+              ...v.draftState,
+              presentIds: v.draftState.presentIds?.filter((id) => !targetIdSet.has(String(id))),
+              absentIds: v.draftState.absentIds?.filter((id) => !targetIdSet.has(String(id))),
+              sponsoredIds: v.draftState.sponsoredIds?.filter((id) => !targetIdSet.has(String(id))),
+              unpaidIds: v.draftState.unpaidIds?.filter((id) => !targetIdSet.has(String(id))),
+              notes: Object.fromEntries(
+                Object.entries(v.draftState.notes || {}).filter(([k]) => !targetIdSet.has(String(k)))
+              ),
+            }
+          : undefined;
+
+        return {
+          ...v,
+          riders: nextRiders,
+          draftState: cleanedDraft,
+        };
+      });
+
+      return { ...prev, signups: updatedSignups, vehicles: updatedVehicles };
+    });
+
+    setMoveNotification({
+      text: `✓ Returned ${unassignedCount} passenger(s) from "${stopLabel}" to unassigned pool`,
+      timestamp: Date.now(),
+    });
+  }, [mutateAndSave]);
+
+  /** Remove a stop label from a vehicle route sequence AND return any assigned riders back to unassigned pool */
+  const removeStopFromVehicle = useCallback((vehicleId: string, stopLabel: string) => {
+    let unassignedCount = 0;
+    mutateAndSave((prev) => {
+      const vehicle = prev.vehicles.find((v) => v.id === vehicleId);
+      if (!vehicle) return prev;
+
+      const vehicleRiderIdSet = new Set(vehicle.riders.map(String));
+      const targetPassengers = prev.signups.filter((p) => {
+        if (!vehicleRiderIdSet.has(String(p.id))) return false;
+        const pHub = hubDisplayName(vehicle.type, p.stop);
+        const isRedirectedToThis = (vehicle.stopRedirects ?? {})[pHub] === stopLabel;
+        return pHub === stopLabel || isRedirectedToThis || p.stop === stopLabel;
+      });
+
+      unassignedCount = targetPassengers.length;
+      const targetIdSet = new Set(targetPassengers.map((p) => String(p.id)));
+
+      const updatedSignups = prev.signups.map((p) =>
+        targetIdSet.has(String(p.id)) ? { ...p, assignedTo: null } : p
+      );
+
+      const updatedVehicles = prev.vehicles.map((v) => {
+        if (v.id !== vehicleId) return v;
+        const cur = v.orderedStops ?? [];
+        const nextStops = cur.filter((s) => s !== stopLabel);
+        const nextRedirects = { ...(v.stopRedirects ?? {}) };
+        delete nextRedirects[stopLabel];
+        Object.entries(nextRedirects).forEach(([from, to]) => {
+          if (to === stopLabel) delete nextRedirects[from];
+        });
+        const nextRiders = v.riders.filter((id) => !targetIdSet.has(String(id)));
+        const cleanedDraft = v.draftState
+          ? {
+              ...v.draftState,
+              presentIds: v.draftState.presentIds?.filter((id) => !targetIdSet.has(String(id))),
+              absentIds: v.draftState.absentIds?.filter((id) => !targetIdSet.has(String(id))),
+              sponsoredIds: v.draftState.sponsoredIds?.filter((id) => !targetIdSet.has(String(id))),
+              unpaidIds: v.draftState.unpaidIds?.filter((id) => !targetIdSet.has(String(id))),
+              notes: Object.fromEntries(
+                Object.entries(v.draftState.notes || {}).filter(([k]) => !targetIdSet.has(String(k)))
+              ),
+            }
+          : undefined;
+
+        return {
+          ...v,
+          orderedStops: nextStops,
+          stopRedirects: nextRedirects,
+          riders: nextRiders,
+          draftState: cleanedDraft,
+        };
+      });
+      return { ...prev, signups: updatedSignups, vehicles: updatedVehicles };
+    });
+    setMoveNotification({
+      text: unassignedCount > 0
+        ? `✓ Removed "${stopLabel}" and returned ${unassignedCount} passenger(s) to unassigned pool`
+        : `✓ Removed "${stopLabel}" from route`,
+      timestamp: Date.now(),
+    });
+  }, [mutateAndSave]);
 
   const unassigned = unassignedPassengers(localManifest);
 
@@ -267,7 +479,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       groups[label].push(r);
     }
     const order = vehicle?.orderedStops ?? [];
-    const orderedLabels = order.filter((l) => groups[l]);
+    const orderedLabels = [...order];
     const extraLabels = Object.keys(groups)
       .filter((l) => !orderedLabels.includes(l))
       .sort((a, b) => (groups[b]?.length || 0) - (groups[a]?.length || 0));
@@ -434,8 +646,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
         const nextRiders = hasRider ? v.riders.filter((id) => String(id) !== String(passengerId)) : v.riders;
 
         const remainingRiderObjs = updatedSignups.filter((p) => nextRiders.some((id) => String(id) === String(p.id)));
-        const activeHubs = new Set(remainingRiderObjs.map((p) => hubDisplayName(v.type, p.stop)));
-        const nextOrderedStops = (v.orderedStops ?? []).filter((s) => activeHubs.has(s));
+        const nextOrderedStops = v.orderedStops ?? [];
 
         // Re-check official rep: if removed passenger was the rep, detect if another rep is on board
         const detectedRep = detectVehicleRep(remainingRiderObjs);
@@ -527,22 +738,41 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     });
   }
 
-  function addStopRedirect(vehicleId: string, fromStop: string, toStop: string, autoSetNote = true) {
+  function addStopRedirect(vehicleId: string, fromStop: string, toStop: string, autoSetNote = true, pullUnassigned = false) {
     const cleanFrom = fromStop.trim();
     const cleanTo = toStop.trim();
     if (!cleanFrom || !cleanTo || cleanFrom.toLowerCase() === cleanTo.toLowerCase()) return;
 
     mutateAndSave((prev) => {
+      let updatedSignups = prev.signups;
+      let pulledIds: string[] = [];
+
+      if (pullUnassigned) {
+        const matchingUnassigned = prev.signups.filter(
+          (p) => !p.assignedTo && (p.stop === cleanFrom || hubDisplayName('Bus', p.stop) === cleanFrom)
+        );
+        if (matchingUnassigned.length > 0) {
+          pulledIds = matchingUnassigned.map((p) => String(p.id));
+          const pulledSet = new Set(pulledIds);
+          updatedSignups = prev.signups.map((p) =>
+            pulledSet.has(String(p.id)) ? { ...p, assignedTo: vehicleId } : p
+          );
+        }
+      }
+
       const updatedVehicles = prev.vehicles.map((v) => {
         if (v.id !== vehicleId) return v;
         const currentRedirects = { ...(v.stopRedirects ?? {}) };
         currentRedirects[cleanFrom] = cleanTo;
 
-        // Clean up orderedStops if the redirected source stop was in orderedStops and now has 0 standalone riders
         let nextOrderedStops = v.orderedStops ?? [];
-        if (nextOrderedStops.includes(cleanFrom) && !nextOrderedStops.includes(cleanTo)) {
-          nextOrderedStops = nextOrderedStops.map((s) => (s === cleanFrom ? cleanTo : s));
+        if (!nextOrderedStops.includes(cleanTo)) {
+          nextOrderedStops = [...nextOrderedStops, cleanTo];
         }
+
+        const nextRiders = pulledIds.length > 0
+          ? Array.from(new Set([...(v.riders || []).map(String), ...pulledIds]))
+          : v.riders;
 
         let note = v.generalNotes ?? '';
         if (autoSetNote && (!note || note.includes('people please go to') || note.includes('Go to') || note.includes('redirected'))) {
@@ -551,13 +781,15 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
 
         return {
           ...v,
+          riders: nextRiders,
           stopRedirects: currentRedirects,
           orderedStops: nextOrderedStops,
           generalNotes: note || v.generalNotes,
         };
       });
-      return { ...prev, vehicles: updatedVehicles };
+      return { ...prev, signups: updatedSignups, vehicles: updatedVehicles };
     });
+    setMoveNotification({ text: `✓ Redirected count from "${cleanFrom}" to "${cleanTo}"`, timestamp: Date.now() });
   }
 
   function removeStopRedirect(vehicleId: string, fromStop: string) {
@@ -624,8 +856,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                   ),
                 }
               : undefined;
-            const activeHubs = new Set(remainingRiders.map((p) => hubDisplayName(v.type, p.stop)));
-            const nextOrderedStops = (v.orderedStops ?? []).filter((s) => activeHubs.has(s));
+            const nextOrderedStops = v.orderedStops ?? [];
             return {
               ...v,
               riders: nextRiders,
@@ -658,8 +889,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
               }
             : undefined;
 
-          const activeHubs = new Set(remainingRiders.map((p) => hubDisplayName(v.type, p.stop)));
-          const nextOrderedStops = (v.orderedStops ?? []).filter((s) => activeHubs.has(s));
+          const nextOrderedStops = v.orderedStops ?? [];
 
           return {
             ...v,
@@ -1113,6 +1343,112 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
               </span>
             ))}
           </div>
+
+          <div className="mt-3 pt-2.5 border-t border-line/60 flex items-center justify-between flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setShowUnassignedList(!showUnassignedList)}
+              className="text-xs font-semibold text-crimson-400 hover:text-crimson-300 flex items-center gap-1.5 transition-colors"
+            >
+              {showUnassignedList ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+              <span>{showUnassignedList ? 'Hide Waiting Passenger List' : `View & Manage Waiting Passengers (${unassigned.length})`}</span>
+            </button>
+            <span className="text-[11px] text-muted">Directly reassign, change stops, or switch services below</span>
+          </div>
+
+          {showUnassignedList && (
+            <div className="mt-3 space-y-2 max-h-96 overflow-y-auto pr-1 animate-fade-in border-t border-line/40 pt-2">
+              {unassigned.map((p) => {
+                const isOfficialRep = matchRiderToOfficialRep(p);
+                const statusBadge = getPassengerStatusBadge(p);
+                return (
+                  <div
+                    key={p.id}
+                    className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-lg border border-line/70 bg-card p-2.5 hover:border-line transition-all shadow-xs"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-semibold text-xs text-ink">{p.fullName}</span>
+                        {p.structure && (
+                          <span className="badge bg-crimson-500/10 text-crimson-300 font-mono text-[10px]">
+                            {p.structure}
+                          </span>
+                        )}
+                        {isOfficialRep && (
+                          <span className="badge bg-amber-500/15 text-amber-300 font-semibold text-[10px]">
+                            ⭐ Rep ({isOfficialRep.structure})
+                          </span>
+                        )}
+                        {statusBadge && (
+                          <span className={`badge text-[10px] ${statusBadge.colorClass}`} title={statusBadge.title}>
+                            {statusBadge.label}
+                          </span>
+                        )}
+                        <span className="badge bg-bg/60 text-muted text-[10px] flex items-center gap-0.5">
+                          <MapPin className="h-3 w-3 text-crimson-400" />
+                          {p.stop}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                      <select
+                        onChange={(e) => {
+                          const targetVeh = e.target.value;
+                          if (!targetVeh) return;
+                          movePassenger(p.id, 'unassigned', targetVeh);
+                        }}
+                        defaultValue=""
+                        className="input-field py-1 text-xs w-36 bg-card-2"
+                      >
+                        <option value="" disabled>
+                          Assign to...
+                        </option>
+                        {sortVehiclesNatural(localManifest.vehicles).map((v) => (
+                          <option key={v.id} value={v.id}>
+                            {v.type === 'Bus' ? '🚌' : '🚕'} {v.name} ({v.riders.length})
+                          </option>
+                        ))}
+                      </select>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setChangeStopPassenger(p);
+                          setChangeStopModalOpen(true);
+                        }}
+                        className="btn-ghost p-1 text-muted hover:text-ink hover:bg-bg/60 rounded text-[11px]"
+                        title="Change Pickup Stop"
+                      >
+                        <MapPin className="h-3.5 w-3.5 text-crimson-400" />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setChangeServicePassenger(p);
+                          setChangeServiceModalOpen(true);
+                        }}
+                        className="btn-ghost p-1 text-muted hover:text-sky-300 hover:bg-sky-500/20 rounded text-[11px]"
+                        title="Change Sunday Service (e.g. 08:30 -> 10:00 -> 17:00)"
+                      >
+                        <ArrowRightLeft className="h-3.5 w-3.5 text-sky-400" />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => removePassenger(p.id)}
+                        className="btn-ghost p-1 text-muted hover:text-crimson-400 hover:bg-crimson-500/20 rounded text-[11px]"
+                        title="Remove passenger from manifest"
+                      >
+                        <Trash2 className="h-3.5 w-3.5 text-crimson-400" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -1485,6 +1821,50 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                       >
                         Move
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setChangeStopPassenger(p);
+                          setChangeStopModalOpen(true);
+                        }}
+                        className="btn-ghost p-1 text-muted hover:text-ink hover:bg-bg/60 rounded text-[11px]"
+                        title="Change Pickup Stop"
+                      >
+                        <MapPin className="h-3.5 w-3.5 text-crimson-400" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setChangeServicePassenger(p);
+                          setChangeServiceModalOpen(true);
+                        }}
+                        className="btn-ghost p-1 text-muted hover:text-sky-300 hover:bg-sky-500/20 rounded text-[11px]"
+                        title="Change Sunday Service (e.g. 08:30 -> 10:00 -> 17:00)"
+                      >
+                        <ArrowRightLeft className="h-3.5 w-3.5 text-sky-400" />
+                      </button>
+                      {assignedVehicle ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            unassignRider(assignedVehicle.id, p.id);
+                            setMoveNotification({ text: `✓ Returned ${p.fullName} to unassigned pool`, timestamp: Date.now() });
+                          }}
+                          className="btn-ghost p-1 text-muted hover:text-crimson-400 hover:bg-crimson-500/20 rounded text-[11px]"
+                          title="Remove from vehicle (returns to unassigned pool)"
+                        >
+                          <UserMinus className="h-3.5 w-3.5" />
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => removePassenger(p.id)}
+                          className="btn-ghost p-1 text-muted hover:text-crimson-400 hover:bg-crimson-500/20 rounded text-[11px]"
+                          title="Delete unassigned passenger from manifest"
+                        >
+                          <Trash2 className="h-3.5 w-3.5 text-crimson-400" />
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => {
@@ -1993,7 +2373,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                     <VehicleStopRedirectSection
                       vehicle={vehicle}
                       allSignups={localManifest.signups}
-                      onAddRedirect={(fromStop, toStop) => addStopRedirect(vehicle.id, fromStop, toStop)}
+                      onAddRedirect={(fromStop, toStop, autoSetNote, pullUnassigned) => addStopRedirect(vehicle.id, fromStop, toStop, autoSetNote, pullUnassigned)}
                       onRemoveRedirect={(fromStop) => removeStopRedirect(vehicle.id, fromStop)}
                     />
 
@@ -2043,17 +2423,87 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                     </div>
 
                     {/* Rider list — grouped by stop/hub with Re-orderable Route Sequencing Controls */}
-                    {riders.length === 0 ? (
-                      <p className="py-3 text-center text-xs text-muted">No passengers assigned to this vehicle yet.</p>
+                    {riders.length === 0 && groups.length === 0 ? (
+                      <div className="py-4 text-center">
+                        <p className="text-xs text-muted mb-2">No passengers or route stops assigned to this vehicle yet.</p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAddingStopVehicleId(addingStopVehicleId === vehicle.id ? null : vehicle.id);
+                            setNewStopInput('');
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition-all"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          <span>Add First Route Stop</span>
+                        </button>
+                      </div>
                     ) : (
                       <div className="space-y-4">
-                        <div className="flex items-center justify-between text-[11px] text-muted border-b border-line pb-1">
+                        <div className="flex items-center justify-between text-[11px] text-muted border-b border-line pb-1.5 flex-wrap gap-2">
                           <span className="flex items-center gap-1 font-semibold uppercase tracking-wider text-muted">
                             <ArrowUpDown className="h-3 w-3" />
                             Route Sequence ({groups.length} stops)
                           </span>
-                          <span>Re-order stops using ▲ / ▼</span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAddingStopVehicleId(addingStopVehicleId === vehicle.id ? null : vehicle.id);
+                                setNewStopInput('');
+                              }}
+                              className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-400 hover:text-amber-300 transition-colors"
+                            >
+                              <Plus className="h-3.5 w-3.5" />
+                              <span>{addingStopVehicleId === vehicle.id ? 'Cancel' : '+ Add Stop to Route'}</span>
+                            </button>
+                            <span>·</span>
+                            <span>Re-order with ▲ / ▼</span>
+                          </div>
                         </div>
+
+                        {/* Inline Add Stop form */}
+                        {addingStopVehicleId === vehicle.id && (
+                          <div className="flex items-center gap-2 p-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10">
+                            <input
+                              type="text"
+                              list={`stops-list-${vehicle.id}`}
+                              value={newStopInput}
+                              onChange={(e) => setNewStopInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' && newStopInput.trim()) {
+                                  addStopToVehicle(vehicle.id, newStopInput);
+                                  setNewStopInput('');
+                                  setAddingStopVehicleId(null);
+                                }
+                              }}
+                              placeholder="Type or pick stop name (e.g. Saratoga, DFC bus stop, YMCA)..."
+                              className="input-field py-1 text-xs flex-1 bg-card"
+                            />
+                            <datalist id={`stops-list-${vehicle.id}`}>
+                              {Array.from(new Set([
+                                ...stopNames,
+                                'DFC bus stop', 'DFC', 'YMCA', 'Gate 7', 'Braam', 'EOH', 'Solomon Mahlangu', 'Saratoga', 'Saratoga Ave'
+                              ])).map((s) => (
+                                <option key={s} value={s} />
+                              ))}
+                            </datalist>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (newStopInput.trim()) {
+                                  addStopToVehicle(vehicle.id, newStopInput);
+                                  setNewStopInput('');
+                                  setAddingStopVehicleId(null);
+                                }
+                              }}
+                              disabled={!newStopInput.trim()}
+                              className="btn-primary py-1 px-3 text-xs font-semibold whitespace-nowrap disabled:opacity-40"
+                            >
+                              Add Stop
+                            </button>
+                          </div>
+                        )}
 
                         {groups.map((group, groupIdx) => {
                           const isFirst = groupIdx === 0;
@@ -2097,7 +2547,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                                   </span>
                                 )}
 
-                                <span className="ml-auto flex items-center gap-1">
+                                <span className="ml-auto flex items-center gap-1.5">
                                   <Clock className="h-3 w-3 text-muted" />
                                   <DebouncedInput
                                     type="time"
@@ -2106,10 +2556,33 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                                     className="input-field w-24 py-0.5 text-[11px]"
                                     title="Pickup time for the WhatsApp export"
                                   />
+                                  {group.riders.length > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => returnStopRidersToPool(vehicle.id, group.label)}
+                                      className="rounded p-1 text-muted hover:bg-amber-500/20 hover:text-amber-300 transition-colors"
+                                      title={`Return all ${group.riders.length} rider(s) from "${group.label}" to unassigned pool`}
+                                    >
+                                      <RotateCcw className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => removeStopFromVehicle(vehicle.id, group.label)}
+                                    className="rounded p-1 text-muted hover:bg-crimson-500/20 hover:text-crimson-400 transition-colors"
+                                    title={`Remove stop "${group.label}" from vehicle route & return riders to unassigned pool`}
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
                                 </span>
                               </div>
 
-                              <div className="space-y-1.5">
+                              {group.riders.length === 0 ? (
+                                <div className="rounded-lg border border-dashed border-line/60 py-2 px-3 text-center text-xs text-muted">
+                                  No passengers assigned to this stop yet.
+                                </div>
+                              ) : (
+                                <div className="space-y-1.5">
                                 {group.riders.map((p) => {
                                   const isRepHighlight = highlightRep === p.fullName;
                                   const pOfficial = matchRiderToOfficialRep(p);
@@ -2274,6 +2747,42 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                                           type="button"
                                           onClick={(e) => {
                                             e.stopPropagation();
+                                            setChangeStopPassenger(p);
+                                            setChangeStopModalOpen(true);
+                                          }}
+                                          className="rounded p-1 text-[11px] text-muted hover:text-ink hover:bg-bg/60 transition-all"
+                                          title="Change Pickup Stop"
+                                        >
+                                          <MapPin className="h-3.5 w-3.5 text-crimson-400" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setChangeServicePassenger(p);
+                                            setChangeServiceModalOpen(true);
+                                          }}
+                                          className="rounded p-1 text-[11px] text-sky-400 hover:text-sky-200 hover:bg-sky-500/20 transition-all"
+                                          title="Change Sunday Service (e.g. 08:30 -> 10:00 -> 17:00)"
+                                        >
+                                          <ArrowRightLeft className="h-3.5 w-3.5" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            unassignRider(vehicle.id, p.id);
+                                            setMoveNotification({ text: `✓ Returned ${p.fullName} to unassigned pool`, timestamp: Date.now() });
+                                          }}
+                                          className="rounded p-1 text-[11px] text-muted hover:text-crimson-400 hover:bg-crimson-500/20 transition-all"
+                                          title="Remove from vehicle (returns to unassigned pool)"
+                                        >
+                                          <UserMinus className="h-3.5 w-3.5" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
                                             setTransferModalPassenger(p);
                                             setTransferModalOpen(true);
                                           }}
@@ -2282,25 +2791,15 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                                         >
                                           <HeartHandshake className="h-3.5 w-3.5" />
                                         </button>
-                                        <button
-                                          type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            unassignRider(vehicle.id, p.id);
-                                          }}
-                                          className="rounded-md p-1.5 text-muted transition-colors hover:bg-crimson-900/40 hover:text-crimson-300 active:scale-95"
-                                          title="Return to pool"
-                                        >
-                                          <X className="h-3.5 w-3.5" />
-                                        </button>
                                       </div>
                                     </div>
                                   );
                                 })}
                               </div>
-                            </div>
-                          );
-                        })}
+                            )}
+                          </div>
+                        );
+                      })}
                       </div>
                     )}
                   </div>
@@ -2478,6 +2977,35 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
         initialPassenger={transferModalPassenger}
         onSuccess={handleTransferSuccess}
       />
+
+      {/* Change Sunday Service Modal */}
+      {changeServicePassenger && (
+        <ChangeServiceModal
+          isOpen={changeServiceModalOpen}
+          onClose={() => {
+            setChangeServiceModalOpen(false);
+            setChangeServicePassenger(null);
+          }}
+          manifest={localManifest}
+          currentService={service}
+          passenger={changeServicePassenger}
+          onSuccess={handleTransferSuccess}
+        />
+      )}
+
+      {/* Change Pickup Stop Modal */}
+      {changeStopPassenger && (
+        <ChangeStopModal
+          isOpen={changeStopModalOpen}
+          onClose={() => {
+            setChangeStopModalOpen(false);
+            setChangeStopPassenger(null);
+          }}
+          passenger={changeStopPassenger}
+          allSignups={localManifest.signups}
+          onSave={changePassengerStop}
+        />
+      )}
     </div>
   );
 }
@@ -2490,13 +3018,14 @@ function VehicleStopRedirectSection({
 }: {
   vehicle: Vehicle;
   allSignups: Passenger[];
-  onAddRedirect: (fromStop: string, toStop: string) => void;
+  onAddRedirect: (fromStop: string, toStop: string, autoSetNote?: boolean, pullUnassigned?: boolean) => void;
   onRemoveRedirect: (fromStop: string) => void;
 }) {
   const activeRedirects = Object.entries(vehicle.stopRedirects ?? {});
   const [isOpen, setIsOpen] = useState(activeRedirects.length > 0);
   const [fromStop, setFromStop] = useState('');
   const [toStop, setToStop] = useState('');
+  const [pullUnassigned, setPullUnassigned] = useState(true);
 
   const riders = useMemo(() => {
     return (vehicle.riders || [])
@@ -2504,20 +3033,25 @@ function VehicleStopRedirectSection({
       .filter((p): p is Passenger => Boolean(p));
   }, [vehicle.riders, allSignups]);
 
-  // Stops currently represented among riders (base hub display name)
-  const availableStops = useMemo(() => {
+  // All known stops: riders on this vehicle, vehicle route stops, signups, and canonical stops
+  const allStopsList = useMemo(() => {
     const set = new Set<string>();
     for (const r of riders) {
-      if (r && r.stop) {
-        set.add(hubDisplayName(vehicle.type, r.stop));
-      }
+      if (r && r.stop) set.add(hubDisplayName(vehicle.type, r.stop));
     }
-    return Array.from(set).filter(Boolean);
-  }, [riders, vehicle.type]);
+    for (const s of vehicle.orderedStops ?? []) {
+      if (s) set.add(s);
+    }
+    for (const p of allSignups) {
+      if (p && p.stop) set.add(hubDisplayName(vehicle.type, p.stop));
+    }
+    ['DFC bus stop', 'DFC', 'YMCA', 'Gate 7', 'Braam', 'EOH', 'Solomon Mahlangu', 'Saratoga', 'Saratoga Ave'].forEach((s) => set.add(s));
+    return Array.from(set).filter(Boolean).sort();
+  }, [riders, vehicle.type, vehicle.orderedStops, allSignups]);
 
   const handleAdd = () => {
     if (!fromStop || !toStop || fromStop === toStop) return;
-    onAddRedirect(fromStop, toStop);
+    onAddRedirect(fromStop, toStop, true, pullUnassigned);
     setFromStop('');
     setToStop('');
   };
@@ -2554,7 +3088,7 @@ function VehicleStopRedirectSection({
       {isOpen && (
         <div className="mt-3 space-y-2.5 animate-fade-in border-t border-line/60 pt-2.5">
           <p className="text-[11px] text-muted leading-relaxed">
-            Add a stop's passenger count into another stop (e.g. merge <strong>Saratoga</strong> count into <strong>DFC bus stop</strong>). Reps and dispatch manifests will see the combined total, and individual passengers will remain flagged with their original stop.
+            Redirect a stop's passenger count into another stop (e.g. merge <strong>Saratoga</strong> count into <strong>DFC bus stop</strong>). Reps and dispatch manifests will see the combined total, and individual passengers will remain flagged with their original stop.
           </p>
 
           {/* Active Redirects List */}
@@ -2588,7 +3122,7 @@ function VehicleStopRedirectSection({
           )}
 
           {/* Add New Redirect Row */}
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
             <div className="flex-1">
               <label className="mb-0.5 block text-[10px] uppercase font-semibold text-muted">Redirect from (Source Stop)</label>
               <select
@@ -2597,15 +3131,19 @@ function VehicleStopRedirectSection({
                 className="input-field py-1 text-xs"
               >
                 <option value="">Select source stop...</option>
-                {availableStops.map((s) => (
-                  <option key={s} value={s}>
-                    {s} ({riders.filter((r) => hubDisplayName(vehicle.type, r.stop) === s).length} riders)
-                  </option>
-                ))}
+                {allStopsList.map((s) => {
+                  const onVehCount = riders.filter((r) => hubDisplayName(vehicle.type, r.stop) === s).length;
+                  const totalUnassigned = allSignups.filter((p) => !p.assignedTo && hubDisplayName('Bus', p.stop) === s).length;
+                  return (
+                    <option key={s} value={s}>
+                      {s} ({onVehCount} on vehicle{totalUnassigned > 0 ? `, ${totalUnassigned} waiting` : ''})
+                    </option>
+                  );
+                })}
               </select>
             </div>
 
-            <div className="flex items-center justify-center pt-3 text-muted">
+            <div className="flex items-center justify-center pb-2 text-muted">
               <ArrowRight className="h-4 w-4" />
             </div>
 
@@ -2617,17 +3155,13 @@ function VehicleStopRedirectSection({
                 className="input-field py-1 text-xs"
               >
                 <option value="">Select target stop...</option>
-                {availableStops.filter((s) => s !== fromStop).map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-                {/* Additional common hubs if not already present */}
-                {['DFC bus stop', 'DFC', 'YMCA', 'Gate 7', 'Braam', 'EOH', 'Solomon Mahlangu'].filter((s) => !availableStops.includes(s) && s !== fromStop).map((s) => (
+                {allStopsList.filter((s) => s !== fromStop).map((s) => (
                   <option key={s} value={s}>{s}</option>
                 ))}
               </select>
             </div>
 
-            <div className="pt-3">
+            <div>
               <button
                 type="button"
                 onClick={handleAdd}
@@ -2639,12 +3173,24 @@ function VehicleStopRedirectSection({
             </div>
           </div>
 
-          {/* Quick preset suggestion if Saratoga is on this vehicle */}
-          {availableStops.includes('Saratoga') && !vehicle.stopRedirects?.['Saratoga'] && (
+          <div className="flex items-center gap-2 pt-1">
+            <label className="inline-flex items-center gap-1.5 text-[11px] text-muted cursor-pointer">
+              <input
+                type="checkbox"
+                checked={pullUnassigned}
+                onChange={(e) => setPullUnassigned(e.target.checked)}
+                className="rounded border-line bg-card text-crimson-500 focus:ring-crimson-500"
+              />
+              <span>Also assign unassigned waiting passengers from "{fromStop || 'source stop'}" to this vehicle</span>
+            </label>
+          </div>
+
+          {/* Quick preset suggestion if Saratoga is available */}
+          {allStopsList.includes('Saratoga') && !vehicle.stopRedirects?.['Saratoga'] && (
             <div className="pt-1">
               <button
                 type="button"
-                onClick={() => onAddRedirect('Saratoga', availableStops.includes('DFC bus stop') ? 'DFC bus stop' : 'DFC bus stop')}
+                onClick={() => onAddRedirect('Saratoga', 'DFC bus stop', true, true)}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500/15 border border-amber-500/30 px-2.5 py-1 text-[11px] font-semibold text-amber-300 hover:bg-amber-500/25 transition-all"
               >
                 <CornerDownRight className="h-3 w-3" />
