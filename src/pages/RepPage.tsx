@@ -757,7 +757,7 @@ export function RepPage() {
     return Math.max(0, riders.length - touchedCount);
   }, [riders.length, touchedCount]);
 
-  const allTouched = riders.length > 0 && touchedCount === riders.length;
+  const allTouched = riders.length === 0 || touchedCount === riders.length;
 
   const sponsoredRidersMissingInfo = useMemo(() => {
     return riders.filter((r) => {
@@ -1592,6 +1592,7 @@ export function RepPage() {
       // Atomic submission payload to central server
       const submitPayload: SubmitVehiclePayload = {
         vehicleId: selectedVehicle.id,
+        vehicle: selectedVehicle,
         repName: repName.trim(),
         licensePlate: licensePlate.trim(),
         coReps: coReps.map((c) => c.trim()).filter(Boolean),
@@ -1605,40 +1606,43 @@ export function RepPage() {
         updatedSignups,
       };
 
-      let submittedManifest: Manifest | null = null;
+      // Construct the client-side submitted manifest with authoritative local state
+      const updatedVehicles = manifest.vehicles.map((v) =>
+        v.id === selectedVehicle.id
+          ? {
+              ...v,
+              submitted: true,
+              submittedAt: new Date().toISOString(),
+              submittedBy: repName.trim(),
+              licensePlate: licensePlate.trim(),
+              repName: repName.trim(),
+              coReps: coReps.map((c) => c.trim()).filter(Boolean),
+              generalNotes: fullGeneralNotes,
+              draftState: finalizedDraft,
+            }
+          : v
+      );
+      let submittedManifest: Manifest = { ...manifest, signups: updatedSignups, vehicles: updatedVehicles };
       let serverSaved = false;
 
       try {
         const result = await submitVehicleToServer(key, submitPayload);
-        if (result && result.manifest) {
-          submittedManifest = result.manifest;
+        if (result && result.success) {
           serverSaved = true;
+          // If the server returned a valid manifest with at least as many vehicles, merge non-conflicting changes
+          if (result.manifest && Array.isArray(result.manifest.vehicles) && result.manifest.vehicles.length >= manifest.vehicles.length) {
+            submittedManifest = result.manifest;
+          }
         }
       } catch (err) {
         console.warn('[RepPage] Server submission queued offline:', err);
       }
 
-      // Also persist to client fallback store and Firestore
-      if (!submittedManifest) {
-        const updatedVehicles = manifest.vehicles.map((v) =>
-          v.id === selectedVehicle.id
-            ? {
-                ...v,
-                submitted: true,
-                submittedAt: new Date().toISOString(),
-                submittedBy: repName.trim(),
-                licensePlate: licensePlate.trim(),
-                repName: repName.trim(),
-                coReps: coReps.map((c) => c.trim()).filter(Boolean),
-                generalNotes: fullGeneralNotes,
-                draftState: finalizedDraft,
-              }
-            : v
-        );
-        submittedManifest = { ...manifest, signups: updatedSignups, vehicles: updatedVehicles };
-      }
-
       await save(submittedManifest);
+      const submittedVehicle = submittedManifest.vehicles.find((v) => v.id === selectedVehicle.id);
+      if (submittedVehicle) {
+        saveVehicleToDb(key, submittedVehicle).catch(() => {});
+      }
 
       // Auto-sync this vehicle's stats to the live Google Sheet (no-ops
       // silently if VITE_GOOGLE_SHEETS_WEBHOOK_URL isn't configured).
@@ -2450,7 +2454,7 @@ export function RepPage() {
                       totalCash={totalCash}
                     />
 
-                    {!allTouched && (
+                    {!allTouched && riders.length > 0 && (
                       <div className="flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
                         <AlertTriangle className="h-4 w-4 shrink-0" />
                         Every passenger must be marked Present or Absent before you can submit ({touchedCount}/{riders.length} checked).

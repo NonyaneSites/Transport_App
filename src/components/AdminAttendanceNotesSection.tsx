@@ -94,6 +94,7 @@ export function AdminAttendanceNotesSection({
   const passengerMap = useMemo(() => {
     const map = new Map<string, Passenger>();
     for (const p of manifest.signups || []) {
+      map.set(String(p.id), p);
       map.set(p.id, p);
     }
     return map;

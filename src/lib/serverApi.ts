@@ -1,8 +1,9 @@
-import type { Manifest, VehicleDraftState } from '@/lib/types';
+import type { Manifest, Vehicle, VehicleDraftState } from '@/lib/types';
 import type { LedgerEntry, AbsenteeInput } from '@/lib/ledger';
 
 export interface SubmitVehiclePayload {
   vehicleId: string;
+  vehicle?: Vehicle;
   repName: string;
   licensePlate: string;
   coReps?: string[];

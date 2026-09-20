@@ -252,7 +252,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     if (!vehicle || !Array.isArray(vehicle.riders)) return [];
     const signups = localManifest?.signups || [];
     return vehicle.riders
-      .map((id) => signups.find((p) => p && p.id === id))
+      .map((id) => signups.find((p) => p && String(p.id) === String(id)))
       .filter((p): p is Passenger => Boolean(p));
   }
 
@@ -303,7 +303,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       const vehicle = prev.vehicles.find((v) => v.id === vehicleId);
       if (!vehicle) return prev;
       const updatedSignups = prev.signups.map((p) =>
-        vehicle.riders.includes(p.id) ? { ...p, assignedTo: null } : p
+        vehicle.riders.some((rId) => String(rId) === String(p.id)) ? { ...p, assignedTo: null } : p
       );
       const updatedVehicles = prev.vehicles.filter((v) => v.id !== vehicleId);
       return { ...prev, signups: updatedSignups, vehicles: updatedVehicles };
@@ -354,7 +354,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       if (toAssign.length === 0) return prev;
 
       const updatedSignups = prev.signups.map((p) => {
-        const match = toAssign.find((t) => t.id === p.id);
+        const match = toAssign.find((t) => String(t.id) === String(p.id));
         if (match) return { ...p, assignedTo: vehicleId };
         return p;
       });
@@ -364,8 +364,8 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
         const orderedStops = v.orderedStops ?? [];
         const nextOrderedStops = orderedStops.includes(poolKey) ? orderedStops : [...orderedStops, poolKey];
 
-        const nextRiders = [...v.riders, ...toAssign.map((p) => p.id)];
-        const riderObjs = updatedSignups.filter((p) => nextRiders.includes(p.id));
+        const nextRiders = [...v.riders, ...toAssign.map((p) => String(p.id))];
+        const riderObjs = updatedSignups.filter((p) => nextRiders.some((rId) => String(rId) === String(p.id)));
         
         // Auto-detect official structure rep (e.g. S9 Amo Nhlabathi -> Amogelang Nhlabathi)
         const autoRep = detectVehicleRep(riderObjs);
@@ -429,10 +429,10 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       });
 
       const updatedVehicles = prev.vehicles.map((v) => {
-        const hasRider = v.riders.includes(passengerId);
-        const nextRiders = hasRider ? v.riders.filter((id) => id !== passengerId) : v.riders;
+        const hasRider = v.riders.some((id) => String(id) === String(passengerId));
+        const nextRiders = hasRider ? v.riders.filter((id) => String(id) !== String(passengerId)) : v.riders;
 
-        const remainingRiderObjs = updatedSignups.filter((p) => nextRiders.includes(p.id));
+        const remainingRiderObjs = updatedSignups.filter((p) => nextRiders.some((id) => String(id) === String(p.id)));
         const activeHubs = new Set(remainingRiderObjs.map((p) => hubDisplayName(v.type, p.stop)));
         const nextOrderedStops = (v.orderedStops ?? []).filter((s) => activeHubs.has(s));
 
@@ -444,12 +444,12 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
         const cleanedDraft = v.draftState
           ? {
               ...v.draftState,
-              presentIds: v.draftState.presentIds?.filter((id) => id !== passengerId),
-              absentIds: v.draftState.absentIds?.filter((id) => id !== passengerId),
-              sponsoredIds: v.draftState.sponsoredIds?.filter((id) => id !== passengerId),
-              unpaidIds: v.draftState.unpaidIds?.filter((id) => id !== passengerId),
+              presentIds: v.draftState.presentIds?.filter((id) => String(id) !== String(passengerId)),
+              absentIds: v.draftState.absentIds?.filter((id) => String(id) !== String(passengerId)),
+              sponsoredIds: v.draftState.sponsoredIds?.filter((id) => String(id) !== String(passengerId)),
+              unpaidIds: v.draftState.unpaidIds?.filter((id) => String(id) !== String(passengerId)),
               notes: Object.fromEntries(
-                Object.entries(v.draftState.notes || {}).filter(([k]) => k !== passengerId)
+                Object.entries(v.draftState.notes || {}).filter(([k]) => String(k) !== String(passengerId))
               ),
             }
           : undefined;
@@ -606,20 +606,20 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       const updatedVehicles = prev.vehicles.map((v) => {
         // If unassigning, remove rider from ALL vehicles and clean draftState
         if (isUnassigning) {
-          if (v.riders.includes(passengerId)) {
-            const nextRiders = v.riders.filter((id) => id !== passengerId);
-            const remainingRiders = updatedSignups.filter((p) => nextRiders.includes(p.id));
+          if (v.riders.some((id) => String(id) === String(passengerId))) {
+            const nextRiders = v.riders.filter((id) => String(id) !== String(passengerId));
+            const remainingRiders = updatedSignups.filter((p) => nextRiders.some((id) => String(id) === String(p.id)));
             const detected = detectVehicleRep(remainingRiders);
             const repStillOnBoard = v.repName && remainingRiders.some((r) => isPassengerRepOfVehicle(r, v.repName));
             const cleanedDraft = v.draftState
               ? {
                   ...v.draftState,
-                  presentIds: v.draftState.presentIds?.filter((id) => id !== passengerId),
-                  absentIds: v.draftState.absentIds?.filter((id) => id !== passengerId),
-                  sponsoredIds: v.draftState.sponsoredIds?.filter((id) => id !== passengerId),
-                  unpaidIds: v.draftState.unpaidIds?.filter((id) => id !== passengerId),
+                  presentIds: v.draftState.presentIds?.filter((id) => String(id) !== String(passengerId)),
+                  absentIds: v.draftState.absentIds?.filter((id) => String(id) !== String(passengerId)),
+                  sponsoredIds: v.draftState.sponsoredIds?.filter((id) => String(id) !== String(passengerId)),
+                  unpaidIds: v.draftState.unpaidIds?.filter((id) => String(id) !== String(passengerId)),
                   notes: Object.fromEntries(
-                    Object.entries(v.draftState.notes || {}).filter(([k]) => k !== passengerId)
+                    Object.entries(v.draftState.notes || {}).filter(([k]) => String(k) !== String(passengerId))
                   ),
                 }
               : undefined;
@@ -638,8 +638,8 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
 
         // Origin vehicle (if moving between vehicles)
         if (fromVehicleId && fromVehicleId !== 'unassigned' && v.id === fromVehicleId) {
-          const nextRiders = v.riders.filter((id) => id !== passengerId);
-          const remainingRiders = updatedSignups.filter((p) => nextRiders.includes(p.id));
+          const nextRiders = v.riders.filter((id) => String(id) !== String(passengerId));
+          const remainingRiders = updatedSignups.filter((p) => nextRiders.some((id) => String(id) === String(p.id)));
           const detected = detectVehicleRep(remainingRiders);
           const repStillOnBoard = v.repName && remainingRiders.some((r) => isPassengerRepOfVehicle(r, v.repName));
 
@@ -647,12 +647,12 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
           const cleanedDraft = v.draftState
             ? {
                 ...v.draftState,
-                presentIds: v.draftState.presentIds?.filter((id) => id !== passengerId),
-                absentIds: v.draftState.absentIds?.filter((id) => id !== passengerId),
-                sponsoredIds: v.draftState.sponsoredIds?.filter((id) => id !== passengerId),
-                unpaidIds: v.draftState.unpaidIds?.filter((id) => id !== passengerId),
+                presentIds: v.draftState.presentIds?.filter((id) => String(id) !== String(passengerId)),
+                absentIds: v.draftState.absentIds?.filter((id) => String(id) !== String(passengerId)),
+                sponsoredIds: v.draftState.sponsoredIds?.filter((id) => String(id) !== String(passengerId)),
+                unpaidIds: v.draftState.unpaidIds?.filter((id) => String(id) !== String(passengerId)),
                 notes: Object.fromEntries(
-                  Object.entries(v.draftState.notes || {}).filter(([k]) => k !== passengerId)
+                  Object.entries(v.draftState.notes || {}).filter(([k]) => String(k) !== String(passengerId))
                 ),
               }
             : undefined;
@@ -673,8 +673,8 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
         if (v.id === toVehicleId) {
           const orderedStops = v.orderedStops ?? [];
           const nextOrderedStops = orderedStops.includes(poolKey) ? orderedStops : [...orderedStops, poolKey];
-          const nextRiders = v.riders.includes(passengerId) ? v.riders : [...v.riders, passengerId];
-          const allRiders = updatedSignups.filter((p) => nextRiders.includes(p.id));
+          const nextRiders = v.riders.some((id) => String(id) === String(passengerId)) ? v.riders : [...v.riders, String(passengerId)];
+          const allRiders = updatedSignups.filter((p) => nextRiders.some((id) => String(id) === String(p.id)));
           const autoRep = detectVehicleRep(allRiders);
 
           return {
@@ -718,14 +718,14 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     return signups.filter((p) => {
       if (!p) return false;
 
-      const assignedVeh = vehicles.find((v) => v.riders.includes(p.id)) || (p.assignedTo ? vehicles.find((v) => v?.id === p.assignedTo) : null);
-      const isPresent = Boolean(assignedVeh?.draftState?.presentIds?.includes(p.id) || (assignedVeh?.submitted && p.present));
+      const assignedVeh = vehicles.find((v) => v.riders.some((id) => String(id) === String(p.id))) || (p.assignedTo ? vehicles.find((v) => v?.id === p.assignedTo) : null);
+      const isPresent = Boolean(assignedVeh?.draftState?.presentIds?.some((id) => String(id) === String(p.id)) || (assignedVeh?.submitted && p.present));
       const isAbsent = Boolean(
-        assignedVeh?.draftState?.absentIds?.includes(p.id) ||
-        (assignedVeh?.submitted && !p.present && !assignedVeh?.draftState?.presentIds?.includes(p.id))
+        assignedVeh?.draftState?.absentIds?.some((id) => String(id) === String(p.id)) ||
+        (assignedVeh?.submitted && !p.present && !assignedVeh?.draftState?.presentIds?.some((id) => String(id) === String(p.id)))
       );
-      const isSponsored = Boolean(p.sponsored || assignedVeh?.draftState?.sponsoredIds?.includes(p.id));
-      const riderNote = (assignedVeh?.draftState?.notes?.[p.id] || p.sponsorNote || '').trim();
+      const isSponsored = Boolean(p.sponsored || assignedVeh?.draftState?.sponsoredIds?.some((id) => String(id) === String(p.id)));
+      const riderNote = (assignedVeh?.draftState?.notes?.[p.id] || assignedVeh?.draftState?.notes?.[String(p.id)] || p.sponsorNote || '').trim();
 
       // 1. Role / status filter tab
       if (adminSearchFilter === 'unassigned' && assignedVeh) return false;
@@ -1357,21 +1357,21 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
               </div>
             ) : (
               filteredSearchPassengers.slice(0, 35).map((p) => {
-                const assignedVehicle = localManifest.vehicles.find((v) => v.riders.includes(p.id)) || (p.assignedTo ? localManifest.vehicles.find((v) => v.id === p.assignedTo) : null);
+                const assignedVehicle = localManifest.vehicles.find((v) => v.riders.some((id) => String(id) === String(p.id))) || (p.assignedTo ? localManifest.vehicles.find((v) => v.id === p.assignedTo) : null);
                 const isOfficialRep = matchRiderToOfficialRep(p);
                 const isActiveRep = assignedVehicle ? isPassengerRepOfVehicle(p, assignedVehicle.repName) : false;
                 const targetVeh = searchMoveTarget[p.id] !== undefined ? searchMoveTarget[p.id] : '';
 
                 const isPresent = Boolean(
-                  assignedVehicle?.draftState?.presentIds?.includes(p.id) ||
+                  assignedVehicle?.draftState?.presentIds?.some((id) => String(id) === String(p.id)) ||
                   (assignedVehicle?.submitted && p.present)
                 );
                 const isAbsent = Boolean(
-                  assignedVehicle?.draftState?.absentIds?.includes(p.id) ||
-                  (assignedVehicle?.submitted && !p.present && !assignedVehicle?.draftState?.presentIds?.includes(p.id))
+                  assignedVehicle?.draftState?.absentIds?.some((id) => String(id) === String(p.id)) ||
+                  (assignedVehicle?.submitted && !p.present && !assignedVehicle?.draftState?.presentIds?.some((id) => String(id) === String(p.id)))
                 );
-                const isSponsored = Boolean(p.sponsored || assignedVehicle?.draftState?.sponsoredIds?.includes(p.id));
-                const riderNote = (assignedVehicle?.draftState?.notes?.[p.id] || p.sponsorNote || '').trim();
+                const isSponsored = Boolean(p.sponsored || assignedVehicle?.draftState?.sponsoredIds?.some((id) => String(id) === String(p.id)));
+                const riderNote = (assignedVehicle?.draftState?.notes?.[p.id] || assignedVehicle?.draftState?.notes?.[String(p.id)] || p.sponsorNote || '').trim();
 
                 return (
                   <div

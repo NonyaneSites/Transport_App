@@ -158,21 +158,27 @@ export function reconcileManifestForSave(
     }
   }
 
+  // 1. Map all riders in incoming vehicles as explicitly assigned to their vehicle
+  for (const incV of incoming.vehicles) {
+    for (const rId of (incV.riders || [])) {
+      ridersExplicitlyAssignedToVehicle.set(String(rId), incV.id);
+    }
+  }
+
+  // 2. Check signups for explicit moves
   for (const incP of incoming.signups) {
     const sId = String(incP.id);
-    if (!incP.assignedTo) {
-      ridersExplicitlyUnassigned.add(sId);
-    } else {
+    if (incP.assignedTo) {
       ridersExplicitlyAssignedToVehicle.set(sId, incP.assignedTo);
     }
   }
 
-  // Also track riders removed from incoming vehicles
+  // 3. Only mark as explicitly unassigned if the passenger was assigned in baseline,
+  // but is NO LONGER in that vehicle or any incoming vehicle and not assigned in signups
   for (const incV of incoming.vehicles) {
-    const incRiders = new Set((incV.riders || []).map(String));
     const baseV = baseVehiclesMap.get(incV.id);
-    const remoteV = remote.vehicles.find((v) => v.id === incV.id);
     if (baseV) {
+      const incRiders = new Set((incV.riders || []).map(String));
       (baseV.riders || []).forEach((rId) => {
         const sRId = String(rId);
         if (!incRiders.has(sRId) && !ridersExplicitlyAssignedToVehicle.has(sRId)) {
@@ -180,13 +186,15 @@ export function reconcileManifestForSave(
         }
       });
     }
-    if (remoteV) {
-      (remoteV.riders || []).forEach((rId) => {
-        const sRId = String(rId);
-        if (!incRiders.has(sRId) && !ridersExplicitlyAssignedToVehicle.has(sRId)) {
-          ridersExplicitlyUnassigned.add(sRId);
-        }
-      });
+  }
+
+  for (const baseP of baseline.signups) {
+    const sId = String(baseP.id);
+    if (baseP.assignedTo && !ridersExplicitlyAssignedToVehicle.has(sId)) {
+      const incP = incSignupsMap.get(sId);
+      if (incP && !incP.assignedTo) {
+        ridersExplicitlyUnassigned.add(sId);
+      }
     }
   }
 
@@ -229,7 +237,7 @@ export function reconcileManifestForSave(
     // Draft state (attendance, notes, rep details): preserve concurrent mobile attendance checks
     const baseDraftStr = JSON.stringify(baseV?.draftState || {});
     const incDraftStr = JSON.stringify(incV.draftState || {});
-    let nextDraftState: VehicleDraftState | undefined = remoteV.draftState;
+    let nextDraftState: VehicleDraftState | undefined = incV.draftState || remoteV.draftState;
 
     if (baseDraftStr !== incDraftStr) {
       const baseD = baseV?.draftState || {};
@@ -298,8 +306,8 @@ export function reconcileManifestForSave(
       riders: incV.riders || [],
       orderedStops: nextStops.length > 0 ? nextStops : (incV.orderedStops || []),
       submitted: isSubmitted,
-      submittedAt: isSubmitted ? (remoteV.submittedAt || incV.submittedAt) : undefined,
-      submittedBy: isSubmitted ? (remoteV.submittedBy || incV.submittedBy) : undefined,
+      submittedAt: isSubmitted ? (incV.submittedAt || remoteV.submittedAt || new Date().toISOString()) : undefined,
+      submittedBy: isSubmitted ? (incV.submittedBy || remoteV.submittedBy || incV.repName) : undefined,
       draftState: nextDraftState,
     });
   }
@@ -409,6 +417,10 @@ export function vehicleToDbRow(manifestKey: string, v: Vehicle): Record<string, 
     manifest_key: manifestKey,
     name: v.name,
     type: v.type,
+    capacity: typeof v.capacity === 'number' ? v.capacity : null,
+    driver_name: v.driverName || null,
+    driver_phone: v.driverPhone || null,
+    notes: v.notes || null,
     riders: Array.isArray(v.riders) ? v.riders : [],
     ordered_stops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
     submitted: Boolean(v.submitted),
@@ -431,7 +443,11 @@ export function dbRowToVehicle(row: Record<string, unknown>): Vehicle {
     id: String(row.id),
     name: String(row.name || ''),
     type: row.type === 'Bus' ? 'Bus' : 'Taxi',
-    riders: Array.isArray(row.riders) ? (row.riders as string[]) : [],
+    capacity: typeof row.capacity === 'number' ? row.capacity : (Number(row.capacity) || undefined),
+    driverName: (row.driver_name || row.driverName) ? String(row.driver_name || row.driverName) : undefined,
+    driverPhone: (row.driver_phone || row.driverPhone) ? String(row.driver_phone || row.driverPhone) : undefined,
+    notes: row.notes ? String(row.notes) : undefined,
+    riders: Array.isArray(row.riders) ? (row.riders as string[]).map(String) : [],
     orderedStops: Array.isArray(row.ordered_stops)
       ? (row.ordered_stops as string[])
       : Array.isArray(row.orderedStops)
@@ -957,6 +973,6 @@ export function passengersByPoolGroup(
 export function vehicleRiders(manifest: Manifest | null, vehicle: Vehicle): Passenger[] {
   if (!manifest) return [];
   return vehicle.riders
-    .map((id) => manifest.signups.find((p) => p.id === id))
+    .map((id) => manifest.signups.find((p) => String(p.id) === String(id)))
     .filter((p): p is Passenger => Boolean(p));
 }

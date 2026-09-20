@@ -200,8 +200,10 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
 
   // 1. Update target vehicle in manifest
   let targetVehicleName = 'Vehicle';
+  let foundTarget = false;
   manifest.vehicles = (manifest.vehicles || []).map((v) => {
     if (v.id === vehicleId) {
+      foundTarget = true;
       targetVehicleName = v.name;
       return {
         ...v,
@@ -217,6 +219,31 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
     }
     return v;
   });
+
+  if (!foundTarget) {
+    const payloadVeh = req.body?.vehicle;
+    const newV = {
+      id: vehicleId,
+      name: payloadVeh?.name || `Vehicle ${(manifest.vehicles || []).length + 1}`,
+      type: payloadVeh?.type || 'Taxi',
+      capacity: payloadVeh?.capacity,
+      driverName: payloadVeh?.driverName,
+      driverPhone: payloadVeh?.driverPhone,
+      notes: payloadVeh?.notes,
+      riders: Array.isArray(payloadVeh?.riders) ? payloadVeh.riders : [],
+      orderedStops: Array.isArray(payloadVeh?.orderedStops) ? payloadVeh.orderedStops : [],
+      submitted: true,
+      submittedAt: nowIso,
+      submittedBy: (repName || '').trim(),
+      repName: (repName || '').trim(),
+      licensePlate: (licensePlate || '').trim(),
+      coReps: Array.isArray(coReps) ? coReps : [],
+      generalNotes: (generalNotes || '').trim(),
+      draftState: draftState || payloadVeh?.draftState,
+    };
+    targetVehicleName = newV.name;
+    manifest.vehicles = [...(manifest.vehicles || []), newV];
+  }
 
   // 2. Update signups attendance if provided
   if (Array.isArray(updatedSignups)) {
