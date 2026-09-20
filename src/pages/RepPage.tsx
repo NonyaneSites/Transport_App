@@ -513,14 +513,15 @@ export function RepPage() {
 
     // 2. Direct synchronization of sponsored and unpaid statuses across all co-reps (turning on and off)
     if (draft.sponsoredIds !== undefined) {
-      const remoteSponsored = new Set(draft.sponsoredIds);
+      const remoteSponsored = new Set(draft.sponsoredIds.map(String));
       setSponsoredIds((prev) => {
         const next = new Set<string>(remoteSponsored);
-        // Retain optimistic local tap only if touched in the last 600ms
+        // Retain optimistic local tap: if the local user has an uncommitted edit on this rider or touched it recently, do NOT drop local sponsored mark!
         for (const id of prev) {
-          const lastEdit = recentlyEditedRidersRef.current.get(id) ?? 0;
-          if (now - lastEdit < 600 && !remoteSponsored.has(id)) {
-            next.add(id);
+          const sId = String(id);
+          const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? recentlyEditedRidersRef.current.get(id) ?? 0;
+          if ((isUserDirtyRef.current || now - lastEdit < 15000) && !remoteSponsored.has(sId)) {
+            next.add(sId);
           }
         }
         return next;
@@ -528,14 +529,15 @@ export function RepPage() {
     }
 
     if (draft.unpaidIds !== undefined) {
-      const remoteUnpaid = new Set(draft.unpaidIds);
+      const remoteUnpaid = new Set(draft.unpaidIds.map(String));
       setUnpaidIds((prev) => {
         const next = new Set<string>(remoteUnpaid);
-        // Retain optimistic local tap only if touched in the last 600ms
+        // Retain optimistic local tap: if the local user has an uncommitted edit on this rider or touched it recently, do NOT drop local unpaid mark!
         for (const id of prev) {
-          const lastEdit = recentlyEditedRidersRef.current.get(id) ?? 0;
-          if (now - lastEdit < 600 && !remoteUnpaid.has(id)) {
-            next.add(id);
+          const sId = String(id);
+          const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? recentlyEditedRidersRef.current.get(id) ?? 0;
+          if ((isUserDirtyRef.current || now - lastEdit < 15000) && !remoteUnpaid.has(sId)) {
+            next.add(sId);
           }
         }
         return next;
@@ -761,8 +763,9 @@ export function RepPage() {
 
   const sponsoredRidersMissingInfo = useMemo(() => {
     return riders.filter((r) => {
-      if (!sponsoredIds.has(r.id)) return false;
-      const note = (notes[r.id] ?? r.sponsorNote ?? '').trim();
+      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id));
+      if (!isSpon) return false;
+      const note = (notes[r.id] ?? notes[String(r.id)] ?? r.sponsorNote ?? '').trim();
       return note.length === 0;
     });
   }, [riders, sponsoredIds, notes]);
@@ -778,7 +781,11 @@ export function RepPage() {
 
   // Cash calculations
   const presentSponsoredCount = useMemo(() => {
-    return riders.filter((r) => presentIds.has(r.id) && sponsoredIds.has(r.id)).length;
+    return riders.filter((r) => {
+      const isPres = presentIds.has(r.id) || presentIds.has(String(r.id));
+      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id));
+      return isPres && isSpon;
+    }).length;
   }, [riders, presentIds, sponsoredIds]);
 
   const grossPresentCash = presentCount * FARE;
@@ -980,18 +987,22 @@ export function RepPage() {
   }, [selectedVehicleId, presentIds, absentIds, repName, broadcastLiveAction]);
 
   const handleToggleSponsored = useCallback((passengerId: string) => {
-    lastLocalEditTimeRef.current = Date.now();
-    recentlyEditedRidersRef.current.set(passengerId, Date.now());
+    const sId = String(passengerId);
+    const now = Date.now();
+    lastLocalEditTimeRef.current = now;
+    recentlyEditedRidersRef.current.set(sId, now);
+    recentlyEditedRidersRef.current.set(passengerId, now);
     isUserDirtyRef.current = true;
 
-    const isCurrentlySponsored = sponsoredIds.has(passengerId);
-    const nextVal = !isCurrentlySponsored;
-
+    let nextVal = false;
     setSponsoredIds((prev) => {
       const next = new Set(prev);
+      const isCurrentlySponsored = prev.has(sId) || prev.has(passengerId);
+      nextVal = !isCurrentlySponsored;
       if (nextVal) {
-        next.add(passengerId);
+        next.add(sId);
       } else {
+        next.delete(sId);
         next.delete(passengerId);
       }
       return next;
@@ -1001,29 +1012,33 @@ export function RepPage() {
       broadcastLiveAction({
         type: 'rider_sponsored',
         vehicleId: selectedVehicleId,
-        riderId: passengerId,
+        riderId: sId,
         sponsored: nextVal,
         repName: repName.trim() || 'Co-rep',
         clientId: clientIdRef.current,
-        timestamp: Date.now(),
+        timestamp: now,
       });
       // Persistence happens via the debounced updateVehicleDraft sync (safe merge against server).
     }
-  }, [selectedVehicleId, sponsoredIds, repName, broadcastLiveAction]);
+  }, [selectedVehicleId, repName, broadcastLiveAction]);
 
   const handleToggleUnpaid = useCallback((passengerId: string) => {
-    lastLocalEditTimeRef.current = Date.now();
-    recentlyEditedRidersRef.current.set(passengerId, Date.now());
+    const sId = String(passengerId);
+    const now = Date.now();
+    lastLocalEditTimeRef.current = now;
+    recentlyEditedRidersRef.current.set(sId, now);
+    recentlyEditedRidersRef.current.set(passengerId, now);
     isUserDirtyRef.current = true;
 
-    const isCurrentlyUnpaid = unpaidIds.has(passengerId);
-    const nextVal = !isCurrentlyUnpaid;
-
+    let nextVal = false;
     setUnpaidIds((prev) => {
       const next = new Set(prev);
+      const isCurrentlyUnpaid = prev.has(sId) || prev.has(passengerId);
+      nextVal = !isCurrentlyUnpaid;
       if (nextVal) {
-        next.add(passengerId);
+        next.add(sId);
       } else {
+        next.delete(sId);
         next.delete(passengerId);
       }
       return next;
@@ -1033,31 +1048,34 @@ export function RepPage() {
       broadcastLiveAction({
         type: 'rider_unpaid',
         vehicleId: selectedVehicleId,
-        riderId: passengerId,
+        riderId: sId,
         unpaid: nextVal,
         repName: repName.trim() || 'Co-rep',
         clientId: clientIdRef.current,
-        timestamp: Date.now(),
+        timestamp: now,
       });
       // Persistence happens via the debounced updateVehicleDraft sync (safe merge against server).
     }
-  }, [selectedVehicleId, unpaidIds, repName, broadcastLiveAction]);
+  }, [selectedVehicleId, repName, broadcastLiveAction]);
 
   const handleSetNote = useCallback((passengerId: string, text: string) => {
-    lastLocalEditTimeRef.current = Date.now();
-    recentlyEditedRidersRef.current.set(passengerId, Date.now());
+    const sId = String(passengerId);
+    const now = Date.now();
+    lastLocalEditTimeRef.current = now;
+    recentlyEditedRidersRef.current.set(sId, now);
+    recentlyEditedRidersRef.current.set(passengerId, now);
     isUserDirtyRef.current = true;
-    setNotes((prev) => ({ ...prev, [passengerId]: text }));
+    setNotes((prev) => ({ ...prev, [sId]: text, [passengerId]: text }));
 
     if (selectedVehicleId) {
       broadcastLiveAction({
         type: 'rider_note',
         vehicleId: selectedVehicleId,
-        riderId: passengerId,
+        riderId: sId,
         note: text,
         repName: repName.trim() || 'Co-rep',
         clientId: clientIdRef.current,
-        timestamp: Date.now(),
+        timestamp: now,
       });
     }
   }, [selectedVehicleId, repName, broadcastLiveAction]);
@@ -1555,23 +1573,30 @@ export function RepPage() {
       };
 
       const updatedSignups = manifest.signups.map((p) => {
-        if (presentIds.has(p.id)) {
+        const sId = String(p.id);
+        const isPres = presentIds.has(p.id) || presentIds.has(sId);
+        const isAbs = absentIds.has(p.id) || absentIds.has(sId);
+        const isSpon = sponsoredIds.has(p.id) || sponsoredIds.has(sId);
+        const isUnpd = unpaidIds.has(p.id) || unpaidIds.has(sId);
+        const pNote = (notes[p.id] ?? notes[sId] ?? p.sponsorNote ?? '').trim();
+
+        if (isPres) {
           return {
             ...p,
             present: true,
-            sponsored: sponsoredIds.has(p.id),
-            sponsorNote: (notes[p.id] ?? p.sponsorNote ?? '').trim(),
-            didNotPay: unpaidIds.has(p.id),
-            unpaidNote: (notes[p.id] ?? p.unpaidNote ?? '').trim(),
+            sponsored: isSpon,
+            sponsorNote: pNote,
+            didNotPay: isUnpd,
+            unpaidNote: (notes[p.id] ?? notes[sId] ?? p.unpaidNote ?? '').trim(),
           };
         }
-        if (absentIds.has(p.id)) {
+        if (isAbs) {
           return {
             ...p,
             present: false,
-            sponsored: sponsoredIds.has(p.id),
+            sponsored: isSpon,
             didNotPay: false,
-            sponsorNote: (notes[p.id] ?? p.sponsorNote ?? '').trim(),
+            sponsorNote: pNote,
           };
         }
         return p;
@@ -1580,13 +1605,13 @@ export function RepPage() {
       const fullGeneralNotes = `${coRepNote}${cashNote}${sponseeNote}${settledNote}${sponsorshipNote}${generalNotes.trim()}`.trim();
 
       const sponsoredRiders = riders
-        .filter((r) => sponsoredIds.has(r.id))
+        .filter((r) => sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id)))
         .map((r) => ({
-          id: r.id,
+          id: String(r.id),
           fullName: r.fullName,
           structure: r.structure || '',
           stop: r.stop || '',
-          sponsorNote: (notes[r.id] ?? r.sponsorNote ?? '').trim(),
+          sponsorNote: (notes[r.id] ?? notes[String(r.id)] ?? r.sponsorNote ?? '').trim(),
         }));
 
       // Atomic submission payload to central server
@@ -3138,19 +3163,19 @@ function StopGroupedChecklist({
                     <PassengerRow
                       key={p.id}
                       passenger={p}
-                      isPresent={presentIds.has(p.id)}
-                      isAbsent={absentIds.has(p.id)}
-                      touched={presentIds.has(p.id) || absentIds.has(p.id)}
+                      isPresent={presentIds.has(p.id) || presentIds.has(String(p.id))}
+                      isAbsent={absentIds.has(p.id) || absentIds.has(String(p.id))}
+                      touched={presentIds.has(p.id) || absentIds.has(p.id) || presentIds.has(String(p.id)) || absentIds.has(String(p.id))}
                       onSetPresent={onSetPresent}
                       onToggleSponsored={onToggleSponsored}
                       onToggleUnpaid={onToggleUnpaid}
                       onSetNote={onSetNote}
-                      isSponsored={sponsoredIds.has(p.id)}
-                      isUnpaid={unpaidIds.has(p.id)}
-                      noteText={notes[p.id] ?? ''}
+                      isSponsored={sponsoredIds.has(p.id) || sponsoredIds.has(String(p.id))}
+                      isUnpaid={unpaidIds.has(p.id) || unpaidIds.has(String(p.id))}
+                      noteText={notes[p.id] ?? notes[String(p.id)] ?? ''}
                       redirectedFrom={isRedirected ? origStop : undefined}
                       disabled={disabled}
-                      outstandingDebts={riderDebtsMap?.[p.id]}
+                      outstandingDebts={riderDebtsMap?.[p.id] || riderDebtsMap?.[String(p.id)]}
                       collectedCancellationIds={collectedCancellationIds}
                       onToggleCancellation={onToggleCancellation}
                     />
@@ -3209,19 +3234,19 @@ function AlphabeticalChecklist({
           <PassengerRow
             key={p.id}
             passenger={p}
-            isPresent={presentIds.has(p.id)}
-            isAbsent={absentIds.has(p.id)}
-            touched={presentIds.has(p.id) || absentIds.has(p.id)}
+            isPresent={presentIds.has(p.id) || presentIds.has(String(p.id))}
+            isAbsent={absentIds.has(p.id) || absentIds.has(String(p.id))}
+            touched={presentIds.has(p.id) || absentIds.has(p.id) || presentIds.has(String(p.id)) || absentIds.has(String(p.id))}
             onSetPresent={onSetPresent}
             onToggleSponsored={onToggleSponsored}
             onToggleUnpaid={onToggleUnpaid}
             onSetNote={onSetNote}
-            isSponsored={sponsoredIds.has(p.id)}
-            isUnpaid={unpaidIds.has(p.id)}
-            noteText={notes[p.id] ?? ''}
+            isSponsored={sponsoredIds.has(p.id) || sponsoredIds.has(String(p.id))}
+            isUnpaid={unpaidIds.has(p.id) || unpaidIds.has(String(p.id))}
+            noteText={notes[p.id] ?? notes[String(p.id)] ?? ''}
             redirectedFrom={isRedirected ? origStop : undefined}
             disabled={disabled}
-            outstandingDebts={riderDebtsMap?.[p.id]}
+            outstandingDebts={riderDebtsMap?.[p.id] || riderDebtsMap?.[String(p.id)]}
             collectedCancellationIds={collectedCancellationIds}
             onToggleCancellation={onToggleCancellation}
           />
@@ -3257,6 +3282,12 @@ const PassengerRow = React.memo(function PassengerRow({
   const isNoteVisible = showNote || isMissingSponsorInfo;
   const [showDebtBreakdown, setShowDebtBreakdown] = useState(false);
 
+  useEffect(() => {
+    if (isSponsored || isUnpaid || !!noteText) {
+      setShowNote(true);
+    }
+  }, [isSponsored, isUnpaid, noteText]);
+
   const totalDebtAmount = useMemo(() => {
     if (!outstandingDebts || outstandingDebts.length === 0) return 0;
     return outstandingDebts.reduce((sum, d) => sum + (Number(d.structure_debt) || FARE), 0);
@@ -3273,12 +3304,12 @@ const PassengerRow = React.memo(function PassengerRow({
   }, [settledDebtEntries]);
 
   function handleSponsoredToggle() {
-    onToggleSponsored(passenger.id);
+    onToggleSponsored(String(passenger.id));
     if (!isSponsored) setShowNote(true);
   }
 
   function handleUnpaidToggle() {
-    onToggleUnpaid(passenger.id);
+    onToggleUnpaid(String(passenger.id));
     if (!isUnpaid) setShowNote(true);
   }
 
@@ -3567,7 +3598,7 @@ const PassengerRow = React.memo(function PassengerRow({
           <input
             type="text"
             value={noteText}
-            onChange={(e) => onSetNote(passenger.id, e.target.value)}
+            onChange={(e) => onSetNote(String(passenger.id), e.target.value)}
             disabled={disabled}
             placeholder={
               isSponsored

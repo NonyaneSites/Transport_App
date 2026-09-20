@@ -1,9 +1,9 @@
 import { supabase, MANIFESTS_TABLE, mockStorage } from './supabase';
 import type { Manifest, Passenger, Vehicle, ServiceType } from './types';
+import { SERVICE_TYPES, hubDisplayName } from './types';
 import { manifestKey, parseManifestKey } from './dates';
-import { hubDisplayName } from './types';
 import { loadManifest, upsertManifest } from './manifest';
-import { normalizeStructureCode } from './ledger';
+import { normalizeStructureCode, recordReportedSponsorships } from './ledger';
 
 export type ServicePeriod = 'AM' | 'PM';
 
@@ -439,6 +439,31 @@ export async function transferPassengerAcrossServices(params: {
       };
 
       await upsertManifest(updatedManifest);
+
+      if (isSponsored) {
+        try {
+          const sDef = SERVICE_TYPES.find((s) => s.value === fromService);
+          const veh = updatedVehicles.find((v) => v.id === toVehicleId);
+          await recordReportedSponsorships(
+            manifestKey(date, fromService),
+            date,
+            sDef?.label || fromService,
+            [{
+              id: String(passenger.id),
+              fullName: passenger.fullName,
+              structure: passenger.structure || '',
+              stop: passenger.stop || '',
+              sponsorNote: sponsorNote || passenger.sponsorNote || 'Unaccounted Sponsorship',
+            }],
+            [passenger.fullName],
+            veh?.name || 'Vehicle',
+            repName || 'Admin'
+          );
+        } catch (sponErr) {
+          console.warn('[Transfer] recordReportedSponsorships error (same-manifest):', sponErr);
+        }
+      }
+
       return { success: true, passenger: updatedSignups.find((p) => String(p.id) === sPassengerId) };
     }
 
@@ -569,6 +594,30 @@ export async function transferPassengerAcrossServices(params: {
       upsertManifest(updatedSourceManifest),
       upsertManifest(updatedDestManifest),
     ]);
+
+    if (effectiveIsSponsored) {
+      try {
+        const destServiceDef = SERVICE_TYPES.find((s) => s.value === toService);
+        const destVeh = updatedDestVehicles.find((v) => v.id === toVehicleId);
+        await recordReportedSponsorships(
+          toKey,
+          date,
+          destServiceDef?.label || toService,
+          [{
+            id: String(destinationPassenger.id),
+            fullName: destinationPassenger.fullName,
+            structure: destinationPassenger.structure || '',
+            stop: destinationPassenger.stop || '',
+            sponsorNote: effectiveSponsorNote || 'Unaccounted Sponsorship',
+          }],
+          [destinationPassenger.fullName],
+          destVeh?.name || 'Vehicle',
+          repName || 'Admin'
+        );
+      } catch (sponErr) {
+        console.warn('[Transfer] recordReportedSponsorships error (cross-service):', sponErr);
+      }
+    }
 
     return { success: true, passenger: destinationPassenger };
   } catch (err) {

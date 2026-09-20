@@ -257,6 +257,7 @@ export function useManifest(
   // Used to suppress our own realtime echoes without blocking external updates.
   const lastSavedUpdatedAtRef = useRef<string | null>(null);
   const lastKnownUpdatedAtRef = useRef<string | null>(null);
+  const lastLocalSaveTimeRef = useRef<number>(0);
 
   // Manual or automatic fresh reload
   const refresh = async () => {

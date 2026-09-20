@@ -325,19 +325,24 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
   }>>(SPONSORSHIPS_FILE, []);
 
   const rawSponsored = Array.isArray(sponsoredRiders) ? sponsoredRiders : [];
-  const draftSponIds = new Set(Array.isArray((draftState as { sponsoredIds?: string[] })?.sponsoredIds) ? (draftState as { sponsoredIds?: string[] }).sponsoredIds : []);
+  const draftSponIds = new Set(
+    Array.isArray((draftState as { sponsoredIds?: Array<string | number> })?.sponsoredIds)
+      ? (draftState as { sponsoredIds?: Array<string | number> }).sponsoredIds.map(String)
+      : []
+  );
   const draftNotes = (draftState as { notes?: Record<string, string> })?.notes || {};
 
   const collectedSponsees: Array<{ id?: string; fullName: string; structure?: string; stop?: string; sponsorNote?: string }> = [...rawSponsored];
   if (collectedSponsees.length === 0 && draftSponIds.size > 0 && Array.isArray(manifest.signups)) {
     for (const s of manifest.signups) {
-      if (draftSponIds.has(s.id)) {
+      const sId = String(s.id);
+      if (draftSponIds.has(sId) || draftSponIds.has(s.id as unknown as string)) {
         collectedSponsees.push({
-          id: s.id,
+          id: sId,
           fullName: s.fullName,
           structure: (s as { structure?: string }).structure || '',
           stop: (s as { stop?: string }).stop || '',
-          sponsorNote: (draftNotes[s.id] ?? (s as { sponsorNote?: string }).sponsorNote ?? '').trim(),
+          sponsorNote: (draftNotes[sId] ?? draftNotes[s.id] ?? (s as { sponsorNote?: string }).sponsorNote ?? '').trim(),
         });
       }
     }
