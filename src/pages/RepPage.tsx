@@ -2047,16 +2047,50 @@ export function RepPage() {
       await withdrawAbsentees(key, vehicleRiderNames);
       await withdrawReportedSponsorships(key, vehicleRiderNames).catch(() => {});
 
+      // Mark local storage draft as unsubmitted
+      const draftStorageKey = `crc_rep_draft_${key}_${selectedVehicle.id}`;
+      try {
+        const rawDraft = localStorage.getItem(draftStorageKey);
+        if (rawDraft) {
+          const draftObj = JSON.parse(rawDraft);
+          draftObj.submitted = false;
+          draftObj.submittedAt = undefined;
+          localStorage.setItem(draftStorageKey, JSON.stringify(draftObj));
+        }
+      } catch {
+        /* ignore */
+      }
+
+      // Revoke submitted attendance flags for riders in this vehicle on manifest.signups
+      const vehicleRiderIdSet = new Set((selectedVehicle.riders || []).map(String));
+      const updatedSignups = manifest.signups.map((p) => {
+        if (vehicleRiderIdSet.has(String(p.id))) {
+          return {
+            ...p,
+            present: false,
+            sponsored: false,
+            didNotPay: false,
+          };
+        }
+        return p;
+      });
+
       const updatedVehicles = manifest.vehicles.map((v) =>
         v.id === selectedVehicle.id
-          ? { ...v, submitted: false, submittedAt: undefined, submittedBy: undefined }
+          ? {
+              ...v,
+              submitted: false,
+              submittedAt: undefined,
+              submittedBy: undefined,
+              draftState: v.draftState ? { ...v.draftState, submitted: false, submittedAt: undefined } : undefined,
+            }
           : v
       );
-      await save({ ...manifest, vehicles: updatedVehicles });
+      await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
       isUserDirtyRef.current = true;
 
       setSubmitMsg(
-        `✓ Attendance reopened for editing. Unconfirmed absentees have been withdrawn from the cancellation ledger until you submit again.`
+        `✓ Attendance reopened for editing. Unconfirmed absentees, stats, and reported sponsorships have been revoked from the system until you submit again.`
       );
     } catch (e) {
       setSubmitMsg(`Error reopening: ${e instanceof Error ? e.message : String(e)}`);

@@ -100,12 +100,15 @@ export function AdminAttendanceNotesSection({
     return map;
   }, [manifest.signups]);
 
-  // Aggregate Sponsored Riders across all vehicles
+  // Aggregate Sponsored Riders across all submitted vehicles
   const sponsoredList = useMemo<SponsoredRiderItem[]>(() => {
     const list: SponsoredRiderItem[] = [];
     const seen = new Set<string>();
 
     for (const v of manifest.vehicles || []) {
+      // RULE: Only submitted vehicles count! Reopened/draft vehicles are revoked until resubmitted.
+      if (!v.submitted) continue;
+
       const draft = v.draftState;
       const sIds = new Set<string>(draft?.sponsoredIds || []);
       const notesMap = draft?.notes || {};
@@ -118,7 +121,7 @@ export function AdminAttendanceNotesSection({
         const isMarkedSponsored = Boolean(p.sponsored || sIds.has(p.id));
         if (isMarkedSponsored && !seen.has(p.id)) {
           seen.add(p.id);
-          const isPresent = draft?.presentIds?.includes(p.id) || (v.submitted && p.present);
+          const isPresent = draft?.presentIds?.includes(p.id) || p.present;
           const sponsorNote = notesMap[p.id] || p.sponsorNote || '';
           list.push({
             passenger: p,
@@ -133,12 +136,14 @@ export function AdminAttendanceNotesSection({
     return list;
   }, [manifest.vehicles, passengerMap]);
 
-  // Aggregate Unpaid (Didn't Pay) Riders across all vehicles
+  // Aggregate Unpaid (Didn't Pay) Riders across all submitted vehicles
   const unpaidList = useMemo<UnpaidRiderItem[]>(() => {
     const list: UnpaidRiderItem[] = [];
     const seen = new Set<string>();
 
     for (const v of manifest.vehicles || []) {
+      if (!v.submitted) continue;
+
       const draft = v.draftState;
       const uIds = new Set<string>(draft?.unpaidIds || []);
       const notesMap = draft?.notes || {};
@@ -151,7 +156,7 @@ export function AdminAttendanceNotesSection({
         const isMarkedUnpaid = Boolean(p.didNotPay || uIds.has(p.id));
         if (isMarkedUnpaid && !seen.has(p.id)) {
           seen.add(p.id);
-          const isPresent = draft?.presentIds?.includes(p.id) || (v.submitted && p.present);
+          const isPresent = draft?.presentIds?.includes(p.id) || p.present;
           const unpaidNote = notesMap[p.id] || p.unpaidNote || p.sponsorNote || '';
           list.push({
             passenger: p,
@@ -166,7 +171,7 @@ export function AdminAttendanceNotesSection({
     return list;
   }, [manifest.vehicles, passengerMap]);
 
-  // Aggregate External Sponsees (cross-vehicle sponsorships recorded in the calculator)
+  // Aggregate External Sponsees (cross-vehicle sponsorships recorded in calculator of submitted vehicles)
   const externalSponseesList = useMemo(() => {
     const list: {
       id: string;
@@ -177,14 +182,25 @@ export function AdminAttendanceNotesSection({
       amount: number;
     }[] = [];
 
+    // Deduplicate against names already present in sponsoredList to prevent double appearance
+    const seenSponsoredNames = new Set(
+      sponsoredList.map((s) => s.passenger.fullName.trim().toLowerCase().replace(/[^a-z0-9]/g, ''))
+    );
+
     for (const v of manifest.vehicles || []) {
+      if (!v.submitted) continue;
+
       const ext = v.draftState?.externalSponsees || [];
       const repName = v.repName || v.submittedBy || '—';
       for (const item of ext) {
-        if (item.sponseeName.trim()) {
+        const cleanName = item.sponseeName.trim();
+        if (!cleanName) continue;
+        const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!seenSponsoredNames.has(normName)) {
+          seenSponsoredNames.add(normName);
           list.push({
             id: `${v.id}-${item.id}`,
-            sponseeName: item.sponseeName.trim(),
+            sponseeName: cleanName,
             sourceTaxiName: v.name,
             sourceRepName: repName,
             targetTaxiName: item.taxiName || undefined,
@@ -194,14 +210,16 @@ export function AdminAttendanceNotesSection({
       }
     }
     return list;
-  }, [manifest.vehicles]);
+  }, [manifest.vehicles, sponsoredList]);
 
-  // Aggregate Absentees across all vehicles
+  // Aggregate Absentees across all submitted vehicles
   const absenteesList = useMemo<AbsentRiderItem[]>(() => {
     const list: AbsentRiderItem[] = [];
     const seen = new Set<string>();
 
     for (const v of manifest.vehicles || []) {
+      if (!v.submitted) continue;
+
       const draft = v.draftState;
       const aIds = new Set<string>(draft?.absentIds || []);
       const pIds = new Set<string>(draft?.presentIds || []);
@@ -213,7 +231,7 @@ export function AdminAttendanceNotesSection({
         if (!p) continue;
 
         // Is marked absent in draft or submitted as not present
-        const isAbsent = aIds.has(p.id) || (v.submitted && !p.present && !pIds.has(p.id));
+        const isAbsent = aIds.has(p.id) || (!p.present && !pIds.has(p.id));
         if (isAbsent && !seen.has(p.id)) {
           seen.add(p.id);
           list.push({
@@ -234,6 +252,8 @@ export function AdminAttendanceNotesSection({
     const seen = new Set<string>();
 
     for (const v of manifest.vehicles || []) {
+      if (!v.submitted) continue;
+
       const draft = v.draftState;
       const notesMap = draft?.notes || {};
       const repName = v.repName || v.submittedBy || '—';
@@ -262,6 +282,8 @@ export function AdminAttendanceNotesSection({
     const list: VehicleGeneralNoteItem[] = [];
 
     for (const v of manifest.vehicles || []) {
+      if (!v.submitted) continue;
+
       const note = (v.generalNotes || v.draftState?.generalNotes || '').trim();
       if (note) {
         list.push({
@@ -288,6 +310,8 @@ export function AdminAttendanceNotesSection({
     }[] = [];
 
     for (const v of manifest.vehicles || []) {
+      if (!v.submitted) continue;
+
       const items = v.draftState?.manualCancellations || [];
       const repName = v.repName || v.submittedBy || '—';
       for (const m of items) {

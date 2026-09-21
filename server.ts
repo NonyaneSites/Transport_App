@@ -395,14 +395,22 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
 
   for (const sp of collectedSponsees) {
     if (!sp.fullName || !sp.fullName.trim()) continue;
-    const cleanName = sp.fullName.trim();
-    const auditId = `sp_${key}_${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
-    const existingIdx = audits.findIndex((a) => a.id === auditId || (a.manifest_key === key && a.passenger_name.toLowerCase() === cleanName.toLowerCase()));
+    const cleanName = sanitizePassengerDisplayName(sp.fullName.trim());
+    if (!cleanName) continue;
+    const baseDate = (parsedDate || key).split('_')[0];
+    const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const auditId = `sp_${baseDate}_${normName}`;
+    const existingIdx = audits.findIndex((a) => {
+      const aDate = (a.date || a.manifest_key || '').split('_')[0];
+      const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+      return a.id === auditId || (aDate === baseDate && aName === normName);
+    });
 
     if (existingIdx >= 0) {
       audits[existingIdx] = {
         ...audits[existingIdx],
         passenger_id: sp.id || audits[existingIdx].passenger_id,
+        passenger_name: cleanName,
         structure: sp.structure || audits[existingIdx].structure,
         stop: sp.stop || audits[existingIdx].stop,
         vehicle_name: targetVehicleName || audits[existingIdx].vehicle_name,
@@ -472,23 +480,54 @@ app.post('/api/manifests/:key/reopen-vehicle', (req, res) => {
         submitted: false,
         submittedAt: undefined,
         submittedBy: undefined,
+        draftState: v.draftState ? { ...(v.draftState as Record<string, unknown>), submitted: false, submittedAt: undefined } : undefined,
       };
     }
     return v;
   });
+
+  // Revoke submitted attendance flags for riders in this vehicle
+  const targetVehicle = (manifest.vehicles || []).find((v) => v.id === vehicleId);
+  const targetRiderIds = new Set(((targetVehicle as { riders?: string[] })?.riders || []).map(String));
+  if (Array.isArray(manifest.signups)) {
+    manifest.signups = manifest.signups.map((s) => {
+      const p = s as { id: string | number; present?: boolean; sponsored?: boolean; didNotPay?: boolean };
+      if (targetRiderIds.has(String(p.id))) {
+        return {
+          ...p,
+          present: false,
+          sponsored: false,
+          didNotPay: false,
+        };
+      }
+      return p;
+    });
+  }
 
   manifest.updated_at = nowIso;
   atomicWriteJson(filePath, manifest);
 
   // Withdraw ledger entries and pending sponsorships for these riders
   if (Array.isArray(allRiderNames) && allRiderNames.length > 0) {
-    const riderSet = new Set(allRiderNames);
-    let ledger = readJsonFile<Array<{ manifest_key: string; passenger_name: string }>>(LEDGER_FILE, []);
-    ledger = ledger.filter((entry) => !(entry.manifest_key === key && riderSet.has(entry.passenger_name)));
+    const riderSet = new Set(allRiderNames.map((n) => sanitizePassengerDisplayName(n).toLowerCase()));
+    const baseDate = key.split('_')[0];
+
+    let ledger = readJsonFile<Array<{ manifest_key: string; passenger_name: string; date?: string }>>(LEDGER_FILE, []);
+    ledger = ledger.filter((entry) => {
+      const eDate = (entry.date || entry.manifest_key || '').split('_')[0];
+      const isSameDate = entry.manifest_key === key || eDate === baseDate;
+      const isRider = riderSet.has(sanitizePassengerDisplayName(entry.passenger_name).toLowerCase());
+      return !(isSameDate && isRider);
+    });
     atomicWriteJson(LEDGER_FILE, ledger);
 
-    let audits = readJsonFile<Array<{ manifest_key: string; passenger_name: string; status: string }>>(SPONSORSHIPS_FILE, []);
-    audits = audits.filter((entry) => !(entry.manifest_key === key && riderSet.has(entry.passenger_name) && entry.status === 'pending'));
+    let audits = readJsonFile<Array<{ manifest_key: string; passenger_name: string; status: string; date?: string }>>(SPONSORSHIPS_FILE, []);
+    audits = audits.filter((entry) => {
+      const eDate = (entry.date || entry.manifest_key || '').split('_')[0];
+      const isSameDate = entry.manifest_key === key || eDate === baseDate;
+      const isRider = riderSet.has(sanitizePassengerDisplayName(entry.passenger_name).toLowerCase());
+      return !(isSameDate && isRider && entry.status === 'pending');
+    });
     atomicWriteJson(SPONSORSHIPS_FILE, audits);
   }
 
@@ -615,17 +654,26 @@ app.get('/api/ledger/sponsorships', (req, res) => {
         }>;
       }>(path.join(MANIFESTS_DIR, file), {});
 
-      const submittedVehicles = (m.vehicles || []).filter((v) => v.submitted);
+      const submittedVehicles = (m.vehicles || []).filter((v) => Boolean(v.submitted));
       for (const v of submittedVehicles) {
-        const sponIds = new Set(v.draftState?.sponsoredIds || []);
+        const vehicleRiderIds = new Set((v.riders || []).map(String));
+        if (vehicleRiderIds.size === 0) continue;
+        const sponIds = new Set((v.draftState?.sponsoredIds || []).map(String));
         const sponNotes = v.draftState?.notes || {};
-        const signups = m.signups || [];
+        const signups = (m.signups || []).filter((s) => vehicleRiderIds.has(String(s.id)));
         for (const s of signups) {
-          if (sponIds.has(s.id) || (s.sponsored && v.submitted)) {
+          const sId = String(s.id);
+          if (sponIds.has(sId) || s.sponsored) {
             const cleanName = sanitizePassengerDisplayName(s.fullName || '');
             if (!cleanName) continue;
-            const auditId = `sp_${key}_${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
-            const exists = audits.some((a) => a.id === auditId || (a.manifest_key === key && a.passenger_name.toLowerCase() === cleanName.toLowerCase()));
+            const baseDate = (m.date || key).split('_')[0];
+            const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+            const auditId = `sp_${baseDate}_${normName}`;
+            const exists = audits.some((a) => {
+              const aDate = (a.date || a.manifest_key || '').split('_')[0];
+              const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+              return a.id === auditId || (aDate === baseDate && aName === normName);
+            });
             if (!exists) {
               audits.push({
                 id: auditId,
@@ -655,14 +703,17 @@ app.get('/api/ledger/sponsorships', (req, res) => {
     console.warn('[Server] Manifest scan for sponsorships note:', err);
   }
 
-  // Deduplicate and sanitize any leftover "Passenger <slug>" records
+  // Deduplicate and sanitize records by session date and passenger name
   const deduped: typeof audits = [];
   const seenMap = new Map<string, number>();
   for (const a of audits) {
     const cleanName = sanitizePassengerDisplayName(a.passenger_name);
-    const key = `${a.manifest_key}::${cleanName.toLowerCase()}`;
-    if (seenMap.has(key)) {
-      const idx = seenMap.get(key)!;
+    if (!cleanName) continue;
+    const baseDate = (a.date || a.manifest_key || '').split('_')[0];
+    const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const dedupKey = `${baseDate}::${normName}`;
+    if (seenMap.has(dedupKey)) {
+      const idx = seenMap.get(dedupKey)!;
       deduped[idx] = {
         ...deduped[idx],
         passenger_name: cleanName,
@@ -672,7 +723,7 @@ app.get('/api/ledger/sponsorships', (req, res) => {
         status: deduped[idx].status !== 'pending' ? deduped[idx].status : a.status,
       };
     } else {
-      seenMap.set(key, deduped.length);
+      seenMap.set(dedupKey, deduped.length);
       deduped.push({
         ...a,
         passenger_name: cleanName,

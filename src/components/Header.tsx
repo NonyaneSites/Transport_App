@@ -1,4 +1,4 @@
-import { Link, useLocation } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
 import { BookOpen, ShieldCheck, Smartphone } from 'lucide-react';
 
 interface HeaderProps {
@@ -10,13 +10,30 @@ export function Header({ current }: HeaderProps = {}) {
 
   const isLedger = current === 'ledger' || location.pathname === '/ledger';
   const isRep = current === 'rep' || location.pathname === '/rep';
-  const isAdmin = current === 'admin' || (!isLedger && !isRep);
+
+  const portalConfig = isLedger
+    ? {
+        label: 'Cancellation Ledger',
+        badgeClass: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+        Icon: BookOpen,
+      }
+    : isRep
+    ? {
+        label: 'Rep Portal',
+        badgeClass: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+        Icon: Smartphone,
+      }
+    : {
+        label: 'Admin Portal',
+        badgeClass: 'bg-crimson-500/15 text-crimson-300 border-crimson-500/30',
+        Icon: ShieldCheck,
+      };
 
   return (
     <header className="sticky top-0 z-40 border-b border-line bg-card/95 backdrop-blur-md">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-2.5 sm:px-6">
-        {/* Brand */}
-        <Link to="/" className="flex items-center gap-2.5 transition hover:opacity-90">
+        {/* Brand (static, non-navigating to prevent page swapping) */}
+        <div className="flex items-center gap-2.5 select-none">
           <img 
             src="/crc-logo.png" 
             alt="CRC Logo" 
@@ -32,46 +49,15 @@ export function Header({ current }: HeaderProps = {}) {
               </span>
             </div>
           </div>
-        </Link>
+        </div>
 
-        {/* Global Portals Navigation */}
-        <nav className="flex items-center gap-1 sm:gap-2">
-          <Link
-            to="/admin"
-            className={`flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold transition ${
-              isAdmin
-                ? 'bg-crimson-600 text-white shadow-sm'
-                : 'text-ink-muted hover:bg-card-2 hover:text-ink'
-            }`}
-          >
-            <ShieldCheck className="h-3.5 w-3.5" />
-            <span>Admin</span>
-          </Link>
-
-          <Link
-            to="/rep"
-            className={`flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold transition ${
-              isRep
-                ? 'bg-emerald-600 text-white shadow-sm'
-                : 'text-ink-muted hover:bg-card-2 hover:text-ink'
-            }`}
-          >
-            <Smartphone className="h-3.5 w-3.5" />
-            <span>Rep Portal</span>
-          </Link>
-
-          <Link
-            to="/ledger"
-            className={`flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold transition ${
-              isLedger
-                ? 'bg-amber-600 text-white shadow-sm'
-                : 'text-ink-muted hover:bg-card-2 hover:text-ink'
-            }`}
-          >
-            <BookOpen className="h-3.5 w-3.5" />
-            <span>Ledger</span>
-          </Link>
-        </nav>
+        {/* Current Portal Badge (isolated - no links to switch pages) */}
+        <div className="flex items-center gap-2">
+          <div className={`flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold border ${portalConfig.badgeClass}`}>
+            <portalConfig.Icon className="h-3.5 w-3.5" />
+            <span>{portalConfig.label}</span>
+          </div>
+        </div>
       </div>
     </header>
   );

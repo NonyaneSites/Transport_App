@@ -514,12 +514,28 @@ export async function withdrawAbsentees(
   riderNames: string[]
 ): Promise<void> {
   if (riderNames.length === 0) return;
-  const { error } = await supabase
-    .from(LEDGER_TABLE)
-    .delete()
-    .eq('manifest_key', manifestKey)
-    .in('passenger_name', riderNames);
-  if (error) throw error;
+  const normalizedNames = new Set(riderNames.map((n) => sanitizePassengerDisplayName(n).toLowerCase()));
+  const baseDate = normalizeDateToYMD(manifestKey) || manifestKey.split('_')[0];
+
+  try {
+    const { data } = await supabase.from(LEDGER_TABLE).select('*');
+    if (Array.isArray(data)) {
+      const idsToDelete = data
+        .filter((entry) => {
+          const eDate = normalizeDateToYMD(entry.date) || entry.date?.split('_')[0] || entry.manifest_key?.split('_')[0];
+          const isSameSession = entry.manifest_key === manifestKey || (baseDate && eDate === baseDate);
+          const isRider = normalizedNames.has(sanitizePassengerDisplayName(entry.passenger_name).toLowerCase());
+          return isSameSession && isRider;
+        })
+        .map((e) => e.id);
+
+      if (idsToDelete.length > 0) {
+        await supabase.from(LEDGER_TABLE).delete().in('id', idsToDelete);
+      }
+    }
+  } catch (err) {
+    console.warn('[Ledger] Failed to withdraw absentees from local store:', err);
+  }
 }
 
 export async function listLedgerEntries(): Promise<LedgerEntry[]> {
@@ -1761,7 +1777,10 @@ export function cleanAndDeduplicateSponsorships(
       }
     }
 
-    const dedupKey = `${item.manifest_key || ''}::${cleanName.toLowerCase()}`;
+    const rawDate = item.date || item.manifest_key || '';
+    const cleanDate = normalizeDateToYMD(rawDate) || rawDate.split('_')[0] || '';
+    const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const dedupKey = `${cleanDate}::${normName}`;
     if (indexMap.has(dedupKey)) {
       const existingIdx = indexMap.get(dedupKey)!;
       const existing = result[existingIdx];
@@ -1817,26 +1836,28 @@ export async function recordReportedSponsorships(
 
   // Remove any previously recorded pending sponsorships for this vehicle session
   // belonging to riders on this roster (preserving already-verified ones)
+  const baseDate = normalizeDateToYMD(manifestKey) || manifestKey.split('_')[0];
   if (allRiderNames.length > 0) {
     const normalizedRoster = new Set(allRiderNames.map((n) => sanitizePassengerDisplayName(n).toLowerCase()));
-    list = list.filter(
-      (s) =>
-        !(
-          s.manifest_key === manifestKey &&
-          normalizedRoster.has(sanitizePassengerDisplayName(s.passenger_name).toLowerCase()) &&
-          s.status === 'pending'
-        )
-    );
+    list = list.filter((s) => {
+      const sDate = normalizeDateToYMD(s.date) || s.date?.split('_')[0] || s.manifest_key?.split('_')[0];
+      const isSameSession = s.manifest_key === manifestKey || (baseDate && sDate === baseDate);
+      const isRider = normalizedRoster.has(sanitizePassengerDisplayName(s.passenger_name).toLowerCase());
+      return !(isSameSession && isRider && s.status === 'pending');
+    });
   }
 
   const now = new Date().toISOString();
   for (const r of sponsoredRiders) {
     const cleanName = sanitizePassengerDisplayName(r.fullName);
     if (!cleanName) continue;
-    const normName = cleanName.toLowerCase();
-    const existingIndex = list.findIndex(
-      (s) => s.manifest_key === manifestKey && sanitizePassengerDisplayName(s.passenger_name).toLowerCase() === normName
-    );
+    const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const existingIndex = list.findIndex((s) => {
+      const sDate = normalizeDateToYMD(s.date) || s.date?.split('_')[0] || s.manifest_key?.split('_')[0];
+      const isSameSession = s.manifest_key === manifestKey || (baseDate && sDate === baseDate);
+      const sName = sanitizePassengerDisplayName(s.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+      return isSameSession && sName === normName;
+    });
 
     if (existingIndex >= 0) {
       list[existingIndex] = {
@@ -1895,15 +1916,16 @@ export async function withdrawReportedSponsorships(
     if (!raw) return;
     const list = JSON.parse(raw) as ReportedSponsorship[];
     const normalizedRoster = new Set(riderNames.map((n) => sanitizePassengerDisplayName(n).toLowerCase()));
-    const filtered = list.filter(
-      (s) =>
-        !(
-          s.manifest_key === manifestKey &&
-          normalizedRoster.has(sanitizePassengerDisplayName(s.passenger_name).toLowerCase()) &&
-          s.status === 'pending'
-        )
-    );
-    localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(filtered));
+    const baseDate = normalizeDateToYMD(manifestKey) || manifestKey.split('_')[0];
+
+    const filtered = list.filter((s) => {
+      const sDate = normalizeDateToYMD(s.date) || s.date?.split('_')[0] || s.manifest_key?.split('_')[0];
+      const isSameSession = s.manifest_key === manifestKey || (baseDate && sDate === baseDate);
+      const isRider = normalizedRoster.has(sanitizePassengerDisplayName(s.passenger_name).toLowerCase());
+      return !(isSameSession && isRider && s.status === 'pending');
+    });
+
+    localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(cleanAndDeduplicateSponsorships(filtered)));
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: filtered }));
     }
@@ -1977,10 +1999,14 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
   try {
     let harvestedNew = false;
     const existingKeys = new Set(
-      list.map((s) => `${s.manifest_key}::${sanitizePassengerDisplayName(s.passenger_name).toLowerCase()}`)
+      list.map((s) => {
+        const baseDate = normalizeDateToYMD(s.date) || s.date?.split('_')[0] || s.manifest_key?.split('_')[0] || '';
+        const normName = sanitizePassengerDisplayName(s.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+        return `${baseDate}::${normName}`;
+      })
     );
 
-    // A. Check mockStorage manifests
+    // A. Check mockStorage manifests (STRICT: only submitted vehicles)
     for (const m of manifestsTable) {
       if (!m.date) continue;
       const parsedDate = m.date.split('_')[0] || m.date;
@@ -1988,23 +2014,26 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
       const allSignups = Array.isArray(m.signups) ? m.signups : [];
 
       for (const v of m.vehicles || []) {
-        const isSubmitted = v.submitted || v.draftState?.submitted;
+        const isSubmitted = Boolean(v.submitted);
         if (!isSubmitted) continue;
 
         const vehicleRiderIds = new Set(v.riders || []);
+        if (vehicleRiderIds.size === 0) continue;
         const vehicleSignups = allSignups.filter((p) => vehicleRiderIds.has(p.id));
-        const activeSignups = vehicleSignups.length > 0 ? vehicleSignups : allSignups;
+        if (vehicleSignups.length === 0) continue;
         const rep = v.repName || v.submittedBy || 'Transport Rep';
         const sponsoredIds = new Set(v.draftState?.sponsoredIds || []);
         const notes = v.draftState?.notes || {};
 
-        for (const p of activeSignups) {
+        for (const p of vehicleSignups) {
           const isSponsored = p.sponsored || sponsoredIds.has(p.id);
           if (!isSponsored) continue;
 
           const cleanName = sanitizePassengerDisplayName(p.fullName);
           if (!cleanName) continue;
-          const lookupKey = `${m.date}::${cleanName.toLowerCase()}`;
+          const baseDate = normalizeDateToYMD(parsedDate) || parsedDate.split('_')[0];
+          const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const lookupKey = `${baseDate}::${normName}`;
           if (existingKeys.has(lookupKey)) continue;
 
           const sponsorNote = (notes[p.id] || p.sponsorNote || '').trim();
@@ -2032,7 +2061,7 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
       }
     }
 
-    // B. Check raw localStorage for any crc_rep_draft_* entries
+    // B. Check raw localStorage for any crc_rep_draft_* entries (STRICT: only submitted drafts)
     if (typeof localStorage !== 'undefined') {
       for (let i = 0; i < localStorage.length; i++) {
         const storageKey = localStorage.key(i);
@@ -2042,7 +2071,8 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
           const rawDraft = localStorage.getItem(storageKey);
           if (!rawDraft) continue;
           const draft = JSON.parse(rawDraft);
-          if (!draft.submitted && !draft.repName) continue;
+          // STRICT RULE: Only drafts explicitly submitted are harvested!
+          if (!draft.submitted) continue;
           if (!Array.isArray(draft.sponsoredIds) || draft.sponsoredIds.length === 0) continue;
 
           const parts = storageKey.replace('crc_rep_draft_', '').split('_');
@@ -2064,7 +2094,9 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
             }
             const cleanName = p ? p.fullName.trim() : sanitizePassengerDisplayName(sponId);
             if (!cleanName) continue;
-            const lookupKey = `${manifestKey}::${cleanName.toLowerCase()}`;
+            const baseDate = normalizeDateToYMD(parsedDate) || parsedDate.split('_')[0];
+            const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+            const lookupKey = `${baseDate}::${normName}`;
             if (existingKeys.has(lookupKey)) continue;
 
             const note = (draft.notes?.[sponId] || p?.sponsorNote || '').trim();

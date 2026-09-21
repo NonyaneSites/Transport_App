@@ -111,22 +111,13 @@ export function extractVehicleStats(
     absentRiders = rawRiders.filter((p) => !p.present);
     sponsoredRiders = rawRiders.filter((p) => p.sponsored);
     ftvRiders = presentRiders.filter((p) => isAutoFirstTimeVisitor(p, notesMap[p.id]));
-  } else if (hasDraft && vehicle?.draftState) {
-    // When in draft, read from draftState ID sets
-    const pSet = new Set(vehicle.draftState.presentIds || []);
-    const aSet = new Set(vehicle.draftState.absentIds || []);
-    const sSet = new Set(vehicle.draftState.sponsoredIds || []);
-
-    presentRiders = rawRiders.filter((p) => pSet.has(p.id));
-    absentRiders = rawRiders.filter((p) => aSet.has(p.id));
-    sponsoredRiders = rawRiders.filter((p) => sSet.has(p.id) || p.sponsored);
-    ftvRiders = presentRiders.filter((p) => isAutoFirstTimeVisitor(p, notesMap[p.id]));
   } else {
-    // Unmarked: treat all as allocated, auto-detect sponsored or FTV markers
+    // Unsubmitted or Reopened for editing:
+    // All attendance, sponsorship, and fare stats are revoked from the app until the rep resubmits.
     presentRiders = [];
     absentRiders = [];
-    sponsoredRiders = rawRiders.filter((p) => p.sponsored);
-    ftvRiders = rawRiders.filter((p) => isAutoFirstTimeVisitor(p, notesMap[p.id]));
+    sponsoredRiders = [];
+    ftvRiders = [];
   }
 
   const presentListStr = joinPassengerStats(presentRiders);
