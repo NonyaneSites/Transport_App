@@ -20,6 +20,8 @@ export interface Passenger {
   didNotPay?: boolean;
   unpaidNote?: string;
   walkIn?: boolean;
+  createdBy?: string;
+  createdClientId?: string;
 }
 
 /**
@@ -125,10 +127,24 @@ export interface VehicleDraftState {
    * totals), so the full entries are kept here to round-trip the
    * calculator's name/vehicle/amount fields across devices.
    */
-  externalSponsees?: { id: string; sponseeName: string; taxiName: string; amount: number }[];
+  externalSponsees?: ExternalSponsee[];
   recentlyEditedRiders?: Record<string, number>;
   updatedAt?: string;
   updatedBy?: string;
+}
+
+export interface ExternalSponsee {
+  id: string;
+  payerId?: string;
+  payerName?: string;
+  sponseeId?: string;
+  sponseeName: string;
+  taxiName: string;
+  targetVehicleId?: string;
+  fromVehicleId?: string;
+  fromVehicleName?: string;
+  amount: number;
+  note?: string;
 }
 
 export interface Vehicle {

@@ -17,6 +17,13 @@ export interface SubmitVehiclePayload {
     stop?: string;
     sponsorNote?: string;
   }>;
+  unpaidRiders?: Array<{
+    id: string;
+    fullName: string;
+    structure?: string;
+    stop?: string;
+    unpaidNote?: string;
+  }>;
   allRiderNames: string[];
   serviceLabel: string;
   parsedDate: string;

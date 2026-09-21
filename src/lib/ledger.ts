@@ -440,7 +440,8 @@ export async function insertAbsentees(
   submittedBy: string,
   licensePlate: string,
   repName: string,
-  generalNotes: string
+  generalNotes: string,
+  unpaidRiders?: Array<{ fullName: string; stop?: string; structure?: string; unpaidNote?: string }>
 ): Promise<void> {
   // Delete any existing cancellation_ledger rows for this session
   // (manifest_key) belonging to any passenger currently on this vehicle's
@@ -456,8 +457,6 @@ export async function insertAbsentees(
       .in('passenger_name', allRiderNames);
     if (delError) throw delError;
   }
-
-  if (absentees.length === 0) return;
 
   const rows = absentees.map((p) => {
     return {
@@ -477,6 +476,29 @@ export async function insertAbsentees(
       general_notes: generalNotes,
     };
   });
+
+  if (unpaidRiders && unpaidRiders.length > 0) {
+    for (const u of unpaidRiders) {
+      rows.push({
+        manifest_key: manifestKey,
+        date,
+        service: serviceLabel,
+        passenger_name: u.fullName,
+        stop: u.stop || '',
+        structure: u.structure || '',
+        vehicle_name: vehicleName,
+        submitted_by: submittedBy,
+        rep_name: repName,
+        license_plate: licensePlate,
+        sponsored: false,
+        sponsor_note: u.unpaidNote ? `Did not pay: ${u.unpaidNote}` : 'Did not pay',
+        structure_debt: CANCELLATION_FEE,
+        general_notes: `Unpaid ride (Did not pay)${u.unpaidNote ? ` - ${u.unpaidNote}` : ''}`,
+      });
+    }
+  }
+
+  if (rows.length === 0) return;
 
   const { error } = await supabase.from(LEDGER_TABLE).insert(rows);
   if (error) throw error;

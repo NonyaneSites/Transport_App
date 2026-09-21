@@ -4,6 +4,7 @@ import {
   Smartphone, ChevronDown, ChevronRight, MapPin, Send,
   HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus, Search, Banknote,
   Sparkles, ArrowDownAZ, RotateCcw, Check, AlertCircle, Calendar, Pencil, UserMinus,
+  Lock, ArrowRightLeft,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { Header } from '@/components/Header';
@@ -19,6 +20,7 @@ import {
   type VehicleDraftState,
   type LiveSyncAction,
   type Manifest,
+  type ExternalSponsee,
 } from '@/lib/types';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
@@ -40,13 +42,6 @@ import {
 const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
 const SYNC_DEBOUNCE_MS = 1500; // 1500ms debounce: batches rapid check-in taps to minimize network egress and mobile data usage
 
-interface ExternalSponsee {
-  id: string;
-  sponseeName: string;
-  taxiName: string;
-  amount: number;
-}
-
 export interface ManualCancellation {
   id: string;
   passengerName: string;
@@ -56,7 +51,33 @@ export interface ManualCancellation {
 }
 
 function makeClientId(): string {
-  return `rep_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    const existing = sessionStorage.getItem('crc_rep_client_id');
+    if (existing) return existing;
+    const fresh = `rep_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    sessionStorage.setItem('crc_rep_client_id', fresh);
+    return fresh;
+  } catch {
+    return `rep_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+}
+
+function findPassengerForTransfer(name: string, structure: string, passengers: Passenger[]): Passenger | undefined {
+  if (!name.trim() || !passengers || passengers.length === 0) return undefined;
+  const walkInInfo = { fullName: name.trim(), structure: structure.trim() || null };
+
+  let bestMatch: Passenger | undefined = undefined;
+  let bestScore = 0;
+
+  for (const p of passengers) {
+    const res = isPassengerTransferMatch(walkInInfo, { fullName: p.fullName, structure: p.structure });
+    if (res.isMatch && res.score > bestScore) {
+      bestScore = res.score;
+      bestMatch = p;
+    }
+  }
+
+  return bestMatch;
 }
 
 export function RepPage() {
@@ -101,6 +122,24 @@ export function RepPage() {
   const [unpaidIds, setUnpaidIds] = useState<Set<string>>(new Set());
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [generalNotes, setGeneralNotes] = useState('');
+
+  // Track walk-ins created by this rep session
+  const [myCreatedWalkInIds, setMyCreatedWalkInIds] = useState<Set<string>>(() => {
+    try {
+      const stored = localStorage.getItem(`crc_rep_my_walkins_${key}`);
+      return stored ? new Set(JSON.parse(stored)) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(`crc_rep_my_walkins_${key}`, JSON.stringify(Array.from(myCreatedWalkInIds)));
+    } catch {
+      // ignore
+    }
+  }, [myCreatedWalkInIds, key]);
 
   // Concurrency tracking
   const licensePlateFocusedRef = useRef(false);
@@ -281,7 +320,8 @@ export function RepPage() {
 
   // Walk-in & Cross-Service Transfer
   const [walkInOpen, setWalkInOpen] = useState(false);
-  const [walkInName, setWalkInName] = useState('');
+  const [walkInFirstName, setWalkInFirstName] = useState('');
+  const [walkInSurname, setWalkInSurname] = useState('');
   const [walkInStructure, setWalkInStructure] = useState('');
   const [transferPrompt, setTransferPrompt] = useState<{
     passenger: Passenger;
@@ -309,6 +349,77 @@ export function RepPage() {
     () => (selectedVehicle ? vehicleRiders(manifest, selectedVehicle) : []),
     [manifest, selectedVehicle]
   );
+
+  // Real-time transfer detection candidate from current manifest as rep types walk-in inputs
+  const detectedTransfer = useMemo(() => {
+    if (!manifest || !selectedVehicle) return null;
+    const query = [walkInFirstName.trim(), walkInSurname.trim()].filter(Boolean).join(' ');
+    if (!query) return null;
+    const existing = findPassengerForTransfer(query, walkInStructure.trim(), manifest.signups);
+    if (!existing) return null;
+    let veh: Vehicle | undefined = undefined;
+    if (existing.assignedTo) {
+      veh = manifest.vehicles.find((v) => v.id === existing.assignedTo);
+    }
+    if (!veh) {
+      veh = manifest.vehicles.find((v) => v.riders.includes(existing.id));
+    }
+    return {
+      passenger: existing,
+      vehicle: veh,
+      isSameVehicle: veh?.id === selectedVehicle.id,
+    };
+  }, [manifest, selectedVehicle, walkInFirstName, walkInSurname, walkInStructure]);
+
+  // External Sponsorship Locks: across all vehicles in this manifest
+  // Rep 1 in Taxi 1 indicates Person A is paying for Person B in Taxi 2
+  // Then Rep 2 in Taxi 2 sees Person B is sponsored by Person A (Taxi 1)
+  // Rep 2 cannot remove this sponsor, but Rep 1 can!
+  const externalSponsorLocks = useMemo(() => {
+    const map = new Map<string, {
+      payerName: string;
+      payerId?: string;
+      fromVehicleName: string;
+      fromVehicleId: string;
+      externalSponseeId: string;
+      canRemove: boolean;
+    }>();
+    if (!manifest) return map;
+
+    for (const v of manifest.vehicles) {
+      const extList = (v.draftState?.externalSponsees || []) as ExternalSponsee[];
+      for (const ext of extList) {
+        const canRemove = v.id === selectedVehicleId;
+        const info = {
+          payerName: ext.payerName || 'Another Rider',
+          payerId: ext.payerId,
+          fromVehicleName: ext.fromVehicleName || v.name,
+          fromVehicleId: ext.fromVehicleId || v.id,
+          externalSponseeId: ext.id,
+          canRemove,
+        };
+
+        if (ext.sponseeId) {
+          map.set(String(ext.sponseeId), info);
+        }
+        if (ext.sponseeName) {
+          map.set(`name:${ext.sponseeName.trim().toLowerCase()}`, info);
+        }
+      }
+    }
+    return map;
+  }, [manifest, selectedVehicleId]);
+
+  // All other vehicles with their riders for cross-vehicle sponsorship search
+  const otherVehiclesWithRiders = useMemo(() => {
+    if (!manifest || !selectedVehicle) return [];
+    return manifest.vehicles
+      .filter((v) => v.id !== selectedVehicle.id)
+      .map((v) => ({
+        vehicle: v,
+        riders: vehicleRiders(manifest, v),
+      }));
+  }, [manifest, selectedVehicle]);
 
   const detectedOfficialRep = useMemo(
     () => (riders.length > 0 ? detectVehicleRep(riders) : null),
@@ -802,6 +913,175 @@ export function RepPage() {
   const pastCancellationCash = selectedLedgerCash + manualCancellationCash;
   const totalCash = baseCash + externalCash + pastCancellationCash;
 
+  const addExternalSponsorship = async (data: {
+    payerId?: string;
+    payerName?: string;
+    sponseeId?: string;
+    sponseeName: string;
+    taxiName: string;
+    targetVehicleId?: string;
+    amount: number;
+    note?: string;
+  }) => {
+    if (!manifest || !selectedVehicle) return;
+
+    isUserDirtyRef.current = true;
+    lastLocalEditTimeRef.current = Date.now();
+
+    const newId = `sponsee-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const newEntry: ExternalSponsee = {
+      id: newId,
+      payerId: data.payerId,
+      payerName: data.payerName || 'Passenger',
+      sponseeId: data.sponseeId,
+      sponseeName: data.sponseeName,
+      taxiName: data.taxiName,
+      targetVehicleId: data.targetVehicleId,
+      fromVehicleId: selectedVehicle.id,
+      fromVehicleName: selectedVehicle.name,
+      amount: data.amount || FARE,
+      note: data.note,
+    };
+
+    const nextExternalSponsees = [...externalSponsees, newEntry];
+    setExternalSponsees(nextExternalSponsees);
+
+    // Auto-sponsor the person in the target vehicle!
+    const targetVehId = data.targetVehicleId;
+    const sponseeId = data.sponseeId;
+    const sponsorLabel = `Sponsored by ${data.payerName || 'Rider'} (${selectedVehicle.name})`;
+
+    const updatedVehicles = manifest.vehicles.map((v) => {
+      if (v.id === selectedVehicle.id) {
+        return {
+          ...v,
+          draftState: {
+            ...v.draftState,
+            externalSponsees: nextExternalSponsees,
+            cashCollected: {
+              base: baseCash,
+              external: nextExternalSponsees.reduce((sum, s) => sum + (s.amount || FARE), 0),
+              pastCancellations: pastCancellationCash,
+            },
+          },
+        };
+      }
+
+      const isTarget = targetVehId ? v.id === targetVehId : v.name.toLowerCase() === data.taxiName.toLowerCase();
+      if (isTarget && sponseeId) {
+        const existingSponsored = v.draftState?.sponsoredIds ?? [];
+        const nextSponsored = existingSponsored.includes(sponseeId) ? existingSponsored : [...existingSponsored, sponseeId];
+        const nextNotes = { ...(v.draftState?.notes || {}), [sponseeId]: sponsorLabel };
+        return {
+          ...v,
+          draftState: {
+            ...v.draftState,
+            sponsoredIds: nextSponsored,
+            notes: nextNotes,
+          },
+        };
+      }
+      return v;
+    });
+
+    const updatedSignups = manifest.signups.map((p) => {
+      if (sponseeId && p.id === sponseeId) {
+        return {
+          ...p,
+          sponsored: true,
+          sponsorNote: sponsorLabel,
+        };
+      }
+      return p;
+    });
+
+    const nextManifest: Manifest = {
+      ...manifest,
+      vehicles: updatedVehicles,
+      signups: updatedSignups,
+    };
+
+    manifestRef.current = nextManifest;
+    await save(nextManifest);
+    setBatchActionMsg(`✓ Recorded: ${data.payerName || 'Rider'} paid R${data.amount || FARE} for ${data.sponseeName} in ${data.taxiName}. Auto-sponsored!`);
+    setTimeout(() => setBatchActionMsg(null), 4000);
+  };
+
+  const updateExternalSponsee = (id: string, patch: Partial<ExternalSponsee>) => {
+    isUserDirtyRef.current = true;
+    setExternalSponsees((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  };
+
+  const removeExternalSponsee = useCallback(async (id: string) => {
+    if (!manifest || !selectedVehicle) return;
+
+    isUserDirtyRef.current = true;
+    lastLocalEditTimeRef.current = Date.now();
+
+    const targetEntry = externalSponsees.find((s) => s.id === id);
+    const nextExternalSponsees = externalSponsees.filter((s) => s.id !== id);
+    setExternalSponsees(nextExternalSponsees);
+
+    const sponseeId = targetEntry?.sponseeId;
+    const targetVehId = targetEntry?.targetVehicleId;
+    const taxiName = targetEntry?.taxiName;
+
+    const updatedVehicles = manifest.vehicles.map((v) => {
+      if (v.id === selectedVehicle.id) {
+        return {
+          ...v,
+          draftState: {
+            ...v.draftState,
+            externalSponsees: nextExternalSponsees,
+            cashCollected: {
+              base: baseCash,
+              external: nextExternalSponsees.reduce((sum, s) => sum + (s.amount || FARE), 0),
+              pastCancellations: pastCancellationCash,
+            },
+          },
+        };
+      }
+
+      const isTarget = targetVehId ? v.id === targetVehId : taxiName ? v.name.toLowerCase() === taxiName.toLowerCase() : false;
+      if (isTarget && sponseeId && v.draftState?.sponsoredIds) {
+        const nextSponsored = v.draftState.sponsoredIds.filter((sid) => sid !== sponseeId);
+        const nextNotes = { ...(v.draftState.notes || {}) };
+        delete nextNotes[sponseeId];
+        return {
+          ...v,
+          draftState: {
+            ...v.draftState,
+            sponsoredIds: nextSponsored,
+            notes: nextNotes,
+          },
+        };
+      }
+      return v;
+    });
+
+    const updatedSignups = manifest.signups.map((p) => {
+      if (sponseeId && p.id === sponseeId) {
+        return {
+          ...p,
+          sponsored: false,
+          sponsorNote: undefined,
+        };
+      }
+      return p;
+    });
+
+    const nextManifest: Manifest = {
+      ...manifest,
+      vehicles: updatedVehicles,
+      signups: updatedSignups,
+    };
+
+    manifestRef.current = nextManifest;
+    await save(nextManifest);
+    setBatchActionMsg(`✓ Removed cross-vehicle sponsorship${targetEntry?.sponseeName ? ` for ${targetEntry.sponseeName}` : ''}.`);
+    setTimeout(() => setBatchActionMsg(null), 4000);
+  }, [manifest, selectedVehicle, externalSponsees, baseCash, pastCancellationCash, save]);
+
   // Conflict-Safe Debounced Background Sync & Instant Local Cache
   useEffect(() => {
     if (isApplyingDraftRef.current) {
@@ -989,6 +1269,22 @@ export function RepPage() {
 
   const handleToggleSponsored = useCallback((passengerId: string) => {
     const sId = String(passengerId);
+    const lock = externalSponsorLocks.get(sId) ||
+      (riders.find((r) => String(r.id) === sId)?.fullName
+        ? externalSponsorLocks.get(`name:${(riders.find((r) => String(r.id) === sId)?.fullName || '').trim().toLowerCase()}`)
+        : undefined);
+
+    if (lock && !lock.canRemove) {
+      setBatchActionMsg(`🔒 Sponsored by ${lock.payerName} in ${lock.fromVehicleName}. Only the rep on ${lock.fromVehicleName} can remove this sponsorship.`);
+      setTimeout(() => setBatchActionMsg(null), 4500);
+      return;
+    }
+
+    if (lock && lock.canRemove) {
+      removeExternalSponsee(lock.externalSponseeId);
+      return;
+    }
+
     const now = Date.now();
     lastLocalEditTimeRef.current = now;
     recentlyEditedRidersRef.current.set(sId, now);
@@ -1021,7 +1317,7 @@ export function RepPage() {
       });
       // Persistence happens via the debounced updateVehicleDraft sync (safe merge against server).
     }
-  }, [selectedVehicleId, repName, broadcastLiveAction]);
+  }, [selectedVehicleId, repName, broadcastLiveAction, externalSponsorLocks, riders, removeExternalSponsee]);
 
   const handleToggleUnpaid = useCallback((passengerId: string) => {
     const sId = String(passengerId);
@@ -1205,42 +1501,6 @@ export function RepPage() {
     setManualCancellations((prev) => prev.filter((c) => c.id !== id));
   };
 
-  const addExternalSponsee = () => {
-    isUserDirtyRef.current = true;
-    setExternalSponsees((prev) => [
-      ...prev,
-      { id: `sponsee-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, sponseeName: '', taxiName: '', amount: FARE },
-    ]);
-  };
-
-  const updateExternalSponsee = (id: string, patch: Partial<ExternalSponsee>) => {
-    isUserDirtyRef.current = true;
-    setExternalSponsees((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
-  };
-
-  const removeExternalSponsee = (id: string) => {
-    isUserDirtyRef.current = true;
-    setExternalSponsees((prev) => prev.filter((s) => s.id !== id));
-  };
-
-  function findPassengerForTransfer(name: string, structure: string, passengers: Passenger[]): Passenger | undefined {
-    if (!name.trim() || !passengers || passengers.length === 0) return undefined;
-    const walkInInfo = { fullName: name.trim(), structure: structure.trim() || null };
-
-    let bestMatch: Passenger | undefined = undefined;
-    let bestScore = 0;
-
-    for (const p of passengers) {
-      const res = isPassengerTransferMatch(walkInInfo, { fullName: p.fullName, structure: p.structure });
-      if (res.isMatch && res.score > bestScore) {
-        bestMatch = p;
-        bestScore = res.score;
-      }
-    }
-
-    return bestMatch;
-  }
-
   function findVehicleForPassenger(p: Passenger): Vehicle | undefined {
     if (!manifest) return undefined;
     if (p.assignedTo) {
@@ -1256,9 +1516,11 @@ export function RepPage() {
   }
 
   async function handleAddWalkIn(overrideCrossTransfer = false) {
-    if (!manifest || !selectedVehicle || !walkInName.trim()) return;
-    const query = walkInName.trim();
+    const effectiveFirstName = walkInFirstName.trim();
+    const effectiveSurname = walkInSurname.trim();
     const effectiveStruct = walkInStructure.trim();
+    const query = [effectiveFirstName, effectiveSurname].filter(Boolean).join(' ');
+    if (!manifest || !selectedVehicle || !query) return;
 
     // 1. First check within current manifest (same service, different vehicle)
     const existing = findPassengerForTransfer(query, effectiveStruct, manifest.signups);
@@ -1266,21 +1528,29 @@ export function RepPage() {
     if (existing && !overrideCrossTransfer) {
       const fromVehicle = findVehicleForPassenger(existing);
       if (fromVehicle && fromVehicle.id !== selectedVehicle.id) {
-        setTransferPrompt({
-          passenger: existing,
-          fromVehicle,
-          fromService: service,
-          fromServiceLabel: serviceLabel,
-          isCrossService: false,
-          isCompatible: true,
-          statusDescription: `Allocated to ${fromVehicle.name} (${serviceLabel})`,
-        });
+        // Automatically transfer: removed from original vehicle and added to this one!
+        await assignWalkIn(existing, fromVehicle.id);
+        setWalkInFirstName('');
+        setWalkInSurname('');
+        setWalkInStructure('');
+        setWalkInOpen(false);
+        setBatchActionMsg(`✓ Transferred ${existing.fullName} from ${fromVehicle.name} into ${selectedVehicle.name}`);
+        setTimeout(() => setBatchActionMsg(null), 5000);
+        return;
+      }
+      if (fromVehicle && fromVehicle.id === selectedVehicle.id) {
+        setBatchActionMsg(`${existing.fullName} is already in ${selectedVehicle.name}`);
+        setTimeout(() => setBatchActionMsg(null), 4000);
+        setWalkInOpen(false);
         return;
       }
       await assignWalkIn(existing, fromVehicle?.id ?? existing.assignedTo ?? null);
-      setWalkInName('');
+      setWalkInFirstName('');
+      setWalkInSurname('');
       setWalkInStructure('');
       setWalkInOpen(false);
+      setBatchActionMsg(`✓ Added ${existing.fullName} into ${selectedVehicle.name}`);
+      setTimeout(() => setBatchActionMsg(null), 4000);
       return;
     }
 
@@ -1330,6 +1600,9 @@ export function RepPage() {
       assignedTo: selectedVehicle.id,
       present: true,
       cancellationFeeOwed: false,
+      walkIn: true,
+      createdBy: repName.trim() || undefined,
+      createdClientId: clientIdRef.current,
     };
     const draftMetadata: Partial<VehicleDraftState> = {
       repName: repName.trim() || selectedVehicle.repName || '',
@@ -1345,13 +1618,17 @@ export function RepPage() {
       next.delete(newPassenger.id);
       return next;
     });
+    setMyCreatedWalkInIds((prev) => new Set(prev).add(newPassenger.id));
 
     // Atomic transaction in Firestore: allows multiple users to append walk-ins simultaneously
     // without race conditions or manual syncing
     await appendWalkIn(selectedVehicle.id, newPassenger, draftMetadata);
-    setWalkInName('');
+    setWalkInFirstName('');
+    setWalkInSurname('');
     setWalkInStructure('');
     setWalkInOpen(false);
+    setBatchActionMsg(`✓ Added walk-in ${finalName} into ${selectedVehicle.name}`);
+    setTimeout(() => setBatchActionMsg(null), 4000);
   }
 
   async function assignWalkIn(passenger: Passenger, fromVehicleId: string | null) {
@@ -1492,7 +1769,8 @@ export function RepPage() {
       }
 
       setTransferPrompt(null);
-      setWalkInName('');
+      setWalkInFirstName('');
+      setWalkInSurname('');
       setWalkInStructure('');
       setWalkInOpen(false);
     } catch (e) {
@@ -1615,6 +1893,16 @@ export function RepPage() {
           sponsorNote: (notes[r.id] ?? notes[String(r.id)] ?? r.sponsorNote ?? '').trim(),
         }));
 
+      const unpaidRiders = riders
+        .filter((r) => unpaidIds.has(r.id) || unpaidIds.has(String(r.id)))
+        .map((r) => ({
+          id: String(r.id),
+          fullName: r.fullName,
+          structure: r.structure || '',
+          stop: r.stop || '',
+          unpaidNote: (notes[r.id] ?? notes[String(r.id)] ?? r.unpaidNote ?? '').trim(),
+        }));
+
       // Atomic submission payload to central server
       const submitPayload: SubmitVehiclePayload = {
         vehicleId: selectedVehicle.id,
@@ -1626,6 +1914,7 @@ export function RepPage() {
         draftState: finalizedDraft,
         absentees,
         sponsoredRiders,
+        unpaidRiders,
         allRiderNames: riders.map((r) => r.fullName),
         serviceLabel,
         parsedDate,
@@ -1683,7 +1972,7 @@ export function RepPage() {
         console.warn('[RepPage] Google Sheets sync skipped:', err);
       }
 
-      // Insert absentees into secondary store as well
+      // Insert absentees and unpaid riders into secondary store as well
       await insertAbsentees(
         key,
         parsedDate,
@@ -1694,7 +1983,8 @@ export function RepPage() {
         repName.trim(),
         licensePlate.trim(),
         repDisplayName,
-        fullGeneralNotes
+        fullGeneralNotes,
+        unpaidRiders
       ).catch(() => {});
 
       // Record reported sponsorships into ledger audit store
@@ -1730,10 +2020,11 @@ export function RepPage() {
 
       const sponNote = sponsoredRiders.length > 0 ? `, ${sponsoredRiders.length} sponsored` : '';
       const absenteeSummary = absentees.length > 0 ? ` ${absentees.length} absentee(s) recorded in cancellation ledger.` : '';
+      const unpaidSummary = unpaidRiders.length > 0 ? ` ${unpaidRiders.length} unpaid passenger(s) entered into cancellation ledger.` : '';
       setSubmitMsg(
         serverSaved
-          ? `✓ Successfully submitted and saved to server! ${presentCount} present, ${absentCount} absent${sponNote}.${absenteeSummary} Thank you, ${repDisplayName}.`
-          : `✓ Successfully submitted & saved! ${presentCount} present, ${absentCount} absent${sponNote}.${absenteeSummary} Thank you, ${repDisplayName}.`
+          ? `✓ Successfully submitted and saved to server! ${presentCount} present, ${absentCount} absent${sponNote}.${absenteeSummary}${unpaidSummary} Thank you, ${repDisplayName}.`
+          : `✓ Successfully submitted & saved! ${presentCount} present, ${absentCount} absent${sponNote}.${absenteeSummary}${unpaidSummary} Thank you, ${repDisplayName}.`
       );
     } catch (e) {
       setSubmitMsg(`Error: ${e instanceof Error ? e.message : String(e)}`);
@@ -1774,20 +2065,58 @@ export function RepPage() {
     }
   }
 
+  const canRemoveRider = useCallback(
+    (passenger: Passenger) => {
+      const isWalkIn =
+        passenger.id.startsWith('walkin-') ||
+        passenger.stop === 'Walk-In' ||
+        passenger.walkIn === true;
+      if (!isWalkIn) return false;
+
+      const isMyWalkIn =
+        myCreatedWalkInIds.has(passenger.id) ||
+        (!!passenger.createdClientId && passenger.createdClientId === clientIdRef.current) ||
+        (!!passenger.createdBy &&
+          !!repName.trim() &&
+          passenger.createdBy.trim().toLowerCase() === repName.trim().toLowerCase());
+
+      return isMyWalkIn;
+    },
+    [myCreatedWalkInIds, repName]
+  );
+
   const handleRemoveRiderFromVehicle = useCallback(
     async (passengerId: string) => {
       if (!manifest || !selectedVehicle) return;
       const targetPassenger = manifest.signups.find((p) => String(p.id) === String(passengerId));
       if (!targetPassenger) return;
 
-      const isWalkIn = targetPassenger.id.startsWith('walkin-') || targetPassenger.stop === 'Walk-In';
+      const isWalkIn =
+        targetPassenger.id.startsWith('walkin-') ||
+        targetPassenger.stop === 'Walk-In' ||
+        targetPassenger.walkIn === true;
 
-      // 1. Update signups: if walk-in, delete it; otherwise return to unassigned pool (assignedTo: null)
-      const updatedSignups = isWalkIn
-        ? manifest.signups.filter((p) => String(p.id) !== String(passengerId))
-        : manifest.signups.map((p) =>
-            String(p.id) === String(passengerId) ? { ...p, assignedTo: null } : p
-          );
+      if (!isWalkIn) {
+        setBatchActionMsg('⚠️ Reps can only remove walk-ins they created. Scheduled signups cannot be removed.');
+        setTimeout(() => setBatchActionMsg(null), 5000);
+        return;
+      }
+
+      const isMyWalkIn =
+        myCreatedWalkInIds.has(targetPassenger.id) ||
+        (!!targetPassenger.createdClientId && targetPassenger.createdClientId === clientIdRef.current) ||
+        (!!targetPassenger.createdBy &&
+          !!repName.trim() &&
+          targetPassenger.createdBy.trim().toLowerCase() === repName.trim().toLowerCase());
+
+      if (!isMyWalkIn) {
+        setBatchActionMsg('⚠️ You can only remove walk-ins that you created.');
+        setTimeout(() => setBatchActionMsg(null), 5000);
+        return;
+      }
+
+      // 1. Delete the walk-in from signups
+      const updatedSignups = manifest.signups.filter((p) => String(p.id) !== String(passengerId));
 
       // 2. Remove from current vehicle's riders and clean draftState
       const updatedVehicles = manifest.vehicles.map((v) => {
@@ -1834,19 +2163,20 @@ export function RepPage() {
         delete next[passengerId];
         return next;
       });
+      setMyCreatedWalkInIds((prev) => {
+        const next = new Set(prev);
+        next.delete(passengerId);
+        return next;
+      });
 
       isUserDirtyRef.current = true;
       const newManifest = { ...manifest, signups: updatedSignups, vehicles: updatedVehicles };
       await save(newManifest);
 
-      setBatchActionMsg(
-        isWalkIn
-          ? `✓ Removed walk-in "${targetPassenger.fullName}".`
-          : `✓ Returned "${targetPassenger.fullName}" to unassigned pool.`
-      );
+      setBatchActionMsg(`✓ Removed walk-in "${targetPassenger.fullName}".`);
       setTimeout(() => setBatchActionMsg(null), 5000);
     },
-    [manifest, selectedVehicle, save]
+    [manifest, selectedVehicle, save, myCreatedWalkInIds, repName]
   );
 
   const handleSelectVehicle = (newVehicleId: string) => {
@@ -2272,43 +2602,111 @@ export function RepPage() {
                             </label>
                             <button
                               type="button"
-                              onClick={() => { setWalkInOpen(false); setWalkInName(''); setWalkInStructure(''); }}
+                              onClick={() => {
+                                setWalkInOpen(false);
+                                setWalkInFirstName('');
+                                setWalkInSurname('');
+                                setWalkInStructure('');
+                              }}
                               className="rounded p-1 text-muted hover:bg-card-2 hover:text-ink text-xs"
                             >
                               Cancel
                             </button>
                           </div>
-                          <div className="flex flex-col gap-2">
-                            <input
-                              type="text"
-                              value={walkInName}
-                              onChange={(e) => setWalkInName(e.target.value)}
-                              onKeyDown={(e) => e.key === 'Enter' && handleAddWalkIn()}
-                              placeholder="Full name (e.g. Sipho Dlamini)"
-                              className="input-field text-xs font-medium"
-                              autoFocus
-                            />
-                            <div className="flex gap-2">
+
+                          <div className="space-y-2">
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="mb-1 block text-[10px] font-semibold text-muted">First Name</label>
+                                <input
+                                  type="text"
+                                  value={walkInFirstName}
+                                  onChange={(e) => setWalkInFirstName(e.target.value)}
+                                  onKeyDown={(e) => e.key === 'Enter' && handleAddWalkIn()}
+                                  placeholder="e.g. Sipho"
+                                  className="input-field text-xs font-medium w-full"
+                                  autoFocus
+                                />
+                              </div>
+                              <div>
+                                <label className="mb-1 block text-[10px] font-semibold text-muted">Surname</label>
+                                <input
+                                  type="text"
+                                  value={walkInSurname}
+                                  onChange={(e) => setWalkInSurname(e.target.value)}
+                                  onKeyDown={(e) => e.key === 'Enter' && handleAddWalkIn()}
+                                  placeholder="e.g. Dlamini"
+                                  className="input-field text-xs font-medium w-full"
+                                />
+                              </div>
+                            </div>
+
+                            <div>
+                              <label className="mb-1 block text-[10px] font-semibold text-muted">Structure</label>
                               <input
                                 type="text"
                                 value={walkInStructure}
                                 onChange={(e) => setWalkInStructure(e.target.value)}
                                 onKeyDown={(e) => e.key === 'Enter' && handleAddWalkIn()}
-                                placeholder="Structure (e.g. S3)"
-                                className="input-field text-xs flex-1 uppercase"
+                                placeholder="Structure (e.g. S3, S9)"
+                                className="input-field text-xs uppercase w-full"
                               />
+                            </div>
+
+                            {/* Real-time Transfer Detection Banner */}
+                            {detectedTransfer && detectedTransfer.vehicle && !detectedTransfer.isSameVehicle && (
+                              <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-200 animate-fade-in flex items-start gap-1.5">
+                                <ArrowRightLeft className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+                                <div className="leading-snug">
+                                  <span className="font-semibold text-amber-300">Existing Passenger Found in {detectedTransfer.vehicle.name}:</span>{' '}
+                                  {detectedTransfer.passenger.fullName} {detectedTransfer.passenger.structure ? `(${detectedTransfer.passenger.structure})` : ''}.{' '}
+                                  Adding will automatically remove them from <strong>{detectedTransfer.vehicle.name}</strong> and reassign to <strong>{selectedVehicle.name}</strong>.
+                                </div>
+                              </div>
+                            )}
+
+                            {detectedTransfer && detectedTransfer.isSameVehicle && (
+                              <div className="rounded-lg border border-line bg-card-2 p-2 text-xs text-muted">
+                                ℹ️ {detectedTransfer.passenger.fullName} is already assigned to this vehicle ({selectedVehicle.name}).
+                              </div>
+                            )}
+
+                            <div className="flex items-center gap-2 pt-1">
                               <button
                                 type="button"
                                 onClick={() => handleAddWalkIn()}
-                                disabled={!walkInName.trim() || isCheckingCrossService}
-                                className="btn-crimson px-3 py-2 text-xs font-bold whitespace-nowrap shadow-sm disabled:opacity-40 flex items-center gap-1.5"
+                                disabled={(!walkInFirstName.trim() && !walkInSurname.trim()) || isCheckingCrossService}
+                                className={`flex-1 py-2 px-3 text-xs font-bold whitespace-nowrap shadow-sm disabled:opacity-40 flex items-center justify-center gap-1.5 rounded-lg transition-all ${
+                                  detectedTransfer && detectedTransfer.vehicle && !detectedTransfer.isSameVehicle
+                                    ? 'bg-amber-600 hover:bg-amber-500 text-white'
+                                    : 'btn-crimson'
+                                }`}
                               >
-                                {isCheckingCrossService && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                                <span>{isCheckingCrossService ? 'Checking…' : 'Add'}</span>
+                                {isCheckingCrossService ? (
+                                  <>
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    <span>Checking cross-service…</span>
+                                  </>
+                                ) : detectedTransfer && detectedTransfer.vehicle && !detectedTransfer.isSameVehicle ? (
+                                  <>
+                                    <ArrowRightLeft className="h-3.5 w-3.5" />
+                                    <span>Transfer from {detectedTransfer.vehicle.name}</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <UserPlus className="h-3.5 w-3.5" />
+                                    <span>Add Walk-In</span>
+                                  </>
+                                )}
                               </button>
                               <button
                                 type="button"
-                                onClick={() => { setWalkInOpen(false); setWalkInName(''); setWalkInStructure(''); }}
+                                onClick={() => {
+                                  setWalkInOpen(false);
+                                  setWalkInFirstName('');
+                                  setWalkInSurname('');
+                                  setWalkInStructure('');
+                                }}
                                 className="btn-ghost px-2.5 py-2 text-xs"
                               >
                                 ✕
@@ -2514,6 +2912,8 @@ export function RepPage() {
                     collectedCancellationIds={collectedCancellationIds}
                     onToggleCancellation={toggleCollectedCancellation}
                     onRemoveRider={handleRemoveRiderFromVehicle}
+                    canRemoveRider={canRemoveRider}
+                    externalSponsorLocks={externalSponsorLocks}
                   />
                 ) : (
                   <AlphabeticalChecklist
@@ -2534,6 +2934,8 @@ export function RepPage() {
                     collectedCancellationIds={collectedCancellationIds}
                     onToggleCancellation={toggleCollectedCancellation}
                     onRemoveRider={handleRemoveRiderFromVehicle}
+                    canRemoveRider={canRemoveRider}
+                    externalSponsorLocks={externalSponsorLocks}
                   />
                 )}
 
@@ -2575,10 +2977,14 @@ export function RepPage() {
                       grossPresentCash={grossPresentCash}
                       sponsoredDeduction={sponsoredDeduction}
                       externalSponsees={externalSponsees}
-                      onAddSponsee={addExternalSponsee}
+                      onAddExternalSponsorship={addExternalSponsorship}
                       onUpdateSponsee={updateExternalSponsee}
                       onRemoveSponsee={removeExternalSponsee}
                       externalCash={externalCash}
+                      thisVehicleRiders={riders}
+                      otherVehiclesWithRiders={otherVehiclesWithRiders}
+                      selectedVehicleName={selectedVehicle.name}
+                      externalSponsorLocks={externalSponsorLocks}
                       pastCancellations={pastCancellations}
                       loadingPastCancellations={loadingPastCancellations}
                       collectedCancellationIds={collectedCancellationIds}
@@ -2912,7 +3318,8 @@ function formatServicePeriodMode(service: string): string {
 
 function CashCalculatorCard({
   presentCount, presentSponsoredCount, fare, grossPresentCash, sponsoredDeduction,
-  externalSponsees, onAddSponsee, onUpdateSponsee, onRemoveSponsee, externalCash,
+  externalSponsees, onAddExternalSponsorship, onRemoveSponsee, externalCash,
+  thisVehicleRiders, otherVehiclesWithRiders, selectedVehicleName,
   pastCancellations, loadingPastCancellations, collectedCancellationIds, onToggleCancellation,
   manualCancellations,
   pastCancellationCash, search, onSearchChange, onEnsureLoaded, onOpenModal,
@@ -2924,10 +3331,23 @@ function CashCalculatorCard({
   grossPresentCash: number;
   sponsoredDeduction: number;
   externalSponsees: ExternalSponsee[];
-  onAddSponsee: () => void;
+  onAddExternalSponsorship?: (data: {
+    payerId?: string;
+    payerName?: string;
+    sponseeId?: string;
+    sponseeName: string;
+    taxiName: string;
+    targetVehicleId?: string;
+    amount: number;
+    note?: string;
+  }) => Promise<void>;
   onUpdateSponsee: (id: string, patch: Partial<ExternalSponsee>) => void;
   onRemoveSponsee: (id: string) => void;
   externalCash: number;
+  thisVehicleRiders?: Passenger[];
+  otherVehiclesWithRiders?: { vehicle: Vehicle; riders: Passenger[] }[];
+  selectedVehicleName?: string;
+  externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean }>;
   pastCancellations: LedgerEntry[];
   loadingPastCancellations: boolean;
   collectedCancellationIds: Set<string>;
@@ -2951,6 +3371,89 @@ function CashCalculatorCard({
     return e.passenger_name.toLowerCase().includes(q) || (e.structure || '').toLowerCase().includes(q);
   });
   const totalSettledCount = selectedCancellations.length + manualCancellations.length;
+
+  // Cross-taxi sponsorship form state
+  const [isAddingSponsorship, setIsAddingSponsorship] = useState(false);
+  const [payerMode, setPayerMode] = useState<'select' | 'custom'>('select');
+  const [selectedPayerId, setSelectedPayerId] = useState<string>('');
+  const [customPayerName, setCustomPayerName] = useState('');
+  const [sponseeSearchQuery, setSponseeSearchQuery] = useState('');
+  const [selectedSponsee, setSelectedSponsee] = useState<{
+    id?: string;
+    fullName: string;
+    vehicleId?: string;
+    vehicleName: string;
+    structure?: string;
+  } | null>(null);
+  const [customSponseeName, setCustomSponseeName] = useState('');
+  const [customTaxiName, setCustomTaxiName] = useState('');
+  const [sponsorAmount, setSponsorAmount] = useState<number>(fare);
+  const [sponsorNote, setSponsorNote] = useState('');
+  const [isSubmittingSponsorship, setIsSubmittingSponsorship] = useState(false);
+
+  // Search candidate riders across all other taxis
+  const otherRiderMatches = useMemo(() => {
+    if (!otherVehiclesWithRiders || !sponseeSearchQuery.trim()) return [];
+    const term = sponseeSearchQuery.trim().toLowerCase();
+    const matches: { passenger: Passenger; vehicle: Vehicle }[] = [];
+    for (const group of otherVehiclesWithRiders) {
+      for (const rider of group.riders) {
+        if (
+          rider.fullName.toLowerCase().includes(term) ||
+          (rider.structure && rider.structure.toLowerCase().includes(term))
+        ) {
+          matches.push({ passenger: rider, vehicle: group.vehicle });
+        }
+      }
+    }
+    return matches.slice(0, 8);
+  }, [otherVehiclesWithRiders, sponseeSearchQuery]);
+
+  async function handleConfirmAddSponsorship() {
+    let finalPayer = '';
+    if (payerMode === 'select' && selectedPayerId) {
+      finalPayer = thisVehicleRiders?.find((r) => r.id === selectedPayerId)?.fullName || '';
+    } else {
+      finalPayer = customPayerName.trim();
+    }
+    if (!finalPayer) {
+      finalPayer = 'Passenger in ' + (selectedVehicleName || 'this vehicle');
+    }
+
+    const finalSponsee = selectedSponsee?.fullName || customSponseeName.trim() || sponseeSearchQuery.trim();
+    const finalTaxi = selectedSponsee?.vehicleName || customTaxiName.trim();
+
+    if (!finalSponsee) return;
+    if (!finalTaxi) return;
+
+    try {
+      setIsSubmittingSponsorship(true);
+      if (onAddExternalSponsorship) {
+        await onAddExternalSponsorship({
+          payerId: selectedPayerId || undefined,
+          payerName: finalPayer,
+          sponseeId: selectedSponsee?.id,
+          sponseeName: finalSponsee,
+          taxiName: finalTaxi,
+          targetVehicleId: selectedSponsee?.vehicleId,
+          amount: sponsorAmount > 0 ? sponsorAmount : fare,
+          note: sponsorNote.trim() || undefined,
+        });
+      }
+      // Reset form
+      setIsAddingSponsorship(false);
+      setSelectedPayerId('');
+      setCustomPayerName('');
+      setSponseeSearchQuery('');
+      setSelectedSponsee(null);
+      setCustomSponseeName('');
+      setCustomTaxiName('');
+      setSponsorAmount(fare);
+      setSponsorNote('');
+    } finally {
+      setIsSubmittingSponsorship(false);
+    }
+  }
 
   return (
     <div className="card">
@@ -2984,43 +3487,317 @@ function CashCalculatorCard({
         )}
       </div>
 
-      {/* External sponsees */}
-      <div className="mt-3">
-        <button onClick={onAddSponsee} className="flex items-center gap-1.5 text-xs font-semibold text-crimson-400 hover:text-crimson-300">
-          <Plus className="h-3.5 w-3.5" />
-          + Add External Sponsee Cash
-        </button>
-        {externalSponsees.length > 0 && (
-          <div className="mt-2 space-y-2">
-            {externalSponsees.map((s) => (
-              <div key={s.id} className="flex flex-col gap-1.5 rounded-lg border border-line bg-card-2/60 p-2.5 sm:flex-row sm:items-center">
+      {/* Cross-Taxi Sponsorships (Paying for someone in another taxi) */}
+      <div className="mt-3 border-t border-line/60 pt-3">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-300">
+            <HeartHandshake className="h-4 w-4 text-amber-400 shrink-0" />
+            <span>Cross-Taxi Sponsorships</span>
+            {externalSponsees.length > 0 && (
+              <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/30">
+                {externalSponsees.length} (+R{externalCash})
+              </span>
+            )}
+          </div>
+          {!isAddingSponsorship && (
+            <button
+              type="button"
+              onClick={() => setIsAddingSponsorship(true)}
+              className="flex items-center gap-1 text-xs font-semibold text-amber-400 hover:text-amber-300 transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>Sponsor Rider in Another Taxi</span>
+            </button>
+          )}
+        </div>
+
+        {/* Info Explainer */}
+        <p className="mb-2 text-[11px] text-muted">
+          Collect cash in this vehicle when a passenger here is paying for a friend or family member travelling in another taxi. It auto-sponsors that passenger in their vehicle.
+        </p>
+
+        {/* Add Sponsorship Expansion Panel */}
+        {isAddingSponsorship && (
+          <div className="mb-3 rounded-xl border border-amber-500/40 bg-card-2/95 p-3.5 text-xs shadow-md space-y-3 animate-fade-in">
+            <div className="flex items-center justify-between border-b border-line/60 pb-2">
+              <span className="font-bold text-amber-300 flex items-center gap-1.5">
+                <HeartHandshake className="h-4 w-4 text-amber-400" />
+                Record Sponsorship (Collect Cash Here)
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsAddingSponsorship(false)}
+                className="text-muted hover:text-ink text-xs"
+              >
+                ✕ Cancel
+              </button>
+            </div>
+
+            {/* Step 1: Who is paying? */}
+            <div className="space-y-1.5">
+              <label className="block font-semibold text-ink text-[11px]">
+                1. Who is paying? (Passenger in this vehicle):
+              </label>
+              <div className="flex gap-2 text-[11px] mb-1">
+                <button
+                  type="button"
+                  onClick={() => setPayerMode('select')}
+                  className={`px-2 py-0.5 rounded text-[11px] font-medium border ${
+                    payerMode === 'select'
+                      ? 'border-amber-500/60 bg-amber-500/20 text-amber-200'
+                      : 'border-line text-muted hover:text-ink'
+                  }`}
+                >
+                  Select from this taxi ({thisVehicleRiders?.length ?? 0})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPayerMode('custom')}
+                  className={`px-2 py-0.5 rounded text-[11px] font-medium border ${
+                    payerMode === 'custom'
+                      ? 'border-amber-500/60 bg-amber-500/20 text-amber-200'
+                      : 'border-line text-muted hover:text-ink'
+                  }`}
+                >
+                  Custom Payer Name
+                </button>
+              </div>
+
+              {payerMode === 'select' ? (
+                <select
+                  value={selectedPayerId}
+                  onChange={(e) => setSelectedPayerId(e.target.value)}
+                  className="input-field py-1.5 text-xs"
+                >
+                  <option value="">-- Choose passenger in this vehicle --</option>
+                  {thisVehicleRiders?.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.fullName} {r.structure ? `(${r.structure})` : ''} - {r.stop}
+                    </option>
+                  ))}
+                </select>
+              ) : (
                 <input
                   type="text"
-                  value={s.sponseeName}
-                  onChange={(e) => onUpdateSponsee(s.id, { sponseeName: e.target.value })}
-                  placeholder="Sponsee name"
-                  className="input-field py-1.5 text-xs sm:flex-1"
+                  value={customPayerName}
+                  onChange={(e) => setCustomPayerName(e.target.value)}
+                  placeholder="Enter payer name (e.g. John Dlamini)"
+                  className="input-field py-1.5 text-xs"
                 />
+              )}
+            </div>
+
+            {/* Step 2: Who are they paying for? (Search in another taxi) */}
+            <div className="space-y-1.5">
+              <label className="block font-semibold text-ink text-[11px]">
+                2. Who are they paying for? (Search passenger in another taxi):
+              </label>
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
                 <input
                   type="text"
-                  value={s.taxiName}
-                  onChange={(e) => onUpdateSponsee(s.id, { taxiName: e.target.value })}
-                  placeholder="In which taxi? (e.g. Taxi 2)"
-                  className="input-field py-1.5 text-xs sm:flex-1"
+                  value={sponseeSearchQuery}
+                  onChange={(e) => {
+                    setSponseeSearchQuery(e.target.value);
+                    if (selectedSponsee && selectedSponsee.fullName !== e.target.value) {
+                      setSelectedSponsee(null);
+                    }
+                  }}
+                  placeholder="Type name to search (e.g. Sipho, Sarah, Khumalo)..."
+                  className="input-field py-1.5 pl-8 text-xs font-medium"
                 />
-                <div className="flex items-center gap-1 text-xs text-muted">
-                  R
+              </div>
+
+              {/* Selected Candidate Badge */}
+              {selectedSponsee && (
+                <div className="flex items-center justify-between rounded-lg border border-emerald-500/40 bg-emerald-950/30 p-2 text-xs">
+                  <div className="flex items-center gap-1.5">
+                    <Check className="h-3.5 w-3.5 text-emerald-400" />
+                    <span className="font-bold text-emerald-200">{selectedSponsee.fullName}</span>
+                    {selectedSponsee.structure && (
+                      <span className="rounded bg-card-2 px-1 py-0.2 text-[10px] text-muted border border-line">
+                        {selectedSponsee.structure}
+                      </span>
+                    )}
+                    <span className="text-muted">in</span>
+                    <span className="font-semibold text-amber-300">{selectedSponsee.vehicleName}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedSponsee(null);
+                      setSponseeSearchQuery('');
+                    }}
+                    className="text-muted hover:text-ink text-[11px]"
+                  >
+                    Change
+                  </button>
+                </div>
+              )}
+
+              {/* Live search results */}
+              {!selectedSponsee && sponseeSearchQuery.trim().length > 0 && (
+                <div className="max-h-44 space-y-1 overflow-y-auto rounded-lg border border-line bg-card p-1.5">
+                  {otherRiderMatches.length > 0 ? (
+                    otherRiderMatches.map(({ passenger, vehicle }) => (
+                      <button
+                        key={`${vehicle.id}-${passenger.id}`}
+                        type="button"
+                        onClick={() => {
+                          setSelectedSponsee({
+                            id: passenger.id,
+                            fullName: passenger.fullName,
+                            vehicleId: vehicle.id,
+                            vehicleName: vehicle.name,
+                            structure: passenger.structure,
+                          });
+                          setSponseeSearchQuery(passenger.fullName);
+                        }}
+                        className="flex w-full items-center justify-between rounded-md p-1.5 text-left text-xs hover:bg-card-2 transition-colors"
+                      >
+                        <div>
+                          <span className="font-semibold text-ink">{passenger.fullName}</span>
+                          {passenger.structure && (
+                            <span className="ml-1 text-[10px] text-muted">({passenger.structure})</span>
+                          )}
+                          <span className="ml-1 text-[10px] text-muted">· {passenger.stop}</span>
+                        </div>
+                        <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/30">
+                          {vehicle.name}
+                        </span>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="p-2 text-center text-muted text-[11px]">
+                      No passenger found with that name. You can enter details manually below:
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Manual fallback if not found in another vehicle */}
+              {!selectedSponsee && sponseeSearchQuery.trim().length > 0 && otherRiderMatches.length === 0 && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
                   <input
-                    type="number"
-                    min="0"
-                    value={s.amount}
-                    onChange={(e) => onUpdateSponsee(s.id, { amount: Math.max(0, parseInt(e.target.value, 10) || 0) })}
-                    className="input-field w-16 py-1 text-center text-xs"
+                    type="text"
+                    value={customSponseeName}
+                    onChange={(e) => setCustomSponseeName(e.target.value)}
+                    placeholder="Sponsee name"
+                    className="input-field py-1 text-xs"
+                  />
+                  <input
+                    type="text"
+                    value={customTaxiName}
+                    onChange={(e) => setCustomTaxiName(e.target.value)}
+                    placeholder="In which taxi? (e.g. Taxi 2)"
+                    className="input-field py-1 text-xs"
                   />
                 </div>
-                <button onClick={() => onRemoveSponsee(s.id)} className="rounded-md p-1.5 text-muted hover:bg-crimson-900/30 hover:text-crimson-300" title="Remove">
-                  <X className="h-3.5 w-3.5" />
-                </button>
+              )}
+            </div>
+
+            {/* Step 3: Fare amount and Note */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <div>
+                <label className="block font-semibold text-ink text-[11px] mb-1">
+                  Cash Collected (R):
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  value={sponsorAmount}
+                  onChange={(e) => setSponsorAmount(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                  className="input-field py-1.5 text-xs text-center font-mono font-bold"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block font-semibold text-ink text-[11px] mb-1">
+                  Optional Note:
+                </label>
+                <input
+                  type="text"
+                  value={sponsorNote}
+                  onChange={(e) => setSponsorNote(e.target.value)}
+                  placeholder="e.g. Brother paying for sister"
+                  className="input-field py-1.5 text-xs"
+                />
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex items-center justify-end gap-2 pt-1 border-t border-line/60">
+              <button
+                type="button"
+                onClick={() => setIsAddingSponsorship(false)}
+                className="btn-ghost py-1.5 px-3 text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmAddSponsorship}
+                disabled={
+                  isSubmittingSponsorship ||
+                  (!selectedSponsee && !customSponseeName.trim() && !sponseeSearchQuery.trim()) ||
+                  (!selectedSponsee && !customTaxiName.trim())
+                }
+                className="btn-crimson py-1.5 px-3 text-xs font-bold flex items-center gap-1.5 disabled:opacity-40"
+              >
+                {isSubmittingSponsorship ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <span>Auto-Sponsoring…</span>
+                  </>
+                ) : (
+                  <>
+                    <Check className="h-3.5 w-3.5" />
+                    <span>Confirm & Auto-Sponsor in {selectedSponsee?.vehicleName || customTaxiName || 'Other Taxi'}</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* List of Recorded Cross-Taxi Sponsorships */}
+        {externalSponsees.length > 0 && (
+          <div className="space-y-2 mb-2">
+            {externalSponsees.map((s) => (
+              <div
+                key={s.id}
+                className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 transition-all space-y-1.5"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="space-y-1 text-xs min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="font-bold text-amber-300">
+                        {s.payerName || 'Passenger in this vehicle'}
+                      </span>
+                      <span className="text-muted text-[11px]">in {s.fromVehicleName || selectedVehicleName || 'this taxi'}</span>
+                      <span className="text-muted text-[11px]">is paying for</span>
+                      <span className="font-bold text-ink">
+                        {s.sponseeName}
+                      </span>
+                      <span className="rounded bg-card-2 px-1.5 py-0.5 text-[10px] font-semibold text-crimson-400 border border-line">
+                        in {s.taxiName}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 text-[11px] text-muted flex-wrap">
+                      <span className="font-mono font-bold text-emerald-400">+R{s.amount || fare} collected</span>
+                      <span className="text-muted">·</span>
+                      <span className="text-emerald-300/90 font-medium">✓ Auto-sponsored in {s.taxiName}</span>
+                      {s.note && <span className="italic text-muted">({s.note})</span>}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onRemoveSponsee(s.id)}
+                    className="shrink-0 rounded-md p-1.5 text-muted hover:bg-crimson-900/30 hover:text-crimson-300 transition-colors"
+                    title="Remove sponsorship and revert auto-sponsor in other vehicle"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -3172,7 +3949,7 @@ function CashCalculatorCard({
 
 function StopGroupedChecklist({
   riders, vehicleType, orderedStops, stopRedirects, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
-  riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider,
+  riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemoveRider, externalSponsorLocks,
 }: {
   riders: Passenger[];
   vehicleType: 'Bus' | 'Taxi';
@@ -3192,6 +3969,8 @@ function StopGroupedChecklist({
   collectedCancellationIds?: Set<string>;
   onToggleCancellation?: (id: string) => void;
   onRemoveRider?: (id: string) => void;
+  canRemoveRider?: (passenger: Passenger) => boolean;
+  externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean }>;
 }) {
   const byStop = useMemo(() => {
     const groups: Record<string, Passenger[]> = {};
@@ -3306,6 +4085,8 @@ function StopGroupedChecklist({
                       collectedCancellationIds={collectedCancellationIds}
                       onToggleCancellation={onToggleCancellation}
                       onRemoveRider={onRemoveRider}
+                      canRemove={canRemoveRider ? canRemoveRider(p) : false}
+                      externalLock={externalSponsorLocks?.get(String(p.id)) || externalSponsorLocks?.get(p.fullName.trim().toLowerCase())}
                     />
                   );
                 })}
@@ -3320,7 +4101,7 @@ function StopGroupedChecklist({
 
 function AlphabeticalChecklist({
   riders, vehicleType, stopRedirects, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
-  riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider,
+  riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemoveRider, externalSponsorLocks,
 }: {
   riders: Passenger[];
   vehicleType?: 'Bus' | 'Taxi';
@@ -3339,6 +4120,8 @@ function AlphabeticalChecklist({
   collectedCancellationIds?: Set<string>;
   onToggleCancellation?: (id: string) => void;
   onRemoveRider?: (id: string) => void;
+  canRemoveRider?: (passenger: Passenger) => boolean;
+  externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean }>;
 }) {
   const sorted = useMemo(() => {
     return [...riders].sort((a, b) => naturalCompare(a.fullName, b.fullName));
@@ -3379,6 +4162,8 @@ function AlphabeticalChecklist({
             collectedCancellationIds={collectedCancellationIds}
             onToggleCancellation={onToggleCancellation}
             onRemoveRider={onRemoveRider}
+            canRemove={canRemoveRider ? canRemoveRider(p) : false}
+            externalLock={externalSponsorLocks?.get(String(p.id)) || externalSponsorLocks?.get(p.fullName.trim().toLowerCase())}
           />
         );
       })}
@@ -3388,7 +4173,7 @@ function AlphabeticalChecklist({
 
 const PassengerRow = React.memo(function PassengerRow({
   passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, isSponsored, isUnpaid, noteText, redirectedFrom, disabled,
-  outstandingDebts, collectedCancellationIds, onToggleCancellation, onRemoveRider,
+  outstandingDebts, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemove, externalLock,
 }: {
   passenger: Passenger;
   isPresent: boolean;
@@ -3407,6 +4192,8 @@ const PassengerRow = React.memo(function PassengerRow({
   collectedCancellationIds?: Set<string>;
   onToggleCancellation?: (id: string) => void;
   onRemoveRider?: (id: string) => void;
+  canRemove?: boolean;
+  externalLock?: { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean };
 }) {
   const isMissingSponsorInfo = isSponsored && !noteText.trim();
   const [showNote, setShowNote] = useState(isSponsored || isUnpaid || !!noteText);
@@ -3523,27 +4310,66 @@ const PassengerRow = React.memo(function PassengerRow({
         </div>
       </div>
 
+      {/* Cross-Taxi External Sponsorship Banner */}
+      {externalLock && (
+        <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-200 animate-fade-in">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <HeartHandshake className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+            <span className="truncate">
+              Paid in <span className="font-bold text-amber-300">{externalLock.fromVehicleName}</span> by{' '}
+              <span className="font-semibold text-ink">{externalLock.payerName}</span>
+            </span>
+          </div>
+          {!externalLock.canRemove ? (
+            <span className="flex items-center gap-1 rounded bg-amber-950/80 border border-amber-500/40 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 shrink-0">
+              <Lock className="h-3 w-3 text-amber-400" />
+              Locked by {externalLock.fromVehicleName}
+            </span>
+          ) : (
+            <span className="flex items-center gap-1 text-[10px] text-emerald-300 font-semibold shrink-0">
+              <Check className="h-3 w-3 text-emerald-400" />
+              Paid from your vehicle
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Action Toggles: Sponsored, Didn't Pay, Settle Debt, and Note */}
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         {/* Sponsored Toggle */}
         <button
           type="button"
           onClick={handleSponsoredToggle}
-          disabled={disabled}
+          disabled={disabled || (externalLock && !externalLock.canRemove)}
           className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-all active:scale-95 ${
             isSponsored
-              ? isMissingSponsorInfo
+              ? isMissingSponsorInfo && !externalLock
                 ? 'bg-amber-500/25 text-amber-300 border border-amber-500/60 font-semibold ring-1 ring-amber-500/40'
                 : 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold'
               : 'bg-card-2/60 text-muted border border-line hover:text-ink'
-          }`}
-          title="Mark if someone else is paying for this passenger"
+          } ${externalLock && !externalLock.canRemove ? 'opacity-80 cursor-not-allowed' : ''}`}
+          title={
+            externalLock && !externalLock.canRemove
+              ? `Sponsored by ${externalLock.payerName} in ${externalLock.fromVehicleName}. Only that vehicle's rep can remove this.`
+              : 'Mark if someone else is paying for this passenger'
+          }
         >
-          <HeartHandshake className="h-3 w-3 text-amber-400" />
-          <span>Sponsored</span>
-          {isMissingSponsorInfo && (
+          {externalLock && !externalLock.canRemove ? (
+            <Lock className="h-3 w-3 text-amber-400" />
+          ) : (
+            <HeartHandshake className="h-3 w-3 text-amber-400" />
+          )}
+          <span>
+            {externalLock ? `Sponsored by ${externalLock.payerName}` : 'Sponsored'}
+          </span>
+          {isMissingSponsorInfo && !externalLock && (
             <span className="ml-0.5 rounded bg-amber-500/40 px-1 py-0.2 text-[9px] font-bold text-amber-200">
               Needs info
+            </span>
+          )}
+          {externalLock && !externalLock.canRemove && (
+            <span className="ml-0.5 text-[9px] font-bold text-amber-300">
+              (Locked)
             </span>
           )}
         </button>
@@ -3612,20 +4438,17 @@ const PassengerRow = React.memo(function PassengerRow({
           </button>
         )}
 
-        {/* Remove rider from vehicle (returns to unassigned pool) */}
-        {onRemoveRider && !disabled && (
+        {/* Only allow removing walk-ins created by this rep */}
+        {canRemove && onRemoveRider && !disabled && (
           <button
             type="button"
             onClick={() => onRemoveRider(passenger.id)}
-            className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-muted hover:text-amber-400 hover:bg-amber-500/15 border border-line/60 hover:border-amber-500/30 transition-all active:scale-95"
-            title={
-              passenger.id.startsWith('walkin-') || passenger.stop === 'Walk-In'
-                ? 'Remove walk-in'
-                : 'Mistakenly added? Remove from vehicle (returns to unassigned pool)'
-            }
+            className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-amber-300 hover:text-amber-200 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 transition-all active:scale-95"
+            title="Remove walk-in created by you"
           >
             <UserMinus className="h-3 w-3 text-amber-400" />
-            <span className="hidden sm:inline">Remove</span>
+            <span className="hidden sm:inline">Remove Walk-in</span>
+            <span className="sm:hidden">Remove</span>
           </button>
         )}
       </div>

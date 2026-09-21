@@ -166,6 +166,7 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
     draftState,
     absentees,
     sponsoredRiders,
+    unpaidRiders,
     allRiderNames,
     serviceLabel,
     parsedDate,
@@ -300,6 +301,50 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
         general_notes: (generalNotes || '').trim(),
         submitted_at: nowIso,
       });
+    }
+  }
+
+  // Insert riders indicated as "didn't pay" directly into ledger
+  const targetRiderIds = new Set((manifest.vehicles.find((v) => v.id === vehicleId)?.riders || []).map(String));
+  const effectiveUnpaid: Array<{ fullName: string; stop?: string; structure?: string; unpaidNote?: string }> = [];
+
+  if (Array.isArray(unpaidRiders) && unpaidRiders.length > 0) {
+    effectiveUnpaid.push(...unpaidRiders);
+  } else if (Array.isArray(manifest.signups)) {
+    for (const s of manifest.signups) {
+      if (targetRiderIds.has(String(s.id)) && s.didNotPay) {
+        effectiveUnpaid.push({
+          fullName: s.fullName,
+          stop: (s as { stop?: string }).stop || '',
+          structure: (s as { structure?: string }).structure || '',
+          unpaidNote: (s as { unpaidNote?: string }).unpaidNote || '',
+        });
+      }
+    }
+  }
+
+  if (effectiveUnpaid.length > 0) {
+    for (const u of effectiveUnpaid) {
+      if (!ledger.some((e) => e.manifest_key === key && e.passenger_name.toLowerCase() === u.fullName.toLowerCase())) {
+        ledger.push({
+          id: `ledger_unpaid_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          manifest_key: key,
+          date: parsedDate || key,
+          service: serviceLabel || 'Service',
+          passenger_name: u.fullName,
+          stop: u.stop || '',
+          structure: u.structure || '',
+          vehicle_name: targetVehicleName,
+          submitted_by: (repName || '').trim(),
+          rep_name: (repName || '').trim(),
+          license_plate: (licensePlate || '').trim(),
+          sponsored: false,
+          sponsor_note: u.unpaidNote ? `Did not pay: ${u.unpaidNote}` : 'Did not pay',
+          structure_debt: 40,
+          general_notes: `Unpaid ride (Did not pay)${u.unpaidNote ? ` - ${u.unpaidNote}` : ''}`,
+          submitted_at: nowIso,
+        });
+      }
     }
   }
 
