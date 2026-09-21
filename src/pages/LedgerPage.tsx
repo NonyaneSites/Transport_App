@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Loader2, AlertTriangle, FileSpreadsheet, Search, Filter, XCircle,
   ChevronDown, ChevronRight, Upload, CheckCircle2, FileText, Banknote, X, UserPlus, Plus,
-  Pencil, Trash2, HeartHandshake, Clock,
+  Pencil, Trash2, HeartHandshake, Clock, Check, CheckSquare, Square,
 } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
@@ -12,7 +12,7 @@ import {
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
   recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch,
   updateDebtorWithInstances, normalizeDateToYMD, normalizeStructureCode, structureSortComparator,
-  listReportedSponsorships, verifySponsorshipStatus, groupSponsorshipsByStructure, sanitizePassengerDisplayName,
+  listReportedSponsorships, verifyBatchSponsorships, groupSponsorshipsByStructure, sanitizePassengerDisplayName,
   type DebtorInstanceUpdateItem,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
   type ReportedSponsorship, type SponsorshipStatus,
@@ -99,6 +99,11 @@ export function LedgerPage() {
   const [closedSponsorshipStructures, setClosedSponsorshipStructures] = useState<Set<string>>(new Set());
   const [sponsorshipUpdatingId, setSponsorshipUpdatingId] = useState<string | null>(null);
   const [sponsorshipNotice, setSponsorshipNotice] = useState<{ id: string; text: string; type: 'success' | 'warn' } | null>(null);
+
+  // Staged Indications & Batch Audit State
+  const [selectedSponIds, setSelectedSponIds] = useState<Set<string>>(new Set());
+  const [stagedIndications, setStagedIndications] = useState<Record<string, SponsorshipStatus>>({});
+  const [isBatchConfirming, setIsBatchConfirming] = useState(false);
 
   // Historical Cancellation Import
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -633,47 +638,116 @@ export function LedgerPage() {
     }
   }
 
-  async function handleVerifySponsorship(id: string, newStatus: SponsorshipStatus) {
-    const target = sponsorships.find((s) => s.id === id);
-    const rawName = target ? target.passenger_name : 'Passenger';
-    const name = sanitizePassengerDisplayName(rawName);
-    const struct = target ? normalizeStructureCode(target.structure) : 'Structure';
+  function handleToggleSelectSponsorship(id: string) {
+    setSelectedSponIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
 
-    // Optimistic UI state update: immediately reflect change so it disappears from Pending view!
-    setSponsorships((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, status: newStatus, status_updated_at: new Date().toISOString() } : s))
-    );
-    setSponsorshipUpdatingId(id);
+  function handleSelectAllSponsorships(ids: string[]) {
+    setSelectedSponIds((prev) => {
+      const allSelected = ids.length > 0 && ids.every((id) => prev.has(id));
+      if (allSelected) {
+        return new Set();
+      }
+      return new Set(ids);
+    });
+  }
 
-    if (newStatus === 'actually_sponsored') {
-      setSponsorshipNotice({
-        id,
-        text: `✓ Confirmed: ${name} was actually sponsored. Cleared from pending queue.`,
-        type: 'success',
-      });
-    } else if (newStatus === 'unpaid_sponsorship') {
-      setSponsorshipNotice({
-        id,
-        text: `Recorded ${name} as Unpaid Sponsorship (R40 debt) on ${struct} ledger.`,
-        type: 'warn',
-      });
-    } else if (newStatus === 'unaccounted_sponsorship') {
-      setSponsorshipNotice({
-        id,
-        text: `Recorded ${name} as Unaccounted Sponsorship (R40 debt) on ${struct} ledger.`,
-        type: 'warn',
-      });
-    } else {
-      setSponsorshipNotice({
-        id,
-        text: `Reset ${name} sponsorship status to Pending Verification.`,
-        type: 'warn',
-      });
+  function handleSelectStructureSponsorships(structureIds: string[]) {
+    setSelectedSponIds((prev) => {
+      const next = new Set(prev);
+      const allSelected = structureIds.length > 0 && structureIds.every((id) => next.has(id));
+      if (allSelected) {
+        structureIds.forEach((id) => next.delete(id));
+      } else {
+        structureIds.forEach((id) => next.add(id));
+      }
+      return next;
+    });
+  }
+
+  function handleSetStagedIndication(id: string, status: SponsorshipStatus) {
+    setStagedIndications((prev) => ({
+      ...prev,
+      [id]: status,
+    }));
+    setSelectedSponIds((prev) => new Set(prev).add(id));
+  }
+
+  async function handleConfirmIndications(
+    targetIds?: string[],
+    overrideStatus?: SponsorshipStatus
+  ) {
+    let idsToConfirm = targetIds && targetIds.length > 0 ? targetIds : Array.from(selectedSponIds);
+    if (idsToConfirm.length === 0) {
+      idsToConfirm = filteredSponsorships.filter((s) => s.status === 'pending').map((s) => s.id);
     }
-    setTimeout(() => setSponsorshipNotice(null), 5000);
+    if (idsToConfirm.length === 0) return;
 
+    setIsBatchConfirming(true);
+    if (idsToConfirm.length === 1) {
+      setSponsorshipUpdatingId(idsToConfirm[0]);
+    }
+    const count = idsToConfirm.length;
+
+    const items = idsToConfirm.map((id) => {
+      const currentItem = sponsorships.find((s) => s.id === id);
+      const chosenStatus: SponsorshipStatus =
+        overrideStatus ||
+        stagedIndications[id] ||
+        (currentItem && currentItem.status !== 'pending' ? currentItem.status : 'actually_sponsored');
+      return { sponsorshipId: id, status: chosenStatus };
+    });
+
+    const statusMap = new Map(items.map((i) => [i.sponsorshipId, i.status]));
+    const now = new Date().toISOString();
+
+    // 1. Optimistic UI update: instantly update status so all indicated items clear out immediately
+    setSponsorships((prev) =>
+      prev.map((s) =>
+        statusMap.has(s.id)
+          ? { ...s, status: statusMap.get(s.id)!, status_updated_at: now }
+          : s
+      )
+    );
+
+    // 2. Clear selections for confirmed items
+    setSelectedSponIds((prev) => {
+      const next = new Set(prev);
+      idsToConfirm!.forEach((id) => next.delete(id));
+      return next;
+    });
+    setStagedIndications((prev) => {
+      const next = { ...prev };
+      idsToConfirm!.forEach((id) => delete next[id]);
+      return next;
+    });
+
+    // 3. User notification
+    const actuallyCount = items.filter((i) => i.status === 'actually_sponsored').length;
+    const debtCount = items.filter((i) => i.status === 'unaccounted_sponsorship' || i.status === 'unpaid_sponsorship').length;
+    const statusText =
+      debtCount > 0
+        ? `Confirmed ${count} sponsorships (${actuallyCount} actually sponsored, ${debtCount} added to ledger debt). Cleared from pending queue.`
+        : `Confirmed ${count} sponsorships as Actually Sponsored. Cleared from pending queue.`;
+
+    setSponsorshipNotice({
+      id: 'batch_confirm',
+      text: `✓ ${statusText}`,
+      type: 'success',
+    });
+    setTimeout(() => setSponsorshipNotice(null), 6000);
+
+    // 4. Server call and sync
     try {
-      const res = await verifySponsorshipStatus(id, newStatus);
+      const res = await verifyBatchSponsorships(items);
       if (res.success) {
         const [updatedSpon, updatedLedger] = await Promise.all([
           listReportedSponsorships(),
@@ -683,8 +757,9 @@ export function LedgerPage() {
         setEntries(updatedLedger);
       }
     } catch (err) {
-      console.error('Failed to verify sponsorship:', err);
+      console.error('Failed to batch confirm sponsorships:', err);
     } finally {
+      setIsBatchConfirming(false);
       setSponsorshipUpdatingId(null);
     }
   }
@@ -1572,6 +1647,105 @@ export function LedgerPage() {
               </div>
             </div>
 
+            {/* Batch Confirmation Actions Toolbar */}
+            {sponsorshipStats.pending > 0 && (
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 shadow-xs">
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const allPendingIds = filteredSponsorships
+                        .filter((s) => s.status === 'pending')
+                        .map((s) => s.id);
+                      handleSelectAllSponsorships(allPendingIds);
+                    }}
+                    className="flex items-center gap-2 rounded-lg border border-line/70 bg-card px-2.5 py-1.5 text-xs font-bold text-ink hover:bg-card-2 transition-colors"
+                  >
+                    {filteredSponsorships.filter((s) => s.status === 'pending').length > 0 &&
+                    filteredSponsorships.filter((s) => s.status === 'pending').every((s) => selectedSponIds.has(s.id)) ? (
+                      <CheckSquare className="h-4 w-4 text-amber-400" />
+                    ) : (
+                      <Square className="h-4 w-4 text-muted/60" />
+                    )}
+                    <span>
+                      {selectedSponIds.size > 0
+                        ? `${selectedSponIds.size} Indicated / Selected`
+                        : `Select All Pending (${filteredSponsorships.filter((s) => s.status === 'pending').length})`}
+                    </span>
+                  </button>
+
+                  {selectedSponIds.size > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedSponIds(new Set())}
+                      className="text-xs text-muted hover:text-ink underline"
+                    >
+                      Clear selection
+                    </button>
+                  )}
+                </div>
+
+                {/* Confirmation Actions */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  {selectedSponIds.size > 0 ? (
+                    <>
+                      <button
+                        type="button"
+                        disabled={isBatchConfirming}
+                        onClick={() => handleConfirmIndications(undefined, 'actually_sponsored')}
+                        className="rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                        title="Confirm selected as Actually Sponsored (No debt) and clear out from pending queue"
+                      >
+                        {isBatchConfirming ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Check className="h-3.5 w-3.5" />
+                        )}
+                        <span>Confirm Selected as Actually Sponsored ({selectedSponIds.size})</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isBatchConfirming}
+                        onClick={() => handleConfirmIndications(undefined, 'unaccounted_sponsorship')}
+                        className="rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                        title="Confirm selected as Unaccounted Sponsorship (Add R40 Debt) and clear out"
+                      >
+                        <AlertTriangle className="h-3.5 w-3.5" />
+                        <span>Unaccounted (R40)</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isBatchConfirming}
+                        onClick={() => handleConfirmIndications(undefined, 'unpaid_sponsorship')}
+                        className="rounded-lg bg-crimson-600 hover:bg-crimson-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                        title="Confirm selected as Unpaid Sponsorship (Add R40 Debt) and clear out"
+                      >
+                        <XCircle className="h-3.5 w-3.5" />
+                        <span>Unpaid (R40)</span>
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={isBatchConfirming}
+                      onClick={() => handleConfirmIndications(undefined, 'actually_sponsored')}
+                      className="rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                      title="Confirm all pending reported sponsorships as Actually Sponsored and clear them out"
+                    >
+                      {isBatchConfirming ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Check className="h-3.5 w-3.5" />
+                      )}
+                      <span>Confirm All Pending Indications ({sponsorshipStats.pending})</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Grouped by Structure Sponsorship Cards */}
             {groupedSponsorships.length === 0 ? (
               <div className="flex flex-col items-center gap-3 rounded-xl border border-line bg-card py-16 text-center">
@@ -1597,6 +1771,9 @@ export function LedgerPage() {
                   const isOpen = isSponsorshipStructureOpen(group.structure);
                   const isSpecial = group.structure === 'No Structure' || group.structure === 'Unidentified';
                   const structureLabel = isSpecial ? group.structure : `Structure ${group.structure}`;
+                  const structurePendingIds = group.items.filter((i) => i.status === 'pending').map((i) => i.id);
+                  const isStructureAllSelected =
+                    structurePendingIds.length > 0 && structurePendingIds.every((id) => selectedSponIds.has(id));
 
                   return (
                     <div
@@ -1604,12 +1781,28 @@ export function LedgerPage() {
                       className="overflow-hidden rounded-xl sm:rounded-2xl border border-line bg-card shadow-sm"
                     >
                       {/* Structure Accordion Header */}
-                      <button
-                        type="button"
+                      <div
                         onClick={() => toggleSponsorshipStructure(group.structure)}
-                        className="w-full flex items-center justify-between p-3.5 sm:p-4 text-left hover:bg-card-2/60 active:bg-card-2 transition-colors select-none"
+                        className="w-full flex items-center justify-between p-3.5 sm:p-4 text-left hover:bg-card-2/60 active:bg-card-2 transition-colors select-none cursor-pointer"
                       >
                         <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+                          {structurePendingIds.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleSelectStructureSponsorships(structurePendingIds);
+                              }}
+                              title={isStructureAllSelected ? 'Deselect structure' : 'Select all pending in structure'}
+                              className="p-1 rounded text-muted hover:text-ink hover:bg-card transition-colors shrink-0"
+                            >
+                              {isStructureAllSelected ? (
+                                <CheckSquare className="h-4 w-4 text-amber-400" />
+                              ) : (
+                                <Square className="h-4 w-4 text-muted/60" />
+                              )}
+                            </button>
+                          )}
                           <div className="flex h-7 w-7 sm:h-8 sm:w-8 items-center justify-center rounded-lg bg-amber-500/15 text-amber-400 font-mono font-bold text-xs sm:text-sm shrink-0">
                             {normalizeStructureCode(group.structure).slice(0, 3)}
                           </div>
@@ -1630,7 +1823,25 @@ export function LedgerPage() {
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-3 shrink-0">
+                        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+                          {/* Confirm All In Structure One-Click Action */}
+                          {group.pendingCount > 0 && (
+                            <button
+                              type="button"
+                              disabled={isBatchConfirming}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleConfirmIndications(structurePendingIds, 'actually_sponsored');
+                              }}
+                              className="rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                              title="Confirm all pending in this structure as Actually Sponsored and clear them from queue"
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                              <span className="hidden sm:inline">Confirm Structure ({group.pendingCount})</span>
+                              <span className="sm:hidden">Confirm ({group.pendingCount})</span>
+                            </button>
+                          )}
+
                           <div className="hidden sm:flex items-center gap-2 text-xs text-muted">
                             {group.actuallySponsoredCount > 0 && (
                               <span className="text-emerald-400 font-medium">
@@ -1651,7 +1862,7 @@ export function LedgerPage() {
                             )}
                           </div>
                         </div>
-                      </button>
+                      </div>
 
                       {/* Accordion Body: Passenger Items */}
                       {isOpen && (
@@ -1659,49 +1870,70 @@ export function LedgerPage() {
                           {group.items.map((s) => {
                             const isUpdating = sponsorshipUpdatingId === s.id;
                             const cleanName = sanitizePassengerDisplayName(s.passenger_name);
+                            const isSelected = selectedSponIds.has(s.id);
+                            const currentIndication = stagedIndications[s.id] || s.status;
+                            const isPending = s.status === 'pending';
 
                             return (
                               <div
                                 key={s.id}
-                                className="p-3.5 sm:p-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 transition-colors hover:bg-card-2/40"
+                                className={`p-3.5 sm:p-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 transition-colors ${
+                                  isSelected ? 'bg-amber-500/10' : 'hover:bg-card-2/40'
+                                }`}
                               >
                                 {/* Passenger Information */}
-                                <div className="space-y-1.5 min-w-0">
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    <span className="font-bold text-sm sm:text-base text-ink">
-                                      <HighlightMatch text={cleanName} query={search} />
-                                    </span>
-                                    {s.structure && (
-                                      <span className="rounded bg-card-2 border border-line/70 px-1.5 py-0.5 text-[11px] font-mono font-bold text-ink">
-                                        {normalizeStructureCode(s.structure)}
-                                      </span>
-                                    )}
-                                    {s.service && (
-                                      <span className="rounded bg-card-2 border border-line/60 px-1.5 py-0.5 text-[10px] font-bold text-muted uppercase">
-                                        {s.service}
-                                      </span>
-                                    )}
-                                    {s.stop && (
-                                      <span className="text-xs text-muted">
-                                        Stop: <strong className="text-ink font-medium">{s.stop}</strong>
-                                      </span>
-                                    )}
-                                  </div>
-
-                                  <div className="flex items-center gap-2 text-xs text-muted flex-wrap">
-                                    <span>Date: {s.date}</span>
-                                    <span>•</span>
-                                    <span>Vehicle: {s.vehicle_name}</span>
-                                    <span>•</span>
-                                    <span>Reported by: {s.rep_name || 'Transport Rep'}</span>
-                                  </div>
-
-                                  {s.sponsor_note && (
-                                    <div className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-1 text-xs text-amber-200 mt-0.5">
-                                      <span className="font-bold text-amber-300">Sponsor Note:</span>
-                                      <span>{s.sponsor_note}</span>
-                                    </div>
+                                <div className="flex items-start gap-2.5 min-w-0">
+                                  {isPending && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToggleSelectSponsorship(s.id)}
+                                      className="p-1 mt-0.5 text-muted hover:text-ink shrink-0 rounded hover:bg-card transition-colors"
+                                      title={isSelected ? 'Deselect passenger' : 'Select passenger'}
+                                    >
+                                      {isSelected ? (
+                                        <CheckSquare className="h-4 w-4 text-amber-400" />
+                                      ) : (
+                                        <Square className="h-4 w-4 text-muted/60" />
+                                      )}
+                                    </button>
                                   )}
+                                  <div className="space-y-1.5 min-w-0">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className="font-bold text-sm sm:text-base text-ink">
+                                        <HighlightMatch text={cleanName} query={search} />
+                                      </span>
+                                      {s.structure && (
+                                        <span className="rounded bg-card-2 border border-line/70 px-1.5 py-0.5 text-[11px] font-mono font-bold text-ink">
+                                          {normalizeStructureCode(s.structure)}
+                                        </span>
+                                      )}
+                                      {s.service && (
+                                        <span className="rounded bg-card-2 border border-line/60 px-1.5 py-0.5 text-[10px] font-bold text-muted uppercase">
+                                          {s.service}
+                                        </span>
+                                      )}
+                                      {s.stop && (
+                                        <span className="text-xs text-muted">
+                                          Stop: <strong className="text-ink font-medium">{s.stop}</strong>
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    <div className="flex items-center gap-2 text-xs text-muted flex-wrap">
+                                      <span>Date: {s.date}</span>
+                                      <span>•</span>
+                                      <span>Vehicle: {s.vehicle_name}</span>
+                                      <span>•</span>
+                                      <span>Reported by: {s.rep_name || 'Transport Rep'}</span>
+                                    </div>
+
+                                    {s.sponsor_note && (
+                                      <div className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-1 text-xs text-amber-200 mt-0.5">
+                                        <span className="font-bold text-amber-300">Sponsor Note:</span>
+                                        <span>{s.sponsor_note}</span>
+                                      </div>
+                                    )}
+                                  </div>
                                 </div>
 
                                 {/* Verification Drop Box Controls */}
@@ -1716,17 +1948,18 @@ export function LedgerPage() {
                                     <div className="flex items-center gap-2">
                                       <select
                                         id={`group_spon_${s.id}`}
-                                        value={s.status}
-                                        disabled={isUpdating}
-                                        onChange={(e) =>
-                                          handleVerifySponsorship(s.id, e.target.value as SponsorshipStatus)
-                                        }
+                                        value={currentIndication}
+                                        disabled={isUpdating || isBatchConfirming}
+                                        onChange={(e) => {
+                                          const nextStatus = e.target.value as SponsorshipStatus;
+                                          handleSetStagedIndication(s.id, nextStatus);
+                                        }}
                                         className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold border transition-all cursor-pointer ${
-                                          s.status === 'actually_sponsored'
+                                          currentIndication === 'actually_sponsored'
                                             ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'
-                                            : s.status === 'unpaid_sponsorship'
+                                            : currentIndication === 'unpaid_sponsorship'
                                             ? 'bg-crimson-500/20 border-crimson-500/50 text-crimson-300'
-                                            : s.status === 'unaccounted_sponsorship'
+                                            : currentIndication === 'unaccounted_sponsorship'
                                             ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
                                             : 'bg-card border-amber-500/40 text-amber-200'
                                         }`}
@@ -1744,8 +1977,42 @@ export function LedgerPage() {
                                           ❌ Unpaid Sponsorship (Add R40 Debt)
                                         </option>
                                       </select>
-                                      {isUpdating && (
-                                        <Loader2 className="h-4 w-4 animate-spin text-muted" />
+
+                                      {/* One-click Confirm Button for this row */}
+                                      {isPending ? (
+                                        <button
+                                          type="button"
+                                          disabled={isUpdating || isBatchConfirming}
+                                          onClick={() => {
+                                            const targetStatus = stagedIndications[s.id] || 'actually_sponsored';
+                                            handleConfirmIndications([s.id], targetStatus);
+                                          }}
+                                          className="rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                                          title="Confirm indication and clear from pending queue"
+                                        >
+                                          {isUpdating ? (
+                                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                          ) : (
+                                            <>
+                                              <Check className="h-3.5 w-3.5" />
+                                              <span>Confirm</span>
+                                            </>
+                                          )}
+                                        </button>
+                                      ) : (
+                                        stagedIndications[s.id] &&
+                                        stagedIndications[s.id] !== s.status && (
+                                          <button
+                                            type="button"
+                                            disabled={isUpdating || isBatchConfirming}
+                                            onClick={() => {
+                                              handleConfirmIndications([s.id], stagedIndications[s.id]);
+                                            }}
+                                            className="rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                                          >
+                                            Update
+                                          </button>
+                                        )
                                       )}
                                     </div>
                                   </div>

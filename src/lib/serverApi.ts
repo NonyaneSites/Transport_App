@@ -350,6 +350,26 @@ export async function verifySponsorshipOnServer(
   }
 }
 
+// Batch verify or update reported sponsorships
+export async function verifyBatchSponsorshipsOnServer(
+  items: Array<{ sponsorshipId: string; status: SponsorshipStatus }>
+): Promise<{ success: boolean; updatedCount: number; ledgerUpdated?: boolean }> {
+  try {
+    const res = await fetch('/api/ledger/verify-sponsorships-batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items }),
+    });
+    if (!res.ok) {
+      return { success: false, updatedCount: 0 };
+    }
+    return (await res.json()) as { success: boolean; updatedCount: number; ledgerUpdated?: boolean };
+  } catch (err) {
+    console.warn('[ServerAPI] verifyBatchSponsorships error:', err);
+    return { success: false, updatedCount: 0 };
+  }
+}
+
 // Server-Sent Events (SSE) live connection with local event sync
 export function connectSyncEvents(
   onManifestUpdate?: (data: { key: string; manifest?: Manifest }) => void,

@@ -8,6 +8,7 @@ import {
   updateDebtorOnServer,
   listReportedSponsorshipsFromServer,
   verifySponsorshipOnServer,
+  verifyBatchSponsorshipsOnServer,
 } from './serverApi';
 import type { ReportedSponsorship, SponsorshipStatus } from './serverApi';
 import type { Passenger, Vehicle } from './types';
@@ -1870,9 +1871,8 @@ export async function recordReportedSponsorships(
         sponsor_note: (r.sponsorNote || list[existingIndex].sponsor_note || '').trim(),
       };
     } else {
-      const cleanKey = manifestKey.replace(/[^a-zA-Z0-9_-]/g, '_');
-      const safeSlug = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '_');
-      const id = `spon_${cleanKey}_${safeSlug}_${Date.now()}`;
+      const baseDate = normalizeDateToYMD(date || manifestKey) || (date || manifestKey).split('_')[0];
+      const id = `sp_${baseDate}_${normName}`;
       list.push({
         id,
         manifest_key: manifestKey,
@@ -2037,9 +2037,7 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
           if (existingKeys.has(lookupKey)) continue;
 
           const sponsorNote = (notes[p.id] || p.sponsorNote || '').trim();
-          const cleanKey = m.date.replace(/[^a-zA-Z0-9_-]/g, '_');
-          const safeSlug = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '_');
-          const id = `spon_${cleanKey}_${safeSlug}_${Date.now()}`;
+          const id = `sp_${baseDate}_${normName}`;
           list.push({
             id,
             manifest_key: m.date,
@@ -2174,6 +2172,12 @@ export async function verifySponsorshipStatus(
       } catch {
         /* ignore */
       }
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('crc_sponsorships_updated'));
+        if (res.ledgerUpdated) {
+          window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
+        }
+      }
       return res;
     }
   } catch (err) {
@@ -2242,4 +2246,69 @@ export async function verifySponsorshipStatus(
   }
 
   return { success: false };
+}
+
+export async function verifyBatchSponsorships(
+  items: Array<{ sponsorshipId: string; status: SponsorshipStatus }>
+): Promise<{ success: boolean; updatedCount: number; ledgerUpdated?: boolean }> {
+  if (!items || items.length === 0) return { success: true, updatedCount: 0 };
+
+  try {
+    const res = await verifyBatchSponsorshipsOnServer(items);
+    if (res.success) {
+      try {
+        const raw = localStorage.getItem(LOCAL_SPONSORSHIPS_KEY);
+        if (raw) {
+          const list = JSON.parse(raw) as ReportedSponsorship[];
+          const statusMap = new Map(items.map((i) => [i.sponsorshipId, i.status]));
+          const now = new Date().toISOString();
+          for (const s of list) {
+            if (statusMap.has(s.id)) {
+              s.status = statusMap.get(s.id)!;
+              s.status_updated_at = now;
+            }
+          }
+          localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(list));
+        }
+      } catch {
+        /* ignore */
+      }
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('crc_sponsorships_updated'));
+        if (res.ledgerUpdated) {
+          window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
+        }
+      }
+      return res;
+    }
+  } catch (err) {
+    console.warn('[Ledger] verifyBatchSponsorships server note:', err);
+  }
+
+  // Local fallback
+  let updatedCount = 0;
+  try {
+    const raw = localStorage.getItem(LOCAL_SPONSORSHIPS_KEY);
+    if (raw) {
+      const list = JSON.parse(raw) as ReportedSponsorship[];
+      const statusMap = new Map(items.map((i) => [i.sponsorshipId, i.status]));
+      const now = new Date().toISOString();
+      for (const s of list) {
+        if (statusMap.has(s.id)) {
+          const newStatus = statusMap.get(s.id)!;
+          s.status = newStatus;
+          s.status_updated_at = now;
+          updatedCount++;
+        }
+      }
+      localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(list));
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: list }));
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  return { success: true, updatedCount };
 }

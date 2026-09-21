@@ -691,7 +691,8 @@ export function RepPage() {
     if (!selectedVehicleId) {
       if (prevVehicleIdRef.current !== null) {
         setWalkInOpen(false);
-        setWalkInName('');
+        setWalkInFirstName('');
+        setWalkInSurname('');
         setWalkInStructure('');
         setTransferPrompt(null);
         prevVehicleIdRef.current = null;
@@ -714,7 +715,8 @@ export function RepPage() {
 
     if (prevVehicleIdRef.current !== selectedVehicleId) {
       setWalkInOpen(false);
-      setWalkInName('');
+      setWalkInFirstName('');
+      setWalkInSurname('');
       setWalkInStructure('');
       setTransferPrompt(null);
       prevVehicleIdRef.current = selectedVehicleId;
