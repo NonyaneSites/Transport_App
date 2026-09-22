@@ -18,6 +18,7 @@ import {
   recordReportedSponsorships,
   sanitizePassengerDisplayName,
   normalizeStructureCode,
+  cleanSponsorshipNote,
 } from '@/lib/ledger';
 
 interface TransferSponsorshipModalProps {
@@ -80,8 +81,7 @@ export function TransferSponsorshipModal({
         }
       }
 
-      const fromDef = SERVICE_TYPES.find((s) => s.value === currentService);
-      setSponsorNote(existingNote || `Unaccounted Sponsorship (from ${fromDef?.mode || currentService})`);
+      setSponsorNote(cleanSponsorshipNote(existingNote));
       setError(null);
     }
   }, [isOpen, initialPassenger, currentService, manifest.signups, manifest.vehicles, compatibleServices]);
@@ -141,13 +141,13 @@ export function TransferSponsorshipModal({
     const pName = passengerToTransfer?.fullName || 'Passenger';
     const struct = normalizeStructureCode(passengerToTransfer?.structure);
     const cleanName = sanitizePassengerDisplayName(pName);
-    const effectiveNote = sponsorNote.trim() || 'Unaccounted Sponsorship';
+    const effectiveNote = cleanSponsorshipNote(sponsorNote);
 
     try {
       if (destinationType === 'ledger') {
         const parentVeh = manifest.vehicles.find((v) => v.riders?.includes(selectedPassengerId));
         const ledgerEntryId = `spon_debt_${selectedPassengerId}_${Date.now()}`;
-        const entryNote = `Unaccounted Sponsorship: ${effectiveNote}`;
+        const entryNote = effectiveNote;
 
         const row = {
           id: ledgerEntryId,
@@ -294,8 +294,7 @@ export function TransferSponsorshipModal({
                   const v = manifest.vehicles.find((veh) => veh.riders?.includes(p.id));
                   if (v?.draftState?.notes?.[p.id]) existing = v.draftState.notes[p.id];
                 }
-                const fromDef = SERVICE_TYPES.find((s) => s.value === currentService);
-                setSponsorNote(existing || `Unaccounted Sponsorship (from ${fromDef?.mode || currentService})`);
+                setSponsorNote(cleanSponsorshipNote(existing));
               }}
               className="input-field py-2 text-xs w-full bg-card-2"
             >

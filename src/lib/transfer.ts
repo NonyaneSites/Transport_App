@@ -380,8 +380,9 @@ export async function transferPassengerAcrossServices(params: {
             ? (sIds.some((id) => String(id) === sPassengerId) ? sIds : [...sIds, passenger.id])
             : sIds;
           const nextNotes = { ...(curDraft.notes || {}) };
-          if (isSponsored || sponsorNote) {
-            nextNotes[passenger.id] = sponsorNote || passenger.sponsorNote || 'Unaccounted Sponsorship';
+          const riderNote = (sponsorNote || passenger.sponsorNote || '').trim();
+          if (riderNote) {
+            nextNotes[passenger.id] = riderNote;
           }
 
           return {
@@ -427,7 +428,7 @@ export async function transferPassengerAcrossServices(params: {
               ...p,
               assignedTo: isUnassigning ? null : toVehicleId,
               present: markPresent ?? p.present,
-              ...(isSponsored ? { sponsored: true, sponsorNote: sponsorNote || 'Unaccounted Sponsorship' } : {}),
+              ...(isSponsored ? { sponsored: true, ...(sponsorNote || p.sponsorNote ? { sponsorNote: (sponsorNote || p.sponsorNote || '').trim() } : {}) } : {}),
             }
           : p
       );
@@ -453,7 +454,7 @@ export async function transferPassengerAcrossServices(params: {
               fullName: passenger.fullName,
               structure: passenger.structure || '',
               stop: passenger.stop || '',
-              sponsorNote: sponsorNote || passenger.sponsorNote || 'Unaccounted Sponsorship',
+              sponsorNote: (sponsorNote || passenger.sponsorNote || '').trim(),
             }],
             [passenger.fullName],
             veh?.name || 'Vehicle',
@@ -517,7 +518,7 @@ export async function transferPassengerAcrossServices(params: {
 
     // 2. Add to destination manifest
     const effectiveIsSponsored = Boolean(isSponsored || passengerToMove.sponsored);
-    const effectiveSponsorNote = sponsorNote || passengerToMove.sponsorNote || (isSponsored ? 'Unaccounted Sponsorship' : undefined);
+    const effectiveSponsorNote = (sponsorNote || passengerToMove.sponsorNote || '').trim() || undefined;
     const willMarkPresent = markPresent ?? passengerToMove.present;
 
     const destinationPassenger: Passenger = {
@@ -525,7 +526,7 @@ export async function transferPassengerAcrossServices(params: {
       assignedTo: isUnassigning ? null : toVehicleId,
       present: willMarkPresent,
       service: toService,
-      ...(effectiveIsSponsored ? { sponsored: true, sponsorNote: effectiveSponsorNote } : {}),
+      ...(effectiveIsSponsored ? { sponsored: true, ...(effectiveSponsorNote ? { sponsorNote: effectiveSponsorNote } : {}) } : {}),
     };
 
     const stopLabel = targetVehicle ? hubDisplayName(targetVehicle.type, destinationPassenger.stop || 'Walk-In') : '';
@@ -551,8 +552,8 @@ export async function transferPassengerAcrossServices(params: {
           ? (sIds.some((id) => String(id) === sPassengerId) ? sIds : [...sIds, destinationPassenger.id])
           : sIds;
         const nextNotes = { ...(curDraft.notes || {}) };
-        if (effectiveIsSponsored || effectiveSponsorNote) {
-          nextNotes[destinationPassenger.id] = effectiveSponsorNote || 'Unaccounted Sponsorship';
+        if (effectiveSponsorNote) {
+          nextNotes[destinationPassenger.id] = effectiveSponsorNote;
         }
 
         return {
@@ -608,7 +609,7 @@ export async function transferPassengerAcrossServices(params: {
             fullName: destinationPassenger.fullName,
             structure: destinationPassenger.structure || '',
             stop: destinationPassenger.stop || '',
-            sponsorNote: effectiveSponsorNote || 'Unaccounted Sponsorship',
+            sponsorNote: effectiveSponsorNote || '',
           }],
           [destinationPassenger.fullName],
           destVeh?.name || 'Vehicle',

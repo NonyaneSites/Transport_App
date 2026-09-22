@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { Lock, Trash2, Loader2, AlertTriangle, Calendar, Users, Bus, ArrowUpRight, XCircle, FileSpreadsheet, ChevronDown, ChevronRight, History, Download, FileDown, Eye, Table, CheckCircle2, X } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
@@ -325,10 +326,15 @@ export function AdminPage() {
               <History className="h-4 w-4 text-muted" />
               <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">Session Archive</h2>
               <span className="badge bg-card-2 text-muted">{sessionList.length} sessions</span>
-              <span className="badge bg-crimson-500/15 text-crimson-300">
+              <Link
+                to="/ledger"
+                onClick={(e) => e.stopPropagation()}
+                className="badge bg-crimson-500/15 text-crimson-300 hover:bg-crimson-500/25 transition-colors border border-crimson-500/30 cursor-pointer"
+                title="Open Cancellation Ledger"
+              >
                 <XCircle className="h-3 w-3" />
                 {ledgerCount} ledger entries
-              </span>
+              </Link>
             </div>
             {showHistory ? <ChevronDown className="h-5 w-5 text-muted" /> : <ChevronRight className="h-5 w-5 text-muted" />}
           </button>

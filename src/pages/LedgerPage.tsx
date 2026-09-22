@@ -13,6 +13,7 @@ import {
   recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch,
   updateDebtorWithInstances, normalizeDateToYMD, normalizeStructureCode, structureSortComparator,
   listReportedSponsorships, verifyBatchSponsorships, groupSponsorshipsByStructure, sanitizePassengerDisplayName,
+  cleanSponsorshipNote, cleanAndDeduplicateSponsorships,
   type DebtorInstanceUpdateItem,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
   type ReportedSponsorship, type SponsorshipStatus,
@@ -213,7 +214,8 @@ export function LedgerPage() {
   }, [sponsorships]);
 
   const filteredSponsorships = useMemo(() => {
-    let list = sponsorships.map((s) => ({
+    const deduped = cleanAndDeduplicateSponsorships(sponsorships);
+    let list = deduped.map((s) => ({
       ...s,
       passenger_name: sanitizePassengerDisplayName(s.passenger_name),
       structure: normalizeStructureCode(s.structure),
@@ -373,7 +375,7 @@ export function LedgerPage() {
     setEditName(row.name);
     setEditStructure(normalizeStructureCode(row.structure));
     setEditDebt(String(row.amount));
-    setEditNotes(row.notes);
+    setEditNotes(cleanSponsorshipNote(row.notes));
     setEditIsSponsored(row.isSponsorshipOrUnpaid);
     if (row.isSponsorshipOrUnpaid) {
       const isUnpaid = (row.notes || '').toLowerCase().includes('unpaid');
@@ -501,8 +503,7 @@ export function LedgerPage() {
     setEditError(null);
     try {
       const isSpon = editDebtType !== 'cancellation';
-      const defaultNote = editDebtType === 'unpaid_sponsorship' ? 'Unpaid Sponsorship' : 'Unaccounted Sponsorship';
-      const finalNotes = isSpon ? (editNotes.trim() || defaultNote) : '';
+      const finalNotes = isSpon ? cleanSponsorshipNote(editNotes) : '';
 
       // If the person's debt for a particular date or service was reduced to zero, remove that debt instance
       const nonZeroInstances = editInstances.filter((inst) => {
@@ -611,8 +612,7 @@ export function LedgerPage() {
     setAddError(null);
     try {
       const isSpon = addDebtType !== 'cancellation';
-      const defaultNote = addDebtType === 'unpaid_sponsorship' ? 'Unpaid Sponsorship' : 'Unaccounted Sponsorship';
-      const finalNotes = isSpon ? (addNotes.trim() || defaultNote) : '';
+      const finalNotes = isSpon ? cleanSponsorshipNote(addNotes) : '';
 
       await addManualLedgerEntry({
         firstName: addFirstName,
@@ -1355,16 +1355,20 @@ export function LedgerPage() {
                                       <div className="font-bold text-ink text-sm leading-snug">
                                         <HighlightMatch text={row.name} query={search} />
                                       </div>
-                                      <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
-                                        <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/15 text-amber-200 border border-amber-500/30">
-                                          {row.notes || 'Unaccounted Sponsorship'}
-                                        </span>
-                                        {row.instances.length > 1 && (
-                                          <span className="text-[10px] text-muted rounded bg-card-2 px-1.5 py-0.5 border border-line/60">
-                                            {row.instances.length}x
-                                          </span>
-                                        )}
-                                      </div>
+                                      {(cleanSponsorshipNote(row.notes) || row.instances.length > 1) && (
+                                        <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                                          {cleanSponsorshipNote(row.notes) && (
+                                            <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/15 text-amber-200 border border-amber-500/30">
+                                              {cleanSponsorshipNote(row.notes)}
+                                            </span>
+                                          )}
+                                          {row.instances.length > 1 && (
+                                            <span className="text-[10px] text-muted rounded bg-card-2 px-1.5 py-0.5 border border-line/60">
+                                              {row.instances.length}x
+                                            </span>
+                                          )}
+                                        </div>
+                                      )}
                                     </div>
                                     <button
                                       type="button"
@@ -1459,9 +1463,13 @@ export function LedgerPage() {
                                         </div>
                                       </td>
                                       <td className="px-3.5 py-2.5 align-top">
-                                        <span className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-amber-500/15 text-amber-200 border border-amber-500/30">
-                                          {row.notes || 'Unaccounted Sponsorship'}
-                                        </span>
+                                        {cleanSponsorshipNote(row.notes) ? (
+                                          <span className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-amber-500/15 text-amber-200 border border-amber-500/30">
+                                            {cleanSponsorshipNote(row.notes)}
+                                          </span>
+                                        ) : (
+                                          <span className="text-xs text-muted/50">—</span>
+                                        )}
                                       </td>
                                       <td className="px-3.5 py-2.5 align-top">
                                         <div className="flex items-center gap-1.5">
@@ -2371,13 +2379,6 @@ export function LedgerPage() {
                           const val = e.target.value as 'cancellation' | 'unaccounted_sponsorship' | 'unpaid_sponsorship';
                           setAddDebtType(val);
                           setAddIsSponsored(val !== 'cancellation');
-                          if (val === 'unaccounted_sponsorship' && (!addNotes || addNotes === 'Unpaid Sponsorship')) {
-                            setAddNotes('Unaccounted Sponsorship');
-                          } else if (val === 'unpaid_sponsorship' && (!addNotes || addNotes === 'Unaccounted Sponsorship')) {
-                            setAddNotes('Unpaid Sponsorship');
-                          } else if (val === 'cancellation' && (addNotes === 'Unaccounted Sponsorship' || addNotes === 'Unpaid Sponsorship')) {
-                            setAddNotes('');
-                          }
                         }}
                         className="input-field w-full text-xs sm:text-sm py-2 bg-card-2"
                       >
@@ -2393,23 +2394,21 @@ export function LedgerPage() {
                       </select>
                     </div>
 
-                    {/* Only show reason/notes if marked as Unaccounted Sponsorship / Unpaid */}
+                    {/* Optional notes if marked as Unaccounted Sponsorship / Unpaid */}
                     {addIsSponsored && (
                       <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 space-y-1.5 animate-in fade-in duration-150">
                         <label className="block text-xs font-bold uppercase tracking-wider text-amber-300">
-                          Sponsorship / Unpaid Reason & Notes <span className="text-crimson-400">*</span>
+                          Sponsorship / Note Details <span className="text-muted font-normal text-[11px]">(Optional)</span>
                         </label>
                         <input
                           type="text"
                           value={addNotes}
                           onChange={(e) => setAddNotes(e.target.value)}
-                          placeholder="e.g. Unaccounted Sponsorship, Sponsor did not pay, Unpaid"
+                          placeholder="e.g. Paid in cash, Sponsor details (Optional)"
                           className="input-field w-full text-xs py-2"
-                          required={addIsSponsored}
-                          autoFocus
                         />
                         <p className="text-[10px] text-amber-200/70">
-                          Reason or note for grouping this person under unaccounted sponsorship or unpaid debt.
+                          Optional notes for this sponsorship entry (leave blank if none).
                         </p>
                       </div>
                     )}
@@ -2634,13 +2633,6 @@ export function LedgerPage() {
                           const val = e.target.value as 'cancellation' | 'unaccounted_sponsorship' | 'unpaid_sponsorship';
                           setEditDebtType(val);
                           setEditIsSponsored(val !== 'cancellation');
-                          if (val === 'unaccounted_sponsorship' && (!editNotes || editNotes === 'Unpaid Sponsorship')) {
-                            setEditNotes('Unaccounted Sponsorship');
-                          } else if (val === 'unpaid_sponsorship' && (!editNotes || editNotes === 'Unaccounted Sponsorship')) {
-                            setEditNotes('Unpaid Sponsorship');
-                          } else if (val === 'cancellation' && (editNotes === 'Unaccounted Sponsorship' || editNotes === 'Unpaid Sponsorship')) {
-                            setEditNotes('');
-                          }
                         }}
                         className="input-field w-full text-xs sm:text-sm py-2 bg-card-2"
                       >
@@ -2656,23 +2648,21 @@ export function LedgerPage() {
                       </select>
                     </div>
 
-                    {/* Only show reason/notes if marked as Unaccounted Sponsorship / Unpaid */}
+                    {/* Optional notes if marked as Unaccounted Sponsorship / Unpaid */}
                     {editIsSponsored && (
                       <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 space-y-1.5 animate-in fade-in duration-150">
                         <label className="block text-xs font-bold uppercase tracking-wider text-amber-300">
-                          Sponsorship / Unpaid Reason & Remarks <span className="text-crimson-400">*</span>
+                          Sponsorship / Note Details <span className="text-muted font-normal text-[11px]">(Optional)</span>
                         </label>
                         <input
                           type="text"
                           value={editNotes}
                           onChange={(e) => setEditNotes(e.target.value)}
-                          placeholder="e.g. Unaccounted Sponsorship, Did not pay, Unpaid"
+                          placeholder="e.g. Paid in cash, Sponsor details (Optional)"
                           className="input-field w-full text-xs py-2"
-                          required={editIsSponsored}
-                          autoFocus
                         />
                         <p className="text-[10px] text-amber-200/70">
-                          Reason or remarks for this unaccounted sponsorship or unpaid entry.
+                          Optional notes for this sponsorship entry (leave blank if none).
                         </p>
                       </div>
                     )}

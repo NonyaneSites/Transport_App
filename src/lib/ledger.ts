@@ -127,6 +127,9 @@ export function sanitizePassengerDisplayName(rawName: string | null | undefined)
     name = name.replace(/^passenger\s+/i, '').trim();
   }
 
+  // Strip parenthetical badges or tags like (Bus), (DFC), [SZ 1]
+  name = name.replace(/\s*\([^)]*\)|\s*\[[^\]]*\]/g, ' ').trim();
+
   // If it's a hyphenated slug (e.g. "bonolo-ngejane-dfc-bus-stop")
   if (/^[a-z0-9]+(-[a-z0-9]+)+$/i.test(name)) {
     const stopSlugs = [
@@ -148,7 +151,49 @@ export function sanitizePassengerDisplayName(rawName: string | null | undefined)
       .join(' ');
   }
 
+  // Strip trailing stop notes like " - DFC Bus Stop"
+  name = name.replace(/\s*-\s*(?:dfc|amic|sunnyside|kingsway|bunting|midrand|soweto|barnato|park).*$/i, '').trim();
+  name = name.replace(/\s+/g, ' ').trim();
+
   return name;
+}
+
+/**
+ * Strips auto-generated boilerplate notes like "Unaccounted Sponsorship",
+ * "Unpaid Sponsorship", or prefixes like "Unaccounted Sponsorship: ...",
+ * preserving only genuine user-provided notes.
+ */
+export function cleanSponsorshipNote(note?: string | null): string {
+  if (!note || typeof note !== 'string') return '';
+  const trimmed = note.trim();
+  if (!trimmed) return '';
+
+  // Exact boilerplate matches (case-insensitive)
+  if (/^(?:unaccounted|unpaid)?\s*sponsorships?$/i.test(trimmed)) return '';
+  if (/^(?:unaccounted|unpaid)$/i.test(trimmed)) return '';
+  if (/^actually\s*sponsored$/i.test(trimmed)) return '';
+  if (/^pending\s*verification$/i.test(trimmed)) return '';
+
+  // Pattern: "Unaccounted Sponsorship (from ...)"
+  if (/^unaccounted\s*sponsorship\s*\(from\s*[^)]+\)$/i.test(trimmed)) return '';
+
+  // Pattern: "Unaccounted Sponsorship (Reported sponsor: XYZ)"
+  const mReported = trimmed.match(/^(?:unaccounted|unpaid)\s*sponsorship\s*\(reported\s*sponsor:\s*(.*?)\)$/i);
+  if (mReported && mReported[1]) {
+    const inner = mReported[1].trim();
+    if (!inner || /^(?:unaccounted|unpaid|sponsorship)$/i.test(inner)) return '';
+    return inner;
+  }
+
+  // Pattern: "Unaccounted Sponsorship: XYZ" or "Unpaid Sponsorship: XYZ"
+  const mColon = trimmed.match(/^(?:unaccounted|unpaid)\s*sponsorship:\s*(.*)$/i);
+  if (mColon && mColon[1]) {
+    const after = mColon[1].trim();
+    if (!after || /^(?:unaccounted|unpaid|sponsorship)$/i.test(after)) return '';
+    return cleanSponsorshipNote(after);
+  }
+
+  return trimmed;
 }
 
 export const BANK_DETAILS = {
@@ -580,6 +625,8 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
       ...e,
       structure: normalizeStructureCode(e.structure),
       passenger_name: sanitizePassengerDisplayName(e.passenger_name),
+      general_notes: cleanSponsorshipNote(e.general_notes),
+      sponsor_note: cleanSponsorshipNote(e.sponsor_note),
     }));
 }
 
@@ -643,14 +690,35 @@ export interface ManualLedgerEntryInput {
 }
 
 /**
- * Converts various date formats (e.g. YYYY-MM-DD, DD/MM/YYYY, DD/MM/YY) into a normalized YYYY-MM-DD string for date pickers.
+ * Converts various date formats (e.g. YYYY-MM-DD, DD/MM/YYYY, DD/MM/YY, text dates) into a normalized YYYY-MM-DD string.
  */
 export function normalizeDateToYMD(dateStr?: string | null): string {
   if (!dateStr) return '';
   const trimmed = String(dateStr).trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  const ymdMatch = trimmed.match(/\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b/);
+  if (ymdMatch) {
+    return `${ymdMatch[1]}-${ymdMatch[2].padStart(2, '0')}-${ymdMatch[3].padStart(2, '0')}`;
+  }
+  const dmyMatch = trimmed.match(/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b/);
+  if (dmyMatch) {
+    return `${dmyMatch[3]}-${dmyMatch[2].padStart(2, '0')}-${dmyMatch[1].padStart(2, '0')}`;
+  }
   const parsed = parseFlexibleHistoricalDate(trimmed);
-  return parsed || trimmed;
+  if (parsed) return parsed;
+  try {
+    const d = new Date(trimmed);
+    if (!isNaN(d.getTime())) {
+      const year = d.getFullYear();
+      if (year >= 2000 && year <= 2100) {
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${year}-${m}-${day}`;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return trimmed.split('_')[0];
 }
 
 /**
@@ -676,9 +744,9 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
     rep_name: '',
     license_plate: '',
     sponsored: !!input.isSponsored,
-    sponsor_note: input.isSponsored ? (input.notes || 'Sponsorship') : '',
+    sponsor_note: input.isSponsored ? cleanSponsorshipNote(input.notes) : '',
     structure_debt: debtAmt,
-    general_notes: input.notes || '',
+    general_notes: cleanSponsorshipNote(input.notes),
   };
 
   try {
@@ -730,7 +798,7 @@ export async function updateDebtorWithInstances(
   const structCode = normalizeStructureCode(updates.structure);
   const cleanName = updates.name.trim();
   const isSponsored = !!updates.isSponsored;
-  const noteText = isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '';
+  const noteText = isSponsored ? cleanSponsorshipNote(updates.notes) : '';
 
   // If the person's debt for a particular date or service was reduced to zero, remove that debt
   const activeInstances = (updates.instances || []).filter((inst) => {
@@ -876,9 +944,9 @@ export async function updateDebtorDetails(
           passenger_name: updates.name ? updates.name.trim() : currentEntries[0].passenger_name,
           structure: structCode ?? currentEntries[0].structure,
           structure_debt: targetDebt,
-          general_notes: updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '',
+          general_notes: updates.isSponsored ? cleanSponsorshipNote(updates.notes) : '',
           sponsored: !!updates.isSponsored,
-          sponsor_note: updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '',
+          sponsor_note: updates.isSponsored ? cleanSponsorshipNote(updates.notes) : '',
         })
         .eq('id', entryIds[0]);
     } else {
@@ -910,9 +978,9 @@ export async function updateDebtorDetails(
               passenger_name: updates.name ? updates.name.trim() : ent.passenger_name,
               structure: structCode ?? ent.structure,
               structure_debt: rowDebt,
-              general_notes: updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '',
+              general_notes: updates.isSponsored ? cleanSponsorshipNote(updates.notes) : '',
               sponsored: !!updates.isSponsored,
-              sponsor_note: updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '',
+              sponsor_note: updates.isSponsored ? cleanSponsorshipNote(updates.notes) : '',
             })
             .eq('id', ent.id);
         }
@@ -925,10 +993,10 @@ export async function updateDebtorDetails(
     if (structCode) patch.structure = structCode;
     if (updates.isSponsored !== undefined) {
       patch.sponsored = updates.isSponsored;
-      patch.general_notes = updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '';
-      patch.sponsor_note = updates.isSponsored ? (updates.notes?.trim() || 'Unaccounted Sponsorship') : '';
+      patch.general_notes = updates.isSponsored ? cleanSponsorshipNote(updates.notes) : '';
+      patch.sponsor_note = updates.isSponsored ? cleanSponsorshipNote(updates.notes) : '';
     } else if (updates.notes !== undefined) {
-      patch.general_notes = updates.notes;
+      patch.general_notes = cleanSponsorshipNote(updates.notes);
     }
 
     if (Object.keys(patch).length > 0) {
@@ -1278,9 +1346,9 @@ export async function importHistoricalCancellations(rows: HistoricalCancellation
       rep_name: r.rep_name || '',
       license_plate: '',
       sponsored: isSponsorship,
-      sponsor_note: isSponsorship ? r.general_notes || 'Unaccounted Sponsorship' : '',
+      sponsor_note: isSponsorship ? cleanSponsorshipNote(r.general_notes) : '',
       structure_debt: r.structure_debt,
-      general_notes: r.general_notes || '',
+      general_notes: cleanSponsorshipNote(r.general_notes),
     };
   });
   const { error } = await supabase.from(LEDGER_TABLE).insert(payload);
@@ -1441,7 +1509,7 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
       const isSponsorshipOrUnpaid = group.some((e) => isEntrySponsorshipOrUnpaid(e));
 
       const combinedNotes = Array.from(
-        new Set(group.map((e) => e.general_notes || e.sponsor_note).filter(Boolean))
+        new Set(group.map((e) => cleanSponsorshipNote(e.general_notes || e.sponsor_note)).filter(Boolean))
       ).join('; ');
 
       return {
@@ -1570,7 +1638,7 @@ export function downloadLedgerExcel(entries: LedgerEntry[], fileName: string): v
           row.formattedDateList || shortDate(row.latestDate),
           nameWithService,
           `R${row.amount}`,
-          row.notes || 'Unaccounted Sponsorship',
+          cleanSponsorshipNote(row.notes),
         ]);
       }
     }
@@ -1705,13 +1773,15 @@ export interface StructureSponsorshipGroup {
 
 /**
  * Groups sponsorships by structure for clear administrative review.
+ * Automatically deduplicates sponsees so identical passenger records are unified.
  */
 export function groupSponsorshipsByStructure(
   items: ReportedSponsorship[]
 ): StructureSponsorshipGroup[] {
+  const cleanedItems = cleanAndDeduplicateSponsorships(items);
   const map = new Map<string, ReportedSponsorship[]>();
 
-  for (const item of items) {
+  for (const item of cleanedItems) {
     const struct = normalizeStructureCode(item.structure);
     if (!map.has(struct)) {
       map.set(struct, []);
@@ -1745,14 +1815,13 @@ export function groupSponsorshipsByStructure(
 
 /**
  * Normalizes passenger names, fills in structure/stop details, and merges duplicates
- * so corrupted slug names like "Passenger bonolo-ngejane-dfc-bus-stop" are purged.
+ * so corrupted slug names or duplicate session entries are cleanly unified.
  */
 export function cleanAndDeduplicateSponsorships(
   items: ReportedSponsorship[],
   knownSignups?: Array<{ id: string; fullName: string; stop?: string; structure?: string }>
 ): ReportedSponsorship[] {
   const result: ReportedSponsorship[] = [];
-  const indexMap = new Map<string, number>();
 
   for (const item of items) {
     let cleanName = sanitizePassengerDisplayName(item.passenger_name);
@@ -1779,31 +1848,47 @@ export function cleanAndDeduplicateSponsorships(
     }
 
     const rawDate = item.date || item.manifest_key || '';
-    const cleanDate = normalizeDateToYMD(rawDate) || rawDate.split('_')[0] || '';
+    const cleanDate = normalizeDateToYMD(rawDate);
     const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const dedupKey = `${cleanDate}::${normName}`;
-    if (indexMap.has(dedupKey)) {
-      const existingIdx = indexMap.get(dedupKey)!;
+
+    // Comprehensive deduplication search
+    const existingIdx = result.findIndex((existing) => {
+      if (item.id && existing.id && item.id === existing.id) return true;
+      if (item.passenger_id && existing.passenger_id && String(item.passenger_id) === String(existing.passenger_id)) {
+        const existDate = normalizeDateToYMD(existing.date || existing.manifest_key);
+        return !cleanDate || !existDate || cleanDate === existDate;
+      }
+      const existNormName = sanitizePassengerDisplayName(existing.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (existNormName === normName) {
+        const existDate = normalizeDateToYMD(existing.date || existing.manifest_key);
+        if (!cleanDate || !existDate || cleanDate === existDate) return true;
+        if (item.manifest_key && existing.manifest_key && item.manifest_key === existing.manifest_key) return true;
+      }
+      return false;
+    });
+
+    if (existingIdx >= 0) {
       const existing = result[existingIdx];
       result[existingIdx] = {
         ...existing,
         passenger_name: cleanName,
         structure: (existing.structure && existing.structure !== 'No Structure') ? existing.structure : structure,
         stop: existing.stop || stop,
+        vehicle_name: existing.vehicle_name || item.vehicle_name,
+        rep_name: existing.rep_name || item.rep_name,
         sponsor_note: existing.sponsor_note || item.sponsor_note || '',
         status: existing.status !== 'pending' ? existing.status : item.status,
         status_updated_at: existing.status_updated_at || item.status_updated_at,
         ledger_entry_id: existing.ledger_entry_id || item.ledger_entry_id,
-        vehicle_name: existing.vehicle_name || item.vehicle_name,
-        rep_name: existing.rep_name || item.rep_name,
+        date: existing.date || cleanDate || item.date,
       };
     } else {
-      indexMap.set(dedupKey, result.length);
       result.push({
         ...item,
         passenger_name: cleanName,
         structure,
         stop,
+        date: cleanDate || item.date,
       });
     }
   }
@@ -2197,8 +2282,7 @@ export async function verifySponsorshipStatus(
 
         // If unpaid or unaccounted, add/ensure entry in LEDGER_TABLE
         if (status === 'unpaid_sponsorship' || status === 'unaccounted_sponsorship') {
-          const cat = status === 'unpaid_sponsorship' ? 'Unpaid Sponsorship' : 'Unaccounted Sponsorship';
-          const entryNote = item.sponsor_note ? `${cat}: ${item.sponsor_note}` : cat;
+          const entryNote = cleanSponsorshipNote(item.sponsor_note);
           const ledgerEntryId = item.ledger_entry_id || `spon_debt_${item.id}`;
           item.ledger_entry_id = ledgerEntryId;
 

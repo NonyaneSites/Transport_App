@@ -1,6 +1,6 @@
 import { jsPDF } from 'jspdf';
 import autoTable, { type RowInput } from 'jspdf-autotable';
-import { type LedgerEntry, BANK_DETAILS, extractServiceCode, extractNameAndService, isEntrySponsorshipOrUnpaid } from './ledger';
+import { type LedgerEntry, BANK_DETAILS, extractServiceCode, extractNameAndService, isEntrySponsorshipOrUnpaid, cleanSponsorshipNote } from './ledger';
 import { naturalCompare } from './sort';
 
 /**
@@ -109,14 +109,14 @@ export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[
         instances: [],
         totalDebt: 0,
         isSponsorship,
-        notes: entry.general_notes || entry.sponsor_note || '',
+        notes: cleanSponsorshipNote(entry.general_notes || entry.sponsor_note),
       });
     }
     const record = structMap.get(personCategoryKey)!;
     record.instances.push({ date: entry.date, formatted: instanceStr });
     record.totalDebt += amount;
     if (!record.notes && (entry.general_notes || entry.sponsor_note)) {
-      record.notes = entry.general_notes || entry.sponsor_note || '';
+      record.notes = cleanSponsorshipNote(entry.general_notes || entry.sponsor_note);
     }
   }
 
@@ -338,7 +338,8 @@ export function downloadCancellationDebtPdf(
 
       for (const person of structGroup.sponsorships) {
         const datesStr = person.instances.join(', ');
-        const label = person.notes ? `${person.name} (${person.notes})` : person.name;
+        const cleanNote = cleanSponsorshipNote(person.notes);
+        const label = cleanNote ? `${person.name} (${cleanNote})` : person.name;
         tableRows.push([
           label,
           datesStr,

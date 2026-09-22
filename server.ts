@@ -397,13 +397,15 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
     if (!sp.fullName || !sp.fullName.trim()) continue;
     const cleanName = sanitizePassengerDisplayName(sp.fullName.trim());
     if (!cleanName) continue;
-    const baseDate = (parsedDate || key).split('_')[0];
+    const baseDate = normalizeDateToYMD(parsedDate || key);
     const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
     const auditId = `sp_${baseDate}_${normName}`;
     const existingIdx = audits.findIndex((a) => {
-      const aDate = (a.date || a.manifest_key || '').split('_')[0];
+      if (a.id && (a.id === auditId || a.id === `sp_${normName}`)) return true;
+      if (sp.id && a.passenger_id && String(sp.id) === String(a.passenger_id)) return true;
+      const aDate = normalizeDateToYMD(a.date || a.manifest_key);
       const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
-      return a.id === auditId || (aDate === baseDate && aName === normName);
+      return aName === normName && (!baseDate || !aDate || aDate === baseDate);
     });
 
     if (existingIdx >= 0) {
@@ -582,6 +584,34 @@ app.post('/api/manifests/:key/draft', (req, res) => {
 // LEDGER API
 // ----------------------------------------------------
 
+// Helper to convert any flexible date into YYYY-MM-DD
+function normalizeDateToYMD(dateStr?: string | null): string {
+  if (!dateStr) return '';
+  const trimmed = String(dateStr).trim();
+  const ymdMatch = trimmed.match(/\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b/);
+  if (ymdMatch) {
+    return `${ymdMatch[1]}-${ymdMatch[2].padStart(2, '0')}-${ymdMatch[3].padStart(2, '0')}`;
+  }
+  const dmyMatch = trimmed.match(/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b/);
+  if (dmyMatch) {
+    return `${dmyMatch[3]}-${dmyMatch[2].padStart(2, '0')}-${dmyMatch[1].padStart(2, '0')}`;
+  }
+  try {
+    const d = new Date(trimmed);
+    if (!isNaN(d.getTime())) {
+      const year = d.getFullYear();
+      if (year >= 2000 && year <= 2100) {
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${year}-${m}-${day}`;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return trimmed.split('_')[0];
+}
+
 // Helper to clean slug/synthetic names like "Passenger bonolo-ngejane-dfc-bus-stop" into "Bonolo Ngejane"
 function sanitizePassengerDisplayName(rawName: string): string {
   if (!rawName) return '';
@@ -590,6 +620,9 @@ function sanitizePassengerDisplayName(rawName: string): string {
   if (/^passenger\s+/i.test(name)) {
     name = name.replace(/^passenger\s+/i, '').trim();
   }
+
+  // Strip parenthetical badges or tags like (Bus), (DFC), [SZ 1]
+  name = name.replace(/\s*\([^)]*\)|\s*\[[^\]]*\]/g, ' ').trim();
 
   if (/^[a-z0-9]+(-[a-z0-9]+)+$/i.test(name)) {
     const stopSlugs = [
@@ -610,6 +643,10 @@ function sanitizePassengerDisplayName(rawName: string): string {
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
       .join(' ');
   }
+
+  // Strip trailing stop notes like " - DFC Bus Stop"
+  name = name.replace(/\s*-\s*(?:dfc|amic|sunnyside|kingsway|bunting|midrand|soweto|barnato|park).*$/i, '').trim();
+  name = name.replace(/\s+/g, ' ').trim();
 
   return name;
 }
@@ -666,13 +703,15 @@ app.get('/api/ledger/sponsorships', (req, res) => {
           if (sponIds.has(sId) || s.sponsored) {
             const cleanName = sanitizePassengerDisplayName(s.fullName || '');
             if (!cleanName) continue;
-            const baseDate = (m.date || key).split('_')[0];
+            const baseDate = normalizeDateToYMD(m.date || key);
             const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
             const auditId = `sp_${baseDate}_${normName}`;
             const exists = audits.some((a) => {
-              const aDate = (a.date || a.manifest_key || '').split('_')[0];
+              if (a.id && (a.id === auditId || a.id === `sp_${normName}`)) return true;
+              if (s.id && a.passenger_id && String(s.id) === String(a.passenger_id)) return true;
+              const aDate = normalizeDateToYMD(a.date || a.manifest_key);
               const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
-              return a.id === auditId || (aDate === baseDate && aName === normName);
+              return aName === normName && (!baseDate || !aDate || aDate === baseDate);
             });
             if (!exists) {
               audits.push({
@@ -705,28 +744,43 @@ app.get('/api/ledger/sponsorships', (req, res) => {
 
   // Deduplicate and sanitize records by session date and passenger name
   const deduped: typeof audits = [];
-  const seenMap = new Map<string, number>();
   for (const a of audits) {
     const cleanName = sanitizePassengerDisplayName(a.passenger_name);
     if (!cleanName) continue;
-    const baseDate = (a.date || a.manifest_key || '').split('_')[0];
+    const baseDate = normalizeDateToYMD(a.date || a.manifest_key);
     const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const dedupKey = `${baseDate}::${normName}`;
-    if (seenMap.has(dedupKey)) {
-      const idx = seenMap.get(dedupKey)!;
-      deduped[idx] = {
-        ...deduped[idx],
+
+    const existingIdx = deduped.findIndex((existing) => {
+      if (a.id && existing.id && a.id === existing.id) return true;
+      if (a.passenger_id && existing.passenger_id && String(a.passenger_id) === String(existing.passenger_id)) {
+        const existDate = normalizeDateToYMD(existing.date || existing.manifest_key);
+        return !baseDate || !existDate || baseDate === existDate;
+      }
+      const existNormName = sanitizePassengerDisplayName(existing.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (existNormName === normName) {
+        const existDate = normalizeDateToYMD(existing.date || existing.manifest_key);
+        if (!baseDate || !existDate || baseDate === existDate) return true;
+        if (a.manifest_key && existing.manifest_key && a.manifest_key === existing.manifest_key) return true;
+      }
+      return false;
+    });
+
+    if (existingIdx >= 0) {
+      deduped[existingIdx] = {
+        ...deduped[existingIdx],
         passenger_name: cleanName,
-        structure: deduped[idx].structure || a.structure,
-        stop: deduped[idx].stop || a.stop,
-        sponsor_note: deduped[idx].sponsor_note || a.sponsor_note,
-        status: deduped[idx].status !== 'pending' ? deduped[idx].status : a.status,
+        structure: deduped[existingIdx].structure || a.structure,
+        stop: deduped[existingIdx].stop || a.stop,
+        vehicle_name: deduped[existingIdx].vehicle_name || a.vehicle_name,
+        rep_name: deduped[existingIdx].rep_name || a.rep_name,
+        sponsor_note: deduped[existingIdx].sponsor_note || a.sponsor_note,
+        status: deduped[existingIdx].status !== 'pending' ? deduped[existingIdx].status : a.status,
       };
     } else {
-      seenMap.set(dedupKey, deduped.length);
       deduped.push({
         ...a,
         passenger_name: cleanName,
+        date: baseDate || a.date,
       });
     }
   }
@@ -738,6 +792,31 @@ app.get('/api/ledger/sponsorships', (req, res) => {
   audits.sort((a, b) => (b.submitted_at || '').localeCompare(a.submitted_at || ''));
   res.json(audits);
 });
+
+// Helper to strip boilerplate sponsorship notes
+function cleanSponsorshipNote(note?: unknown): string {
+  if (!note || typeof note !== 'string') return '';
+  const trimmed = note.trim();
+  if (!trimmed) return '';
+  if (/^(?:unaccounted|unpaid)?\s*sponsorships?$/i.test(trimmed)) return '';
+  if (/^(?:unaccounted|unpaid)$/i.test(trimmed)) return '';
+  if (/^actually\s*sponsored$/i.test(trimmed)) return '';
+  if (/^pending\s*verification$/i.test(trimmed)) return '';
+  if (/^unaccounted\s*sponsorship\s*\(from\s*[^)]+\)$/i.test(trimmed)) return '';
+  const mReported = trimmed.match(/^(?:unaccounted|unpaid)\s*sponsorship\s*\(reported\s*sponsor:\s*(.*?)\)$/i);
+  if (mReported && mReported[1]) {
+    const inner = mReported[1].trim();
+    if (!inner || /^(?:unaccounted|unpaid|sponsorship)$/i.test(inner)) return '';
+    return inner;
+  }
+  const mColon = trimmed.match(/^(?:unaccounted|unpaid)\s*sponsorship:\s*(.*)$/i);
+  if (mColon && mColon[1]) {
+    const after = mColon[1].trim();
+    if (!after || /^(?:unaccounted|unpaid|sponsorship)$/i.test(after)) return '';
+    return cleanSponsorshipNote(after);
+  }
+  return trimmed;
+}
 
 // Verify sponsorship status (cancellation admin action)
 app.post('/api/ledger/verify-sponsorship', (req, res) => {
@@ -808,8 +887,7 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
   let ledgerChanged = false;
 
   if (status === 'unpaid_sponsorship' || status === 'unaccounted_sponsorship') {
-    const categoryName = status === 'unpaid_sponsorship' ? 'Unpaid Sponsorship' : 'Unaccounted Sponsorship';
-    const noteText = spon.sponsor_note ? `${categoryName} (Reported sponsor: ${spon.sponsor_note})` : categoryName;
+    const noteText = cleanSponsorshipNote(spon.sponsor_note);
 
     // Check if debt entry already exists for this sponsorship
     const existingLedgerIdx = ledger.findIndex((e) =>
@@ -819,7 +897,7 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
 
     if (existingLedgerIdx >= 0) {
       ledger[existingLedgerIdx].general_notes = noteText;
-      ledger[existingLedgerIdx].sponsor_note = spon.sponsor_note || '';
+      ledger[existingLedgerIdx].sponsor_note = noteText;
       ledger[existingLedgerIdx].sponsored = true;
       ledger[existingLedgerIdx].structure_debt = 40;
       spon.ledger_entry_id = ledger[existingLedgerIdx].id;
@@ -839,7 +917,7 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
         rep_name: spon.rep_name,
         license_plate: '',
         sponsored: true,
-        sponsor_note: spon.sponsor_note || '',
+        sponsor_note: noteText,
         structure_debt: 40,
         general_notes: noteText,
         submitted_at: new Date().toISOString(),
@@ -944,8 +1022,7 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
     spon.status_updated_at = now;
 
     if (status === 'unpaid_sponsorship' || status === 'unaccounted_sponsorship') {
-      const categoryName = status === 'unpaid_sponsorship' ? 'Unpaid Sponsorship' : 'Unaccounted Sponsorship';
-      const noteText = spon.sponsor_note ? `${categoryName} (Reported sponsor: ${spon.sponsor_note})` : categoryName;
+      const noteText = cleanSponsorshipNote(spon.sponsor_note);
 
       const existingLedgerIdx = ledger.findIndex((e) =>
         (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
@@ -954,7 +1031,7 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
 
       if (existingLedgerIdx >= 0) {
         ledger[existingLedgerIdx].general_notes = noteText;
-        ledger[existingLedgerIdx].sponsor_note = spon.sponsor_note || '';
+        ledger[existingLedgerIdx].sponsor_note = noteText;
         ledger[existingLedgerIdx].sponsored = true;
         ledger[existingLedgerIdx].structure_debt = 40;
         spon.ledger_entry_id = ledger[existingLedgerIdx].id;
@@ -974,7 +1051,7 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
           rep_name: spon.rep_name,
           license_plate: '',
           sponsored: true,
-          sponsor_note: spon.sponsor_note || '',
+          sponsor_note: noteText,
           structure_debt: 40,
           general_notes: noteText,
           submitted_at: now,
@@ -1012,14 +1089,38 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
 
 // List all ledger entries
 app.get('/api/ledger', (req, res) => {
-  const ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
-  // If a debt for a particular date or service was reduced to zero, it is removed
-  const activeLedger = ledger.filter((entry) => {
-    if (typeof entry.structure_debt === 'number') {
-      return entry.structure_debt > 0;
-    }
-    return true;
-  });
+  let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+  let dirty = false;
+
+  // Filter out zero-debt items and sanitize boilerplate notes
+  const activeLedger = ledger
+    .filter((entry) => {
+      if (typeof entry.structure_debt === 'number') {
+        return entry.structure_debt > 0;
+      }
+      return true;
+    })
+    .map((entry) => {
+      const origGn = typeof entry.general_notes === 'string' ? entry.general_notes : '';
+      const origSn = typeof entry.sponsor_note === 'string' ? entry.sponsor_note : '';
+      const cleanGn = cleanSponsorshipNote(origGn);
+      const cleanSn = cleanSponsorshipNote(origSn);
+      if (cleanGn !== origGn || cleanSn !== origSn) {
+        dirty = true;
+        return { ...entry, general_notes: cleanGn, sponsor_note: cleanSn };
+      }
+      return entry;
+    });
+
+  if (dirty) {
+    ledger = ledger.map((e) => ({
+      ...e,
+      general_notes: cleanSponsorshipNote(e.general_notes),
+      sponsor_note: cleanSponsorshipNote(e.sponsor_note),
+    }));
+    atomicWriteJson(LEDGER_FILE, ledger);
+  }
+
   res.json(activeLedger);
 });
 
@@ -1062,9 +1163,9 @@ app.post('/api/ledger/manual', (req, res) => {
     rep_name: entry.rep_name || 'Admin',
     license_plate: entry.license_plate || '',
     sponsored: Boolean(entry.sponsored),
-    sponsor_note: entry.sponsor_note || '',
+    sponsor_note: cleanSponsorshipNote(entry.sponsor_note),
     structure_debt: typeof entry.structure_debt === 'number' ? entry.structure_debt : 40,
-    general_notes: entry.general_notes || '',
+    general_notes: cleanSponsorshipNote(entry.general_notes),
     submitted_at: entry.submitted_at || new Date().toISOString(),
   };
 
@@ -1102,7 +1203,7 @@ app.post('/api/ledger/update-debtor', (req, res) => {
   const cleanName = updates?.name ? String(updates.name).trim() : '';
   const rawStruct = updates?.structure ? String(updates.structure).trim() : 'No Structure';
   const isSponsored = Boolean(updates?.isSponsored);
-  const notes = updates?.notes ? String(updates.notes).trim() : (isSponsored ? 'Unaccounted Sponsorship' : '');
+  const notes = cleanSponsorshipNote(updates?.notes);
 
   const instances = Array.isArray(updates?.instances) ? updates.instances : [];
   // If the person's debt for a particular date or service was reduced to zero, remove that debt
