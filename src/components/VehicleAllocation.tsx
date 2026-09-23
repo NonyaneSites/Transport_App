@@ -2986,7 +2986,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
             setChangeServiceModalOpen(false);
             setChangeServicePassenger(null);
           }}
-          manifest={localManifest}
+          manifestDate={localManifest.date}
           currentService={service}
           passenger={changeServicePassenger}
           onSuccess={handleTransferSuccess}
@@ -3002,8 +3002,8 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
             setChangeStopPassenger(null);
           }}
           passenger={changeStopPassenger}
-          allSignups={localManifest.signups}
-          onSave={changePassengerStop}
+          existingStops={Array.from(new Set(localManifest.signups.map((p) => p.stop).filter(Boolean)))}
+          onConfirm={changePassengerStop}
         />
       )}
     </div>
