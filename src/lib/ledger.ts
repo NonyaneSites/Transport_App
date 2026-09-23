@@ -275,6 +275,37 @@ export function extractServiceCode(serviceStr: string): string {
 }
 
 /**
+ * Returns true if a 'YYYY-MM-DD' date string falls on any day other than
+ * Sunday. Used to identify DreamWeek (Tue–Fri) conference-day cancellations
+ * so they can be labelled distinctly from ordinary Sunday cancellations.
+ */
+export function isDreamWeekDate(dateStr?: string | null): boolean {
+  if (!dateStr || typeof dateStr !== 'string') return false;
+  const parts = dateStr.trim().split('-');
+  if (parts.length !== 3) return false;
+  const [y, m, d] = parts.map(Number);
+  if (!y || !m || !d) return false;
+  const dt = new Date(y, m - 1, d);
+  if (isNaN(dt.getTime())) return false;
+  return dt.getDay() !== 0; // 0 = Sunday
+}
+
+/**
+ * Resolves the display service code for a ledger entry/instance, prefixing
+ * plain 'AM'/'PM' codes with 'DW ' (-> 'DW AM' / 'DW PM') whenever the
+ * entry's date falls on a DreamWeek conference day (Tue–Fri, i.e. not a
+ * Sunday). Named church-event codes (LM, WMP, EF, AD, FW, etc.) are left
+ * untouched since they are already self-describing regardless of weekday.
+ */
+export function serviceCodeForEntry(e: { service?: string | null; date?: string | null }): string {
+  const code = extractServiceCode(e.service || '') || 'PM';
+  if ((code === 'AM' || code === 'PM') && isDreamWeekDate(e.date)) {
+    return `DW ${code}`;
+  }
+  return code;
+}
+
+/**
  * Parses raw structure cell text like "S1 - Nthabiseng, Nthabeleng" into a clean
  * structure code ("S1") and optional associated rep names ("Nthabiseng, Nthabeleng").
  */
@@ -1477,7 +1508,7 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
           return !Number.isFinite(rawD) || rawD > 0;
         })
         .map((e) => {
-        const code = extractServiceCode(e.service) || 'PM';
+        const code = serviceCodeForEntry(e);
         serviceCodesSet.add(code);
 
         // Format date into dd/mm/yy or 'Undated'

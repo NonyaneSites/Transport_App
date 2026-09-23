@@ -1,6 +1,6 @@
 import { jsPDF } from 'jspdf';
 import autoTable, { type RowInput } from 'jspdf-autotable';
-import { type LedgerEntry, BANK_DETAILS, extractServiceCode, extractNameAndService, isEntrySponsorshipOrUnpaid, cleanSponsorshipNote } from './ledger';
+import { type LedgerEntry, BANK_DETAILS, extractServiceCode, extractNameAndService, isEntrySponsorshipOrUnpaid, cleanSponsorshipNote, isDreamWeekDate } from './ledger';
 import { naturalCompare } from './sort';
 
 /**
@@ -53,7 +53,11 @@ export function formatCancellationInstance(dateStr: string, serviceStr: string):
   }
 
   const code = extractServiceCode(serviceStr) || 'PM';
-  return `${d}/${m}/${y}(${code})`;
+  // DreamWeek (Tue–Fri) conference-day cancellations are labelled "DW AM" /
+  // "DW PM" instead of plain "AM" / "PM" so they're clearly distinguished
+  // from ordinary Sunday cancellations on the printed debt report.
+  const displayCode = (code === 'AM' || code === 'PM') && isDreamWeekDate(dateStr) ? `DW ${code}` : code;
+  return `${d}/${m}/${y}(${displayCode})`;
 }
 
 export interface DebtorPersonSummary {
