@@ -27,6 +27,11 @@ import {
   downloadTextFile
 } from '@/lib/whatsappManifest';
 
+const CIRCLED_NUMBERS = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩', '⑪', '⑫', '⑬', '⑭', '⑮', '⑯', '⑰', '⑱', '⑲', '⑳'];
+function formatStopSequenceNumber(index: number): string {
+  return CIRCLED_NUMBERS[index] || `${index + 1}.`;
+}
+
 function DebouncedInput({
   value,
   onChange,
@@ -2120,6 +2125,8 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
             const groups = ridersGroupedByHub(vehicle);
             const repPassenger = findVehicleRepPassenger(localManifest, vehicle);
             const hasRepWhatsApp = Boolean(normalizeWhatsAppPhone(repPassenger?.phone));
+            const capacity = vehicle.capacity ?? (vehicle.type === 'Taxi' ? 15 : 60);
+            const stopRiderCountMap = new Map(groups.map((g) => [g.label, g.riders.length]));
 
             // Attendance & Sponsorship metrics
             const vPresent = vehicle.submitted
@@ -2169,16 +2176,32 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                           </span>
                         ) : null}
 
-                        {/* Live Dispatch Attendance Badges */}
+                        {/* Live Dispatch Attendance & Core Stat Pills */}
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="badge bg-success/15 text-success-light text-[10px] font-semibold border border-success/20">
-                            {vPresent}/{riders.length} Present
+                          <span
+                            className="badge bg-success/15 text-success-light text-[10px] font-semibold border border-success/20"
+                            title={`${vPresent} marked present`}
+                          >
+                            ✓ {vPresent} Present
                           </span>
-                          {vAbsent > 0 && (
-                            <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px] font-semibold border border-crimson-500/20">
-                              {vAbsent} Absent
-                            </span>
-                          )}
+                          <span
+                            className="badge bg-crimson-500/15 text-crimson-300 text-[10px] font-semibold border border-crimson-500/20"
+                            title={`${vAbsent} absent`}
+                          >
+                            ✗ {vAbsent} Absent
+                          </span>
+                          <span
+                            className={`badge text-[10px] font-semibold border ${
+                              riders.length > capacity
+                                ? 'bg-crimson-500/15 text-crimson-300 border-crimson-500/30'
+                                : riders.length === capacity
+                                ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                : 'bg-card border-line text-ink'
+                            }`}
+                            title={`${riders.length} of ${capacity} seats occupied`}
+                          >
+                            {riders.length}/{capacity} Seats
+                          </span>
                           {vSponsored > 0 && (
                             <span className="badge bg-amber-500/15 text-amber-300 text-[10px] font-semibold border border-amber-500/20">
                               ★ {vSponsored} Sponsored
@@ -2196,10 +2219,22 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                           )}
                         </div>
                       </div>
-                      <div className="text-xs text-muted mt-0.5">
-                        {vehicle.type} · {riders.length} passenger{riders.length !== 1 ? 's' : ''}
-                        {vehicle.repName ? ` · Rep: ${vehicle.repName}${repStruct ? ` (${repStruct})` : ''}` : ''}
-                        {vehicle.licensePlate ? ` · Plate: ${vehicle.licensePlate}` : ''}
+                      <div className="text-xs text-muted mt-0.5 flex items-center gap-1.5 flex-wrap">
+                        <span>{vehicle.type} ({capacity} seats)</span>
+                        <span>·</span>
+                        <span>{riders.length} passenger{riders.length !== 1 ? 's' : ''}</span>
+                        {vehicle.repName ? (
+                          <>
+                            <span>·</span>
+                            <span>Rep: {vehicle.repName}{repStruct ? ` (${repStruct})` : ''}</span>
+                          </>
+                        ) : null}
+                        {vehicle.licensePlate ? (
+                          <>
+                            <span>·</span>
+                            <span>Plate: {vehicle.licensePlate}</span>
+                          </>
+                        ) : null}
                       </div>
                       {vGeneralNote && !isExpanded && (
                         <div className="mt-1 text-[11px] text-sky-300 line-clamp-1 flex items-center gap-1">
@@ -2253,6 +2288,55 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
+                  </div>
+                </div>
+
+                {/* Route summary row directly under the collapsed header */}
+                <div
+                  onClick={() => { setExpandedVehicle(isExpanded ? null : vehicle.id); setSelectedPoolKey(''); setAssignQty(''); }}
+                  className="border-t border-line/50 bg-card/25 px-4 py-2 flex items-center justify-between gap-3 cursor-pointer hover:bg-card/50 transition-colors text-xs select-none"
+                  title="Click to view or edit stop sequence & riders"
+                >
+                  <div className="flex items-center gap-2 flex-wrap min-w-0 flex-1">
+                    <div className="flex items-center gap-1 text-[11px] font-bold uppercase tracking-wider text-crimson-400 shrink-0">
+                      <MapPin className="h-3.5 w-3.5 text-crimson-400 shrink-0" />
+                      <span>Route:</span>
+                    </div>
+
+                    {(!vehicle.orderedStops || vehicle.orderedStops.length === 0) ? (
+                      <span className="text-xs text-muted/70 italic">No stops assigned yet</span>
+                    ) : (
+                      <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                        {vehicle.orderedStops.map((stop, sIdx) => {
+                          const riderCount = stopRiderCountMap.get(stop) ?? 0;
+                          const isLast = sIdx === (vehicle.orderedStops?.length ?? 0) - 1;
+                          return (
+                            <div key={`${stop}-${sIdx}`} className="flex items-center gap-1.5">
+                              <span className="inline-flex items-center gap-1.5 rounded-md border border-line/80 bg-card px-2 py-0.5 text-xs shadow-2xs">
+                                <span className="font-semibold text-crimson-300">
+                                  {formatStopSequenceNumber(sIdx)} {stop}
+                                </span>
+                                <span className="rounded bg-card-2 px-1 py-0.2 text-[10px] font-bold text-muted border border-line/60">
+                                  {riderCount}
+                                </span>
+                              </span>
+                              {!isLast && (
+                                <ChevronRight className="h-3 w-3 text-muted/50 shrink-0" />
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1 text-muted shrink-0 text-[11px]">
+                    <span className="hidden sm:inline">{isExpanded ? 'Collapse' : 'Expand'}</span>
+                    {isExpanded ? (
+                      <ChevronUp className="h-3.5 w-3.5" />
+                    ) : (
+                      <ChevronDown className="h-3.5 w-3.5" />
+                    )}
                   </div>
                 </div>
 
