@@ -32,6 +32,7 @@ import { syncVehicleStatsToGoogleSheet, sheetDateLabel } from '@/lib/googleSheet
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
 import { RepStatsCopyCard } from '@/components/RepStatsCopyCard';
 import { CancellationSearchModal } from '@/components/CancellationSearchModal';
+import { CrossTaxiSponsorshipModal } from '@/components/CrossTaxiSponsorshipModal';
 import {
   transferPassengerAcrossServices,
   crossCheckPassengerAcrossDate,
@@ -118,6 +119,7 @@ export function RepPage() {
   // Optimistic local state for instantaneous attendance UI
   const [presentIds, setPresentIds] = useState<Set<string>>(new Set());
   const [absentIds, setAbsentIds] = useState<Set<string>>(new Set());
+  const [absentPaidIds, setAbsentPaidIds] = useState<Set<string>>(new Set());
   const [sponsoredIds, setSponsoredIds] = useState<Set<string>>(new Set());
   const [unpaidIds, setUnpaidIds] = useState<Set<string>>(new Set());
   const [notes, setNotes] = useState<Record<string, string>>({});
@@ -199,6 +201,14 @@ export function RepPage() {
           else next.delete(riderId);
           return next;
         });
+      } else if (action.type === 'rider_absent_paid') {
+        const { riderId, absentPaid } = action;
+        setAbsentPaidIds((prev) => {
+          const next = new Set(prev);
+          if (absentPaid) next.add(riderId);
+          else next.delete(riderId);
+          return next;
+        });
       } else if (action.type === 'rider_note') {
         const { riderId, note } = action;
         setNotes((prev) => ({ ...prev, [riderId]: note }));
@@ -242,6 +252,7 @@ export function RepPage() {
   const [manualCancellations, setManualCancellations] = useState<ManualCancellation[]>([]);
   const [cancellationSearch, setCancellationSearch] = useState('');
   const [showCancellationModal, setShowCancellationModal] = useState(false);
+  const [showCrossTaxiModal, setShowCrossTaxiModal] = useState(false);
 
   // Sync locks & conflict prevention
   const [draftRestored, setDraftRestored] = useState(false);
@@ -560,6 +571,7 @@ export function RepPage() {
 
     setPresentIds(pIds);
     setAbsentIds(aIds);
+    setAbsentPaidIds(new Set(draft.absentPaidIds ?? []));
     setSponsoredIds(new Set(draft.sponsoredIds ?? []));
     setUnpaidIds(new Set(draft.unpaidIds ?? []));
     setNotes(draft.notes ?? {});
@@ -649,6 +661,21 @@ export function RepPage() {
           const sId = String(id);
           const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? recentlyEditedRidersRef.current.get(id) ?? 0;
           if ((isUserDirtyRef.current || now - lastEdit < 15000) && !remoteUnpaid.has(sId)) {
+            next.add(sId);
+          }
+        }
+        return next;
+      });
+    }
+
+    if (draft.absentPaidIds !== undefined) {
+      const remoteAbsentPaid = new Set(draft.absentPaidIds.map(String));
+      setAbsentPaidIds((prev) => {
+        const next = new Set<string>(remoteAbsentPaid);
+        for (const id of prev) {
+          const sId = String(id);
+          const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? recentlyEditedRidersRef.current.get(id) ?? 0;
+          if ((isUserDirtyRef.current || now - lastEdit < 15000) && !remoteAbsentPaid.has(sId)) {
             next.add(sId);
           }
         }
@@ -761,6 +788,7 @@ export function RepPage() {
       isApplyingDraftRef.current = true;
       const initialPresent = new Set<string>();
       const initialAbsent = new Set<string>();
+      const initialAbsentPaid = new Set<string>();
       const initialSponsored = new Set<string>();
       const initialUnpaid = new Set<string>();
       currentRiders.forEach((r) => {
@@ -778,6 +806,7 @@ export function RepPage() {
       });
       setPresentIds(initialPresent);
       setAbsentIds(initialAbsent);
+      setAbsentPaidIds(initialAbsentPaid);
       setSponsoredIds(initialSponsored);
       setUnpaidIds(initialUnpaid);
       const initialNotes: Record<string, string> = {};
@@ -905,6 +934,16 @@ export function RepPage() {
   const grossPresentCash = presentCount * FARE;
   const sponsoredDeduction = presentSponsoredCount * FARE;
   const baseCash = grossPresentCash - sponsoredDeduction;
+
+  const absentPaidCount = useMemo(() => {
+    return riders.filter((r) => {
+      const isAbs = absentIds.has(r.id) || absentIds.has(String(r.id));
+      const isPaid = absentPaidIds.has(r.id) || absentPaidIds.has(String(r.id));
+      return isAbs && isPaid;
+    }).length;
+  }, [riders, absentIds, absentPaidIds]);
+
+  const absentPaidCash = absentPaidCount * FARE;
   const externalCash = externalSponsees.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
   const selectedLedgerCash = useMemo(() => {
     return pastCancellations
@@ -913,7 +952,7 @@ export function RepPage() {
   }, [pastCancellations, collectedCancellationIds]);
   const manualCancellationCash = manualCancellations.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
   const pastCancellationCash = selectedLedgerCash + manualCancellationCash;
-  const totalCash = baseCash + externalCash + pastCancellationCash;
+  const totalCash = baseCash + absentPaidCash + externalCash + pastCancellationCash;
 
   const addExternalSponsorship = async (data: {
     payerId?: string;
@@ -1101,6 +1140,7 @@ export function RepPage() {
     const currentDraft: VehicleDraftState = {
       presentIds: pIdsArray,
       absentIds: aIdsArray,
+      absentPaidIds: Array.from(absentPaidIds),
       sponsoredIds: Array.from(sponsoredIds),
       unpaidIds: Array.from(unpaidIds),
       notes,
@@ -1108,7 +1148,7 @@ export function RepPage() {
       coReps: coReps.filter(Boolean),
       licensePlate: licensePlate.trim(),
       generalNotes: generalNotes.trim(),
-      cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+      cashCollected: { base: baseCash, absentPaid: absentPaidCash, external: externalCash, pastCancellations: pastCancellationCash },
       settledLedgerIds: Array.from(collectedCancellationIds),
       manualCancellations,
       externalSponsees,
@@ -1149,10 +1189,10 @@ export function RepPage() {
       if (pendingSyncTimerRef.current) clearTimeout(pendingSyncTimerRef.current);
     };
   }, [
-    selectedVehicleId, selectedVehicle, presentIds, absentIds,
+    selectedVehicleId, selectedVehicle, presentIds, absentIds, absentPaidIds,
     sponsoredIds, unpaidIds, notes, generalNotes, coReps, repName, licensePlate,
     externalSponsees, collectedCancellationIds, manualCancellations,
-    baseCash, externalCash, pastCancellationCash,
+    baseCash, absentPaidCash, externalCash, pastCancellationCash,
     key, updateVehicleDraft,
   ]);
 
@@ -1165,6 +1205,7 @@ export function RepPage() {
       const currentDraft: VehicleDraftState = {
         presentIds: Array.from(presentIds),
         absentIds: Array.from(absentIds),
+        absentPaidIds: Array.from(absentPaidIds),
         sponsoredIds: Array.from(sponsoredIds),
         unpaidIds: Array.from(unpaidIds),
         notes,
@@ -1172,7 +1213,7 @@ export function RepPage() {
         coReps: coReps.filter(Boolean),
         licensePlate: licensePlate.trim(),
         generalNotes: generalNotes.trim(),
-        cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+        cashCollected: { base: baseCash, absentPaid: absentPaidCash, external: externalCash, pastCancellations: pastCancellationCash },
         settledLedgerIds: Array.from(collectedCancellationIds),
         manualCancellations,
         externalSponsees,
@@ -1197,10 +1238,10 @@ export function RepPage() {
       document.removeEventListener('visibilitychange', handleFlushOnExit);
     };
   }, [
-    selectedVehicleId, selectedVehicle, presentIds, absentIds,
+    selectedVehicleId, selectedVehicle, presentIds, absentIds, absentPaidIds,
     sponsoredIds, unpaidIds, notes, generalNotes, coReps, repName, licensePlate,
     externalSponsees, collectedCancellationIds, manualCancellations,
-    baseCash, externalCash, pastCancellationCash, key,
+    baseCash, absentPaidCash, externalCash, pastCancellationCash, key,
   ]);
 
   // Instant local toggle handlers (Zero lag, pure React state, deterministic single click)
@@ -1231,6 +1272,14 @@ export function RepPage() {
           next.delete(passengerId);
           return next;
         });
+        // Clear absent-paid flag if the person is now present
+        setAbsentPaidIds((prev) => {
+          if (!prev.has(passengerId) && !prev.has(String(passengerId))) return prev;
+          const next = new Set(prev);
+          next.delete(passengerId);
+          next.delete(String(passengerId));
+          return next;
+        });
       }
     } else {
       if (isCurrentlyAbsent) {
@@ -1239,6 +1288,13 @@ export function RepPage() {
         setAbsentIds((prev) => {
           const next = new Set(prev);
           next.delete(passengerId);
+          return next;
+        });
+        setAbsentPaidIds((prev) => {
+          if (!prev.has(passengerId) && !prev.has(String(passengerId))) return prev;
+          const next = new Set(prev);
+          next.delete(passengerId);
+          next.delete(String(passengerId));
           return next;
         });
       } else {
@@ -1354,6 +1410,41 @@ export function RepPage() {
         timestamp: now,
       });
       // Persistence happens via the debounced updateVehicleDraft sync (safe merge against server).
+    }
+  }, [selectedVehicleId, repName, broadcastLiveAction]);
+
+  const handleToggleAbsentPaid = useCallback((passengerId: string) => {
+    const sId = String(passengerId);
+    const now = Date.now();
+    lastLocalEditTimeRef.current = now;
+    recentlyEditedRidersRef.current.set(sId, now);
+    recentlyEditedRidersRef.current.set(passengerId, now);
+    isUserDirtyRef.current = true;
+
+    let nextVal = false;
+    setAbsentPaidIds((prev) => {
+      const next = new Set(prev);
+      const isCurrentlyAbsentPaid = prev.has(sId) || prev.has(passengerId);
+      nextVal = !isCurrentlyAbsentPaid;
+      if (nextVal) {
+        next.add(sId);
+      } else {
+        next.delete(sId);
+        next.delete(passengerId);
+      }
+      return next;
+    });
+
+    if (selectedVehicleId) {
+      broadcastLiveAction({
+        type: 'rider_absent_paid',
+        vehicleId: selectedVehicleId,
+        riderId: sId,
+        absentPaid: nextVal,
+        repName: repName.trim() || 'Co-rep',
+        clientId: clientIdRef.current,
+        timestamp: now,
+      });
     }
   }, [selectedVehicleId, repName, broadcastLiveAction]);
 
@@ -1803,20 +1894,27 @@ export function RepPage() {
     setSubmitMsg(null);
 
     try {
+      const absentPaidRiders = riders.filter(
+        (r) => (absentIds.has(r.id) || absentIds.has(String(r.id))) && (absentPaidIds.has(r.id) || absentPaidIds.has(String(r.id)))
+      );
+      const absentPaidNote = absentPaidRiders.length > 0
+        ? `Paid while absent: ${absentPaidRiders.map((r) => r.fullName).join(', ')} (R${absentPaidRiders.length * FARE}). `
+        : '';
+
       const absentees = riders
-        .filter((r) => absentIds.has(r.id))
+        .filter((r) => (absentIds.has(r.id) || absentIds.has(String(r.id))) && !(absentPaidIds.has(r.id) || absentPaidIds.has(String(r.id))))
         .map((r) => ({
           ...r,
           present: false,
-          sponsored: sponsoredIds.has(r.id),
-          sponsorNote: notes[r.id] ?? r.sponsorNote ?? '',
+          sponsored: sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id)),
+          sponsorNote: notes[r.id] ?? notes[String(r.id)] ?? r.sponsorNote ?? '',
         }));
 
       const repDisplayName = [repName.trim(), ...coReps.map((c) => c.trim()).filter(Boolean)].join(' & ');
       const coRepNote = coReps.map((c) => c.trim()).filter(Boolean).length > 0
         ? `Co-reps: ${coReps.map((c) => c.trim()).filter(Boolean).join(', ')}. `
         : '';
-      const cashNote = `Cash collected: R${totalCash} (base R${baseCash}${externalCash > 0 ? ` + external R${externalCash}` : ''}${pastCancellationCash > 0 ? ` + past cancellations R${pastCancellationCash}` : ''}). `;
+      const cashNote = `Cash collected: R${totalCash} (base R${baseCash}${absentPaidCash > 0 ? ` + absent paid R${absentPaidCash}` : ''}${externalCash > 0 ? ` + external R${externalCash}` : ''}${pastCancellationCash > 0 ? ` + past cancellations R${pastCancellationCash}` : ''}). `;
       const sponseeNote = externalSponsees.length > 0
         ? `External sponsees: ${externalSponsees.map((s) => `${s.sponseeName || 'Unnamed'} in ${s.taxiName || 'another vehicle'} (R${s.amount})`).join('; ')}. `
         : '';
@@ -1838,6 +1936,7 @@ export function RepPage() {
       const finalizedDraft: VehicleDraftState = {
         presentIds: Array.from(presentIds),
         absentIds: Array.from(absentIds),
+        absentPaidIds: Array.from(absentPaidIds),
         sponsoredIds: Array.from(sponsoredIds),
         unpaidIds: Array.from(unpaidIds),
         notes,
@@ -1845,7 +1944,7 @@ export function RepPage() {
         coReps: coReps.map((c) => c.trim()).filter(Boolean),
         licensePlate: licensePlate.trim(),
         generalNotes: generalNotes.trim(),
-        cashCollected: { base: baseCash, external: externalCash, pastCancellations: pastCancellationCash },
+        cashCollected: { base: baseCash, absentPaid: absentPaidCash, external: externalCash, pastCancellations: pastCancellationCash },
         settledLedgerIds: Array.from(collectedCancellationIds),
         manualCancellations,
         externalSponsees,
@@ -1883,7 +1982,7 @@ export function RepPage() {
         return p;
       });
 
-      const fullGeneralNotes = `${coRepNote}${cashNote}${sponseeNote}${settledNote}${sponsorshipNote}${generalNotes.trim()}`.trim();
+      const fullGeneralNotes = `${coRepNote}${cashNote}${absentPaidNote}${sponseeNote}${settledNote}${sponsorshipNote}${generalNotes.trim()}`.trim();
 
       const sponsoredRiders = riders
         .filter((r) => sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id)))
@@ -2615,9 +2714,9 @@ export function RepPage() {
                   </div>
                 ) : null}
 
-                {/* Quick Actions: Walk-in & Settle Cancellation */}
+                {/* Quick Actions: Walk-in, Settle Cancellation & Cross-Taxi Sponsorship */}
                 {!isSubmitted && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     {/* Walk-in card */}
                     <div className="card border-line bg-card p-2.5">
                       {!walkInOpen ? (
@@ -2772,6 +2871,52 @@ export function RepPage() {
                         )}
                       </button>
                     </div>
+
+                    {/* Cross-Taxi Sponsorship Button */}
+                    <div className="card border-line bg-card p-2.5 flex flex-col justify-center">
+                      <button
+                        type="button"
+                        onClick={() => setShowCrossTaxiModal(true)}
+                        className={`flex w-full items-center justify-center gap-1.5 rounded-lg border py-1.5 px-2.5 text-xs font-semibold transition-all ${
+                          externalSponsees.length > 0
+                            ? 'border-amber-500/50 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25'
+                            : 'border-line bg-card-2 text-ink hover:border-amber-500/40 hover:bg-card-2/80'
+                        }`}
+                        title="Collect fare cash in this taxi for a rider travelling in another vehicle"
+                      >
+                        <HeartHandshake className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+                        <span className="truncate">Cross-Taxi Sponsor</span>
+                        {externalSponsees.length > 0 && (
+                          <span className="rounded bg-amber-500/25 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/40">
+                            {externalSponsees.length} (+R{externalCash})
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Persistent Cross-Taxi Sponsorship Banner */}
+                {externalSponsees.length > 0 && (
+                  <div className="flex items-center justify-between gap-2.5 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200 animate-fade-in shadow-xs">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <HeartHandshake className="h-4 w-4 text-amber-400 shrink-0" />
+                      <div className="truncate">
+                        <span className="font-bold text-amber-300">
+                          {externalSponsees.length} Cross-Taxi Sponsorship{externalSponsees.length > 1 ? 's' : ''} Active (+R{externalCash}):
+                        </span>{' '}
+                        <span className="text-amber-200/90 text-[11px]">
+                          {externalSponsees.map((s) => `${s.sponseeName} in ${s.taxiName} (R${s.amount})`).join(', ')}
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowCrossTaxiModal(true)}
+                      className="shrink-0 rounded-lg bg-amber-500/20 px-2.5 py-1 text-xs font-bold text-amber-200 border border-amber-500/40 hover:bg-amber-500/30 transition-colors"
+                    >
+                      Manage
+                    </button>
                   </div>
                 )}
 
@@ -2936,9 +3081,11 @@ export function RepPage() {
                     stopRedirects={selectedVehicle?.stopRedirects}
                     presentIds={presentIds}
                     absentIds={absentIds}
+                    absentPaidIds={absentPaidIds}
                     onSetPresent={handleSetPresent}
                     onToggleSponsored={handleToggleSponsored}
                     onToggleUnpaid={handleToggleUnpaid}
+                    onToggleAbsentPaid={handleToggleAbsentPaid}
                     onSetNote={handleSetNote}
                     sponsoredIds={sponsoredIds}
                     unpaidIds={unpaidIds}
@@ -2958,9 +3105,11 @@ export function RepPage() {
                     stopRedirects={selectedVehicle?.stopRedirects}
                     presentIds={presentIds}
                     absentIds={absentIds}
+                    absentPaidIds={absentPaidIds}
                     onSetPresent={handleSetPresent}
                     onToggleSponsored={handleToggleSponsored}
                     onToggleUnpaid={handleToggleUnpaid}
+                    onToggleAbsentPaid={handleToggleAbsentPaid}
                     onSetNote={handleSetNote}
                     sponsoredIds={sponsoredIds}
                     unpaidIds={unpaidIds}
@@ -3012,10 +3161,13 @@ export function RepPage() {
                       fare={FARE}
                       grossPresentCash={grossPresentCash}
                       sponsoredDeduction={sponsoredDeduction}
+                      absentPaidCount={absentPaidCount}
+                      absentPaidCash={absentPaidCash}
                       externalSponsees={externalSponsees}
                       onAddExternalSponsorship={addExternalSponsorship}
                       onUpdateSponsee={updateExternalSponsee}
                       onRemoveSponsee={removeExternalSponsee}
+                      onOpenCrossTaxiModal={() => setShowCrossTaxiModal(true)}
                       externalCash={externalCash}
                       thisVehicleRiders={riders}
                       otherVehiclesWithRiders={otherVehiclesWithRiders}
@@ -3155,6 +3307,7 @@ export function RepPage() {
                   absentIds={absentIds}
                   sponsoredIds={sponsoredIds}
                   unpaidIds={unpaidIds}
+                  absentPaidIds={absentPaidIds}
                   notes={notes}
                   vehicleName={selectedVehicle.name}
                   repName={repName}
@@ -3312,6 +3465,21 @@ export function RepPage() {
         vehicleRiders={riders}
         fare={FARE}
       />
+
+      {/* Cross-Taxi Sponsorship Modal */}
+      {selectedVehicle && (
+        <CrossTaxiSponsorshipModal
+          isOpen={showCrossTaxiModal}
+          onClose={() => setShowCrossTaxiModal(false)}
+          thisVehicleName={selectedVehicle.name}
+          thisVehicleRiders={riders}
+          otherVehiclesWithRiders={otherVehiclesWithRiders}
+          externalSponsees={externalSponsees}
+          onAddExternalSponsorship={addExternalSponsorship}
+          onRemoveSponsee={removeExternalSponsee}
+          fare={FARE}
+        />
+      )}
     </div>
   );
 }
@@ -3354,11 +3522,12 @@ function formatServicePeriodMode(service: string): string {
 
 function CashCalculatorCard({
   presentCount, presentSponsoredCount, fare, grossPresentCash, sponsoredDeduction,
+  absentPaidCount, absentPaidCash,
   externalSponsees, onAddExternalSponsorship, onRemoveSponsee, externalCash,
   thisVehicleRiders, otherVehiclesWithRiders, selectedVehicleName,
   pastCancellations, loadingPastCancellations, collectedCancellationIds, onToggleCancellation,
   manualCancellations,
-  pastCancellationCash, search, onSearchChange, onEnsureLoaded, onOpenModal,
+  pastCancellationCash, search, onSearchChange, onEnsureLoaded, onOpenModal, onOpenCrossTaxiModal,
   baseCash, totalCash,
 }: {
   presentCount: number;
@@ -3366,6 +3535,8 @@ function CashCalculatorCard({
   fare: number;
   grossPresentCash: number;
   sponsoredDeduction: number;
+  absentPaidCount?: number;
+  absentPaidCash?: number;
   externalSponsees: ExternalSponsee[];
   onAddExternalSponsorship?: (data: {
     payerId?: string;
@@ -3397,6 +3568,7 @@ function CashCalculatorCard({
   onSearchChange: (v: string) => void;
   onEnsureLoaded: () => void;
   onOpenModal?: () => void;
+  onOpenCrossTaxiModal?: () => void;
   baseCash: number;
   totalCash: number;
 }) {
@@ -3521,6 +3693,12 @@ function CashCalculatorCard({
             <span className="font-mono font-semibold text-warning">{presentSponsoredCount} × R{fare} = -R{sponsoredDeduction}</span>
           </div>
         )}
+        {absentPaidCount !== undefined && absentPaidCount > 0 && (
+          <div className="flex items-center justify-between text-muted">
+            <span className="text-emerald-300 font-medium">+ Absent Passengers (Paid)</span>
+            <span className="font-mono font-semibold text-emerald-300">+{absentPaidCount} × R{fare} = +R{absentPaidCash ?? absentPaidCount * fare}</span>
+          </div>
+        )}
       </div>
 
       {/* Cross-Taxi Sponsorships (Paying for someone in another taxi) */}
@@ -3535,16 +3713,17 @@ function CashCalculatorCard({
               </span>
             )}
           </div>
-          {!isAddingSponsorship && (
-            <button
-              type="button"
-              onClick={() => setIsAddingSponsorship(true)}
-              className="flex items-center gap-1 text-xs font-semibold text-amber-400 hover:text-amber-300 transition-colors"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              <span>Sponsor Rider in Another Taxi</span>
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => {
+              if (onOpenCrossTaxiModal) onOpenCrossTaxiModal();
+              else setIsAddingSponsorship(!isAddingSponsorship);
+            }}
+            className="flex items-center gap-1 text-xs font-semibold text-amber-400 hover:text-amber-300 transition-colors"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            <span>Sponsor Rider in Another Taxi</span>
+          </button>
         </div>
 
         {/* Info Explainer */}
@@ -3959,6 +4138,12 @@ function CashCalculatorCard({
           <span>Base Passenger Cash</span>
           <span className="font-mono font-semibold text-ink">R{baseCash}</span>
         </div>
+        {absentPaidCash !== undefined && absentPaidCash > 0 && (
+          <div className="flex items-center justify-between text-muted">
+            <span className="text-emerald-300">+ Absent Passengers (Paid)</span>
+            <span className="font-mono font-semibold text-emerald-300">+R{absentPaidCash}</span>
+          </div>
+        )}
         {externalCash > 0 && (
           <div className="flex items-center justify-between text-muted">
             <span>+ External Sponsee Cash</span>
@@ -3984,7 +4169,7 @@ function CashCalculatorCard({
 }
 
 function StopGroupedChecklist({
-  riders, vehicleType, orderedStops, stopRedirects, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
+  riders, vehicleType, orderedStops, stopRedirects, presentIds, absentIds, absentPaidIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
   riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemoveRider, externalSponsorLocks,
 }: {
   riders: Passenger[];
@@ -3993,9 +4178,11 @@ function StopGroupedChecklist({
   stopRedirects?: Record<string, string>;
   presentIds: Set<string>;
   absentIds: Set<string>;
+  absentPaidIds?: Set<string>;
   onSetPresent: (id: string, present: boolean) => void;
   onToggleSponsored: (id: string) => void;
   onToggleUnpaid: (id: string) => void;
+  onToggleAbsentPaid?: (id: string) => void;
   onSetNote: (id: string, text: string) => void;
   sponsoredIds: Set<string>;
   unpaidIds: Set<string>;
@@ -4107,10 +4294,12 @@ function StopGroupedChecklist({
                       passenger={p}
                       isPresent={presentIds.has(p.id) || presentIds.has(String(p.id))}
                       isAbsent={absentIds.has(p.id) || absentIds.has(String(p.id))}
+                      isAbsentPaid={absentPaidIds?.has(p.id) || absentPaidIds?.has(String(p.id))}
                       touched={presentIds.has(p.id) || absentIds.has(p.id) || presentIds.has(String(p.id)) || absentIds.has(String(p.id))}
                       onSetPresent={onSetPresent}
                       onToggleSponsored={onToggleSponsored}
                       onToggleUnpaid={onToggleUnpaid}
+                      onToggleAbsentPaid={onToggleAbsentPaid}
                       onSetNote={onSetNote}
                       isSponsored={sponsoredIds.has(p.id) || sponsoredIds.has(String(p.id))}
                       isUnpaid={unpaidIds.has(p.id) || unpaidIds.has(String(p.id))}
@@ -4136,7 +4325,7 @@ function StopGroupedChecklist({
 }
 
 function AlphabeticalChecklist({
-  riders, vehicleType, stopRedirects, presentIds, absentIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
+  riders, vehicleType, stopRedirects, presentIds, absentIds, absentPaidIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
   riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemoveRider, externalSponsorLocks,
 }: {
   riders: Passenger[];
@@ -4144,9 +4333,11 @@ function AlphabeticalChecklist({
   stopRedirects?: Record<string, string>;
   presentIds: Set<string>;
   absentIds: Set<string>;
+  absentPaidIds?: Set<string>;
   onSetPresent: (id: string, present: boolean) => void;
   onToggleSponsored: (id: string) => void;
   onToggleUnpaid: (id: string) => void;
+  onToggleAbsentPaid?: (id: string) => void;
   onSetNote: (id: string, text: string) => void;
   sponsoredIds: Set<string>;
   unpaidIds: Set<string>;
@@ -4184,10 +4375,12 @@ function AlphabeticalChecklist({
             passenger={p}
             isPresent={presentIds.has(p.id) || presentIds.has(String(p.id))}
             isAbsent={absentIds.has(p.id) || absentIds.has(String(p.id))}
+            isAbsentPaid={absentPaidIds?.has(p.id) || absentPaidIds?.has(String(p.id))}
             touched={presentIds.has(p.id) || absentIds.has(p.id) || presentIds.has(String(p.id)) || absentIds.has(String(p.id))}
             onSetPresent={onSetPresent}
             onToggleSponsored={onToggleSponsored}
             onToggleUnpaid={onToggleUnpaid}
+            onToggleAbsentPaid={onToggleAbsentPaid}
             onSetNote={onSetNote}
             isSponsored={sponsoredIds.has(p.id) || sponsoredIds.has(String(p.id))}
             isUnpaid={unpaidIds.has(p.id) || unpaidIds.has(String(p.id))}
@@ -4208,16 +4401,18 @@ function AlphabeticalChecklist({
 }
 
 const PassengerRow = React.memo(function PassengerRow({
-  passenger, isPresent, isAbsent, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onSetNote, isSponsored, isUnpaid, noteText, redirectedFrom, disabled,
+  passenger, isPresent, isAbsent, isAbsentPaid, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, isSponsored, isUnpaid, noteText, redirectedFrom, disabled,
   outstandingDebts, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemove, externalLock,
 }: {
   passenger: Passenger;
   isPresent: boolean;
   isAbsent: boolean;
+  isAbsentPaid?: boolean;
   touched: boolean;
   onSetPresent: (id: string, present: boolean) => void;
   onToggleSponsored: (id: string) => void;
   onToggleUnpaid: (id: string) => void;
+  onToggleAbsentPaid?: (id: string) => void;
   onSetNote: (id: string, text: string) => void;
   isSponsored: boolean;
   isUnpaid: boolean;
@@ -4297,6 +4492,11 @@ const PassengerRow = React.memo(function PassengerRow({
                 · {passenger.stop}
               </span>
             ) : null}
+            {isAbsent && isAbsentPaid && (
+              <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300 border border-emerald-500/40">
+                Paid (Absent)
+              </span>
+            )}
             {!touched && !disabled && (
               <span className="text-[10px] text-amber-400/80 font-medium">
                 (unmarked)
@@ -4425,6 +4625,24 @@ const PassengerRow = React.memo(function PassengerRow({
           <AlertCircle className="h-3 w-3 text-crimson-400" />
           {isUnpaid ? "Didn't Pay" : "Didn't Pay"}
         </button>
+
+        {/* Paid (Absent) Toggle - only shown when passenger is Absent */}
+        {isAbsent && onToggleAbsentPaid && (
+          <button
+            type="button"
+            onClick={() => onToggleAbsentPaid(String(passenger.id))}
+            disabled={disabled}
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-all active:scale-95 ${
+              isAbsentPaid
+                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 font-semibold'
+                : 'bg-card-2/60 text-muted border border-line hover:text-ink'
+            }`}
+            title="Mark that this passenger is absent but has already paid their fare (will not be added to debt ledger)"
+          >
+            <Banknote className="h-3 w-3 text-emerald-400" />
+            <span>{isAbsentPaid ? 'Paid (Absent) ✓' : 'Paid (Absent)'}</span>
+          </button>
+        )}
 
         {/* Settle Debt Button (Reveals breakdown on tap) */}
         {outstandingDebts && outstandingDebts.length > 0 && (

@@ -6,6 +6,7 @@ const supabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | unde
 export const MANIFESTS_TABLE = 'transport_manifests';
 export const LEDGER_TABLE = 'cancellation_ledger';
 export const VEHICLES_TABLE = 'transport_vehicles';
+export const SPONSORSHIPS_TABLE = 'sponsorship_audits';
 
 const isConfigured = Boolean(
   supabaseUrl &&
@@ -28,6 +29,7 @@ export class MockSupabaseStorage {
     [MANIFESTS_TABLE]: [],
     [LEDGER_TABLE]: [],
     [VEHICLES_TABLE]: [],
+    [SPONSORSHIPS_TABLE]: [],
   };
   private listeners: Set<(table: string, payload: StoragePayload) => void> = new Set();
 
@@ -59,6 +61,11 @@ export class MockSupabaseStorage {
       if (vehicles) {
         const parsed = JSON.parse(vehicles);
         if (Array.isArray(parsed)) this.memoryStore[VEHICLES_TABLE] = parsed;
+      }
+      const sponsorships = localStorage.getItem(`crc_transport_${SPONSORSHIPS_TABLE}`);
+      if (sponsorships) {
+        const parsed = JSON.parse(sponsorships);
+        if (Array.isArray(parsed)) this.memoryStore[SPONSORSHIPS_TABLE] = parsed;
       }
     } catch {
       // Ignore local storage parse errors

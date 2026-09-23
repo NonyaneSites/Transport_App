@@ -76,6 +76,7 @@ export function applyWalkInToManifest(
       absentIds,
       sponsoredIds: currentDraft.sponsoredIds || [],
       unpaidIds: currentDraft.unpaidIds || [],
+      absentPaidIds: currentDraft.absentPaidIds || [],
       updatedAt: new Date().toISOString(),
       updatedBy: extraDraftUpdate?.updatedBy || currentDraft.updatedBy,
     };
@@ -281,6 +282,15 @@ export function reconcileManifestForSave(
         if (!nextUnpaid.some((uId) => String(uId) === String(id))) nextUnpaid.push(id);
       });
 
+      const baseAbsentPaid = new Set((baseD.absentPaidIds || []).map(String));
+      const incAbsentPaid = new Set((incD.absentPaidIds || []).map(String));
+      const addedAbsentPaid = (incD.absentPaidIds || []).filter((id) => !baseAbsentPaid.has(String(id)));
+      const removedAbsentPaid = new Set((baseD.absentPaidIds || []).filter((id) => !incAbsentPaid.has(String(id))).map(String));
+      const nextAbsentPaid = (remD.absentPaidIds || []).filter((id) => !removedAbsentPaid.has(String(id)));
+      addedAbsentPaid.forEach((id) => {
+        if (!nextAbsentPaid.some((apId) => String(apId) === String(id))) nextAbsentPaid.push(id);
+      });
+
       nextDraftState = {
         ...remD,
         ...incD,
@@ -288,6 +298,7 @@ export function reconcileManifestForSave(
         absentIds: nextAbsent,
         sponsoredIds: nextSpon,
         unpaidIds: nextUnpaid,
+        absentPaidIds: nextAbsentPaid,
         notes: { ...(remD.notes || {}), ...(incD.notes || {}) },
         repName: incD.repName !== baseD.repName ? (incD.repName || remD.repName) : remD.repName,
         licensePlate: incD.licensePlate !== baseD.licensePlate ? (incD.licensePlate || remD.licensePlate) : remD.licensePlate,
@@ -344,6 +355,7 @@ export function reconcileManifestForSave(
           absentIds: v.draftState.absentIds?.filter((id) => activeRidersSet.has(String(id))),
           sponsoredIds: v.draftState.sponsoredIds?.filter((id) => activeRidersSet.has(String(id))),
           unpaidIds: v.draftState.unpaidIds?.filter((id) => activeRidersSet.has(String(id))),
+          absentPaidIds: v.draftState.absentPaidIds?.filter((id) => activeRidersSet.has(String(id))),
           notes: Object.fromEntries(
             Object.entries(v.draftState.notes || {}).filter(([k]) => activeRidersSet.has(String(k)))
           ),
@@ -681,6 +693,7 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
               absentIds: (v.draftState?.absentIds ?? ind.draftState?.absentIds ?? []).filter((id) => activeRiderIds.has(id)),
               sponsoredIds: (v.draftState?.sponsoredIds ?? ind.draftState?.sponsoredIds ?? []).filter((id) => activeRiderIds.has(id)),
               unpaidIds: (v.draftState?.unpaidIds ?? ind.draftState?.unpaidIds ?? []).filter((id) => activeRiderIds.has(id)),
+              absentPaidIds: (v.draftState?.absentPaidIds ?? ind.draftState?.absentPaidIds ?? []).filter((id) => activeRiderIds.has(id)),
               notes: Object.fromEntries(
                 Object.entries({ ...(ind.draftState?.notes || {}), ...(v.draftState?.notes || {}) }).filter(([k]) => activeRiderIds.has(k))
               ),

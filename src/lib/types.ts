@@ -110,6 +110,7 @@ export interface VehicleDraftState {
   absentIds?: string[];
   sponsoredIds?: string[];
   unpaidIds?: string[]; // IDs of riders who rode but did not pay (unpaid fare)
+  absentPaidIds?: string[]; // IDs of riders marked absent but who paid fare nonetheless
   notes?: Record<string, string>; // passengerId -> note string
   repName?: string;
   coReps?: string[];
@@ -225,6 +226,15 @@ export type LiveSyncAction =
       vehicleId: string;
       riderId: string;
       unpaid: boolean;
+      repName: string;
+      clientId: string;
+      timestamp: number;
+    }
+  | {
+      type: 'rider_absent_paid';
+      vehicleId: string;
+      riderId: string;
+      absentPaid: boolean;
       repName: string;
       clientId: string;
       timestamp: number;

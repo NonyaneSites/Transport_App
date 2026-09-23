@@ -11,6 +11,7 @@ interface RepStatsCopyCardProps {
   absentIds: Set<string>;
   sponsoredIds: Set<string>;
   unpaidIds?: Set<string>;
+  absentPaidIds?: Set<string>;
   notes?: Record<string, string>;
   vehicleName: string;
   repName: string;
@@ -64,6 +65,7 @@ export function RepStatsCopyCard({
   absentIds,
   sponsoredIds,
   unpaidIds = new Set(),
+  absentPaidIds = new Set(),
   notes = {},
   vehicleName,
   repName,
@@ -112,10 +114,15 @@ export function RepStatsCopyCard({
     return riders.filter((r) => unpaidIds.has(r.id));
   }, [riders, unpaidIds]);
 
-  // 5. Cancellations (absentees)
+  // 5. Cancellations (unpaid absentees)
   const absenteePassengers = useMemo(() => {
-    return riders.filter((r) => absentIds.has(r.id));
-  }, [riders, absentIds]);
+    return riders.filter((r) => absentIds.has(r.id) && !absentPaidIds.has(r.id) && !absentPaidIds.has(String(r.id)));
+  }, [riders, absentIds, absentPaidIds]);
+
+  // 6. Paid while absent
+  const absentPaidPassengers = useMemo(() => {
+    return riders.filter((r) => absentIds.has(r.id) && (absentPaidIds.has(r.id) || absentPaidIds.has(String(r.id))));
+  }, [riders, absentIds, absentPaidIds]);
 
   function formatList(passengers: Passenger[], delimiter: 'comma' | 'newline' = formatStyle, isSponsored = false): string {
     if (passengers.length === 0) return '';
@@ -135,6 +142,7 @@ export function RepStatsCopyCard({
   const sponsoredText = formatList(sponsoredPassengers, formatStyle, true);
   const unpaidText = formatList(unpaidPassengers);
   const absenteeText = formatList(absenteePassengers);
+  const absentPaidText = formatList(absentPaidPassengers);
 
   // Full unified stats template for pasting into WhatsApp / summaries
   const allStatsTemplate = useMemo(() => {
@@ -159,11 +167,17 @@ export function RepStatsCopyCard({
     lines.push(unpaidText || 'None');
     lines.push('');
 
-    lines.push('*List of cancellations:*');
+    lines.push('*List of cancellations (Unpaid):*');
     lines.push(absenteeText || 'None');
 
+    if (absentPaidPassengers.length > 0) {
+      lines.push('');
+      lines.push('*List of cancellations (Paid while absent):*');
+      lines.push(absentPaidText);
+    }
+
     return lines.join('\n');
-  }, [vehicleName, repName, presentText, ftvText, sponsoredText, unpaidText, absenteeText]);
+  }, [vehicleName, repName, presentText, ftvText, sponsoredText, unpaidText, absenteeText, absentPaidText, absentPaidPassengers.length]);
 
   function toggleManualFtv(passengerId: string) {
     setManualFtvIds((prev) => {

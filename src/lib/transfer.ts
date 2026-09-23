@@ -412,6 +412,7 @@ export async function transferPassengerAcrossServices(params: {
             absentIds: curDraft.absentIds?.filter((id) => String(id) !== sPassengerId),
             sponsoredIds: curDraft.sponsoredIds?.filter((id) => String(id) !== sPassengerId),
             unpaidIds: curDraft.unpaidIds?.filter((id) => String(id) !== sPassengerId),
+            absentPaidIds: curDraft.absentPaidIds?.filter((id) => String(id) !== sPassengerId),
             notes: Object.fromEntries(
               Object.entries(curDraft.notes || {}).filter(([k]) => String(k) !== sPassengerId)
             ),
@@ -498,6 +499,7 @@ export async function transferPassengerAcrossServices(params: {
           absentIds: curDraft.absentIds?.filter((id) => String(id) !== sPassengerId),
           sponsoredIds: curDraft.sponsoredIds?.filter((id) => String(id) !== sPassengerId),
           unpaidIds: curDraft.unpaidIds?.filter((id) => String(id) !== sPassengerId),
+          absentPaidIds: curDraft.absentPaidIds?.filter((id) => String(id) !== sPassengerId),
           notes: Object.fromEntries(
             Object.entries(curDraft.notes || {}).filter(([k]) => String(k) !== sPassengerId)
           ),

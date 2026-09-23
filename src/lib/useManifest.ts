@@ -84,6 +84,7 @@ export function mergeIncomingManifest(
           absentIds: (incDraft.absentIds !== undefined ? incDraft.absentIds : (curDraft?.absentIds || [])).filter((id) => activeRiderSet.has(id)),
           sponsoredIds: (incDraft.sponsoredIds !== undefined ? incDraft.sponsoredIds : (curDraft?.sponsoredIds || [])).filter((id) => activeRiderSet.has(id)),
           unpaidIds: (incDraft.unpaidIds !== undefined ? incDraft.unpaidIds : (curDraft?.unpaidIds || [])).filter((id) => activeRiderSet.has(id)),
+          absentPaidIds: (incDraft.absentPaidIds !== undefined ? incDraft.absentPaidIds : (curDraft?.absentPaidIds || [])).filter((id) => activeRiderSet.has(id)),
           notes: Object.fromEntries(
             Object.entries({ ...(curDraft?.notes || {}), ...(incDraft.notes || {}) }).filter(([k]) => activeRiderSet.has(k))
           ),
@@ -851,6 +852,15 @@ export function useManifest(
         }
       });
 
+      // Merge absent paid marks: preserve existing absent paid flags from other reps
+      const mergedAbsentPaid = new Set(draftState.absentPaidIds ?? []);
+      (existingDraft.absentPaidIds ?? []).forEach((id) => {
+        const lastEdit = localEditedMap[id] ?? 0;
+        if (now - lastEdit > 15000) {
+          mergedAbsentPaid.add(id);
+        }
+      });
+
       // Merge manual cancellations by ID
       const manualMap = new Map<string, { id: string; passengerName: string; structure?: string; amount: number; note?: string }>();
       (existingDraft.manualCancellations ?? []).forEach((c) => manualMap.set(c.id, c));
@@ -868,6 +878,7 @@ export function useManifest(
         absentIds: Array.from(combinedAbsent),
         sponsoredIds: Array.from(mergedSponsored),
         unpaidIds: Array.from(mergedUnpaid),
+        absentPaidIds: Array.from(mergedAbsentPaid),
         notes: { ...(existingDraft.notes ?? {}), ...(draftState.notes ?? {}) },
         repName: draftState.repName?.trim() || existingDraft.repName || targetVehicle?.repName,
         licensePlate: draftState.licensePlate?.trim() || existingDraft.licensePlate || targetVehicle?.licensePlate,
