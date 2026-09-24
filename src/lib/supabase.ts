@@ -315,10 +315,18 @@ export class MockQueryBuilder {
 
 export function createMockClient() {
   return {
+    auth: {
+      getSession: async () => ({ data: { session: null }, error: null }),
+      onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
+      signInWithPassword: async () => ({ data: null, error: { message: "Auth disabled in mock mode" } }),
+      signUp: async () => ({ data: null, error: { message: "Auth disabled in mock mode" } }),
+      signOut: async () => ({ error: null }),
+    },
     from(tableName: string) {
       return new MockQueryBuilder(tableName);
     },
     channel(channelName: string) {
+      // ✅ Clean single declaration:
       const callbacks: ((payload: StoragePayload & { table: string }) => void)[] = [];
       let unsub: (() => void) | null = null;
 
@@ -374,19 +382,15 @@ export function createMockClient() {
     },
   };
 }
-
-/**
- * Creates a resilient Supabase client wrapper that automatically falls back
- * to the local mock storage engine whenever Supabase network requests fail
- * (e.g. TypeError: Failed to fetch, paused project, CORS, offline mode).
- */
 function createResilientSupabaseClient() {
   if (!isConfigured) {
     return createMockClient() as unknown as ReturnType<typeof createClient>;
   }
 
   const realClient = createClient(supabaseUrl!, supabaseAnonKey!, {
-    auth: { persistSession: false },
+    // Keep auth enabled, just turn off autoRefreshToken if you want, 
+    // or leave it as default.
+    auth: { persistSession: true }, 
     realtime: { params: { eventsPerSecond: 10 } },
   });
 
@@ -394,6 +398,7 @@ function createResilientSupabaseClient() {
 
   return {
     ...realClient,
+    auth: realClient.auth, // <--- EXPLICITLY BIND AUTH HERE
     from(tableName: string) {
       const realBuilder = realClient.from(tableName);
       const fallbackBuilder = mockClient.from(tableName);
