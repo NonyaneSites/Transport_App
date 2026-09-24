@@ -20,10 +20,10 @@ export function Header({ current }: HeaderProps = {}) {
       />
       <div>
         <div className="flex items-center gap-1.5">
-          <h1 className="font-display text-sm font-bold tracking-tight text-ink sm:text-base">
+          <h1 className="font-display text-sm font-bold tracking-tight text-white sm:text-base">
             CRC Transport
           </h1>
-          <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-crimson-500/15 text-crimson-400 border border-crimson-500/20">
+          <span className="text-[8px] uppercase tracking-wider font-bold px-0.5 py-0.5 text-white border border-white/20 rounded-md">
             JHB
           </span>
         </div>
@@ -32,7 +32,7 @@ export function Header({ current }: HeaderProps = {}) {
   );
 
   return (
-    <header className="sticky top-0 z-40 border-b border-line bg-card/95 backdrop-blur-md">
+    <header className="sticky top-0 z-40 border-b-[3px] border-[#E11D48] bg-[#031435] backdrop-blur-md">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-2.5 sm:px-6">
         {/* Brand: non-navigating on Rep page, links to Admin on Admin/Ledger */}
         {isRep ? (
@@ -47,7 +47,7 @@ export function Header({ current }: HeaderProps = {}) {
         <div className="flex items-center gap-2">
           {isRep ? (
             /* Rep Portal: Isolated, strictly NO links to Ledger or Admin */
-            <div className="flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold border bg-emerald-500/15 text-emerald-300 border-emerald-500/30">
+            <div className="flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold border bg-emerald-500/40 text-white border-emerald-500/30">
               <Smartphone className="h-3.5 w-3.5" />
               <span>Rep Portal</span>
             </div>
@@ -71,13 +71,13 @@ export function Header({ current }: HeaderProps = {}) {
           ) : (
             /* Admin Page: Can navigate to Ledger, but NOT to Rep */
             <>
-              <div className="flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold border bg-crimson-500/15 text-crimson-300 border-crimson-500/30">
+              <div className="flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold border bg-crimson-500/60 text-card-3 border-crimson-500/30">
                 <ShieldCheck className="h-3.5 w-3.5" />
                 <span>Admin Portal</span>
               </div>
               <Link
                 to="/ledger"
-                className="flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold border border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 transition-colors"
+                className="flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold border border-rose-500/30 bg-rose-500/60 text-card-3 hover:bg-rose-400/85 transition-colors"
                 title="Switch to Cancellation Ledger"
               >
                 <BookOpen className="h-3.5 w-3.5" />
