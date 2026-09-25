@@ -110,19 +110,19 @@ export function AdminAttendanceNotesSection({
       if (!v.submitted) continue;
 
       const draft = v.draftState;
-      const sIds = new Set<string>(draft?.sponsoredIds || []);
+      const sIds = new Set<string>((draft?.sponsoredIds || []).map(String));
       const notesMap = draft?.notes || {};
       const repName = v.repName || v.submittedBy || '—';
 
       for (const riderId of v.riders || []) {
-        const p = passengerMap.get(riderId);
+        const p = passengerMap.get(String(riderId)) || passengerMap.get(riderId);
         if (!p) continue;
 
-        const isMarkedSponsored = Boolean(p.sponsored || sIds.has(p.id));
-        if (isMarkedSponsored && !seen.has(p.id)) {
-          seen.add(p.id);
-          const isPresent = draft?.presentIds?.includes(p.id) || p.present;
-          const sponsorNote = notesMap[p.id] || p.sponsorNote || '';
+        const isMarkedSponsored = Boolean(p.sponsored || sIds.has(String(p.id)) || sIds.has(p.id));
+        if (isMarkedSponsored && !seen.has(String(p.id))) {
+          seen.add(String(p.id));
+          const isPresent = draft?.presentIds?.some((id) => String(id) === String(p.id)) || p.present;
+          const sponsorNote = notesMap[p.id] || notesMap[String(p.id)] || p.sponsorNote || '';
           list.push({
             passenger: p,
             vehicle: v,
@@ -145,19 +145,19 @@ export function AdminAttendanceNotesSection({
       if (!v.submitted) continue;
 
       const draft = v.draftState;
-      const uIds = new Set<string>(draft?.unpaidIds || []);
+      const uIds = new Set<string>((draft?.unpaidIds || []).map(String));
       const notesMap = draft?.notes || {};
       const repName = v.repName || v.submittedBy || '—';
 
       for (const riderId of v.riders || []) {
-        const p = passengerMap.get(riderId);
+        const p = passengerMap.get(String(riderId)) || passengerMap.get(riderId);
         if (!p) continue;
 
-        const isMarkedUnpaid = Boolean(p.didNotPay || uIds.has(p.id));
-        if (isMarkedUnpaid && !seen.has(p.id)) {
-          seen.add(p.id);
-          const isPresent = draft?.presentIds?.includes(p.id) || p.present;
-          const unpaidNote = notesMap[p.id] || p.unpaidNote || p.sponsorNote || '';
+        const isMarkedUnpaid = Boolean(p.didNotPay || uIds.has(String(p.id)) || uIds.has(p.id));
+        if (isMarkedUnpaid && !seen.has(String(p.id))) {
+          seen.add(String(p.id));
+          const isPresent = draft?.presentIds?.some((id) => String(id) === String(p.id)) || p.present;
+          const unpaidNote = notesMap[p.id] || notesMap[String(p.id)] || p.unpaidNote || p.sponsorNote || '';
           list.push({
             passenger: p,
             vehicle: v,
@@ -1223,21 +1223,21 @@ export function AdminAttendanceNotesSection({
                     {sortVehiclesNatural(manifest.vehicles || []).map((v) => {
                       const riders = (v.riders || []).map((id) => passengerMap.get(id)).filter(Boolean) as Passenger[];
                       const draft = v.draftState;
-                      const pIds = new Set<string>(draft?.presentIds || []);
-                      const aIds = new Set<string>(draft?.absentIds || []);
-                      const sIds = new Set<string>(draft?.sponsoredIds || []);
-                      const uIds = new Set<string>(draft?.unpaidIds || []);
+                      const pIds = new Set<string>((draft?.presentIds || []).map(String));
+                      const aIds = new Set<string>((draft?.absentIds || []).map(String));
+                      const sIds = new Set<string>((draft?.sponsoredIds || []).map(String));
+                      const uIds = new Set<string>((draft?.unpaidIds || []).map(String));
 
                       const presentCount = v.submitted
                         ? riders.filter((r) => r.present).length
-                        : riders.filter((r) => pIds.has(r.id)).length;
+                        : riders.filter((r) => r.present || pIds.has(String(r.id))).length;
 
                       const absentCount = v.submitted
                         ? riders.filter((r) => !r.present).length
-                        : riders.filter((r) => aIds.has(r.id)).length;
+                        : riders.filter((r) => aIds.has(String(r.id))).length;
 
-                      const sponsoredCount = riders.filter((r) => r.sponsored || sIds.has(r.id)).length;
-                      const unpaidCount = riders.filter((r) => r.didNotPay || uIds.has(r.id)).length;
+                      const sponsoredCount = riders.filter((r) => r.sponsored || sIds.has(String(r.id))).length;
+                      const unpaidCount = riders.filter((r) => r.didNotPay || uIds.has(String(r.id))).length;
                       const repName = v.repName || v.submittedBy || '—';
                       const notesCount = (draft?.notes ? Object.keys(draft.notes).length : 0) + (v.generalNotes ? 1 : 0);
 

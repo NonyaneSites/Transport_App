@@ -8,6 +8,7 @@ import {
   updateDebtorOnServer,
   listReportedSponsorshipsFromServer,
   verifyBatchSponsorshipsOnServer,
+  recordReportedSponsorshipsOnServer,
 } from './serverApi';
 import type { ReportedSponsorship, SponsorshipStatus } from './serverApi';
 import type { Passenger, Vehicle } from './types';
@@ -158,13 +159,12 @@ export function sanitizePassengerDisplayName(rawName: string | null | undefined)
 }
 
 /**
- * Strips auto-generated boilerplate notes like "Unaccounted Sponsorship",
- * "Unpaid Sponsorship", or prefixes like "Unaccounted Sponsorship: ...",
- * preserving only genuine user-provided notes.
+ * Strips auto-generated boilerplate and vehicle references from sponsorship notes,
+ * preserving only genuine user-provided sponsor notes.
  */
 export function cleanSponsorshipNote(note?: string | null): string {
   if (!note || typeof note !== 'string') return '';
-  const trimmed = note.trim();
+  let trimmed = note.trim();
   if (!trimmed) return '';
 
   // Exact boilerplate matches (case-insensitive)
@@ -172,6 +172,8 @@ export function cleanSponsorshipNote(note?: string | null): string {
   if (/^(?:unaccounted|unpaid)$/i.test(trimmed)) return '';
   if (/^actually\s*sponsored$/i.test(trimmed)) return '';
   if (/^pending\s*verification$/i.test(trimmed)) return '';
+  if (/^(?:(?:from|in)\s+)?(?:taxi|vehicle|bus)\s*\d+$/i.test(trimmed)) return '';
+  if (/^vehicle:\s*.*$/i.test(trimmed)) return '';
 
   // Pattern: "Unaccounted Sponsorship (from ...)"
   if (/^unaccounted\s*sponsorship\s*\(from\s*[^)]+\)$/i.test(trimmed)) return '';
@@ -181,7 +183,7 @@ export function cleanSponsorshipNote(note?: string | null): string {
   if (mReported && mReported[1]) {
     const inner = mReported[1].trim();
     if (!inner || /^(?:unaccounted|unpaid|sponsorship)$/i.test(inner)) return '';
-    return inner;
+    return cleanSponsorshipNote(inner);
   }
 
   // Pattern: "Unaccounted Sponsorship: XYZ" or "Unpaid Sponsorship: XYZ"
@@ -191,6 +193,22 @@ export function cleanSponsorshipNote(note?: string | null): string {
     if (!after || /^(?:unaccounted|unpaid|sponsorship)$/i.test(after)) return '';
     return cleanSponsorshipNote(after);
   }
+
+  // Strip vehicle mentions like "(Taxi 1)", "(from Taxi 2)", "(in Vehicle 3)", "(Bus 4)"
+  trimmed = trimmed.replace(/\s*\((?:(?:from|in)\s+)?(?:taxi|vehicle|bus)(?:\s*\d+)?(?:\s*-[^)]*)?\)/gi, '').trim();
+
+  // Strip "in/from Taxi X" or "in/from Vehicle X"
+  trimmed = trimmed.replace(/\s*(?:(?:from|in)\s+)(?:taxi|vehicle|bus)\s*\d+\b/gi, '').trim();
+
+  // Strip " - Taxi X" or "Taxi X - "
+  trimmed = trimmed.replace(/\s*[-–—]\s*(?:taxi|vehicle|bus)\s*\d+\b/gi, '').trim();
+  trimmed = trimmed.replace(/^(?:taxi|vehicle|bus)\s*\d+\s*[-–—:]\s*/gi, '').trim();
+
+  // Strip general notes boilerplate if accidental full notes got attached
+  trimmed = trimmed.replace(/(?:co-reps|cash collected|external sponsees|past cancellations)[^;.]*(?:[;.]|$)/gi, '').trim();
+
+  if (/^(?:unaccounted|unpaid)?\s*sponsorships?$/i.test(trimmed)) return '';
+  if (/^(?:(?:from|in)\s+)?(?:taxi|vehicle|bus)\s*\d+$/i.test(trimmed)) return '';
 
   return trimmed;
 }
@@ -547,9 +565,9 @@ export async function insertAbsentees(
       rep_name: repName,
       license_plate: licensePlate,
       sponsored: p.sponsored ?? false,
-      sponsor_note: p.sponsorNote ?? '',
+      sponsor_note: cleanSponsorshipNote(p.sponsorNote),
       structure_debt: CANCELLATION_FEE,
-      general_notes: generalNotes,
+      general_notes: p.sponsored ? (cleanSponsorshipNote(p.sponsorNote) || '') : generalNotes,
     };
   });
 
@@ -1995,8 +2013,14 @@ export async function recordReportedSponsorships(
     });
   }
 
-  // 3. Upsert to Supabase
+  // 3. Upsert to Supabase & Central Server
   if (upsertRows.length > 0) {
+    try {
+      await recordReportedSponsorshipsOnServer(upsertRows);
+    } catch {
+      /* ignore server error */
+    }
+
     try {
       const { error: upsertErr } = await supabase
         .from(SPONSORSHIPS_TABLE)
@@ -2115,7 +2139,17 @@ export async function withdrawReportedSponsorships(
 export async function listReportedSponsorships(): Promise<ReportedSponsorship[]> {
   let list: ReportedSponsorship[] = [];
 
-  // 1. Primary: Supabase table sponsorship_audits
+  // 1. Primary: Central Express Server API (contains cross-device reported sponsorships)
+  try {
+    const serverSponsees = await listReportedSponsorshipsFromServer();
+    if (serverSponsees && serverSponsees.length > 0) {
+      list = serverSponsees;
+    }
+  } catch (err) {
+    console.debug('[Ledger] Server fetch sponsorships note:', err);
+  }
+
+  // 2. Secondary: Supabase table sponsorship_audits
   try {
     const { data, error } = await supabase
       .from(SPONSORSHIPS_TABLE)
@@ -2123,22 +2157,10 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
       .order('submitted_at', { ascending: false });
 
     if (!error && Array.isArray(data) && data.length > 0) {
-      list = data as ReportedSponsorship[];
+      list = cleanAndDeduplicateSponsorships([...list, ...(data as ReportedSponsorship[])]);
     }
   } catch (err) {
     console.debug('[Ledger] Supabase listReportedSponsorships note:', err);
-  }
-
-  // 2. Server API fallback if Supabase returned empty
-  if (list.length === 0) {
-    try {
-      const serverSponsees = await listReportedSponsorshipsFromServer();
-      if (serverSponsees && serverSponsees.length > 0) {
-        list = serverSponsees;
-      }
-    } catch (err) {
-      console.debug('[Ledger] Server fetch sponsorships note:', err);
-    }
   }
 
   // 3. LocalStorage fallback

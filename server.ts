@@ -296,9 +296,9 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
         rep_name: (repName || '').trim(),
         license_plate: (licensePlate || '').trim(),
         sponsored: Boolean(a.sponsored),
-        sponsor_note: a.sponsorNote || '',
+        sponsor_note: cleanSponsorshipNote(a.sponsorNote),
         structure_debt: 40,
-        general_notes: (generalNotes || '').trim(),
+        general_notes: a.sponsored ? (cleanSponsorshipNote(a.sponsorNote) || '') : (generalNotes || '').trim(),
         submitted_at: nowIso,
       });
     }
@@ -580,6 +580,15 @@ app.post('/api/manifests/:key/draft', (req, res) => {
   res.json({ success: true, manifest });
 });
 
+// Broadcast fine-grained live actions (attendance toggles, sponsorship clicks, didn't pay clicks)
+app.post('/api/sync/live-action', (req, res) => {
+  const action = req.body;
+  if (action && typeof action === 'object') {
+    broadcastSse('live_action', action);
+  }
+  res.json({ success: true });
+});
+
 // ----------------------------------------------------
 // LEDGER API
 // ----------------------------------------------------
@@ -651,6 +660,81 @@ function sanitizePassengerDisplayName(rawName: string): string {
   return name;
 }
 
+// Record reported sponsorships from attendance check-in or transfers
+app.post('/api/ledger/sponsorships', (req, res) => {
+  const { sponsorships } = req.body || {};
+  if (Array.isArray(sponsorships) && sponsorships.length > 0) {
+    const audits = readJsonFile<Array<{
+      id: string;
+      manifest_key: string;
+      date: string;
+      service: string;
+      passenger_id?: string;
+      passenger_name: string;
+      structure: string;
+      stop?: string;
+      vehicle_name: string;
+      rep_name: string;
+      sponsor_note: string;
+      status: 'pending' | 'actually_sponsored' | 'unpaid_sponsorship' | 'unaccounted_sponsorship';
+      status_updated_at?: string;
+      ledger_entry_id?: string;
+      submitted_at: string;
+    }>>(SPONSORSHIPS_FILE, []);
+
+    for (const sp of sponsorships) {
+      const rawName = sp.passenger_name || sp.fullName;
+      if (!rawName) continue;
+      const cleanName = sanitizePassengerDisplayName(rawName);
+      if (!cleanName) continue;
+      const baseDate = normalizeDateToYMD(sp.date || sp.manifest_key);
+      const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const auditId = sp.id || `sp_${baseDate}_${normName}`;
+      const cleanNote = cleanSponsorshipNote(sp.sponsor_note ?? sp.sponsorNote);
+
+      const existingIdx = audits.findIndex((a) => {
+        if (a.id && (a.id === auditId || a.id === `sp_${normName}`)) return true;
+        if (sp.passenger_id && a.passenger_id && String(sp.passenger_id) === String(a.passenger_id)) return true;
+        const aDate = normalizeDateToYMD(a.date || a.manifest_key);
+        const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+        return aName === normName && (!baseDate || !aDate || aDate === baseDate);
+      });
+
+      if (existingIdx >= 0) {
+        audits[existingIdx] = {
+          ...audits[existingIdx],
+          passenger_name: cleanName,
+          structure: sp.structure || audits[existingIdx].structure,
+          stop: sp.stop || audits[existingIdx].stop,
+          vehicle_name: sp.vehicle_name || audits[existingIdx].vehicle_name,
+          rep_name: sp.rep_name || audits[existingIdx].rep_name,
+          sponsor_note: cleanNote || audits[existingIdx].sponsor_note,
+        };
+      } else {
+        audits.push({
+          id: auditId,
+          manifest_key: sp.manifest_key || '',
+          date: sp.date || baseDate,
+          service: sp.service || 'Service',
+          passenger_id: sp.passenger_id || sp.id,
+          passenger_name: cleanName,
+          structure: sp.structure || '',
+          stop: sp.stop || '',
+          vehicle_name: sp.vehicle_name || 'Vehicle',
+          rep_name: sp.rep_name || 'Rep',
+          sponsor_note: cleanNote,
+          status: sp.status || 'pending',
+          submitted_at: sp.submitted_at || new Date().toISOString(),
+        });
+      }
+    }
+
+    atomicWriteJson(SPONSORSHIPS_FILE, audits);
+    broadcastSse('sponsorships_updated', { timestamp: Date.now() });
+  }
+  res.json({ success: true });
+});
+
 // List reported sponsorships for cancellation admin audit
 app.get('/api/ledger/sponsorships', (req, res) => {
   let audits = readJsonFile<Array<{
@@ -671,8 +755,8 @@ app.get('/api/ledger/sponsorships', (req, res) => {
     submitted_at: string;
   }>>(SPONSORSHIPS_FILE, []);
 
-  // Auto-scan manifests to find any sponsored passengers from submitted vehicles
-  // so all existing historical submitted vehicle data is instantly visible
+  // Auto-scan manifests to find any sponsored passengers
+  // so all existing historical and in-progress sponsorship data is instantly visible
   try {
     const files = fs.readdirSync(MANIFESTS_DIR).filter((f) => f.endsWith('.json'));
     let addedCount = 0;
@@ -687,14 +771,13 @@ app.get('/api/ledger/sponsorships', (req, res) => {
           submitted?: boolean;
           repName?: string;
           submittedBy?: string;
+          riders?: string[];
           draftState?: { sponsoredIds?: string[]; notes?: Record<string, string> };
         }>;
       }>(path.join(MANIFESTS_DIR, file), {});
 
-      const submittedVehicles = (m.vehicles || []).filter((v) => Boolean(v.submitted));
-      for (const v of submittedVehicles) {
+      for (const v of m.vehicles || []) {
         const vehicleRiderIds = new Set((v.riders || []).map(String));
-        if (vehicleRiderIds.size === 0) continue;
         const sponIds = new Set((v.draftState?.sponsoredIds || []).map(String));
         const sponNotes = v.draftState?.notes || {};
         const signups = (m.signups || []).filter((s) => vehicleRiderIds.has(String(s.id)));
@@ -725,12 +808,48 @@ app.get('/api/ledger/sponsorships', (req, res) => {
                 stop: s.stop || '',
                 vehicle_name: v.name,
                 rep_name: v.repName || v.submittedBy || 'Rep',
-                sponsor_note: (sponNotes[s.id] ?? s.sponsorNote ?? '').trim(),
+                sponsor_note: cleanSponsorshipNote(sponNotes[s.id] ?? s.sponsorNote),
                 status: 'pending',
                 submitted_at: new Date().toISOString(),
               });
               addedCount++;
             }
+          }
+        }
+      }
+
+      // Also scan all signups directly for any passengers marked sponsored
+      for (const s of m.signups || []) {
+        if (s.sponsored) {
+          const cleanName = sanitizePassengerDisplayName(s.fullName || '');
+          if (!cleanName) continue;
+          const baseDate = normalizeDateToYMD(m.date || key);
+          const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const auditId = `sp_${baseDate}_${normName}`;
+          const exists = audits.some((a) => {
+            if (a.id && (a.id === auditId || a.id === `sp_${normName}`)) return true;
+            if (s.id && a.passenger_id && String(s.id) === String(a.passenger_id)) return true;
+            const aDate = normalizeDateToYMD(a.date || a.manifest_key);
+            const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+            return aName === normName && (!baseDate || !aDate || aDate === baseDate);
+          });
+          if (!exists) {
+            audits.push({
+              id: auditId,
+              manifest_key: key,
+              date: m.date || key,
+              service: 'Service',
+              passenger_id: s.id,
+              passenger_name: cleanName,
+              structure: s.structure || '',
+              stop: s.stop || '',
+              vehicle_name: 'Vehicle',
+              rep_name: 'Rep',
+              sponsor_note: cleanSponsorshipNote(s.sponsorNote),
+              status: 'pending',
+              submitted_at: new Date().toISOString(),
+            });
+            addedCount++;
           }
         }
       }
@@ -765,6 +884,8 @@ app.get('/api/ledger/sponsorships', (req, res) => {
       return false;
     });
 
+    const cleanedSponsorNote = cleanSponsorshipNote(a.sponsor_note);
+
     if (existingIdx >= 0) {
       deduped[existingIdx] = {
         ...deduped[existingIdx],
@@ -773,13 +894,14 @@ app.get('/api/ledger/sponsorships', (req, res) => {
         stop: deduped[existingIdx].stop || a.stop,
         vehicle_name: deduped[existingIdx].vehicle_name || a.vehicle_name,
         rep_name: deduped[existingIdx].rep_name || a.rep_name,
-        sponsor_note: deduped[existingIdx].sponsor_note || a.sponsor_note,
+        sponsor_note: cleanSponsorshipNote(deduped[existingIdx].sponsor_note) || cleanedSponsorNote,
         status: deduped[existingIdx].status !== 'pending' ? deduped[existingIdx].status : a.status,
       };
     } else {
       deduped.push({
         ...a,
         passenger_name: cleanName,
+        sponsor_note: cleanedSponsorNote,
         date: baseDate || a.date,
       });
     }
@@ -793,28 +915,52 @@ app.get('/api/ledger/sponsorships', (req, res) => {
   res.json(audits);
 });
 
-// Helper to strip boilerplate sponsorship notes
+// Helper to strip boilerplate and vehicle notes from sponsorship notes
 function cleanSponsorshipNote(note?: unknown): string {
   if (!note || typeof note !== 'string') return '';
-  const trimmed = note.trim();
+  let trimmed = note.trim();
   if (!trimmed) return '';
+
   if (/^(?:unaccounted|unpaid)?\s*sponsorships?$/i.test(trimmed)) return '';
   if (/^(?:unaccounted|unpaid)$/i.test(trimmed)) return '';
   if (/^actually\s*sponsored$/i.test(trimmed)) return '';
   if (/^pending\s*verification$/i.test(trimmed)) return '';
+  if (/^(?:(?:from|in)\s+)?(?:taxi|vehicle|bus)\s*\d+$/i.test(trimmed)) return '';
+  if (/^vehicle:\s*.*$/i.test(trimmed)) return '';
+
+  // Pattern: "Unaccounted Sponsorship (from ...)"
   if (/^unaccounted\s*sponsorship\s*\(from\s*[^)]+\)$/i.test(trimmed)) return '';
+
   const mReported = trimmed.match(/^(?:unaccounted|unpaid)\s*sponsorship\s*\(reported\s*sponsor:\s*(.*?)\)$/i);
   if (mReported && mReported[1]) {
     const inner = mReported[1].trim();
     if (!inner || /^(?:unaccounted|unpaid|sponsorship)$/i.test(inner)) return '';
-    return inner;
+    return cleanSponsorshipNote(inner);
   }
+
   const mColon = trimmed.match(/^(?:unaccounted|unpaid)\s*sponsorship:\s*(.*)$/i);
   if (mColon && mColon[1]) {
     const after = mColon[1].trim();
     if (!after || /^(?:unaccounted|unpaid|sponsorship)$/i.test(after)) return '';
     return cleanSponsorshipNote(after);
   }
+
+  // Strip vehicle mentions like "(Taxi 1)", "(from Taxi 2)", "(in Vehicle 3)", "(Bus 4)"
+  trimmed = trimmed.replace(/\s*\((?:(?:from|in)\s+)?(?:taxi|vehicle|bus)(?:\s*\d+)?(?:\s*-[^)]*)?\)/gi, '').trim();
+
+  // Strip "in/from Taxi X" or "in/from Vehicle X"
+  trimmed = trimmed.replace(/\s*(?:(?:from|in)\s+)(?:taxi|vehicle|bus)\s*\d+\b/gi, '').trim();
+
+  // Strip " - Taxi X" or "Taxi X - "
+  trimmed = trimmed.replace(/\s*[-–—]\s*(?:taxi|vehicle|bus)\s*\d+\b/gi, '').trim();
+  trimmed = trimmed.replace(/^(?:taxi|vehicle|bus)\s*\d+\s*[-–—:]\s*/gi, '').trim();
+
+  // Strip general notes boilerplate if accidental full notes got attached
+  trimmed = trimmed.replace(/(?:co-reps|cash collected|external sponsees|past cancellations)[^;.]*(?:[;.]|$)/gi, '').trim();
+
+  if (/^(?:unaccounted|unpaid)?\s*sponsorships?$/i.test(trimmed)) return '';
+  if (/^(?:(?:from|in)\s+)?(?:taxi|vehicle|bus)\s*\d+$/i.test(trimmed)) return '';
+
   return trimmed;
 }
 

@@ -10,7 +10,7 @@ import {
   dbRowToVehicle,
   resetManifest,
 } from './manifest';
-import { saveManifestToServer } from './serverApi';
+import { saveManifestToServer, broadcastLiveActionToServer, connectSyncEvents } from './serverApi';
 import type { Manifest, Vehicle, Passenger, VehicleDraftState, LiveSyncAction } from './types';
 
 export interface ActiveCoRep {
@@ -70,7 +70,7 @@ export function mergeIncomingManifest(
     // It's the active vehicle: incoming riders from admin allocation is authoritative!
     // NEVER resurrect riders that were removed or unassigned.
     const activeRiders = Array.isArray(incV.riders) ? incV.riders : [];
-    const activeRiderSet = new Set(activeRiders);
+    const activeRiderStrSet = new Set(activeRiders.map(String));
 
     const incDraft = incV.draftState;
     const curDraft = currentActiveVehicle.draftState;
@@ -80,13 +80,13 @@ export function mergeIncomingManifest(
       ? {
           ...(curDraft || {}),
           ...incDraft,
-          presentIds: (incDraft.presentIds !== undefined ? incDraft.presentIds : (curDraft?.presentIds || [])).filter((id) => activeRiderSet.has(id)),
-          absentIds: (incDraft.absentIds !== undefined ? incDraft.absentIds : (curDraft?.absentIds || [])).filter((id) => activeRiderSet.has(id)),
-          sponsoredIds: (incDraft.sponsoredIds !== undefined ? incDraft.sponsoredIds : (curDraft?.sponsoredIds || [])).filter((id) => activeRiderSet.has(id)),
-          unpaidIds: (incDraft.unpaidIds !== undefined ? incDraft.unpaidIds : (curDraft?.unpaidIds || [])).filter((id) => activeRiderSet.has(id)),
-          absentPaidIds: (incDraft.absentPaidIds !== undefined ? incDraft.absentPaidIds : (curDraft?.absentPaidIds || [])).filter((id) => activeRiderSet.has(id)),
+          presentIds: (incDraft.presentIds !== undefined ? incDraft.presentIds : (curDraft?.presentIds || [])).filter((id) => activeRiderStrSet.has(String(id))),
+          absentIds: (incDraft.absentIds !== undefined ? incDraft.absentIds : (curDraft?.absentIds || [])).filter((id) => activeRiderStrSet.has(String(id))),
+          sponsoredIds: (incDraft.sponsoredIds !== undefined ? incDraft.sponsoredIds : (curDraft?.sponsoredIds || [])).filter((id) => activeRiderStrSet.has(String(id))),
+          unpaidIds: (incDraft.unpaidIds !== undefined ? incDraft.unpaidIds : (curDraft?.unpaidIds || [])).filter((id) => activeRiderStrSet.has(String(id))),
+          absentPaidIds: (incDraft.absentPaidIds !== undefined ? incDraft.absentPaidIds : (curDraft?.absentPaidIds || [])).filter((id) => activeRiderStrSet.has(String(id))),
           notes: Object.fromEntries(
-            Object.entries({ ...(curDraft?.notes || {}), ...(incDraft.notes || {}) }).filter(([k]) => activeRiderSet.has(k))
+            Object.entries({ ...(curDraft?.notes || {}), ...(incDraft.notes || {}) }).filter(([k]) => activeRiderStrSet.has(String(k)))
           ),
           updatedAt: incDraft.updatedAt || curDraft?.updatedAt || new Date().toISOString(),
           updatedBy: incDraft.updatedBy || curDraft?.updatedBy,
@@ -258,6 +258,7 @@ export function useManifest(
       event: 'live_action',
       payload: action,
     });
+    broadcastLiveActionToServer(action).catch(() => {});
   }, [safeChannelSend]);
 
   // Track the updatedAt timestamp of the last thing WE saved.
@@ -614,9 +615,51 @@ export function useManifest(
       window.addEventListener('pageshow', handlePageShow);
     }
 
+    // 6. Central Server SSE Live Connection (cross-device real-time sync for reps & admin)
+    const disconnectSSE = connectSyncEvents(
+      (data) => {
+        if (keyRef.current !== key) return;
+        if (data.key === key && data.manifest) {
+          const incoming = normalizeManifestData(data.manifest);
+          if (incoming) {
+            setManifest((prev) => mergeIncomingManifest(prev, incoming, activeVehicleIdRef.current));
+            setLastSyncedAt(Date.now());
+          }
+        }
+      },
+      undefined,
+      (data) => {
+        if (keyRef.current !== key) return;
+        if (data.key === key && data.vehicleId && data.draftState) {
+          setManifest((prev) => {
+            if (!prev) return prev;
+            const updatedVehicles = prev.vehicles.map((v) => {
+              if (v.id !== data.vehicleId) return v;
+              const isTargetActive = activeVehicleIdRef.current === data.vehicleId;
+              if (isTargetActive && v.draftState?.updatedBy === data.draftState.updatedBy) return v;
+              return {
+                ...v,
+                draftState: data.draftState,
+                repName: data.repName?.trim() || data.draftState.repName?.trim() || v.repName,
+                licensePlate: data.licensePlate?.trim() || data.draftState.licensePlate?.trim() || v.licensePlate,
+              };
+            });
+            return { ...prev, vehicles: updatedVehicles };
+          });
+          setLastSyncedAt(Date.now());
+        }
+      },
+      undefined,
+      (action) => {
+        if (keyRef.current !== key) return;
+        handleIncomingLiveAction(action);
+      }
+    );
+
     return () => {
       keyRef.current = null;
       clearInterval(pollInterval);
+      disconnectSSE();
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', handleVisibilityChange);
       }
@@ -891,15 +934,31 @@ export function useManifest(
       };
     }
 
-    // 3. Update passenger present status using the merged draft
-    const finalPresentSet = new Set(mergedDraft?.presentIds ?? []);
-    const finalAbsentSet = new Set(mergedDraft?.absentIds ?? []);
+    // 3. Update passenger present, sponsored, and unpaid statuses using the merged draft
+    const finalPresentSet = new Set((mergedDraft?.presentIds ?? []).map(String));
+    const finalAbsentSet = new Set((mergedDraft?.absentIds ?? []).map(String));
+    const finalSponsoredSet = new Set((mergedDraft?.sponsoredIds ?? []).map(String));
+    const finalUnpaidSet = new Set((mergedDraft?.unpaidIds ?? []).map(String));
+    const vehicleRiderStrSet = new Set((targetVehicle?.riders ?? []).map(String));
 
     const updatedSignups: Passenger[] = remoteManifest.signups.map((p): Passenger => {
-      if (vehicleRiderSet.has(p.id)) {
-        if (finalPresentSet.has(p.id)) return { ...p, present: true };
-        if (finalAbsentSet.has(p.id)) return { ...p, present: false };
-        return { ...p, present: p.present ?? false };
+      const sId = String(p.id);
+      if (vehicleRiderStrSet.has(sId) || vehicleRiderSet.has(p.id)) {
+        const isPresent = finalPresentSet.has(sId);
+        const isAbsent = finalAbsentSet.has(sId);
+        const isSponsored = finalSponsoredSet.has(sId);
+        const isUnpaid = finalUnpaidSet.has(sId);
+        const sNote = (mergedDraft?.notes?.[sId] || mergedDraft?.notes?.[p.id] || p.sponsorNote || '').trim();
+        const uNote = (mergedDraft?.notes?.[sId] || mergedDraft?.notes?.[p.id] || p.unpaidNote || '').trim();
+
+        return {
+          ...p,
+          present: isPresent ? true : isAbsent ? false : (p.present ?? false),
+          sponsored: isSponsored,
+          sponsorNote: isSponsored ? (sNote || p.sponsorNote) : undefined,
+          didNotPay: isUnpaid,
+          unpaidNote: isUnpaid ? (uNote || p.unpaidNote) : undefined,
+        };
       }
       return p;
     });

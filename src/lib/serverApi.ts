@@ -1,4 +1,4 @@
-import type { Manifest, Vehicle, VehicleDraftState } from '@/lib/types';
+import type { Manifest, Vehicle, VehicleDraftState, LiveSyncAction } from '@/lib/types';
 import type { LedgerEntry, AbsenteeInput } from '@/lib/ledger';
 
 export interface SubmitVehiclePayload {
@@ -370,12 +370,41 @@ export async function verifyBatchSponsorshipsOnServer(
   }
 }
 
+// Record reported sponsorships to central server
+export async function recordReportedSponsorshipsOnServer(
+  sponsorships: ReportedSponsorship[]
+): Promise<void> {
+  try {
+    await fetch('/api/ledger/sponsorships', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sponsorships }),
+    });
+  } catch (err) {
+    console.debug('[ServerAPI] recordReportedSponsorships error:', err);
+  }
+}
+
+// Broadcast lightweight live action to central server for instant cross-device delivery
+export async function broadcastLiveActionToServer(action: LiveSyncAction): Promise<void> {
+  try {
+    await fetch('/api/sync/live-action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(action),
+    });
+  } catch {
+    // Non-blocking
+  }
+}
+
 // Server-Sent Events (SSE) live connection with local event sync
 export function connectSyncEvents(
   onManifestUpdate?: (data: { key: string; manifest?: Manifest }) => void,
   onLedgerUpdate?: () => void,
-  onDraftDelta?: (data: { key: string; vehicleId: string; draftState: VehicleDraftState }) => void,
-  onSponsorshipsUpdate?: () => void
+  onDraftDelta?: (data: { key: string; vehicleId: string; draftState: VehicleDraftState; repName?: string; licensePlate?: string }) => void,
+  onSponsorshipsUpdate?: () => void,
+  onLiveAction?: (action: LiveSyncAction) => void
 ): () => void {
   if (typeof window === 'undefined') {
     return () => {};
@@ -425,6 +454,15 @@ export function connectSyncEvents(
         try {
           const data = JSON.parse(e.data);
           onDraftDelta?.(data);
+        } catch {
+          /* ignore parse error */
+        }
+      });
+
+      es.addEventListener('live_action', (e) => {
+        try {
+          const action = JSON.parse(e.data);
+          onLiveAction?.(action as LiveSyncAction);
         } catch {
           /* ignore parse error */
         }

@@ -679,7 +679,19 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
           const isSubmitted = Boolean(v.submitted || ind.submitted);
           const submittedAt = v.submittedAt || ind.submittedAt;
           const submittedBy = v.submittedBy || ind.submittedBy;
-          const activeRiderIds = new Set(v.riders || []);
+          const activeRiderIds = new Set((v.riders || []).map(String));
+          const vSpon = v.draftState?.sponsoredIds ?? [];
+          const indSpon = ind.draftState?.sponsoredIds ?? [];
+          const mergedSponIds = vSpon.length > 0 ? vSpon : indSpon;
+
+          const vUnp = v.draftState?.unpaidIds ?? [];
+          const indUnp = ind.draftState?.unpaidIds ?? [];
+          const mergedUnpIds = vUnp.length > 0 ? vUnp : indUnp;
+
+          const vAp = v.draftState?.absentPaidIds ?? [];
+          const indAp = ind.draftState?.absentPaidIds ?? [];
+          const mergedApIds = vAp.length > 0 ? vAp : indAp;
+
           mergedVehicles.push({
             ...ind,
             ...v,
@@ -689,13 +701,13 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
             draftState: {
               ...(ind.draftState || {}),
               ...(v.draftState || {}),
-              presentIds: (v.draftState?.presentIds ?? ind.draftState?.presentIds ?? []).filter((id) => activeRiderIds.has(id)),
-              absentIds: (v.draftState?.absentIds ?? ind.draftState?.absentIds ?? []).filter((id) => activeRiderIds.has(id)),
-              sponsoredIds: (v.draftState?.sponsoredIds ?? ind.draftState?.sponsoredIds ?? []).filter((id) => activeRiderIds.has(id)),
-              unpaidIds: (v.draftState?.unpaidIds ?? ind.draftState?.unpaidIds ?? []).filter((id) => activeRiderIds.has(id)),
-              absentPaidIds: (v.draftState?.absentPaidIds ?? ind.draftState?.absentPaidIds ?? []).filter((id) => activeRiderIds.has(id)),
+              presentIds: (v.draftState?.presentIds ?? ind.draftState?.presentIds ?? []).filter((id) => activeRiderIds.has(String(id))),
+              absentIds: (v.draftState?.absentIds ?? ind.draftState?.absentIds ?? []).filter((id) => activeRiderIds.has(String(id))),
+              sponsoredIds: mergedSponIds.filter((id) => activeRiderIds.has(String(id))),
+              unpaidIds: mergedUnpIds.filter((id) => activeRiderIds.has(String(id))),
+              absentPaidIds: mergedApIds.filter((id) => activeRiderIds.has(String(id))),
               notes: Object.fromEntries(
-                Object.entries({ ...(ind.draftState?.notes || {}), ...(v.draftState?.notes || {}) }).filter(([k]) => activeRiderIds.has(k))
+                Object.entries({ ...(ind.draftState?.notes || {}), ...(v.draftState?.notes || {}) }).filter(([k]) => activeRiderIds.has(String(k)))
               ),
             },
           });

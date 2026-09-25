@@ -2131,12 +2131,12 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
             // Attendance & Sponsorship metrics
             const vPresent = vehicle.submitted
               ? riders.filter((r) => r.present).length
-              : riders.filter((r) => vehicle.draftState?.presentIds?.includes(r.id)).length;
+              : riders.filter((r) => r.present || vehicle.draftState?.presentIds?.some((id) => String(id) === String(r.id))).length;
             const vAbsent = vehicle.submitted
               ? riders.filter((r) => !r.present).length
-              : riders.filter((r) => vehicle.draftState?.absentIds?.includes(r.id)).length;
-            const vSponsored = riders.filter((r) => r.sponsored || vehicle.draftState?.sponsoredIds?.includes(r.id)).length;
-            const vUnpaid = riders.filter((r) => r.didNotPay || vehicle.draftState?.unpaidIds?.includes(r.id)).length;
+              : riders.filter((r) => vehicle.draftState?.absentIds?.some((id) => String(id) === String(r.id))).length;
+            const vSponsored = riders.filter((r) => r.sponsored || vehicle.draftState?.sponsoredIds?.some((id) => String(id) === String(r.id))).length;
+            const vUnpaid = riders.filter((r) => r.didNotPay || vehicle.draftState?.unpaidIds?.some((id) => String(id) === String(r.id))).length;
             const vRiderNotesCount = vehicle.draftState?.notes ? Object.keys(vehicle.draftState.notes).length : 0;
             const vGeneralNote = vehicle.generalNotes || vehicle.draftState?.generalNotes || '';
 
@@ -2684,11 +2684,11 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                                   );
                                   const isSponsored = Boolean(
                                     p.sponsored ||
-                                    vehicle.draftState?.sponsoredIds?.includes(p.id)
+                                    vehicle.draftState?.sponsoredIds?.some((id) => String(id) === String(p.id))
                                   );
                                   const isUnpaid = Boolean(
                                     p.didNotPay ||
-                                    vehicle.draftState?.unpaidIds?.includes(p.id)
+                                    vehicle.draftState?.unpaidIds?.some((id) => String(id) === String(p.id))
                                   );
                                   const riderNote = (vehicle.draftState?.notes?.[p.id] || p.unpaidNote || p.sponsorNote || '').trim();
 
@@ -2915,8 +2915,8 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                 const vRiders = riderPassengers(v);
                 const presentRiders = vRiders.filter((r) => r.present);
                 const absentRiders = vRiders.filter((r) => !r.present);
-                const sponsoredRiders = vRiders.filter((r) => r.sponsored || v.draftState?.sponsoredIds?.includes(r.id));
-                const unpaidRiders = vRiders.filter((r) => r.didNotPay || v.draftState?.unpaidIds?.includes(r.id));
+                const sponsoredRiders = vRiders.filter((r) => r.sponsored || v.draftState?.sponsoredIds?.some((id) => String(id) === String(r.id)));
+                const unpaidRiders = vRiders.filter((r) => r.didNotPay || v.draftState?.unpaidIds?.some((id) => String(id) === String(r.id)));
                 const draftNotes = v.draftState?.notes || {};
                 const generalNote = v.generalNotes || v.draftState?.generalNotes;
 
@@ -3005,8 +3005,8 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                       </div>
                       <div className="flex flex-wrap gap-1.5">
                         {presentRiders.map((r) => {
-                          const isSponsored = r.sponsored || v.draftState?.sponsoredIds?.includes(r.id);
-                          const isUnpaid = r.didNotPay || v.draftState?.unpaidIds?.includes(r.id);
+                          const isSponsored = r.sponsored || v.draftState?.sponsoredIds?.some((id) => String(id) === String(r.id));
+                          const isUnpaid = r.didNotPay || v.draftState?.unpaidIds?.some((id) => String(id) === String(r.id));
                           const rNote = draftNotes[r.id] || r.unpaidNote || r.sponsorNote;
                           return (
                             <span
