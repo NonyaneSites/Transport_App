@@ -373,26 +373,51 @@ export function RepPage() {
     [manifest, selectedVehicle]
   );
 
+  // All known signups and riders across the manifest for search and transfer detection
+  const allKnownPassengers: Passenger[] = useMemo(() => {
+    if (!manifest) return [];
+    const map = new Map<string, Passenger>();
+    for (const p of manifest.signups || []) {
+      map.set(String(p.id), p);
+    }
+    for (const v of manifest.vehicles || []) {
+      const vRiders = vehicleRiders(manifest, v);
+      for (const r of vRiders) {
+        if (!map.has(String(r.id))) {
+          map.set(String(r.id), r);
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [manifest]);
+
+  const findVehicleForPassenger = useCallback(
+    (p: Passenger): Vehicle | undefined => {
+      if (!manifest) return undefined;
+      const pIdStr = String(p.id);
+      if (p.assignedTo) {
+        const v = manifest.vehicles.find((veh) => String(veh.id) === String(p.assignedTo));
+        if (v) return v;
+      }
+      return manifest.vehicles.find((veh) => (veh.riders || []).some((id) => String(id) === pIdStr));
+    },
+    [manifest]
+  );
+
   // Real-time transfer detection candidate from current manifest as rep types walk-in inputs
   const detectedTransfer = useMemo(() => {
     if (!manifest || !selectedVehicle) return null;
     const query = [walkInFirstName.trim(), walkInSurname.trim()].filter(Boolean).join(' ');
     if (!query) return null;
-    const existing = findPassengerForTransfer(query, walkInStructure.trim(), manifest.signups);
+    const existing = findPassengerForTransfer(query, walkInStructure.trim(), allKnownPassengers);
     if (!existing) return null;
-    let veh: Vehicle | undefined = undefined;
-    if (existing.assignedTo) {
-      veh = manifest.vehicles.find((v) => v.id === existing.assignedTo);
-    }
-    if (!veh) {
-      veh = manifest.vehicles.find((v) => v.riders.includes(existing.id));
-    }
+    const veh = findVehicleForPassenger(existing);
     return {
       passenger: existing,
       vehicle: veh,
       isSameVehicle: veh?.id === selectedVehicle.id,
     };
-  }, [manifest, selectedVehicle, walkInFirstName, walkInSurname, walkInStructure]);
+  }, [manifest, selectedVehicle, walkInFirstName, walkInSurname, walkInStructure, allKnownPassengers, findVehicleForPassenger]);
 
   // External Sponsorship Locks: across all vehicles in this manifest
   // Rep 1 in Taxi 1 indicates Person A is paying for Person B in Taxi 2
@@ -1635,15 +1660,6 @@ export function RepPage() {
     setManualCancellations((prev) => prev.filter((c) => c.id !== id));
   };
 
-  function findVehicleForPassenger(p: Passenger): Vehicle | undefined {
-    if (!manifest) return undefined;
-    if (p.assignedTo) {
-      const v = manifest.vehicles.find((veh) => veh.id === p.assignedTo);
-      if (v) return v;
-    }
-    return manifest.vehicles.find((veh) => veh.riders.includes(p.id));
-  }
-
   function orderedStopsWith(vehicle: Vehicle, poolKey: string): string[] {
     const existing = vehicle.orderedStops ?? [];
     return existing.includes(poolKey) ? existing : [...existing, poolKey];
@@ -1656,8 +1672,8 @@ export function RepPage() {
     const query = [effectiveFirstName, effectiveSurname].filter(Boolean).join(' ');
     if (!manifest || !selectedVehicle || !query) return;
 
-    // 1. First check within current manifest (same service, different vehicle)
-    const existing = findPassengerForTransfer(query, effectiveStruct, manifest.signups);
+    // 1. First check within current manifest (same service, different vehicle or unassigned)
+    const existing = findPassengerForTransfer(query, effectiveStruct, allKnownPassengers);
 
     if (existing && !overrideCrossTransfer) {
       const fromVehicle = findVehicleForPassenger(existing);
@@ -1754,8 +1770,7 @@ export function RepPage() {
     });
     setMyCreatedWalkInIds((prev) => new Set(prev).add(newPassenger.id));
 
-    // Atomic transaction in Firestore: allows multiple users to append walk-ins simultaneously
-    // without race conditions or manual syncing
+    // Atomic transaction: allows multiple users to append walk-ins simultaneously
     await appendWalkIn(selectedVehicle.id, newPassenger, draftMetadata);
     setWalkInFirstName('');
     setWalkInSurname('');
@@ -1775,34 +1790,44 @@ export function RepPage() {
     lastLocalEditTimeRef.current = Date.now();
 
     const poolKey = hubDisplayName(selectedVehicle.type, passenger.stop || 'Walk-In');
+    const pIdStr = String(passenger.id);
 
     const updatedSignups = manifest.signups.map((p) =>
-      p.id === passenger.id ? { ...p, assignedTo: selectedVehicle.id, present: true } : p
+      String(p.id) === pIdStr ? { ...p, assignedTo: selectedVehicle.id, present: true } : p
     );
-    if (!updatedSignups.some((p) => p.id === passenger.id)) {
+    if (!updatedSignups.some((p) => String(p.id) === pIdStr)) {
       updatedSignups.push({ ...passenger, assignedTo: selectedVehicle.id, present: true });
     }
 
     const updatedVehicles = manifest.vehicles.map((v) => {
-      if (fromVehicleId && v.id === fromVehicleId && v.id !== selectedVehicle.id) {
-        const nextRiders = v.riders.filter((id) => id !== passenger.id);
-        const cleanedDraft = v.draftState ? {
-          ...v.draftState,
-          presentIds: v.draftState.presentIds?.filter((id) => id !== passenger.id),
-          absentIds: v.draftState.absentIds?.filter((id) => id !== passenger.id),
-          sponsoredIds: v.draftState.sponsoredIds?.filter((id) => id !== passenger.id),
-        } : undefined;
+      const isFrom =
+        (fromVehicleId && v.id === fromVehicleId) ||
+        (v.id !== selectedVehicle.id && (v.riders || []).some((id) => String(id) === pIdStr));
+
+      if (isFrom && v.id !== selectedVehicle.id) {
+        const nextRiders = (v.riders || []).filter((id) => String(id) !== pIdStr);
+        const cleanedDraft = v.draftState
+          ? {
+              ...v.draftState,
+              presentIds: (v.draftState.presentIds || []).filter((id) => String(id) !== pIdStr),
+              absentIds: (v.draftState.absentIds || []).filter((id) => String(id) !== pIdStr),
+              sponsoredIds: (v.draftState.sponsoredIds || []).filter((id) => String(id) !== pIdStr),
+              unpaidIds: (v.draftState.unpaidIds || []).filter((id) => String(id) !== pIdStr),
+              absentPaidIds: (v.draftState.absentPaidIds || []).filter((id) => String(id) !== pIdStr),
+            }
+          : undefined;
         return { ...v, riders: nextRiders, draftState: cleanedDraft };
       }
 
       if (v.id === selectedVehicle.id) {
-        const nextRiders = v.riders.includes(passenger.id) ? v.riders : [...v.riders, passenger.id];
+        const alreadyInRiders = (v.riders || []).some((id) => String(id) === pIdStr);
+        const nextRiders = alreadyInRiders ? v.riders : [...v.riders, passenger.id];
         const nextOrderedStops = orderedStopsWith(v, poolKey);
         const existingDraftPresent = v.draftState?.presentIds ?? [];
-        const nextDraftPresent = existingDraftPresent.includes(passenger.id)
+        const nextDraftPresent = existingDraftPresent.some((id) => String(id) === pIdStr)
           ? existingDraftPresent
           : [...existingDraftPresent, passenger.id];
-        const nextDraftAbsent = (v.draftState?.absentIds ?? []).filter((id) => id !== passenger.id);
+        const nextDraftAbsent = (v.draftState?.absentIds ?? []).filter((id) => String(id) !== pIdStr);
 
         const nextDraft: VehicleDraftState = {
           presentIds: nextDraftPresent,
@@ -1829,17 +1854,6 @@ export function RepPage() {
         };
       }
 
-      if (v.riders.includes(passenger.id) && v.id !== selectedVehicle.id) {
-        const nextRiders = v.riders.filter((id) => id !== passenger.id);
-        const cleanedDraft = v.draftState ? {
-          ...v.draftState,
-          presentIds: v.draftState.presentIds?.filter((id) => id !== passenger.id),
-          absentIds: v.draftState.absentIds?.filter((id) => id !== passenger.id),
-          sponsoredIds: v.draftState.sponsoredIds?.filter((id) => id !== passenger.id),
-        } : undefined;
-        return { ...v, riders: nextRiders, draftState: cleanedDraft };
-      }
-
       return v;
     });
 
@@ -1851,12 +1865,22 @@ export function RepPage() {
 
     manifestRef.current = nextManifest;
 
-    setPresentIds((prev) => new Set(prev).add(passenger.id));
+    setPresentIds((prev) => new Set(prev).add(pIdStr));
     setAbsentIds((prev) => {
-      if (!prev.has(passenger.id)) return prev;
+      if (!prev.has(pIdStr) && !prev.has(passenger.id)) return prev;
       const next = new Set(prev);
+      next.delete(pIdStr);
       next.delete(passenger.id);
       return next;
+    });
+
+    broadcastLiveAction({
+      type: 'rider_attendance',
+      vehicleId: selectedVehicle.id,
+      riderId: pIdStr,
+      status: 'present',
+      clientId: clientIdRef.current,
+      timestamp: Date.now(),
     });
 
     await save(nextManifest);
@@ -2851,6 +2875,17 @@ export function RepPage() {
                               </div>
                             )}
 
+                            {detectedTransfer && !detectedTransfer.vehicle && (
+                              <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs text-emerald-200 animate-fade-in flex items-start gap-1.5">
+                                <Check className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+                                <div className="leading-snug">
+                                  <span className="font-semibold text-emerald-300">Existing Signup Found (Unassigned):</span>{' '}
+                                  {detectedTransfer.passenger.fullName} {detectedTransfer.passenger.structure ? `(${detectedTransfer.passenger.structure})` : ''}.{' '}
+                                  Adding will allocate them directly to <strong>{selectedVehicle.name}</strong>.
+                                </div>
+                              </div>
+                            )}
+
                             {detectedTransfer && detectedTransfer.isSameVehicle && (
                               <div className="rounded-lg border border-line bg-card-2 p-2 text-xs text-muted">
                                 ℹ️ {detectedTransfer.passenger.fullName} is already assigned to this vehicle ({selectedVehicle.name}).
@@ -2865,6 +2900,8 @@ export function RepPage() {
                                 className={`flex-1 py-2 px-3 text-xs font-bold whitespace-nowrap shadow-sm disabled:opacity-40 flex items-center justify-center gap-1.5 rounded-lg transition-all ${
                                   detectedTransfer && detectedTransfer.vehicle && !detectedTransfer.isSameVehicle
                                     ? 'bg-amber-600 hover:bg-amber-500 text-white'
+                                    : detectedTransfer && !detectedTransfer.vehicle
+                                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
                                     : 'btn-crimson'
                                 }`}
                               >
@@ -2877,6 +2914,11 @@ export function RepPage() {
                                   <>
                                     <ArrowRightLeft className="h-3.5 w-3.5" />
                                     <span>Transfer from {detectedTransfer.vehicle.name}</span>
+                                  </>
+                                ) : detectedTransfer && !detectedTransfer.vehicle ? (
+                                  <>
+                                    <UserPlus className="h-3.5 w-3.5" />
+                                    <span>Assign to {selectedVehicle.name}</span>
                                   </>
                                 ) : (
                                   <>

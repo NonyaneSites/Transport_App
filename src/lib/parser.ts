@@ -589,6 +589,58 @@ const MONTH_MAP: Record<string, number> = {
   dec: 12, december: 12,
 };
 
+export const DATE_COLUMN_PATTERNS = [
+  'service date',
+  'date of service',
+  'event date',
+  'attendance date',
+  'service_date',
+  'dreamweek date',
+  'dreamweek',
+  'which day will you be attending',
+  'which day are you attending',
+  'which date are you attending',
+  'which service date are you attending',
+  'which service date',
+  'which night are you attending',
+  'which night',
+  'which day',
+  'which date',
+  'select date',
+  'select day',
+  'choose date',
+  'choose day',
+  'date attending',
+  'day attending',
+  'attendance day',
+  'conference date',
+  'evening date',
+  'evening service date',
+  'date',
+  'day',
+  'night',
+];
+
+export function findDateColumn(headers: string[]): string | null {
+  const direct = findColumn(headers, DATE_COLUMN_PATTERNS);
+  if (direct) return direct;
+
+  return headers.find((h) => {
+    const lh = lower(clean(h));
+    return (
+      (lh.includes('date') || lh.includes('day') || lh.includes('night') || lh.includes('attending') || lh.includes('evening')) &&
+      !lh.includes('birth') &&
+      !lh.includes('completion') &&
+      !lh.includes('submission') &&
+      !lh.includes('created') &&
+      !lh.includes('timestamp') &&
+      !lh.includes('phone') &&
+      !lh.includes('email') &&
+      !lh.includes('contact')
+    );
+  }) || null;
+}
+
 /**
  * Extracts and parses a calendar date pattern anywhere in a string, cell, or row,
  * returning a normalized 'YYYY-MM-DD' string or null if no valid date pattern was found.
@@ -596,22 +648,16 @@ const MONTH_MAP: Record<string, number> = {
  * Handles:
  * - Unanchored formats with trailing or leading text, e.g. "11 September 2026 - Night Vigil"
  * - "D Month YYYY", "Month D, YYYY", "Month D YYYY", "YYYY-MM-DD", "DD/MM/YYYY", "M/D/YYYY"
+ * - Date patterns without year, defaulting to referenceDate's year or 2026 (e.g. "Tuesday, 22 September", "22 Sep")
  * - Native Date instances and Excel date numbers
  */
-export function extractRowDate(input: unknown, headers?: string[]): string | null {
+export function extractRowDate(input: unknown, headers?: string[], referenceDate?: string): string | null {
   if (input === null || input === undefined) return null;
 
   let raw: unknown = input;
   if (headers && typeof input === 'object' && !(input instanceof Date)) {
     const row = input as RawRow;
-    const col = findColumn(headers, [
-      'service date',
-      'date of service',
-      'event date',
-      'attendance date',
-      'service_date',
-      'date',
-    ]);
+    const col = findDateColumn(headers);
     if (!col || row[col] === undefined || row[col] === null) return null;
     raw = row[col];
   }
@@ -640,6 +686,10 @@ export function extractRowDate(input: unknown, headers?: string[]): string | nul
 
   const rawStr = clean(raw).trim();
   if (!rawStr) return null;
+
+  const refYear = (referenceDate && /^\d{4}/.test(referenceDate))
+    ? parseInt(referenceDate.slice(0, 4), 10)
+    : 2026;
 
   // 3. Match "D Month YYYY" anywhere in the string (e.g. "11 September 2026 - Night Vigil", "7 Sep 2025")
   const dMonYrMatch = rawStr.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+([a-zA-Z]{3,10})\s+(\d{4})\b/i);
@@ -711,7 +761,50 @@ export function extractRowDate(input: unknown, headers?: string[]): string | nul
     }
   }
 
-  // 8. Fallback: Try native Date parser for clean standard strings without trailing annotations
+  // 8. Match "D Month" WITHOUT year (e.g. "Tuesday, 22 September", "22 September", "22 Sep", "22nd September")
+  const dMonNoYrMatch = rawStr.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+([a-zA-Z]{3,10})\b/i);
+  if (dMonNoYrMatch) {
+    const day = parseInt(dMonNoYrMatch[1], 10);
+    const monStr = lower(dMonNoYrMatch[2]);
+    const monKey = monStr.slice(0, 3);
+    const month = MONTH_MAP[monStr] || MONTH_MAP[monKey];
+    if (month && day >= 1 && day <= 31) {
+      return `${refYear}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+
+  // 9. Match "Month D" WITHOUT year (e.g. "September 22", "Sep 22")
+  const monDNoYrMatch = rawStr.match(/\b([a-zA-Z]{3,10})\s+(\d{1,2})(?:st|nd|rd|th)?\b/i);
+  if (monDNoYrMatch) {
+    const monStr = lower(monDNoYrMatch[1]);
+    const monKey = monStr.slice(0, 3);
+    const day = parseInt(monDNoYrMatch[2], 10);
+    const month = MONTH_MAP[monStr] || MONTH_MAP[monKey];
+    if (month && day >= 1 && day <= 31) {
+      return `${refYear}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+
+  // 10. Match numeric "DD/MM" or "DD-MM" without year (e.g. "22/09", "22-09")
+  const numNoYrMatch = rawStr.match(/\b(\d{1,2})[-/.](\d{1,2})\b/);
+  if (numNoYrMatch) {
+    const partA = parseInt(numNoYrMatch[1], 10);
+    const partB = parseInt(numNoYrMatch[2], 10);
+    let day = partA;
+    let month = partB;
+    if (partA > 12 && partB <= 12) {
+      day = partA;
+      month = partB;
+    } else if (partB > 12 && partA <= 12) {
+      month = partA;
+      day = partB;
+    }
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return `${refYear}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+
+  // 11. Fallback: Try native Date parser for clean standard strings without trailing annotations
   const cell = new Date(rawStr);
   if (!isNaN(cell.getTime()) && cell.getFullYear() >= 1970 && cell.getFullYear() <= 2100) {
     const y = cell.getFullYear();
@@ -723,27 +816,106 @@ export function extractRowDate(input: unknown, headers?: string[]): string | nul
   return null;
 }
 
-function matchesDate(row: RawRow, headers: string[], selectedDate: string): boolean {
-  const col = findColumn(headers, [
-    'service date',
-    'date of service',
-    'event date',
-    'attendance date',
-    'service_date',
-    'date',
-  ]);
+export function matchesDate(row: RawRow, headers: string[], selectedDate: string): boolean {
+  const col = findDateColumn(headers);
   if (!col) return true; // no date column — don't filter by date
+
   const rawVal = row[col];
   if (rawVal === undefined || rawVal === null) return true; // empty date value — don't filter
   if (typeof rawVal === 'string' && !rawVal.trim()) return true;
 
-  const parsedDate = extractRowDate(rawVal);
-  if (parsedDate) {
-    // We parsed a real date — only include if it matches the selected service date
-    return parsedDate === selectedDate;
+  // 1. Direct parse check via extractRowDate
+  const parsedDate = extractRowDate(rawVal, undefined, selectedDate);
+  if (parsedDate === selectedDate) {
+    return true;
   }
 
-  // Truly unparseable date — don't exclude (benefit of the doubt)
+  // 2. Comprehensive check for multi-select, day-of-week, or formatted cells
+  const valStr = lower(clean(rawVal));
+  if (!valStr) return true;
+
+  const [sYStr, sMStr, sDStr] = selectedDate.split('-');
+  const sY = parseInt(sYStr, 10);
+  const sM = parseInt(sMStr, 10);
+  const sD = parseInt(sDStr, 10);
+  if (!sY || !sM || !sD) {
+    return parsedDate ? parsedDate === selectedDate : true;
+  }
+
+  // Check if string contains direct selectedDate (e.g. "2026-09-22" or "2026/09/22")
+  if (valStr.includes(selectedDate) || valStr.includes(selectedDate.replace(/-/g, '/'))) {
+    return true;
+  }
+
+  const selDateObj = new Date(sY, sM - 1, sD);
+  const dayOfWeekIdx = selDateObj.getDay();
+  const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const WEEKDAY_NAMES_SHORT = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+  const selWeekday = WEEKDAY_NAMES[dayOfWeekIdx];
+  const selWeekdayShort = WEEKDAY_NAMES_SHORT[dayOfWeekIdx];
+  const MONTH_NAMES = ['', 'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+  const MONTH_NAMES_SHORT = ['', 'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  const selMon = MONTH_NAMES[sM] || '';
+  const selMonShort = MONTH_NAMES_SHORT[sM] || '';
+
+  // Check Day Number + Month Name (e.g. "22 September", "22nd Sep", "September 22", "Tue 22 Sep")
+  const dayRegex = new RegExp(`\\b0?${sD}(?:st|nd|rd|th)?\\b`, 'i');
+  const monRegex = new RegExp(`\\b(?:${selMon}|${selMonShort})\\b`, 'i');
+  if (dayRegex.test(valStr) && monRegex.test(valStr)) {
+    // If a year is explicitly given in the string, make sure it matches sY
+    const yrMatch = valStr.match(/\b(19\d\d|20\d\d)\b/);
+    if (!yrMatch || parseInt(yrMatch[1], 10) === sY) {
+      return true;
+    }
+  }
+
+  // Check numeric day-month pattern (e.g. "22/09", "22-09", "22/9")
+  const numRegex = new RegExp(`\\b0?${sD}[/-]0?${sM}(?:[/-]${sY})?\\b`);
+  if (numRegex.test(valStr)) {
+    return true;
+  }
+
+  // Check weekday name when weekday is explicitly stated (e.g. "Tuesday", "Tuesday Evening")
+  const weekdayRegex = new RegExp(`\\b(?:${selWeekday}|${selWeekdayShort})\\b`, 'i');
+  if (weekdayRegex.test(valStr)) {
+    // If the cell contains other explicit day numbers (e.g. "Wednesday 23 Sep"),
+    // verify it doesn't solely belong to another day
+    const otherDays = valStr.match(/\b([0-3]?\d)(?:st|nd|rd|th)?\b/g);
+    if (otherDays) {
+      const numbers = otherDays.map((n) => parseInt(n, 10)).filter((n) => n >= 1 && n <= 31);
+      if (numbers.length > 0 && !numbers.includes(sD)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // If a date was parsed from the string and it differed from selectedDate:
+  if (parsedDate && parsedDate !== selectedDate) {
+    return false;
+  }
+
+  // Check if string contains another recognizable calendar day of the same month
+  for (let d = 1; d <= 31; d++) {
+    if (d !== sD) {
+      const otherDayRegex = new RegExp(`\\b0?${d}(?:st|nd|rd|th)?\\b`, 'i');
+      if (otherDayRegex.test(valStr) && monRegex.test(valStr)) {
+        return false;
+      }
+    }
+  }
+
+  // Check if string contains another weekday (e.g. "Wednesday" when selected is Tuesday)
+  for (let w = 0; w < WEEKDAY_NAMES.length; w++) {
+    if (w !== dayOfWeekIdx) {
+      const otherWkRegex = new RegExp(`\\b(?:${WEEKDAY_NAMES[w]}|${WEEKDAY_NAMES_SHORT[w]})\\b`, 'i');
+      if (otherWkRegex.test(valStr) && !weekdayRegex.test(valStr)) {
+        return false;
+      }
+    }
+  }
+
+  // If parsedDate was null and couldn't match or exclude, give benefit of doubt
   return true;
 }
 
@@ -1004,9 +1176,26 @@ function processExtractedCandidates(
   let matchedDate = 0;
   let matchedTransport = 0;
 
-  // Pass 2: Group submissions by person and keep strictly the MOST RECENT submission for each person
-  const personGroups = new Map<string, RawCandidate[]>();
+  // Pass 1: Filter candidates down to those matching the admin-chosen date (opts.selectedDate).
+  // In events like DreamWeek, rows for different dates are NOT duplicates of each other;
+  // each date is distinct.
+  const submissionsForSelectedDate: RawCandidate[] = [];
+  let otherDatesCount = 0;
+
   for (const sub of rawSubmissions) {
+    if (!sub.matchesDate) {
+      otherDatesCount++;
+      skipped++;
+      continue;
+    }
+    submissionsForSelectedDate.push(sub);
+  }
+
+  // Pass 2: For submissions matching the selected date, group by person.
+  // If a person submitted more than once FOR THIS SAME DATE (e.g. updated stop/phone),
+  // their most recent submission for this date takes precedence.
+  const personGroups = new Map<string, RawCandidate[]>();
+  for (const sub of submissionsForSelectedDate) {
     const group = personGroups.get(sub.normalizedName);
     if (!group) {
       personGroups.set(sub.normalizedName, [sub]);
@@ -1018,7 +1207,7 @@ function processExtractedCandidates(
   const dateMatchedCandidates: RawCandidate[] = [];
 
   for (const [, submissions] of personGroups) {
-    // Sort submissions for this person by timestamp descending (or row index descending if equal)
+    // Sort submissions for this person on this date by timestamp descending (or row index descending if equal)
     submissions.sort((a, b) => {
       if (b.timestampEpoch !== a.timestampEpoch) {
         return b.timestampEpoch - a.timestampEpoch;
@@ -1026,28 +1215,27 @@ function processExtractedCandidates(
       return b.rowIndex - a.rowIndex;
     });
 
-    // The most recent submission takes 100% precedence
+    // The most recent submission for this date takes 100% precedence
     const mostRecent = submissions[0];
 
-    // Older duplicate submissions for this person are superseded
+    // Older duplicate submissions for this person on this same date are superseded
     if (submissions.length > 1) {
       skipped += (submissions.length - 1);
     }
 
-    // Now evaluate the most recent submission
+    // Now evaluate transport requirement
     if (!mostRecent.wantsTransport) {
       skipped++;
       continue;
     }
     matchedTransport++;
-
-    if (!mostRecent.matchesDate) {
-      skipped++;
-      continue;
-    }
     matchedDate++;
 
     dateMatchedCandidates.push(mostRecent);
+  }
+
+  if (otherDatesCount > 0) {
+    warnings.push(`Notice: ${otherDatesCount} row(s) in sheet belong to other dates and were filtered out for ${opts.selectedDate}.`);
   }
 
   // Count categories among valid date-matched submissions

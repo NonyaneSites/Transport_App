@@ -93,37 +93,24 @@ export function extractStructureFromText(text: string): { cleanText: string; str
 }
 
 /**
- * Compares surnames: must be identical or at most 1 char typo for length >= 5.
+ * Compares two name tokens: exact match, nickname / prefix (length >= 2), or minor typo.
  */
-function isSurnameMatch(s1: string, s2: string): boolean {
-  if (s1 === s2) return true;
-  if (Math.min(s1.length, s2.length) >= 5 && levenshteinDistance(s1, s2) <= 1) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * Compares first names: matches exact, nickname / prefix (e.g. Amo -> Amogelang, Chris -> Christopher),
- * or minor typo (distance <= 1).
- */
-function isFirstNameMatch(f1: string, f2: string): boolean {
-  if (f1 === f2) return true;
-  // Prefix / nickname abbreviation (e.g. "amo" for "amogelang", "dan" for "daniel")
-  if (f1.length >= 3 && f2.startsWith(f1)) return true;
-  if (f2.length >= 3 && f1.startsWith(f2)) return true;
-  // Minor typo for longer names
-  if (Math.min(f1.length, f2.length) >= 4 && levenshteinDistance(f1, f2) <= 1) {
-    return true;
-  }
+function isTokenMatch(t1: string, t2: string): boolean {
+  if (!t1 || !t2) return false;
+  if (t1 === t2) return true;
+  // Prefix / nickname abbreviation (length >= 2, e.g. Bo -> Bongani, Amo -> Amogelang, Dan -> Daniel)
+  if (t1.length >= 2 && t2.startsWith(t1)) return true;
+  if (t2.length >= 2 && t1.startsWith(t2)) return true;
+  // Minor typo (distance <= 1 for length >= 4)
+  if (Math.min(t1.length, t2.length) >= 4 && levenshteinDistance(t1, t2) <= 1) return true;
   return false;
 }
 
 /**
  * Checks if a walk-in entry matches an existing passenger for a transfer:
  * 1. Requires structure to match when both are present (e.g. S9 === S9). Conflicting structures never transfer.
- * 2. Requires both first name and surname to be almost identical (e.g. Amogelang Nhlabathi vs Amo Nhlabathi).
- * 3. Prevents ambiguous single-token substring matches from hijacking transfers.
+ * 2. Order-independent matching (e.g. "Nhlabathi Amo" matches "Amo Nhlabathi").
+ * 3. Handles nicknames, prefixes (Amo <-> Amogelang), typos, and single-word signups/queries.
  */
 export function isPassengerTransferMatch(
   walkIn: { fullName: string; structure?: string | null },
@@ -132,8 +119,21 @@ export function isPassengerTransferMatch(
   const walkInExtracted = extractStructureFromText(walkIn.fullName);
   const candExtracted = extractStructureFromText(candidate.fullName);
 
-  const cleanWalkIn = walkInExtracted.cleanText.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim();
-  const cleanCand = candExtracted.cleanText.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim();
+  const cleanWalkIn = walkInExtracted.cleanText
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const cleanCand = candExtracted.cleanText
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
   const walkInStruct = normalizeStructure(walkIn.structure || walkInExtracted.structure);
   const candStruct = normalizeStructure(candidate.structure || candExtracted.structure);
@@ -143,43 +143,89 @@ export function isPassengerTransferMatch(
     return { isMatch: false, score: 0 };
   }
 
-  const tokens1 = cleanWalkIn.split(/\s+/).filter(Boolean);
-  const tokens2 = cleanCand.split(/\s+/).filter(Boolean);
+  if (!cleanWalkIn || !cleanCand) {
+    return { isMatch: false, score: 0 };
+  }
+
+  // 1. Direct exact match
+  if (cleanWalkIn === cleanCand) {
+    const score = walkInStruct && candStruct && walkInStruct === candStruct ? 1.0 : 0.95;
+    return { isMatch: true, score };
+  }
+
+  const tokens1 = cleanWalkIn.split(' ').filter(Boolean);
+  const tokens2 = cleanCand.split(' ').filter(Boolean);
 
   if (tokens1.length === 0 || tokens2.length === 0) {
     return { isMatch: false, score: 0 };
   }
 
-  // Single-word input constraint: must be exact match and have structure match
-  if (tokens1.length === 1 || tokens2.length === 1) {
-    if (tokens1.join(' ') === tokens2.join(' ')) {
+  // 2. Single-token query (rep typed only first name, only surname, or candidate has a single name)
+  if (tokens1.length === 1) {
+    const q = tokens1[0];
+    const exactFound = tokens2.some((t) => t === q);
+    if (exactFound) {
+      if (walkInStruct && candStruct && walkInStruct === candStruct) {
+        return { isMatch: true, score: 0.95 };
+      }
+      if (q.length >= 3) {
+        return { isMatch: true, score: 0.88 };
+      }
+    }
+
+    const tokenFound = tokens2.some((t) => isTokenMatch(q, t));
+    if (tokenFound) {
       if (walkInStruct && candStruct && walkInStruct === candStruct) {
         return { isMatch: true, score: 0.9 };
+      }
+      if (q.length >= 3) {
+        return { isMatch: true, score: 0.82 };
       }
     }
     return { isMatch: false, score: 0 };
   }
 
-  // Surnames (last word)
-  const surname1 = tokens1[tokens1.length - 1];
-  const surname2 = tokens2[tokens2.length - 1];
-  if (!isSurnameMatch(surname1, surname2)) {
-    return { isMatch: false, score: 0 };
+  // 3. Multi-token order-independent matching
+  // Pairs each token of walkIn with a unique token of candidate
+  const matchedCandIndices = new Set<number>();
+  let matchedCount = 0;
+
+  for (const t1 of tokens1) {
+    let bestIdx = -1;
+    let exact = false;
+    for (let j = 0; j < tokens2.length; j++) {
+      if (matchedCandIndices.has(j)) continue;
+      const t2 = tokens2[j];
+      if (t1 === t2) {
+        bestIdx = j;
+        exact = true;
+        break;
+      }
+      if (!exact && isTokenMatch(t1, t2)) {
+        bestIdx = j;
+      }
+    }
+    if (bestIdx !== -1) {
+      matchedCandIndices.add(bestIdx);
+      matchedCount++;
+    }
   }
 
-  // First names (preceding words)
-  const first1 = tokens1.slice(0, -1).join(' ');
-  const first2 = tokens2.slice(0, -1).join(' ');
-  if (!isFirstNameMatch(first1, first2)) {
-    return { isMatch: false, score: 0 };
+  // If all tokens of walkIn matched tokens in candidate (e.g. "Amo Nhlabathi" in "Nhlabathi Amo" or "Amo Blessing Nhlabathi")
+  if (matchedCount >= tokens1.length) {
+    let score = 0.92;
+    if (walkInStruct && candStruct && walkInStruct === candStruct) score += 0.06;
+    return { isMatch: true, score };
   }
 
-  let score = 0.9;
-  if (walkInStruct && candStruct && walkInStruct === candStruct) {
-    score = 1.0;
+  // If walkIn had multiple tokens and matched at least 2 tokens (e.g. middle names / variations)
+  if (matchedCount >= 2 && matchedCount >= tokens2.length - 1) {
+    let score = 0.86;
+    if (walkInStruct && candStruct && walkInStruct === candStruct) score += 0.06;
+    return { isMatch: true, score };
   }
 
-  return { isMatch: true, score };
+  return { isMatch: false, score: 0 };
 }
 
 export interface CrossCheckCandidate {

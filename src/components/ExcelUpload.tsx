@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react';
-import { Upload, CheckCircle2, AlertTriangle, Loader2, EyeOff } from 'lucide-react';
+import { Upload, CheckCircle2, AlertTriangle, Loader2, EyeOff, RefreshCw, Calendar } from 'lucide-react';
 import { parseWorkbookAsync, type ParseResult } from '@/lib/parser';
 import type { Passenger, ServiceType } from '@/lib/types';
+import { prettyDate, shortDate, parseDate } from '@/lib/dates';
 
 interface Props {
   date: string;
@@ -17,14 +18,16 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
   const [lastResult, setLastResult] = useState<ParseResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
+  const [cachedWorkbook, setCachedWorkbook] = useState<{ name: string; buffer: ArrayBuffer } | null>(null);
 
-  async function handleFile(file: File) {
+  const isDreamWeekDay = Boolean(date) && /^\d{4}-\d{2}-\d{2}$/.test(date) && parseDate(date).getDay() !== 0;
+
+  async function runParseWithBuffer(buf: ArrayBuffer, name: string) {
     setParsing(true);
     setError(null);
     setProgressText('Reading workbook…');
-    setFileName(file.name);
+    setFileName(name);
     try {
-      const buf = await file.arrayBuffer();
       const result = await parseWorkbookAsync(
         buf,
         { selectedDate: date, selectedService: service },
@@ -32,7 +35,7 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
           if (progress.phase === 'scanning_sheet') {
             setProgressText(`Scanning sheet ${progress.sheetIndex} of ${progress.totalSheets}: "${progress.sheetName}"…`);
           } else if (progress.phase === 'processing') {
-            setProgressText('Deduplicating & allocating passengers…');
+            setProgressText('Deduplicating & allocating passengers for selected date…');
           }
         }
       );
@@ -45,6 +48,16 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
     } finally {
       setParsing(false);
       setProgressText(null);
+    }
+  }
+
+  async function handleFile(file: File) {
+    try {
+      const buf = await file.arrayBuffer();
+      setCachedWorkbook({ name: file.name, buffer: buf });
+      await runParseWithBuffer(buf, file.name);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to read file.');
     }
   }
 
@@ -62,9 +75,22 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
 
   return (
     <div className="card">
-      <div className="mb-4 flex items-center gap-2">
-        <div className="h-5 w-1 rounded-full bg-crimson-500" />
-        <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">Excel / CSV Upload</h2>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <div className="h-5 w-1 rounded-full bg-crimson-500" />
+          <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink">Excel / CSV Upload</h2>
+        </div>
+        {date && /^\d{4}-\d{2}-\d{2}$/.test(date) && (
+          <div className="flex items-center gap-1.5 text-xs text-muted font-medium bg-card-2 px-2.5 py-1 rounded-lg border border-line">
+            <Calendar className="h-3.5 w-3.5 text-crimson-400" />
+            <span>Target: <strong className="text-ink">{shortDate(date)}</strong></span>
+            {isDreamWeekDay && (
+              <span className="ml-1 rounded bg-crimson-500/20 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-crimson-300">
+                DreamWeek
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       <div
@@ -99,11 +125,40 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
               <p className="text-sm font-semibold text-ink">
                 Drop Google Sheets / Excel export here or click to browse
               </p>
-              <p className="mt-0.5 text-xs text-muted">Supports .xlsx, .xls, and .csv files</p>
+              <p className="mt-0.5 text-xs text-muted">
+                Filtering for <strong className="text-ink">{prettyDate(date)}</strong> · Supports multi-day DreamWeek sheets
+              </p>
             </div>
           </div>
         )}
       </div>
+
+      {cachedWorkbook && (
+        <div className="mt-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 rounded-xl border border-crimson-500/30 bg-crimson-900/10 p-3 animate-fade-in">
+          <div className="text-xs">
+            <div className="font-semibold text-ink flex items-center gap-1.5 flex-wrap">
+              <span>Loaded sheet:</span>
+              <span className="font-mono text-crimson-300">{cachedWorkbook.name}</span>
+            </div>
+            <div className="text-muted mt-0.5">
+              Active filter: <span className="font-semibold text-ink">{prettyDate(date)}</span> ({service})
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              runParseWithBuffer(cachedWorkbook.buffer, cachedWorkbook.name);
+            }}
+            disabled={parsing}
+            className="btn-crimson text-xs py-1.5 px-3 self-start sm:self-auto flex items-center gap-1.5 shadow-sm"
+            title={`Re-filter ${cachedWorkbook.name} for ${prettyDate(date)}`}
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${parsing ? 'animate-spin' : ''}`} />
+            <span>Filter & Import for {shortDate(date)}</span>
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="mt-4 flex items-start gap-2 rounded-lg border border-crimson-500/30 bg-crimson-900/20 p-3 text-sm text-crimson-300 animate-fade-in">
@@ -138,7 +193,7 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
 
           {lastResult.skipped > 0 && (
             <p className="text-xs text-muted">
-              {lastResult.skipped} row(s) skipped — no transport needed, different date, different service, or duplicate.
+              {lastResult.skipped} row(s) excluded — different date, different service, no transport, or repeat submission.
             </p>
           )}
 

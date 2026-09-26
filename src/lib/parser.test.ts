@@ -418,3 +418,129 @@ test('parseWorkbook() accurately parses PM version spreadsheet (CSV and XLSX)', 
   });
   assert.strictEqual(resAM.passengers.length, 0);
 });
+
+test('DreamWeek: passengers signing up multiple times on different dates are NOT treated as duplicates', () => {
+  // Simulates a DreamWeek evening signup sheet where people sign up 2, 3, or 4 times across different evenings
+  const dreamWeekCsv = [
+    'Timestamp,Full Name,Phone Number,DreamWeek Date,Which service are you attending,Do you need transport,Pickup Stop',
+    // Kabelo signs up 4 times for 4 different dates
+    '9/15/2026 10:00:00,Kabelo Sithole,0821112233,Tuesday 22 September 2026,PM Service,Yes,56 Jorissen',
+    '9/15/2026 10:05:00,Kabelo Sithole,0821112233,Wednesday 23 September 2026,PM Service,Yes,Gate 2',
+    '9/15/2026 10:10:00,Kabelo Sithole,0821112233,Thursday 24 September 2026,PM Service,Yes,Focus 1',
+    '9/15/2026 10:15:00,Kabelo Sithole,0821112233,Friday 25 September 2026,PM Service,Yes,Apex',
+    // Thabo signs up twice: Tuesday and Thursday
+    '9/15/2026 11:00:00,Thabo Mokoena,0832223344,Tuesday 22 September 2026,PM Service,Yes,Junction',
+    '9/15/2026 11:05:00,Thabo Mokoena,0832223344,Thursday 24 September 2026,PM Service,Yes,Junction',
+    // Nomsa signs up for Wednesday only
+    '9/15/2026 12:00:00,Nomsa Dlamini,0843334455,Wednesday 23 September 2026,PM Service,Yes,Laborie',
+    // Lerato signs up TWICE for Tuesday (09:00 with 56 Jorissen, then 14:00 update with Gate 2)
+    '9/15/2026 09:00:00,Lerato Khumalo,0854445566,Tuesday 22 September 2026,PM Service,Yes,56 Jorissen',
+    '9/15/2026 14:00:00,Lerato Khumalo,0854445566,Tuesday 22 September 2026,PM Service,Yes,Gate 2',
+  ].join('\n');
+
+  // 1. Filter for Tuesday (2026-09-22)
+  const resTue = parseWorkbook(dreamWeekCsv, {
+    selectedDate: '2026-09-22',
+    selectedService: 'PM_Normal',
+  });
+  // Should include: Kabelo (Tuesday), Thabo (Tuesday), Lerato (Tuesday - latest Gate 2) = 3 passengers
+  assert.strictEqual(resTue.passengers.length, 3, 'Tuesday must have exactly 3 passengers');
+  const kabeloTue = resTue.passengers.find((p) => p.fullName === 'Kabelo Sithole');
+  assert.ok(kabeloTue, 'Kabelo must be present for Tuesday even though he signed up 4 times');
+  assert.strictEqual(kabeloTue!.stop, '56 Jorissen');
+
+  const thaboTue = resTue.passengers.find((p) => p.fullName === 'Thabo Mokoena');
+  assert.ok(thaboTue, 'Thabo must be present for Tuesday');
+  assert.strictEqual(thaboTue!.stop, 'Junction');
+
+  const leratoTue = resTue.passengers.find((p) => p.fullName === 'Lerato Khumalo');
+  assert.ok(leratoTue, 'Lerato must be present for Tuesday');
+  assert.strictEqual(leratoTue!.stop, 'Gate 2', 'Lerato duplicate on same day must resolve to most recent (Gate 2)');
+
+  // 2. Filter for Wednesday (2026-09-23)
+  const resWed = parseWorkbook(dreamWeekCsv, {
+    selectedDate: '2026-09-23',
+    selectedService: 'PM_Normal',
+  });
+  // Should include: Kabelo (Wednesday, stop: Gate 2), Nomsa (Wednesday, stop: Laborie) = 2 passengers
+  assert.strictEqual(resWed.passengers.length, 2, 'Wednesday must have exactly 2 passengers');
+  const kabeloWed = resWed.passengers.find((p) => p.fullName === 'Kabelo Sithole');
+  assert.ok(kabeloWed, 'Kabelo must be present for Wednesday');
+  assert.strictEqual(kabeloWed!.stop, 'Gate 2');
+
+  const nomsaWed = resWed.passengers.find((p) => p.fullName === 'Nomsa Dlamini');
+  assert.ok(nomsaWed, 'Nomsa must be present for Wednesday');
+  assert.strictEqual(nomsaWed!.stop, 'Laborie');
+
+  // 3. Filter for Thursday (2026-09-24)
+  const resThu = parseWorkbook(dreamWeekCsv, {
+    selectedDate: '2026-09-24',
+    selectedService: 'PM_Normal',
+  });
+  // Should include: Kabelo (Thursday, stop: Focus 1), Thabo (Thursday, stop: Junction) = 2 passengers
+  assert.strictEqual(resThu.passengers.length, 2, 'Thursday must have exactly 2 passengers');
+  const kabeloThu = resThu.passengers.find((p) => p.fullName === 'Kabelo Sithole');
+  assert.ok(kabeloThu, 'Kabelo must be present for Thursday');
+  assert.strictEqual(kabeloThu!.stop, 'Focus 1');
+
+  // 4. Filter for Friday (2026-09-25)
+  const resFri = parseWorkbook(dreamWeekCsv, {
+    selectedDate: '2026-09-25',
+    selectedService: 'PM_Normal',
+  });
+  // Should include: Kabelo (Friday, stop: Apex) = 1 passenger
+  assert.strictEqual(resFri.passengers.length, 1, 'Friday must have exactly 1 passenger');
+  const kabeloFri = resFri.passengers.find((p) => p.fullName === 'Kabelo Sithole');
+  assert.ok(kabeloFri, 'Kabelo must be present for Friday');
+  assert.strictEqual(kabeloFri!.stop, 'Apex');
+});
+
+test('DreamWeek: parses various date representations and multi-select evening cells', () => {
+  const variedCsv = [
+    'Timestamp,Full Name,Phone Number,Which day are you attending?,Which service are you attending,Do you need transport,Pickup Stop',
+    '9/15/2026 10:00:00,Rider One,0810000001,Tuesday 22 September,PM Service,Yes,56 Jorissen', // no year
+    '9/15/2026 10:01:00,Rider Two,0810000002,Wednesday 23 Sep,PM Service,Yes,Junction', // short month, no year
+    '9/15/2026 10:02:00,Rider Three,0810000003,Thursday 24 September 2026 - Evening Service,PM Service,Yes,Apex', // trailing label
+    '9/15/2026 10:03:00,Rider Four,0810000004,Friday Evening,PM Service,Yes,Focus 1', // weekday only
+    '9/15/2026 10:04:00,Rider Five,0810000005,"Tuesday 22 September, Wednesday 23 September",PM Service,Yes,Gate 2', // multi-day checkbox
+  ].join('\n');
+
+  // Tuesday 22 Sep
+  const resTue = parseWorkbook(variedCsv, {
+    selectedDate: '2026-09-22',
+    selectedService: 'PM_Normal',
+  });
+  // Rider One (Tuesday) + Rider Five (Tuesday & Wednesday)
+  assert.strictEqual(resTue.passengers.length, 2);
+  assert.ok(resTue.passengers.some((p) => p.fullName === 'Rider One'));
+  assert.ok(resTue.passengers.some((p) => p.fullName === 'Rider Five'));
+
+  // Wednesday 23 Sep
+  const resWed = parseWorkbook(variedCsv, {
+    selectedDate: '2026-09-23',
+    selectedService: 'PM_Normal',
+  });
+  // Rider Two (Wednesday) + Rider Five (Tuesday & Wednesday)
+  assert.strictEqual(resWed.passengers.length, 2);
+  assert.ok(resWed.passengers.some((p) => p.fullName === 'Rider Two'));
+  assert.ok(resWed.passengers.some((p) => p.fullName === 'Rider Five'));
+
+  // Thursday 24 Sep
+  const resThu = parseWorkbook(variedCsv, {
+    selectedDate: '2026-09-24',
+    selectedService: 'PM_Normal',
+  });
+  // Rider Three (Thursday)
+  assert.strictEqual(resThu.passengers.length, 1);
+  assert.strictEqual(resThu.passengers[0].fullName, 'Rider Three');
+
+  // Friday 25 Sep
+  const resFri = parseWorkbook(variedCsv, {
+    selectedDate: '2026-09-25',
+    selectedService: 'PM_Normal',
+  });
+  // Rider Four (Friday Evening)
+  assert.strictEqual(resFri.passengers.length, 1);
+  assert.strictEqual(resFri.passengers[0].fullName, 'Rider Four');
+});
+

@@ -35,13 +35,15 @@ export function applyWalkInToManifest(
   walkInPassenger: Passenger,
   extraDraftUpdate?: Partial<VehicleDraftState>
 ): Manifest {
-  const existingIndex = currentManifest.signups.findIndex((p) => p.id === walkInPassenger.id);
+  const pIdStr = String(walkInPassenger.id);
+  const existingIndex = currentManifest.signups.findIndex((p) => String(p.id) === pIdStr);
   let nextSignups: Passenger[];
+  const targetSignup = { ...walkInPassenger, assignedTo: vehicleId, present: true };
   if (existingIndex >= 0) {
     nextSignups = [...currentManifest.signups];
-    nextSignups[existingIndex] = { ...currentManifest.signups[existingIndex], ...walkInPassenger };
+    nextSignups[existingIndex] = { ...currentManifest.signups[existingIndex], ...targetSignup };
   } else {
-    nextSignups = [...currentManifest.signups, walkInPassenger];
+    nextSignups = [...currentManifest.signups, targetSignup];
   }
 
   const poolKey = hubDisplayName(
@@ -50,21 +52,39 @@ export function applyWalkInToManifest(
   );
 
   const nextVehicles = currentManifest.vehicles.map((v) => {
-    if (v.id !== vehicleId) return v;
+    if (v.id !== vehicleId) {
+      // Cleanly remove from any previous vehicle
+      const wasInVehicle = (v.riders || []).some((rId) => String(rId) === pIdStr);
+      if (wasInVehicle) {
+        const cleanedRiders = (v.riders || []).filter((rId) => String(rId) !== pIdStr);
+        const cleanedDraft = v.draftState
+          ? {
+              ...v.draftState,
+              presentIds: (v.draftState.presentIds || []).filter((id) => String(id) !== pIdStr),
+              absentIds: (v.draftState.absentIds || []).filter((id) => String(id) !== pIdStr),
+              sponsoredIds: (v.draftState.sponsoredIds || []).filter((id) => String(id) !== pIdStr),
+              unpaidIds: (v.draftState.unpaidIds || []).filter((id) => String(id) !== pIdStr),
+              absentPaidIds: (v.draftState.absentPaidIds || []).filter((id) => String(id) !== pIdStr),
+            }
+          : undefined;
+        return { ...v, riders: cleanedRiders, draftState: cleanedDraft };
+      }
+      return v;
+    }
 
     const riders = Array.isArray(v.riders) ? v.riders : [];
-    const nextRiders = riders.includes(walkInPassenger.id) ? riders : [...riders, walkInPassenger.id];
+    const nextRiders = riders.some((rId) => String(rId) === pIdStr) ? riders : [...riders, walkInPassenger.id];
 
     const orderedStops = Array.isArray(v.orderedStops) ? v.orderedStops : [];
     const nextOrderedStops = orderedStops.includes(poolKey) ? orderedStops : [...orderedStops, poolKey];
 
     const currentDraft = v.draftState || {};
     const presentIds = currentDraft.presentIds || [];
-    const nextPresentIds = presentIds.includes(walkInPassenger.id)
+    const nextPresentIds = presentIds.some((id) => String(id) === pIdStr)
       ? presentIds
       : [...presentIds, walkInPassenger.id];
 
-    const absentIds = (currentDraft.absentIds || []).filter((id) => id !== walkInPassenger.id);
+    const absentIds = (currentDraft.absentIds || []).filter((id) => String(id) !== pIdStr);
 
     const nextDraftState: VehicleDraftState = {
       ...currentDraft,

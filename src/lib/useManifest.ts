@@ -1068,13 +1068,19 @@ export function useManifest(
 
         const updated = applyWalkInToManifest(remote, vehicleId, newPassenger, draftUpdate);
 
-        // Persist target vehicle individually to transport_vehicles
-        const updatedTargetVehicle = updated.vehicles.find((v) => v.id === vehicleId);
-        if (updatedTargetVehicle) {
-          saveVehicleToDb(updated.date, updatedTargetVehicle).catch((err) => {
-            console.warn('[useManifest] Error saving walk-in vehicle individually:', err);
-          });
+        // Persist target vehicle and any previous vehicle individually
+        for (const v of updated.vehicles) {
+          const remoteV = remote.vehicles.find((rv) => rv.id === v.id);
+          const hadRider = (remoteV?.riders || []).some((rId) => String(rId) === String(newPassenger.id));
+          const hasRider = (v.riders || []).some((rId) => String(rId) === String(newPassenger.id));
+          if (v.id === vehicleId || hadRider !== hasRider) {
+            saveVehicleToDb(updated.date, v).catch((err) => {
+              console.warn('[useManifest] Error saving vehicle individually:', err);
+            });
+          }
         }
+
+        saveManifestToServer(updated).catch(() => {});
 
         const { data: saved } = await supabase
           .from(MANIFESTS_TABLE)
