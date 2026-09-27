@@ -105,6 +105,16 @@ export function getPassengerStatusBadge(p?: Partial<Passenger> | null): {
  * across every device/tab a Rep has open, survives a refresh, and preserves
  * all marked absentees and present riders upon submission and reopening.
  */
+export interface StopCashConfirmation {
+  stopName: string;
+  expectedAmount: number;
+  receivedAmount?: number;
+  confirmed: boolean;
+  confirmedBy?: string;
+  confirmedAt?: string;
+  notes?: string;
+}
+
 export interface VehicleDraftState {
   presentIds?: string[];
   absentIds?: string[];
@@ -117,6 +127,7 @@ export interface VehicleDraftState {
   licensePlate?: string;
   generalNotes?: string;
   cashCollected?: Record<string, number>;
+  stopCashConfirmations?: Record<string, StopCashConfirmation>;
   settledLedgerIds?: string[]; // historical debt IDs selected for settlement
   /**
    * Manual cancellation fees paid in cash (e.g. when passenger is not on the ledger yet).
@@ -277,6 +288,15 @@ export type LiveSyncAction =
   | {
       type: 'presence_heartbeat';
       vehicleId: string;
+      repName: string;
+      clientId: string;
+      timestamp: number;
+    }
+  | {
+      type: 'stop_cash_confirmation';
+      vehicleId: string;
+      stopName: string;
+      confirmation: StopCashConfirmation;
       repName: string;
       clientId: string;
       timestamp: number;

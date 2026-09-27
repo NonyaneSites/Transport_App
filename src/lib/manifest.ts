@@ -2,7 +2,7 @@ import { supabase, MANIFESTS_TABLE, VEHICLES_TABLE, mockStorage } from './supaba
 import type { Manifest, Passenger, Vehicle, VehicleDraftState } from './types';
 import { hubDisplayName } from './types';
 import { normalizePassengerText, getSubmissionTimestampEpoch } from './importer';
-import { saveManifestToServer } from './serverApi';
+import { saveManifestToServer, fetchManifestFromServer } from './serverApi';
 export { parseGoogleSheetSignups, type RawSheetRow } from './importer';
 
 /**
@@ -636,36 +636,51 @@ export async function syncVehiclesToDb(manifestKey: string, vehicles: Vehicle[])
 export async function loadManifest(key: string): Promise<Manifest | null> {
   let manifest: Manifest | null = null;
   let loadedFromRemote = false;
+
+  // 1. Primary: Central Express Server API (persists manifests across devices & sessions)
   try {
-    const { data, error } = await supabase
-      .from(MANIFESTS_TABLE)
-      .select('date, signups, vehicles, created_at, updated_at')
-      .eq('date', key)
-      .maybeSingle();
-    if (error) {
-      console.warn('[Manifest] Failed to load remote manifest, reading local store:', error);
-    }
-    if (data) {
-      manifest = {
-        date: data.date,
-        signups: Array.isArray(data.signups) ? data.signups : [],
-        vehicles: Array.isArray(data.vehicles)
-          ? data.vehicles.map((v: Vehicle) => ({
-              ...v,
-              riders: Array.isArray(v.riders) ? v.riders : [],
-              orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
-            }))
-          : [],
-        created_at: data.created_at,
-        updated_at: data.updated_at,
-      };
+    const serverManifest = await fetchManifestFromServer(key);
+    if (serverManifest && Array.isArray(serverManifest.vehicles) && serverManifest.vehicles.length > 0) {
+      manifest = serverManifest;
       loadedFromRemote = true;
     }
   } catch (err) {
-    console.warn('[Manifest] Exception loading manifest, checking local store:', err);
+    console.debug('[Manifest] Server fetch manifest note:', err);
   }
 
-  // Fallback to local storage if not yet loaded from remote
+  // 2. Secondary: Supabase table transport_manifests
+  if (!manifest) {
+    try {
+      const { data, error } = await supabase
+        .from(MANIFESTS_TABLE)
+        .select('date, signups, vehicles, created_at, updated_at')
+        .eq('date', key)
+        .maybeSingle();
+      if (error) {
+        console.warn('[Manifest] Failed to load remote manifest, reading local store:', error);
+      }
+      if (data) {
+        manifest = {
+          date: data.date,
+          signups: Array.isArray(data.signups) ? data.signups : [],
+          vehicles: Array.isArray(data.vehicles)
+            ? data.vehicles.map((v: Vehicle) => ({
+                ...v,
+                riders: Array.isArray(v.riders) ? v.riders : [],
+                orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
+              }))
+            : [],
+          created_at: data.created_at,
+          updated_at: data.updated_at,
+        };
+        loadedFromRemote = true;
+      }
+    } catch (err) {
+      console.warn('[Manifest] Exception loading manifest, checking local store:', err);
+    }
+  }
+
+  // 3. Fallback to local storage if not yet loaded
   if (!manifest) {
     const localRow = mockStorage.getTable(MANIFESTS_TABLE).find((r) => r.date === key);
     if (localRow) {
@@ -683,12 +698,9 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
 
   // Integrate individual vehicle persistence (source of truth per vehicle)
   try {
-    // If loaded from remote Supabase, skip local storage fallback to avoid overwriting with stale cache
     const individualVehicles = await loadVehiclesForManifest(key, loadedFromRemote);
     if (individualVehicles.length > 0) {
-      // Build a map of individually saved vehicles
       const indMap = new Map(individualVehicles.map((v) => [v.id, v]));
-      // Merge with manifest list to maintain order, updating with latest individual records
       const mergedVehicles: Vehicle[] = [];
       const seenIds = new Set<string>();
 
@@ -696,9 +708,14 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
         if (indMap.has(v.id)) {
           const ind = indMap.get(v.id)!;
           // CRITICAL: NEVER lose submitted status! Remote or local submission must be preserved.
-          const isSubmitted = Boolean(v.submitted || ind.submitted);
-          const submittedAt = v.submittedAt || ind.submittedAt;
-          const submittedBy = v.submittedBy || ind.submittedBy;
+          const isSubmitted = Boolean(v.submitted || ind.submitted || v.draftState?.submitted || ind.draftState?.submitted);
+          const submittedAt = v.submittedAt || ind.submittedAt || (isSubmitted ? new Date().toISOString() : undefined);
+          const submittedBy = v.submittedBy?.trim() || ind.submittedBy?.trim() || v.repName?.trim() || ind.repName?.trim();
+          const repName = v.repName?.trim() || ind.repName?.trim() || v.draftState?.repName?.trim() || ind.draftState?.repName?.trim() || submittedBy || '';
+          const licensePlate = v.licensePlate?.trim() || ind.licensePlate?.trim() || v.draftState?.licensePlate?.trim() || ind.draftState?.licensePlate?.trim() || '';
+          const generalNotes = v.generalNotes?.trim() || ind.generalNotes?.trim() || v.draftState?.generalNotes?.trim() || ind.draftState?.generalNotes?.trim() || '';
+          const coReps = (v.coReps && v.coReps.length > 0) ? v.coReps : (ind.coReps || []);
+
           const activeRiderIds = new Set((v.riders || []).map(String));
           const vSpon = v.draftState?.sponsoredIds ?? [];
           const indSpon = ind.draftState?.sponsoredIds ?? [];
@@ -715,17 +732,28 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
           mergedVehicles.push({
             ...ind,
             ...v,
+            repName,
+            licensePlate,
+            generalNotes,
+            coReps,
             submitted: isSubmitted,
             submittedAt,
             submittedBy,
             draftState: {
               ...(ind.draftState || {}),
               ...(v.draftState || {}),
+              repName: repName || v.draftState?.repName || ind.draftState?.repName,
+              licensePlate: licensePlate || v.draftState?.licensePlate || ind.draftState?.licensePlate,
+              generalNotes: generalNotes || v.draftState?.generalNotes || ind.draftState?.generalNotes,
+              coReps: coReps || v.draftState?.coReps || ind.draftState?.coReps,
+              submitted: isSubmitted,
               presentIds: (v.draftState?.presentIds ?? ind.draftState?.presentIds ?? []).filter((id) => activeRiderIds.has(String(id))),
               absentIds: (v.draftState?.absentIds ?? ind.draftState?.absentIds ?? []).filter((id) => activeRiderIds.has(String(id))),
               sponsoredIds: mergedSponIds.filter((id) => activeRiderIds.has(String(id))),
               unpaidIds: mergedUnpIds.filter((id) => activeRiderIds.has(String(id))),
               absentPaidIds: mergedApIds.filter((id) => activeRiderIds.has(String(id))),
+              externalSponsees: v.draftState?.externalSponsees || ind.draftState?.externalSponsees || [],
+              cashCollected: v.draftState?.cashCollected || ind.draftState?.cashCollected,
               notes: Object.fromEntries(
                 Object.entries({ ...(ind.draftState?.notes || {}), ...(v.draftState?.notes || {}) }).filter(([k]) => activeRiderIds.has(String(k)))
               ),

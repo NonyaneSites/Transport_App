@@ -107,7 +107,7 @@ export function AdminAttendanceNotesSection({
 
     for (const v of manifest.vehicles || []) {
       // RULE: Only submitted vehicles count! Reopened/draft vehicles are revoked until resubmitted.
-      if (!v.submitted) continue;
+      if (!v.submitted && !v.draftState?.submitted) continue;
 
       const draft = v.draftState;
       const sIds = new Set<string>((draft?.sponsoredIds || []).map(String));
@@ -142,7 +142,7 @@ export function AdminAttendanceNotesSection({
     const seen = new Set<string>();
 
     for (const v of manifest.vehicles || []) {
-      if (!v.submitted) continue;
+      if (!v.submitted && !v.draftState?.submitted) continue;
 
       const draft = v.draftState;
       const uIds = new Set<string>((draft?.unpaidIds || []).map(String));
@@ -188,7 +188,7 @@ export function AdminAttendanceNotesSection({
     );
 
     for (const v of manifest.vehicles || []) {
-      if (!v.submitted) continue;
+      if (!v.submitted && !v.draftState?.submitted) continue;
 
       const ext = v.draftState?.externalSponsees || [];
       const repName = v.repName || v.submittedBy || '—';
@@ -218,7 +218,7 @@ export function AdminAttendanceNotesSection({
     const seen = new Set<string>();
 
     for (const v of manifest.vehicles || []) {
-      if (!v.submitted) continue;
+      if (!v.submitted && !v.draftState?.submitted) continue;
 
       const draft = v.draftState;
       const aIds = new Set<string>(draft?.absentIds || []);

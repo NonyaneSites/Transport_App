@@ -1027,15 +1027,38 @@ export function RepPage() {
     isUserDirtyRef.current = true;
     lastLocalEditTimeRef.current = Date.now();
 
+    // Auto-resolve sponsee in manifest signups if sponseeId was not explicitly set
+    let resolvedSponseeId = data.sponseeId;
+    let resolvedTargetVehId = data.targetVehicleId;
+    let resolvedTaxiName = data.taxiName;
+
+    if (!resolvedSponseeId) {
+      const matchedSignup = manifest.signups.find(
+        (s) => s.fullName.trim().toLowerCase() === data.sponseeName.trim().toLowerCase()
+      );
+      if (matchedSignup) {
+        resolvedSponseeId = String(matchedSignup.id);
+        if (!resolvedTargetVehId) {
+          const vehWithRider = manifest.vehicles.find((v) =>
+            (v.riders || []).some((rId) => String(rId) === String(matchedSignup.id))
+          );
+          if (vehWithRider) {
+            resolvedTargetVehId = vehWithRider.id;
+            resolvedTaxiName = vehWithRider.name;
+          }
+        }
+      }
+    }
+
     const newId = `sponsee-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const newEntry: ExternalSponsee = {
       id: newId,
       payerId: data.payerId,
       payerName: data.payerName || 'Passenger',
-      sponseeId: data.sponseeId,
+      sponseeId: resolvedSponseeId,
       sponseeName: data.sponseeName,
-      taxiName: data.taxiName,
-      targetVehicleId: data.targetVehicleId,
+      taxiName: resolvedTaxiName,
+      targetVehicleId: resolvedTargetVehId,
       fromVehicleId: selectedVehicle.id,
       fromVehicleName: selectedVehicle.name,
       amount: data.amount || FARE,
@@ -1046,12 +1069,12 @@ export function RepPage() {
     setExternalSponsees(nextExternalSponsees);
 
     // Auto-sponsor the person in the target vehicle!
-    const targetVehId = data.targetVehicleId;
-    const sponseeId = data.sponseeId;
+    const targetVehId = resolvedTargetVehId;
+    const sponseeId = resolvedSponseeId;
     const sponsorLabel = data.payerName ? `Sponsored by ${data.payerName}` : 'Sponsored';
 
-    const targetVeh = manifest.vehicles.find((v) => targetVehId ? v.id === targetVehId : v.name.toLowerCase() === data.taxiName.toLowerCase());
-    const resolvedTargetVehId = targetVeh?.id || targetVehId;
+    const targetVeh = manifest.vehicles.find((v) => targetVehId ? v.id === targetVehId : v.name.toLowerCase() === resolvedTaxiName.toLowerCase());
+    const finalTargetVehId = targetVeh?.id || targetVehId;
 
     const updatedVehicles = manifest.vehicles.map((v) => {
       if (v.id === selectedVehicle.id) {
@@ -1107,10 +1130,10 @@ export function RepPage() {
     manifestRef.current = nextManifest;
     await save(nextManifest);
 
-    if (sponseeId && resolvedTargetVehId) {
+    if (sponseeId && finalTargetVehId) {
       broadcastLiveAction({
         type: 'rider_sponsored',
-        vehicleId: resolvedTargetVehId,
+        vehicleId: finalTargetVehId,
         riderId: String(sponseeId),
         sponsored: true,
         repName: data.payerName || 'Co-rep',
@@ -2079,24 +2102,6 @@ export function RepPage() {
           unpaidNote: (notes[r.id] ?? notes[String(r.id)] ?? r.unpaidNote ?? '').trim(),
         }));
 
-      // Atomic submission payload to central server
-      const submitPayload: SubmitVehiclePayload = {
-        vehicleId: selectedVehicle.id,
-        vehicle: selectedVehicle,
-        repName: repName.trim(),
-        licensePlate: licensePlate.trim(),
-        coReps: coReps.map((c) => c.trim()).filter(Boolean),
-        generalNotes: fullGeneralNotes,
-        draftState: finalizedDraft,
-        absentees,
-        sponsoredRiders,
-        unpaidRiders,
-        allRiderNames: riders.map((r) => r.fullName),
-        serviceLabel,
-        parsedDate,
-        updatedSignups,
-      };
-
       // Construct the client-side submitted manifest with authoritative local state
       const updatedVehicles = manifest.vehicles.map((v) =>
         v.id === selectedVehicle.id
@@ -2113,6 +2118,26 @@ export function RepPage() {
             }
           : v
       );
+
+      // Atomic submission payload to central server
+      const submitPayload: SubmitVehiclePayload = {
+        vehicleId: selectedVehicle.id,
+        vehicle: selectedVehicle,
+        allVehicles: updatedVehicles,
+        repName: repName.trim(),
+        licensePlate: licensePlate.trim(),
+        coReps: coReps.map((c) => c.trim()).filter(Boolean),
+        generalNotes: fullGeneralNotes,
+        draftState: finalizedDraft,
+        absentees,
+        sponsoredRiders,
+        unpaidRiders,
+        allRiderNames: riders.map((r) => r.fullName),
+        serviceLabel,
+        parsedDate,
+        updatedSignups,
+      };
+
       let submittedManifest: Manifest = { ...manifest, signups: updatedSignups, vehicles: updatedVehicles };
       let serverSaved = false;
 
@@ -2120,7 +2145,7 @@ export function RepPage() {
         const result = await submitVehicleToServer(key, submitPayload);
         if (result && result.success) {
           serverSaved = true;
-          // If the server returned a valid manifest with at least as many vehicles, merge non-conflicting changes
+          // If the server returned a valid manifest with vehicles, adopt it
           if (result.manifest && Array.isArray(result.manifest.vehicles) && result.manifest.vehicles.length >= manifest.vehicles.length) {
             submittedManifest = result.manifest;
           }

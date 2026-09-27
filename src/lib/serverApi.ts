@@ -4,6 +4,7 @@ import type { LedgerEntry, AbsenteeInput } from '@/lib/ledger';
 export interface SubmitVehiclePayload {
   vehicleId: string;
   vehicle?: Vehicle;
+  allVehicles?: Vehicle[];
   repName: string;
   licensePlate: string;
   coReps?: string[];
@@ -15,6 +16,9 @@ export interface SubmitVehiclePayload {
     fullName: string;
     structure?: string;
     stop?: string;
+    vehicleName?: string;
+    vehicle_name?: string;
+    taxiName?: string;
     sponsorNote?: string;
   }>;
   unpaidRiders?: Array<{

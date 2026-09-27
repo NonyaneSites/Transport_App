@@ -39,15 +39,24 @@ export function mergeIncomingManifest(
   // If no specific vehicle is actively open for editing, incoming is authoritative,
   // but protect submitted vehicles from being accidentally un-submitted by stale broadcasts
   if (!activeVehicleId) {
-    const currentVehMap = new Map((current?.vehicles || []).map((v) => [v.id, v]));
+    const currentVehMap = new Map((current?.vehicles || []).map((v) => [String(v.id), v]));
     const safeVehicles = incoming.vehicles.map((incV) => {
-      const curV = currentVehMap.get(incV.id);
-      if (curV?.submitted && !incV.submitted) {
+      const curV = currentVehMap.get(String(incV.id));
+      const wasSubmitted = Boolean(curV?.submitted || curV?.draftState?.submitted);
+      if (wasSubmitted && !incV.submitted) {
         return {
           ...incV,
           submitted: true,
-          submittedAt: curV.submittedAt || incV.submittedAt,
-          submittedBy: curV.submittedBy || incV.submittedBy,
+          submittedAt: curV?.submittedAt || incV.submittedAt,
+          submittedBy: curV?.submittedBy || incV.submittedBy,
+          repName: curV?.repName || incV.repName,
+          licensePlate: curV?.licensePlate || incV.licensePlate,
+          generalNotes: curV?.generalNotes || incV.generalNotes,
+          draftState: {
+            ...(typeof incV.draftState === 'object' && incV.draftState ? incV.draftState : {}),
+            ...(typeof curV?.draftState === 'object' && curV?.draftState ? curV.draftState : {}),
+            submitted: true,
+          },
         };
       }
       return incV;

@@ -205,11 +205,32 @@ export function cleanSponsorshipNote(note?: string | null): string {
   trimmed = trimmed.replace(/^(?:taxi|vehicle|bus)\s*\d+\s*[-–—:]\s*/gi, '').trim();
 
   // Strip general notes boilerplate if accidental full notes got attached
-  trimmed = trimmed.replace(/(?:co-reps|cash collected|external sponsees|past cancellations)[^;.]*(?:[;.]|$)/gi, '').trim();
+  trimmed = trimmed.replace(/(?:co-reps|cash collected|external sponsees|past cancellations|sponsorships):?[^;.]*(?:[;.]|$)/gi, '').trim();
 
   if (/^(?:unaccounted|unpaid)?\s*sponsorships?$/i.test(trimmed)) return '';
   if (/^(?:(?:from|in)\s+)?(?:taxi|vehicle|bus)\s*\d+$/i.test(trimmed)) return '';
 
+  return trimmed;
+}
+
+/**
+ * Strips vehicle-wide summaries (cash, co-reps, sponsorships) from personal absentee notes
+ * so an absentee passenger's record is never tainted by other riders' sponsorships.
+ */
+export function cleanPersonalAbsenteeNote(note?: unknown): string {
+  if (!note || typeof note !== 'string') return '';
+  let trimmed = note.trim();
+  if (!trimmed) return '';
+
+  // Strip vehicle-wide summary prefixes and their trailing contents
+  trimmed = trimmed.replace(/(?:co-reps|cash collected|external sponsees|past cancellations|sponsorships?)\s*:[^.]*(?:\.|$)/gi, '');
+  trimmed = trimmed.replace(/(?:co-reps|cash collected|external sponsees|past cancellations|sponsorships?)\s*:.*?(?=(?:co-reps|cash collected|external sponsees|past cancellations|sponsorships?)\s*:|$)/gi, '');
+  trimmed = trimmed.replace(/\b(?:co-reps|cash collected|external sponsees|past cancellations|sponsorships?)\b[^.]*(\.|$)/gi, '');
+  trimmed = trimmed.replace(/\bpaid by\s*:[^;.]*(?:[;.]|$)/gi, '');
+  trimmed = trimmed.replace(/\s{2,}/g, ' ').trim();
+
+  // If after stripping only punctuation or whitespace remains, return empty string
+  if (/^[-–—:;,.\s]*$/.test(trimmed)) return '';
   return trimmed;
 }
 
@@ -553,6 +574,7 @@ export async function insertAbsentees(
   }
 
   const rows = absentees.map((p) => {
+    const isSpon = Boolean(p.sponsored);
     return {
       manifest_key: manifestKey,
       date,
@@ -564,10 +586,12 @@ export async function insertAbsentees(
       submitted_by: submittedBy,
       rep_name: repName,
       license_plate: licensePlate,
-      sponsored: p.sponsored ?? false,
-      sponsor_note: cleanSponsorshipNote(p.sponsorNote),
+      sponsored: isSpon,
+      sponsor_note: isSpon ? cleanSponsorshipNote(p.sponsorNote) : '',
       structure_debt: CANCELLATION_FEE,
-      general_notes: p.sponsored ? (cleanSponsorshipNote(p.sponsorNote) || '') : generalNotes,
+      general_notes: isSpon
+        ? (cleanSponsorshipNote(p.sponsorNote) || 'Reported sponsored')
+        : cleanPersonalAbsenteeNote((p as { notes?: string }).notes || ''),
     };
   });
 
@@ -1452,18 +1476,33 @@ export function isEntrySponsorshipOrUnpaid(e: {
   general_notes?: string | null;
   sponsor_note?: string | null;
 }): boolean {
-  const gn = (e.general_notes || '').toLowerCase();
-  const sn = (e.sponsor_note || '').toLowerCase();
-  return (
-    Boolean(e.sponsored) ||
-    gn.includes('unaccounted') ||
-    gn.includes('unpaid') ||
-    gn.includes('did not pay') ||
-    gn.includes('sponsorship') ||
+  if (e.sponsored) return true;
+  const sn = (e.sponsor_note || '').toLowerCase().trim();
+  if (
+    sn.includes('sponsor') ||
     sn.includes('unaccounted') ||
     sn.includes('unpaid') ||
-    sn.includes('sponsorship')
-  );
+    sn.includes('did not pay')
+  ) {
+    return true;
+  }
+  // Strip any accidental vehicle-level summaries before evaluating general_notes
+  const rawGn = cleanPersonalAbsenteeNote(e.general_notes || '');
+  const gn = rawGn.toLowerCase();
+  // Check for specific debt/sponsorship phrases directed at this passenger:
+  if (
+    gn.includes('unaccounted sponsorship') ||
+    gn.includes('unpaid sponsorship') ||
+    gn.includes('unpaid ride') ||
+    gn.includes('did not pay') ||
+    gn.includes('actually sponsored')
+  ) {
+    return true;
+  }
+  if (/^(?:unaccounted|unpaid)\b/i.test(gn)) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -1899,24 +1938,24 @@ export function cleanAndDeduplicateSponsorships(
     const cleanDate = normalizeDateToYMD(rawDate);
     const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-    // Comprehensive deduplication search
+    // Comprehensive deduplication search - strictly scoped to session date
     const existingIdx = result.findIndex((existing) => {
+      const existDate = normalizeDateToYMD(existing.date || existing.manifest_key);
+      const isSameDate = (!cleanDate && !existDate) || (cleanDate && existDate && cleanDate === existDate) || (item.manifest_key && existing.manifest_key && item.manifest_key === existing.manifest_key);
+      if (!isSameDate) return false;
+
       if (item.id && existing.id && item.id === existing.id) return true;
       if (item.passenger_id && existing.passenger_id && String(item.passenger_id) === String(existing.passenger_id)) {
-        const existDate = normalizeDateToYMD(existing.date || existing.manifest_key);
-        return !cleanDate || !existDate || cleanDate === existDate;
+        return true;
       }
       const existNormName = sanitizePassengerDisplayName(existing.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
-      if (existNormName === normName) {
-        const existDate = normalizeDateToYMD(existing.date || existing.manifest_key);
-        if (!cleanDate || !existDate || cleanDate === existDate) return true;
-        if (item.manifest_key && existing.manifest_key && item.manifest_key === existing.manifest_key) return true;
-      }
-      return false;
+      return existNormName === normName;
     });
 
     if (existingIdx >= 0) {
       const existing = result[existingIdx];
+      // Keep verified status if existing was already verified, otherwise keep item's status
+      const resolvedStatus = existing.status !== 'pending' ? existing.status : item.status;
       result[existingIdx] = {
         ...existing,
         passenger_name: cleanName,
@@ -1925,7 +1964,7 @@ export function cleanAndDeduplicateSponsorships(
         vehicle_name: existing.vehicle_name || item.vehicle_name,
         rep_name: existing.rep_name || item.rep_name,
         sponsor_note: existing.sponsor_note || item.sponsor_note || '',
-        status: existing.status !== 'pending' ? existing.status : item.status,
+        status: resolvedStatus,
         status_updated_at: existing.status_updated_at || item.status_updated_at,
         ledger_entry_id: existing.ledger_entry_id || item.ledger_entry_id,
         date: existing.date || cleanDate || item.date,
@@ -2218,7 +2257,7 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
       })
     );
 
-    // A. Check mockStorage manifests (STRICT: only submitted vehicles)
+    // A. Check mockStorage manifests (both submitted vehicles and in-progress drafts, plus cross-taxi external sponsees)
     for (const m of manifestsTable) {
       if (!m.date) continue;
       const parsedDate = m.date.split('_')[0] || m.date;
@@ -2226,19 +2265,15 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
       const allSignups = Array.isArray(m.signups) ? m.signups : [];
 
       for (const v of m.vehicles || []) {
-        const isSubmitted = Boolean(v.submitted);
-        if (!isSubmitted) continue;
-
-        const vehicleRiderIds = new Set(v.riders || []);
-        if (vehicleRiderIds.size === 0) continue;
-        const vehicleSignups = allSignups.filter((p) => vehicleRiderIds.has(p.id));
-        if (vehicleSignups.length === 0) continue;
+        const vehicleRiderIds = new Set((v.riders || []).map(String));
+        const vehicleSignups = allSignups.filter((p) => vehicleRiderIds.has(String(p.id)));
         const rep = v.repName || v.submittedBy || 'Transport Rep';
-        const sponsoredIds = new Set(v.draftState?.sponsoredIds || []);
+        const sponsoredIds = new Set((v.draftState?.sponsoredIds || []).map(String));
         const notes = v.draftState?.notes || {};
 
         for (const p of vehicleSignups) {
-          const isSponsored = p.sponsored || sponsoredIds.has(p.id);
+          const sId = String(p.id);
+          const isSponsored = Boolean(p.sponsored || sponsoredIds.has(sId) || sponsoredIds.has(p.id));
           if (!isSponsored) continue;
 
           const cleanName = sanitizePassengerDisplayName(p.fullName);
@@ -2248,7 +2283,7 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
           const lookupKey = `${baseDate}::${normName}`;
           if (existingKeys.has(lookupKey)) continue;
 
-          const sponsorNote = (notes[p.id] || p.sponsorNote || '').trim();
+          const sponsorNote = (notes[sId] || notes[p.id] || p.sponsorNote || '').trim();
           const id = `sp_${baseDate}_${normName}`;
           const newSpon: ReportedSponsorship = {
             id,
@@ -2261,7 +2296,43 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
             stop: (p.stop || '').trim(),
             vehicle_name: v.name || 'Vehicle',
             rep_name: rep,
-            sponsor_note: sponsorNote,
+            sponsor_note: cleanSponsorshipNote(sponsorNote),
+            status: 'pending',
+            submitted_at: v.submittedAt || new Date().toISOString(),
+          };
+          list.push(newSpon);
+          harvestedRows.push(newSpon);
+          existingKeys.add(lookupKey);
+          harvestedNew = true;
+        }
+
+        // Also harvest cross-taxi external sponsees recorded in this vehicle's draft
+        const extSponsees = Array.isArray(v.draftState?.externalSponsees)
+          ? (v.draftState.externalSponsees as Array<{ sponseeId?: string; sponseeName?: string; taxiName?: string; payerName?: string; note?: string }>)
+          : [];
+        for (const ext of extSponsees) {
+          if (!ext.sponseeName || !ext.sponseeName.trim()) continue;
+          const cleanName = sanitizePassengerDisplayName(ext.sponseeName);
+          if (!cleanName) continue;
+          const baseDate = normalizeDateToYMD(parsedDate) || parsedDate.split('_')[0];
+          const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const lookupKey = `${baseDate}::${normName}`;
+          if (existingKeys.has(lookupKey)) continue;
+
+          const matchedSignup = allSignups.find((s) => s.fullName.toLowerCase() === ext.sponseeName?.toLowerCase());
+          const id = `sp_${baseDate}_${normName}`;
+          const newSpon: ReportedSponsorship = {
+            id,
+            manifest_key: m.date,
+            date: parsedDate,
+            service: parsedService,
+            passenger_id: ext.sponseeId || matchedSignup?.id,
+            passenger_name: cleanName,
+            structure: normalizeStructureCode(matchedSignup?.structure),
+            stop: matchedSignup?.stop || '',
+            vehicle_name: ext.taxiName || v.name || 'Vehicle',
+            rep_name: rep,
+            sponsor_note: cleanSponsorshipNote(ext.note || `Paid by ${ext.payerName || 'Rider'} in ${v.name}`),
             status: 'pending',
             submitted_at: v.submittedAt || new Date().toISOString(),
           };
@@ -2271,9 +2342,41 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
           harvestedNew = true;
         }
       }
+
+      // Also scan all signups directly in case of unassigned sponsored passengers
+      for (const p of allSignups) {
+        if (!p.sponsored) continue;
+        const cleanName = sanitizePassengerDisplayName(p.fullName);
+        if (!cleanName) continue;
+        const baseDate = normalizeDateToYMD(parsedDate) || parsedDate.split('_')[0];
+        const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const lookupKey = `${baseDate}::${normName}`;
+        if (existingKeys.has(lookupKey)) continue;
+
+        const id = `sp_${baseDate}_${normName}`;
+        const newSpon: ReportedSponsorship = {
+          id,
+          manifest_key: m.date,
+          date: parsedDate,
+          service: parsedService,
+          passenger_id: p.id,
+          passenger_name: cleanName,
+          structure: normalizeStructureCode(p.structure),
+          stop: (p.stop || '').trim(),
+          vehicle_name: 'Vehicle',
+          rep_name: 'Transport Rep',
+          sponsor_note: cleanSponsorshipNote(p.sponsorNote),
+          status: 'pending',
+          submitted_at: new Date().toISOString(),
+        };
+        list.push(newSpon);
+        harvestedRows.push(newSpon);
+        existingKeys.add(lookupKey);
+        harvestedNew = true;
+      }
     }
 
-    // B. Check raw localStorage for any crc_rep_draft_* entries (STRICT: only submitted drafts)
+    // B. Check raw localStorage for any crc_rep_draft_* entries (including in-progress drafts and external sponsees)
     if (typeof localStorage !== 'undefined') {
       for (let i = 0; i < localStorage.length; i++) {
         const storageKey = localStorage.key(i);
@@ -2283,8 +2386,9 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
           const rawDraft = localStorage.getItem(storageKey);
           if (!rawDraft) continue;
           const draft = JSON.parse(rawDraft);
-          if (!draft.submitted) continue;
-          if (!Array.isArray(draft.sponsoredIds) || draft.sponsoredIds.length === 0) continue;
+          const hasSponIds = Array.isArray(draft.sponsoredIds) && draft.sponsoredIds.length > 0;
+          const hasExtSponsees = Array.isArray(draft.externalSponsees) && draft.externalSponsees.length > 0;
+          if (!hasSponIds && !hasExtSponsees) continue;
 
           const parts = storageKey.replace('crc_rep_draft_', '').split('_');
           const manifestKey = parts.slice(0, -1).join('_') || storageKey;
@@ -2295,47 +2399,81 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
           const allSignups = mMatch?.signups || [];
           const rep = draft.repName || 'Transport Rep';
 
-          for (const sponId of draft.sponsoredIds) {
-            let p = allSignups.find((s) => s.id === sponId);
-            if (!p) {
-              for (const otherM of manifestsTable) {
-                p = (otherM.signups || []).find((s) => s.id === sponId);
-                if (p) break;
+          if (hasSponIds) {
+            for (const sponId of draft.sponsoredIds) {
+              let p = allSignups.find((s) => String(s.id) === String(sponId));
+              if (!p) {
+                for (const otherM of manifestsTable) {
+                  p = (otherM.signups || []).find((s) => String(s.id) === String(sponId));
+                  if (p) break;
+                }
               }
-            }
-            const cleanName = p ? p.fullName.trim() : sanitizePassengerDisplayName(sponId);
-            if (!cleanName) continue;
-            const baseDate = normalizeDateToYMD(parsedDate) || parsedDate.split('_')[0];
-            const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
-            const lookupKey = `${baseDate}::${normName}`;
-            if (existingKeys.has(lookupKey)) continue;
+              const cleanName = p ? p.fullName.trim() : sanitizePassengerDisplayName(String(sponId));
+              if (!cleanName) continue;
+              const baseDate = normalizeDateToYMD(parsedDate) || parsedDate.split('_')[0];
+              const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+              const lookupKey = `${baseDate}::${normName}`;
+              if (existingKeys.has(lookupKey)) continue;
 
-            const note = (draft.notes?.[sponId] || p?.sponsorNote || '').trim();
-            const cleanKey = manifestKey.replace(/[^a-zA-Z0-9_-]/g, '_');
-            const safeSlug = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '_');
-            const id = `spon_${cleanKey}_${safeSlug}_${Date.now()}`;
-            const newSpon: ReportedSponsorship = {
-              id,
-              manifest_key: manifestKey,
-              date: parsedDate,
-              service: parsedService,
-              passenger_id: sponId,
-              passenger_name: cleanName,
-              structure: normalizeStructureCode(p?.structure),
-              stop: p?.stop || '',
-              vehicle_name: 'Vehicle',
-              rep_name: rep,
-              sponsor_note: note,
-              status: 'pending',
-              submitted_at: new Date().toISOString(),
-            };
-            list.push(newSpon);
-            harvestedRows.push(newSpon);
-            existingKeys.add(lookupKey);
-            harvestedNew = true;
+              const note = (draft.notes?.[sponId] || p?.sponsorNote || '').trim();
+              const id = `sp_${baseDate}_${normName}`;
+              const newSpon: ReportedSponsorship = {
+                id,
+                manifest_key: manifestKey,
+                date: parsedDate,
+                service: parsedService,
+                passenger_id: String(sponId),
+                passenger_name: cleanName,
+                structure: normalizeStructureCode(p?.structure),
+                stop: p?.stop || '',
+                vehicle_name: 'Vehicle',
+                rep_name: rep,
+                sponsor_note: cleanSponsorshipNote(note),
+                status: 'pending',
+                submitted_at: draft.submittedAt || new Date().toISOString(),
+              };
+              list.push(newSpon);
+              harvestedRows.push(newSpon);
+              existingKeys.add(lookupKey);
+              harvestedNew = true;
+            }
+          }
+
+          if (hasExtSponsees) {
+            for (const ext of draft.externalSponsees) {
+              if (!ext.sponseeName || !ext.sponseeName.trim()) continue;
+              const cleanName = sanitizePassengerDisplayName(ext.sponseeName);
+              if (!cleanName) continue;
+              const baseDate = normalizeDateToYMD(parsedDate) || parsedDate.split('_')[0];
+              const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+              const lookupKey = `${baseDate}::${normName}`;
+              if (existingKeys.has(lookupKey)) continue;
+
+              const matchedP = allSignups.find((s) => s.fullName.toLowerCase() === ext.sponseeName?.toLowerCase());
+              const id = `sp_${baseDate}_${normName}`;
+              const newSpon: ReportedSponsorship = {
+                id,
+                manifest_key: manifestKey,
+                date: parsedDate,
+                service: parsedService,
+                passenger_id: ext.sponseeId || matchedP?.id,
+                passenger_name: cleanName,
+                structure: normalizeStructureCode(matchedP?.structure),
+                stop: matchedP?.stop || '',
+                vehicle_name: ext.taxiName || 'Vehicle',
+                rep_name: rep,
+                sponsor_note: cleanSponsorshipNote(ext.note || `Paid by ${ext.payerName || 'Rider'}`),
+                status: 'pending',
+                submitted_at: draft.submittedAt || new Date().toISOString(),
+              };
+              list.push(newSpon);
+              harvestedRows.push(newSpon);
+              existingKeys.add(lookupKey);
+              harvestedNew = true;
+            }
           }
         } catch {
-          /* ignore parse errors */
+          // ignore
         }
       }
     }

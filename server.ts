@@ -140,11 +140,74 @@ app.post('/api/manifests/:key', (req, res) => {
 
   const filePath = path.join(MANIFESTS_DIR, `${key}.json`);
   const nowIso = new Date().toISOString();
+
+  // Read existing manifest on disk to guarantee submitted vehicles and their attendance notes are NEVER wiped out by concurrent saves
+  const existingManifest = readJsonFile<{
+    date?: string;
+    signups?: unknown[];
+    vehicles?: Array<{
+      id: string;
+      name?: string;
+      submitted?: boolean;
+      submittedAt?: string;
+      submittedBy?: string;
+      repName?: string;
+      licensePlate?: string;
+      coReps?: string[];
+      generalNotes?: string;
+      draftState?: unknown;
+      riders?: string[];
+    }>;
+  }>(filePath, { date: key, signups: [], vehicles: [] });
+
+  const existingVehMap = new Map((existingManifest.vehicles || []).map((v) => [String(v.id), v]));
+
+  // Reconcile incoming vehicles with disk: if vehicle was already submitted on disk, NEVER let a routine save un-submit it!
+  const mergedVehicles = (Array.isArray(manifest.vehicles) ? manifest.vehicles : []).map((incV: {
+    id: string;
+    submitted?: boolean;
+    submittedAt?: string;
+    submittedBy?: string;
+    repName?: string;
+    licensePlate?: string;
+    generalNotes?: string;
+    draftState?: Record<string, unknown>;
+  }) => {
+    const sId = String(incV.id);
+    const existV = existingVehMap.get(sId);
+    if (existV?.submitted && !incV.submitted) {
+      return {
+        ...incV,
+        submitted: true,
+        submittedAt: existV.submittedAt || incV.submittedAt,
+        submittedBy: existV.submittedBy || incV.submittedBy,
+        repName: existV.repName || incV.repName,
+        licensePlate: existV.licensePlate || incV.licensePlate,
+        generalNotes: existV.generalNotes || incV.generalNotes,
+        draftState: {
+          ...(typeof incV.draftState === 'object' && incV.draftState ? incV.draftState : {}),
+          ...(typeof existV.draftState === 'object' && existV.draftState ? (existV.draftState as Record<string, unknown>) : {}),
+          submitted: true,
+          submittedAt: existV.submittedAt || incV.submittedAt,
+        },
+      };
+    }
+    return incV;
+  });
+
+  // Preserve any vehicles that were in existing disk file but missing from partial payload
+  const incomingVehIds = new Set((manifest.vehicles || []).map((v: { id: string }) => String(v.id)));
+  for (const existV of existingManifest.vehicles || []) {
+    if (!incomingVehIds.has(String(existV.id))) {
+      mergedVehicles.push(existV);
+    }
+  }
+
   const toSave = {
     ...manifest,
     date: key,
-    signups: Array.isArray(manifest.signups) ? manifest.signups : [],
-    vehicles: Array.isArray(manifest.vehicles) ? manifest.vehicles : [],
+    signups: Array.isArray(manifest.signups) ? manifest.signups : (existingManifest.signups || []),
+    vehicles: mergedVehicles,
     updated_at: nowIso,
   };
 
@@ -153,6 +216,24 @@ app.post('/api/manifests/:key', (req, res) => {
 
   res.json({ success: true, manifest: toSave });
 });
+
+// Helper to thoroughly strip vehicle summary boilerplate from personal absentee notes
+function cleanPersonalAbsenteeNote(note?: unknown): string {
+  if (!note || typeof note !== 'string') return '';
+  let trimmed = note.trim();
+  if (!trimmed) return '';
+
+  // Strip vehicle-wide summary prefixes and their trailing contents
+  trimmed = trimmed.replace(/(?:co-reps|cash collected|external sponsees|past cancellations|sponsorships?)\s*:[^.]*(?:\.|$)/gi, '');
+  trimmed = trimmed.replace(/(?:co-reps|cash collected|external sponsees|past cancellations|sponsorships?)\s*:.*?(?=(?:co-reps|cash collected|external sponsees|past cancellations|sponsorships?)\s*:|$)/gi, '');
+  trimmed = trimmed.replace(/\b(?:co-reps|cash collected|external sponsees|past cancellations|sponsorships?)\b[^.]*(\.|$)/gi, '');
+  trimmed = trimmed.replace(/\bpaid by\s*:[^;.]*(?:[;.]|$)/gi, '');
+  trimmed = trimmed.replace(/\s{2,}/g, ' ').trim();
+
+  // If after stripping only punctuation or whitespace remains, return empty string
+  if (/^[-–—:;,.\s]*$/.test(trimmed)) return '';
+  return trimmed;
+}
 
 // Atomic Vehicle Attendance Submission
 app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
@@ -171,6 +252,7 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
     serviceLabel,
     parsedDate,
     updatedSignups,
+    allVehicles,
   } = req.body;
 
   if (!vehicleId) {
@@ -199,13 +281,32 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
 
   const nowIso = new Date().toISOString();
 
-  // 1. Update target vehicle in manifest
+  // If manifest has no vehicles or missing vehicles, merge with allVehicles from payload
+  const incomingFleet = Array.isArray(allVehicles)
+    ? allVehicles
+    : Array.isArray(req.body?.vehicles)
+    ? req.body.vehicles
+    : [];
+
+  if ((manifest.vehicles || []).length === 0 && incomingFleet.length > 0) {
+    manifest.vehicles = incomingFleet;
+  } else if (incomingFleet.length > 0) {
+    const existingVehIds = new Set((manifest.vehicles || []).map((v) => String(v.id)));
+    for (const incV of incomingFleet) {
+      if (!existingVehIds.has(String(incV.id))) {
+        manifest.vehicles.push(incV);
+      }
+    }
+  }
+
+  // 1. Update target vehicle in manifest (using String comparison to avoid number vs string mismatch)
   let targetVehicleName = 'Vehicle';
   let foundTarget = false;
   manifest.vehicles = (manifest.vehicles || []).map((v) => {
-    if (v.id === vehicleId) {
+    if (String(v.id) === String(vehicleId)) {
       foundTarget = true;
       targetVehicleName = v.name;
+      const vDraft = typeof draftState === 'object' && draftState ? draftState : (v.draftState || {});
       return {
         ...v,
         submitted: true,
@@ -215,7 +316,15 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
         licensePlate: (licensePlate || '').trim(),
         coReps: Array.isArray(coReps) ? coReps : [],
         generalNotes: (generalNotes || '').trim(),
-        draftState: draftState || v.draftState,
+        draftState: {
+          ...(typeof v.draftState === 'object' && v.draftState ? v.draftState : {}),
+          ...(typeof vDraft === 'object' && vDraft ? (vDraft as Record<string, unknown>) : {}),
+          submitted: true,
+          submittedAt: nowIso,
+          repName: (repName || '').trim(),
+          licensePlate: (licensePlate || '').trim(),
+          generalNotes: (generalNotes || '').trim(),
+        },
       };
     }
     return v;
@@ -223,8 +332,9 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
 
   if (!foundTarget) {
     const payloadVeh = req.body?.vehicle;
+    const vDraft = typeof draftState === 'object' && draftState ? draftState : (payloadVeh?.draftState || {});
     const newV = {
-      id: vehicleId,
+      id: String(vehicleId),
       name: payloadVeh?.name || `Vehicle ${(manifest.vehicles || []).length + 1}`,
       type: payloadVeh?.type || 'Taxi',
       capacity: payloadVeh?.capacity,
@@ -240,14 +350,21 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
       licensePlate: (licensePlate || '').trim(),
       coReps: Array.isArray(coReps) ? coReps : [],
       generalNotes: (generalNotes || '').trim(),
-      draftState: draftState || payloadVeh?.draftState,
+      draftState: {
+        ...(typeof vDraft === 'object' && vDraft ? (vDraft as Record<string, unknown>) : {}),
+        submitted: true,
+        submittedAt: nowIso,
+        repName: (repName || '').trim(),
+        licensePlate: (licensePlate || '').trim(),
+        generalNotes: (generalNotes || '').trim(),
+      },
     };
     targetVehicleName = newV.name;
     manifest.vehicles = [...(manifest.vehicles || []), newV];
   }
 
   // 2. Update signups attendance if provided
-  if (Array.isArray(updatedSignups)) {
+  if (Array.isArray(updatedSignups) && updatedSignups.length > 0) {
     manifest.signups = updatedSignups;
   }
 
@@ -280,9 +397,10 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
     ledger = ledger.filter((entry) => !(entry.manifest_key === key && riderSet.has(entry.passenger_name)));
   }
 
-  // Insert new absentees
+  // Insert new absentees: CRITICAL FIX — non-sponsored absentees must NEVER have vehicle-wide sponsorship notes attached!
   if (Array.isArray(absentees) && absentees.length > 0) {
     for (const a of absentees) {
+      const isSpon = Boolean(a.sponsored);
       ledger.push({
         id: `ledger_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         manifest_key: key,
@@ -295,17 +413,19 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
         submitted_by: (repName || '').trim(),
         rep_name: (repName || '').trim(),
         license_plate: (licensePlate || '').trim(),
-        sponsored: Boolean(a.sponsored),
-        sponsor_note: cleanSponsorshipNote(a.sponsorNote),
+        sponsored: isSpon,
+        sponsor_note: isSpon ? cleanSponsorshipNote(a.sponsorNote) : '',
         structure_debt: 40,
-        general_notes: a.sponsored ? (cleanSponsorshipNote(a.sponsorNote) || '') : (generalNotes || '').trim(),
+        general_notes: isSpon
+          ? (cleanSponsorshipNote(a.sponsorNote) || 'Reported sponsored')
+          : cleanPersonalAbsenteeNote((a as { notes?: string }).notes || ''),
         submitted_at: nowIso,
       });
     }
   }
 
   // Insert riders indicated as "didn't pay" directly into ledger
-  const targetRiderIds = new Set((manifest.vehicles.find((v) => v.id === vehicleId)?.riders || []).map(String));
+  const targetRiderIds = new Set((manifest.vehicles.find((v) => String(v.id) === String(vehicleId))?.riders || []).map(String));
   const effectiveUnpaid: Array<{ fullName: string; stop?: string; structure?: string; unpaidNote?: string }> = [];
 
   if (Array.isArray(unpaidRiders) && unpaidRiders.length > 0) {
@@ -377,19 +497,52 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
   );
   const draftNotes = (draftState as { notes?: Record<string, string> })?.notes || {};
 
-  const collectedSponsees: Array<{ id?: string; fullName: string; structure?: string; stop?: string; sponsorNote?: string }> = [...rawSponsored];
-  if (collectedSponsees.length === 0 && draftSponIds.size > 0 && Array.isArray(manifest.signups)) {
+  const collectedSponsees: Array<{
+    id?: string;
+    fullName: string;
+    structure?: string;
+    stop?: string;
+    vehicleName?: string;
+    vehicle_name?: string;
+    taxiName?: string;
+    sponsorNote?: string;
+  }> = [...rawSponsored];
+
+  // Include any riders in draftState.sponsoredIds that were not already in rawSponsored
+  if (draftSponIds.size > 0 && Array.isArray(manifest.signups)) {
     for (const s of manifest.signups) {
       const sId = String(s.id);
-      if (draftSponIds.has(sId) || draftSponIds.has(s.id as unknown as string)) {
+      if (
+        (draftSponIds.has(sId) || draftSponIds.has(s.id as unknown as string)) &&
+        !collectedSponsees.some((c) => c.fullName.toLowerCase() === s.fullName.toLowerCase())
+      ) {
         collectedSponsees.push({
           id: sId,
           fullName: s.fullName,
           structure: (s as { structure?: string }).structure || '',
           stop: (s as { stop?: string }).stop || '',
+          vehicleName: targetVehicleName,
           sponsorNote: (draftNotes[sId] ?? draftNotes[s.id] ?? (s as { sponsorNote?: string }).sponsorNote ?? '').trim(),
         });
       }
+    }
+  }
+
+  // Also include any external cross-taxi sponsees recorded in draftState
+  const extSponsees = Array.isArray((draftState as { externalSponsees?: unknown[] })?.externalSponsees)
+    ? (draftState as { externalSponsees: Array<{ sponseeId?: string; sponseeName: string; taxiName?: string; payerName?: string; note?: string }> }).externalSponsees
+    : [];
+  for (const ext of extSponsees) {
+    if (ext.sponseeName && !collectedSponsees.some((c) => c.fullName.toLowerCase() === ext.sponseeName.toLowerCase())) {
+      const matchedSignup = (manifest.signups || []).find((s) => s.fullName.toLowerCase() === ext.sponseeName.toLowerCase());
+      collectedSponsees.push({
+        id: ext.sponseeId || (matchedSignup ? String(matchedSignup.id) : undefined),
+        fullName: ext.sponseeName,
+        structure: (matchedSignup as { structure?: string })?.structure || '',
+        stop: (matchedSignup as { stop?: string })?.stop || '',
+        vehicleName: ext.taxiName || targetVehicleName,
+        sponsorNote: cleanSponsorshipNote(ext.note || `Paid by ${ext.payerName || 'Rider'} in ${targetVehicleName}`),
+      });
     }
   }
 
@@ -400,12 +553,18 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
     const baseDate = normalizeDateToYMD(parsedDate || key);
     const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
     const auditId = `sp_${baseDate}_${normName}`;
+    const specificVehicle = sp.vehicleName || sp.vehicle_name || sp.taxiName || targetVehicleName;
+
+    // Strict date-scoped search: ONLY match within the same session date
     const existingIdx = audits.findIndex((a) => {
-      if (a.id && (a.id === auditId || a.id === `sp_${normName}`)) return true;
-      if (sp.id && a.passenger_id && String(sp.id) === String(a.passenger_id)) return true;
       const aDate = normalizeDateToYMD(a.date || a.manifest_key);
+      const isSameDate = (!baseDate && !aDate) || (baseDate && aDate && baseDate === aDate) || (a.manifest_key === key);
+      if (!isSameDate) return false;
+
+      if (a.id && a.id === auditId) return true;
+      if (sp.id && a.passenger_id && String(sp.id) === String(a.passenger_id)) return true;
       const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
-      return aName === normName && (!baseDate || !aDate || aDate === baseDate);
+      return aName === normName;
     });
 
     if (existingIdx >= 0) {
@@ -415,9 +574,9 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
         passenger_name: cleanName,
         structure: sp.structure || audits[existingIdx].structure,
         stop: sp.stop || audits[existingIdx].stop,
-        vehicle_name: targetVehicleName || audits[existingIdx].vehicle_name,
+        vehicle_name: specificVehicle || audits[existingIdx].vehicle_name,
         rep_name: (repName || '').trim() || audits[existingIdx].rep_name,
-        sponsor_note: sp.sponsorNote || audits[existingIdx].sponsor_note,
+        sponsor_note: cleanSponsorshipNote(sp.sponsorNote) || audits[existingIdx].sponsor_note,
         date: parsedDate || key,
         service: serviceLabel || 'Service',
       };
@@ -431,9 +590,9 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
         passenger_name: cleanName,
         structure: sp.structure || '',
         stop: sp.stop || '',
-        vehicle_name: targetVehicleName,
+        vehicle_name: specificVehicle,
         rep_name: (repName || '').trim(),
-        sponsor_note: sp.sponsorNote || '',
+        sponsor_note: cleanSponsorshipNote(sp.sponsorNote) || '',
         status: 'pending',
         submitted_at: nowIso,
       });
@@ -790,11 +949,14 @@ app.get('/api/ledger/sponsorships', (req, res) => {
             const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
             const auditId = `sp_${baseDate}_${normName}`;
             const exists = audits.some((a) => {
-              if (a.id && (a.id === auditId || a.id === `sp_${normName}`)) return true;
-              if (s.id && a.passenger_id && String(s.id) === String(a.passenger_id)) return true;
               const aDate = normalizeDateToYMD(a.date || a.manifest_key);
+              const isSameDate = (!baseDate && !aDate) || (baseDate && aDate && baseDate === aDate) || (a.manifest_key === key);
+              if (!isSameDate) return false;
+
+              if (a.id && a.id === auditId) return true;
+              if (s.id && a.passenger_id && String(s.id) === String(a.passenger_id)) return true;
               const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
-              return aName === normName && (!baseDate || !aDate || aDate === baseDate);
+              return aName === normName;
             });
             if (!exists) {
               audits.push({
@@ -816,6 +978,48 @@ app.get('/api/ledger/sponsorships', (req, res) => {
             }
           }
         }
+
+        // Also scan external cross-taxi sponsees in draftState
+        const extSponsees = Array.isArray(v.draftState?.externalSponsees)
+          ? (v.draftState.externalSponsees as Array<{ sponseeId?: string; sponseeName?: string; taxiName?: string; payerName?: string; note?: string }>)
+          : [];
+        for (const ext of extSponsees) {
+          if (!ext.sponseeName || !ext.sponseeName.trim()) continue;
+          const cleanName = sanitizePassengerDisplayName(ext.sponseeName);
+          if (!cleanName) continue;
+          const baseDate = normalizeDateToYMD(m.date || key);
+          const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const auditId = `sp_${baseDate}_${normName}`;
+          const matchedSignup = (m.signups || []).find((p) => p.fullName.toLowerCase() === ext.sponseeName?.toLowerCase());
+          const exists = audits.some((a) => {
+            const aDate = normalizeDateToYMD(a.date || a.manifest_key);
+            const isSameDate = (!baseDate && !aDate) || (baseDate && aDate && baseDate === aDate) || (a.manifest_key === key);
+            if (!isSameDate) return false;
+
+            if (a.id && a.id === auditId) return true;
+            if (ext.sponseeId && a.passenger_id && String(ext.sponseeId) === String(a.passenger_id)) return true;
+            const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+            return aName === normName;
+          });
+          if (!exists) {
+            audits.push({
+              id: auditId,
+              manifest_key: key,
+              date: m.date || key,
+              service: 'Service',
+              passenger_id: ext.sponseeId || (matchedSignup ? String(matchedSignup.id) : undefined),
+              passenger_name: cleanName,
+              structure: (matchedSignup as { structure?: string })?.structure || '',
+              stop: (matchedSignup as { stop?: string })?.stop || '',
+              vehicle_name: ext.taxiName || v.name,
+              rep_name: v.repName || v.submittedBy || 'Rep',
+              sponsor_note: cleanSponsorshipNote(ext.note || `Paid by ${ext.payerName || 'Rider'} in ${v.name}`),
+              status: 'pending',
+              submitted_at: new Date().toISOString(),
+            });
+            addedCount++;
+          }
+        }
       }
 
       // Also scan all signups directly for any passengers marked sponsored
@@ -827,11 +1031,14 @@ app.get('/api/ledger/sponsorships', (req, res) => {
           const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
           const auditId = `sp_${baseDate}_${normName}`;
           const exists = audits.some((a) => {
-            if (a.id && (a.id === auditId || a.id === `sp_${normName}`)) return true;
-            if (s.id && a.passenger_id && String(s.id) === String(a.passenger_id)) return true;
             const aDate = normalizeDateToYMD(a.date || a.manifest_key);
+            const isSameDate = (!baseDate && !aDate) || (baseDate && aDate && baseDate === aDate) || (a.manifest_key === key);
+            if (!isSameDate) return false;
+
+            if (a.id && a.id === auditId) return true;
+            if (s.id && a.passenger_id && String(s.id) === String(a.passenger_id)) return true;
             const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
-            return aName === normName && (!baseDate || !aDate || aDate === baseDate);
+            return aName === normName;
           });
           if (!exists) {
             audits.push({
@@ -861,7 +1068,7 @@ app.get('/api/ledger/sponsorships', (req, res) => {
     console.warn('[Server] Manifest scan for sponsorships note:', err);
   }
 
-  // Deduplicate and sanitize records by session date and passenger name
+  // Deduplicate and sanitize records strictly by session date and passenger name
   const deduped: typeof audits = [];
   for (const a of audits) {
     const cleanName = sanitizePassengerDisplayName(a.passenger_name);
@@ -870,18 +1077,16 @@ app.get('/api/ledger/sponsorships', (req, res) => {
     const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
 
     const existingIdx = deduped.findIndex((existing) => {
+      const existDate = normalizeDateToYMD(existing.date || existing.manifest_key);
+      const isSameDate = (!baseDate && !existDate) || (baseDate && existDate && baseDate === existDate) || (a.manifest_key && existing.manifest_key && a.manifest_key === existing.manifest_key);
+      if (!isSameDate) return false;
+
       if (a.id && existing.id && a.id === existing.id) return true;
       if (a.passenger_id && existing.passenger_id && String(a.passenger_id) === String(existing.passenger_id)) {
-        const existDate = normalizeDateToYMD(existing.date || existing.manifest_key);
-        return !baseDate || !existDate || baseDate === existDate;
+        return true;
       }
       const existNormName = sanitizePassengerDisplayName(existing.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
-      if (existNormName === normName) {
-        const existDate = normalizeDateToYMD(existing.date || existing.manifest_key);
-        if (!baseDate || !existDate || baseDate === existDate) return true;
-        if (a.manifest_key && existing.manifest_key && a.manifest_key === existing.manifest_key) return true;
-      }
-      return false;
+      return existNormName === normName;
     });
 
     const cleanedSponsorNote = cleanSponsorshipNote(a.sponsor_note);
@@ -1247,23 +1452,44 @@ app.get('/api/ledger', (req, res) => {
       return true;
     })
     .map((entry) => {
+      const isSpon = Boolean(entry.sponsored);
       const origGn = typeof entry.general_notes === 'string' ? entry.general_notes : '';
       const origSn = typeof entry.sponsor_note === 'string' ? entry.sponsor_note : '';
-      const cleanGn = cleanSponsorshipNote(origGn);
-      const cleanSn = cleanSponsorshipNote(origSn);
+      let cleanGn = cleanSponsorshipNote(origGn);
+      let cleanSn = cleanSponsorshipNote(origSn);
+
+      // If entry is not sponsored, clean out vehicle summaries mentioning other people's sponsorships
+      if (!isSpon) {
+        cleanSn = '';
+        cleanGn = cleanPersonalAbsenteeNote(origGn);
+        if (/sponsorship|paid by|unaccounted/i.test(cleanGn)) {
+          cleanGn = '';
+        }
+      }
+
       if (cleanGn !== origGn || cleanSn !== origSn) {
         dirty = true;
-        return { ...entry, general_notes: cleanGn, sponsor_note: cleanSn };
+        return { ...entry, sponsored: isSpon, general_notes: cleanGn, sponsor_note: cleanSn };
       }
       return entry;
     });
 
   if (dirty) {
-    ledger = ledger.map((e) => ({
-      ...e,
-      general_notes: cleanSponsorshipNote(e.general_notes),
-      sponsor_note: cleanSponsorshipNote(e.sponsor_note),
-    }));
+    ledger = ledger.map((e) => {
+      const isSpon = Boolean(e.sponsored);
+      const gn = typeof e.general_notes === 'string' ? e.general_notes : '';
+      const sn = typeof e.sponsor_note === 'string' ? e.sponsor_note : '';
+      let cleanedGn = (!isSpon) ? cleanPersonalAbsenteeNote(gn) : cleanSponsorshipNote(gn);
+      if (!isSpon && /sponsorship|paid by|unaccounted/i.test(cleanedGn)) {
+        cleanedGn = '';
+      }
+      return {
+        ...e,
+        sponsored: isSpon,
+        general_notes: cleanedGn,
+        sponsor_note: isSpon ? cleanSponsorshipNote(sn) : '',
+      };
+    });
     atomicWriteJson(LEDGER_FILE, ledger);
   }
 
