@@ -153,7 +153,8 @@ export async function fetchManifestFromServer(key: string): Promise<Manifest | n
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    return data as Manifest;
+    const manifest = (data && data.manifest ? data.manifest : data) as Manifest;
+    return manifest && typeof manifest === 'object' && Array.isArray(manifest.vehicles) ? manifest : null;
   } catch (err) {
     console.warn('[ServerAPI] fetchManifest error:', err);
     return null;
@@ -227,13 +228,15 @@ export async function updateVehicleDraftOnServer(
   vehicleId: string,
   draftState: Partial<VehicleDraftState>,
   repName?: string,
-  licensePlate?: string
+  licensePlate?: string,
+  fullVehicle?: Vehicle,
+  manifest?: Manifest
 ): Promise<void> {
   try {
     await fetch(`/api/manifests/${encodeURIComponent(key)}/draft`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ vehicleId, draftState, repName, licensePlate }),
+      body: JSON.stringify({ vehicleId, draftState, repName, licensePlate, fullVehicle, manifest }),
     });
   } catch (err) {
     console.debug('[ServerAPI] updateVehicleDraft note:', err);
@@ -266,26 +269,6 @@ export async function settleLedgerOnServer(ids: string[]): Promise<number> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
-    });
-    if (!res.ok) return 0;
-    const data = await res.json();
-    return data.count || 0;
-  } catch {
-    return 0;
-  }
-}
-
-export async function withdrawAbsenteesOnServer(
-  date: string,
-  riderNames: string[],
-  manifestKey?: string
-): Promise<number> {
-  if (!riderNames || riderNames.length === 0) return 0;
-  try {
-    const res = await fetch('/api/ledger/withdraw', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, riderNames, manifest_key: manifestKey }),
     });
     if (!res.ok) return 0;
     const data = await res.json();

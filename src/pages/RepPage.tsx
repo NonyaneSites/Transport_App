@@ -569,26 +569,33 @@ export function RepPage() {
     setLicensePlate('');
   }, []);
 
-  // When session key (date or service) changes, update vehicle selection to the stored vehicle for that session,
-  // or clear selection and reset draft state so vehicles and drafts from previous dates never bleed over
+  const prevKeyRef = useRef(key);
+  // When session key (date or service) genuinely changes, update vehicle selection to the stored vehicle for that session,
+  // or clear selection and reset draft state so vehicles and drafts from previous dates never bleed over.
+  // Crucially: never wipe local draft on initial page mount or browser refresh!
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(`crc_rep_vehicle_${key}`);
-      setSelectedVehicleId(stored || '');
-    } catch {
-      setSelectedVehicleId('');
+    if (prevKeyRef.current !== key) {
+      prevKeyRef.current = key;
+      try {
+        const stored = localStorage.getItem(`crc_rep_vehicle_${key}`);
+        setSelectedVehicleId(stored || '');
+      } catch {
+        setSelectedVehicleId('');
+      }
+      resetLocalDraftState();
     }
-    resetLocalDraftState();
   }, [key, resetLocalDraftState]);
 
-  // When manifest loads or changes, if the selected vehicle does not exist in the manifest, reset vehicle selection
+  // When manifest loads or changes, only reset vehicle selection if manifest is fully loaded
+  // with non-empty vehicles and the vehicle genuinely does not exist in the manifest.
   useEffect(() => {
-    if (!manifest || manifest.date !== key) return;
-    if (selectedVehicleId && !manifest.vehicles.some((v) => v.id === selectedVehicleId)) {
+    if (!manifest || manifest.date !== key || loading) return;
+    if (!manifest.vehicles || manifest.vehicles.length === 0) return;
+    if (selectedVehicleId && !manifest.vehicles.some((v) => String(v.id) === String(selectedVehicleId))) {
       setSelectedVehicleId('');
       resetLocalDraftState();
     }
-  }, [manifest, key, selectedVehicleId, resetLocalDraftState]);
+  }, [manifest, key, selectedVehicleId, resetLocalDraftState, loading]);
 
   const applyDraftState = useCallback((draft: VehicleDraftState, vehicleRidersList: Passenger[], fallbackVehicle?: Vehicle | null) => {
     isApplyingDraftRef.current = true;
@@ -807,7 +814,7 @@ export function RepPage() {
       prevVehicleIdRef.current = selectedVehicleId;
     }
 
-    const vehicle = manifest.vehicles.find((v) => v.id === selectedVehicleId);
+    const vehicle = manifest.vehicles.find((v) => String(v.id) === String(selectedVehicleId));
     if (!vehicle) return;
 
     initializedKeyRef.current = currentKey;
@@ -824,12 +831,30 @@ export function RepPage() {
 
     const cloudDraft = vehicle.draftState;
 
-    // Pick whichever draft has the freshest edits
+    // Pick whichever draft has the freshest edits or merge them so no checked-in riders are lost
     let draft: VehicleDraftState | undefined = undefined;
     if (localDraft && cloudDraft) {
-      const localTime = localDraft.updatedAt ? new Date(localDraft.updatedAt).getTime() : 0;
-      const cloudTime = cloudDraft.updatedAt ? new Date(cloudDraft.updatedAt).getTime() : 0;
-      draft = localTime >= cloudTime ? localDraft : cloudDraft;
+      const mergedDraft: VehicleDraftState = {
+        ...cloudDraft,
+        ...localDraft,
+        presentIds: Array.from(new Set([...(cloudDraft.presentIds || []), ...(localDraft.presentIds || [])].map(String))),
+        absentIds: Array.from(new Set([...(cloudDraft.absentIds || []), ...(localDraft.absentIds || [])].map(String))),
+        sponsoredIds: Array.from(new Set([...(cloudDraft.sponsoredIds || []), ...(localDraft.sponsoredIds || [])].map(String))),
+        unpaidIds: Array.from(new Set([...(cloudDraft.unpaidIds || []), ...(localDraft.unpaidIds || [])].map(String))),
+        absentPaidIds: Array.from(new Set([...(cloudDraft.absentPaidIds || []), ...(localDraft.absentPaidIds || [])].map(String))),
+        notes: { ...(cloudDraft.notes || {}), ...(localDraft.notes || {}) },
+        repName: localDraft.repName || cloudDraft.repName || vehicle.repName || '',
+        licensePlate: localDraft.licensePlate || cloudDraft.licensePlate || vehicle.licensePlate || '',
+        generalNotes: localDraft.generalNotes || cloudDraft.generalNotes || vehicle.generalNotes || '',
+        coReps: Array.from(new Set([...(cloudDraft.coReps || []), ...(localDraft.coReps || [])])),
+        externalSponsees: localDraft.externalSponsees && localDraft.externalSponsees.length > 0 ? localDraft.externalSponsees : (cloudDraft.externalSponsees || []),
+        settledLedgerIds: Array.from(new Set([...(cloudDraft.settledLedgerIds || []), ...(localDraft.settledLedgerIds || [])])),
+        manualCancellations: localDraft.manualCancellations && localDraft.manualCancellations.length > 0 ? localDraft.manualCancellations : (cloudDraft.manualCancellations || []),
+        updatedAt: (localDraft.updatedAt && cloudDraft.updatedAt)
+          ? (new Date(localDraft.updatedAt) > new Date(cloudDraft.updatedAt) ? localDraft.updatedAt : cloudDraft.updatedAt)
+          : localDraft.updatedAt || cloudDraft.updatedAt || new Date().toISOString(),
+      };
+      draft = mergedDraft;
     } else if (localDraft) {
       draft = localDraft;
     } else if (cloudDraft) {
@@ -980,7 +1005,7 @@ export function RepPage() {
     !sponsoredMissingNotes &&
     !submitting;
 
-  // Cash calculations
+  // Cash calculations: accurately reflect sponsored AND unpaid passengers (people who didn't pay fare)
   const presentSponsoredCount = useMemo(() => {
     return riders.filter((r) => {
       const isPres = presentIds.has(r.id) || presentIds.has(String(r.id));
@@ -989,9 +1014,20 @@ export function RepPage() {
     }).length;
   }, [riders, presentIds, sponsoredIds]);
 
+  const presentUnpaidCount = useMemo(() => {
+    return riders.filter((r) => {
+      const isPres = presentIds.has(r.id) || presentIds.has(String(r.id));
+      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id)) || Boolean(r.sponsored);
+      const isUnp = unpaidIds.has(r.id) || unpaidIds.has(String(r.id)) || Boolean(r.didNotPay);
+      return isPres && !isSpon && isUnp;
+    }).length;
+  }, [riders, presentIds, sponsoredIds, unpaidIds]);
+
   const grossPresentCash = presentCount * FARE;
   const sponsoredDeduction = presentSponsoredCount * FARE;
-  const baseCash = grossPresentCash - sponsoredDeduction;
+  const unpaidDeduction = presentUnpaidCount * FARE;
+  // Deduct both sponsored and unpaid riders from gross passenger cash
+  const baseCash = Math.max(0, grossPresentCash - sponsoredDeduction - unpaidDeduction);
 
   const absentPaidCount = useMemo(() => {
     return riders.filter((r) => {
@@ -1011,6 +1047,60 @@ export function RepPage() {
   const manualCancellationCash = manualCancellations.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
   const pastCancellationCash = selectedLedgerCash + manualCancellationCash;
   const totalCash = baseCash + absentPaidCash + externalCash + pastCancellationCash;
+
+  // Stop-by-stop physical cash breakdown (strictly for buses to reconcile physical envelope cash vs calculator)
+  const busStopsBreakdown = useMemo(() => {
+    if (!selectedVehicle || selectedVehicle.type !== 'Bus') return [];
+    const groups: Record<string, Passenger[]> = {};
+    for (const r of riders) {
+      if (!r) continue;
+      const label = getEffectiveStop({ type: selectedVehicle.type, stopRedirects: selectedVehicle.stopRedirects }, r.stop);
+      if (!groups[label]) groups[label] = [];
+      groups[label].push(r);
+    }
+    const activeKeys = Object.keys(groups);
+    let ordered: string[] = activeKeys;
+    if (selectedVehicle.orderedStops && selectedVehicle.orderedStops.length > 0) {
+      const inOrder = selectedVehicle.orderedStops.filter((s) => activeKeys.includes(s));
+      const extras = activeKeys.filter((s) => !inOrder.includes(s));
+      ordered = [...inOrder, ...extras];
+    } else {
+      ordered = sortByRouteSequence(activeKeys, (s) => s);
+    }
+
+    return ordered.map((stopName) => {
+      const stopRiders = groups[stopName] || [];
+      const stopPresentRiders = stopRiders.filter((r) => presentIds.has(r.id) || presentIds.has(String(r.id)));
+      const stopSponsoredRiders = stopPresentRiders.filter((r) => sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id)) || Boolean(r.sponsored));
+      const stopUnpaidRiders = stopPresentRiders.filter((r) => !stopSponsoredRiders.includes(r) && (unpaidIds.has(r.id) || unpaidIds.has(String(r.id)) || Boolean(r.didNotPay)));
+      const stopPayingRiders = stopPresentRiders.filter((r) => !stopSponsoredRiders.includes(r) && !stopUnpaidRiders.includes(r));
+      const stopAbsentPaidRiders = stopRiders.filter((r) => (absentIds.has(r.id) || absentIds.has(String(r.id))) && (absentPaidIds.has(r.id) || absentPaidIds.has(String(r.id))));
+
+      let arrearsCash = 0;
+      for (const r of stopRiders) {
+        const debts = riderDebtsMap[r.id] || riderDebtsMap[String(r.id)] || [];
+        for (const d of debts) {
+          if (collectedCancellationIds.has(d.id)) {
+            arrearsCash += parseDebtAmount(d.structure_debt);
+          }
+        }
+      }
+
+      const totalStopCash = (stopPayingRiders.length * FARE) + (stopAbsentPaidRiders.length * FARE) + arrearsCash;
+
+      return {
+        stopName,
+        totalRiders: stopRiders.length,
+        presentCount: stopPresentRiders.length,
+        payingCount: stopPayingRiders.length,
+        sponsoredCount: stopSponsoredRiders.length,
+        unpaidCount: stopUnpaidRiders.length,
+        absentPaidCount: stopAbsentPaidRiders.length,
+        arrearsCash,
+        totalStopCash,
+      };
+    });
+  }, [selectedVehicle, riders, presentIds, sponsoredIds, unpaidIds, absentIds, absentPaidIds, riderDebtsMap, collectedCancellationIds]);
 
   const addExternalSponsorship = async (data: {
     payerId?: string;
@@ -1262,7 +1352,7 @@ export function RepPage() {
       coReps: coReps.filter(Boolean),
       licensePlate: licensePlate.trim(),
       generalNotes: generalNotes.trim(),
-      cashCollected: { base: baseCash, absentPaid: absentPaidCash, external: externalCash, pastCancellations: pastCancellationCash },
+      cashCollected: { base: baseCash, unpaidDeduction, absentPaid: absentPaidCash, external: externalCash, pastCancellations: pastCancellationCash },
       settledLedgerIds: Array.from(collectedCancellationIds),
       manualCancellations,
       externalSponsees,
@@ -1278,7 +1368,7 @@ export function RepPage() {
       // storage unavailable
     }
 
-    // 2. Debounced background cloud sync to Supabase
+    // 2. Debounced background cloud sync to server & database
     if (pendingSyncTimerRef.current) clearTimeout(pendingSyncTimerRef.current);
 
     pendingSyncTimerRef.current = setTimeout(() => {
@@ -1306,7 +1396,7 @@ export function RepPage() {
     selectedVehicleId, selectedVehicle, presentIds, absentIds, absentPaidIds,
     sponsoredIds, unpaidIds, notes, generalNotes, coReps, repName, licensePlate,
     externalSponsees, collectedCancellationIds, manualCancellations,
-    baseCash, absentPaidCash, externalCash, pastCancellationCash,
+    baseCash, unpaidDeduction, absentPaidCash, externalCash, pastCancellationCash,
     key, updateVehicleDraft,
   ]);
 
@@ -1315,7 +1405,7 @@ export function RepPage() {
     const handleFlushOnExit = () => {
       // If visibilitychange fired because the user returned to the tab, do not flush!
       if (typeof document !== 'undefined' && !document.hidden) return;
-      if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted || !isUserDirtyRef.current) return;
+      if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted) return;
       const currentDraft: VehicleDraftState = {
         presentIds: Array.from(presentIds),
         absentIds: Array.from(absentIds),
@@ -1327,7 +1417,7 @@ export function RepPage() {
         coReps: coReps.filter(Boolean),
         licensePlate: licensePlate.trim(),
         generalNotes: generalNotes.trim(),
-        cashCollected: { base: baseCash, absentPaid: absentPaidCash, external: externalCash, pastCancellations: pastCancellationCash },
+        cashCollected: { base: baseCash, unpaidDeduction, absentPaid: absentPaidCash, external: externalCash, pastCancellations: pastCancellationCash },
         settledLedgerIds: Array.from(collectedCancellationIds),
         manualCancellations,
         externalSponsees,
@@ -1339,6 +1429,21 @@ export function RepPage() {
         localStorage.setItem(`crc_rep_draft_${key}_${selectedVehicleId}`, JSON.stringify(currentDraft));
       } catch {
         // storage unavailable
+      }
+
+      // Synchronous beacon flush ensures zero loss on refresh or browser exit
+      if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+        try {
+          const payload = JSON.stringify({
+            vehicleId: selectedVehicleId,
+            draftState: currentDraft,
+            repName: repName.trim(),
+            licensePlate: licensePlate.trim(),
+          });
+          navigator.sendBeacon(`/api/manifests/${encodeURIComponent(key)}/draft`, new Blob([payload], { type: 'application/json' }));
+        } catch {
+          // ignore
+        }
       }
     };
 
@@ -1355,7 +1460,7 @@ export function RepPage() {
     selectedVehicleId, selectedVehicle, presentIds, absentIds, absentPaidIds,
     sponsoredIds, unpaidIds, notes, generalNotes, coReps, repName, licensePlate,
     externalSponsees, collectedCancellationIds, manualCancellations,
-    baseCash, absentPaidCash, externalCash, pastCancellationCash, key,
+    baseCash, unpaidDeduction, absentPaidCash, externalCash, pastCancellationCash, key,
   ]);
 
   // Instant local toggle handlers (Zero lag, pure React state, deterministic single click)
@@ -1506,12 +1611,25 @@ export function RepPage() {
       nextVal = !isCurrentlyUnpaid;
       if (nextVal) {
         next.add(sId);
+        next.add(passengerId);
       } else {
         next.delete(sId);
         next.delete(passengerId);
       }
       return next;
     });
+
+    // If marked as didn't pay, they physically attended the bus/taxi — auto mark them present
+    if (nextVal) {
+      setPresentIds((prev) => new Set(prev).add(sId).add(passengerId));
+      setAbsentIds((prev) => {
+        if (!prev.has(sId) && !prev.has(passengerId)) return prev;
+        const n = new Set(prev);
+        n.delete(sId);
+        n.delete(passengerId);
+        return n;
+      });
+    }
 
     if (selectedVehicleId) {
       broadcastLiveAction({
@@ -2002,7 +2120,7 @@ export function RepPage() {
       const coRepNote = coReps.map((c) => c.trim()).filter(Boolean).length > 0
         ? `Co-reps: ${coReps.map((c) => c.trim()).filter(Boolean).join(', ')}. `
         : '';
-      const cashNote = `Cash collected: R${totalCash} (base R${baseCash}${absentPaidCash > 0 ? ` + absent paid R${absentPaidCash}` : ''}${externalCash > 0 ? ` + external R${externalCash}` : ''}${pastCancellationCash > 0 ? ` + past cancellations R${pastCancellationCash}` : ''}). `;
+      const cashNote = `Cash collected: R${totalCash} (base R${baseCash}${presentUnpaidCount > 0 ? ` [${presentUnpaidCount} unpaid deducted -R${unpaidDeduction}]` : ''}${absentPaidCash > 0 ? ` + absent paid R${absentPaidCash}` : ''}${externalCash > 0 ? ` + external R${externalCash}` : ''}${pastCancellationCash > 0 ? ` + past cancellations R${pastCancellationCash}` : ''}). `;
       const sponseeNote = externalSponsees.length > 0
         ? `External sponsees: ${externalSponsees.map((s) => `${s.sponseeName || 'Unnamed'} in ${s.taxiName || 'another vehicle'} (R${s.amount})`).join('; ')}. `
         : '';
@@ -2032,7 +2150,7 @@ export function RepPage() {
         coReps: coReps.map((c) => c.trim()).filter(Boolean),
         licensePlate: licensePlate.trim(),
         generalNotes: generalNotes.trim(),
-        cashCollected: { base: baseCash, absentPaid: absentPaidCash, external: externalCash, pastCancellations: pastCancellationCash },
+        cashCollected: { base: baseCash, unpaidDeduction, absentPaid: absentPaidCash, external: externalCash, pastCancellations: pastCancellationCash },
         settledLedgerIds: Array.from(collectedCancellationIds),
         manualCancellations,
         externalSponsees,
@@ -3183,6 +3301,7 @@ export function RepPage() {
                   <StopGroupedChecklist
                     riders={filteredRiders}
                     vehicleType={selectedVehicle?.type ?? 'Taxi'}
+                    fare={FARE}
                     orderedStops={selectedVehicle?.orderedStops}
                     stopRedirects={selectedVehicle?.stopRedirects}
                     presentIds={presentIds}
@@ -3264,9 +3383,13 @@ export function RepPage() {
                     <CashCalculatorCard
                       presentCount={presentCount}
                       presentSponsoredCount={presentSponsoredCount}
+                      presentUnpaidCount={presentUnpaidCount}
                       fare={FARE}
                       grossPresentCash={grossPresentCash}
                       sponsoredDeduction={sponsoredDeduction}
+                      unpaidDeduction={unpaidDeduction}
+                      isBus={selectedVehicle.type === 'Bus'}
+                      busStopsBreakdown={busStopsBreakdown}
                       absentPaidCount={absentPaidCount}
                       absentPaidCash={absentPaidCash}
                       externalSponsees={externalSponsees}
@@ -3627,7 +3750,8 @@ function formatServicePeriodMode(service: string): string {
 }
 
 function CashCalculatorCard({
-  presentCount, presentSponsoredCount, fare, grossPresentCash, sponsoredDeduction,
+  presentCount, presentSponsoredCount, presentUnpaidCount = 0, fare, grossPresentCash, sponsoredDeduction, unpaidDeduction = 0,
+  isBus = false, busStopsBreakdown = [],
   absentPaidCount, absentPaidCash,
   externalSponsees, onAddExternalSponsorship, onRemoveSponsee, externalCash,
   thisVehicleRiders, otherVehiclesWithRiders, selectedVehicleName,
@@ -3638,9 +3762,23 @@ function CashCalculatorCard({
 }: {
   presentCount: number;
   presentSponsoredCount: number;
+  presentUnpaidCount?: number;
   fare: number;
   grossPresentCash: number;
   sponsoredDeduction: number;
+  unpaidDeduction?: number;
+  isBus?: boolean;
+  busStopsBreakdown?: Array<{
+    stopName: string;
+    totalRiders: number;
+    presentCount: number;
+    payingCount: number;
+    sponsoredCount: number;
+    unpaidCount: number;
+    absentPaidCount: number;
+    arrearsCash: number;
+    totalStopCash: number;
+  }>;
   absentPaidCount?: number;
   absentPaidCash?: number;
   externalSponsees: ExternalSponsee[];
@@ -3685,6 +3823,16 @@ function CashCalculatorCard({
     return e.passenger_name.toLowerCase().includes(q) || (e.structure || '').toLowerCase().includes(q);
   });
   const totalSettledCount = selectedCancellations.length + manualCancellations.length;
+
+  // Track physical cash envelope counts per stop (only for buses) to reconcile discrepancies
+  const [stopPhysicalCash, setStopPhysicalCash] = useState<Record<string, string>>(() => {
+    try {
+      const stored = localStorage.getItem('crc_rep_bus_stop_cash');
+      return stored ? JSON.parse(stored) : {};
+    } catch {
+      return {};
+    }
+  });
 
   // Cross-taxi sponsorship form state
   const [isAddingSponsorship, setIsAddingSponsorship] = useState(false);
@@ -3795,8 +3943,14 @@ function CashCalculatorCard({
         </div>
         {presentSponsoredCount > 0 && (
           <div className="flex items-center justify-between text-muted">
-            <span>- Sponsored (Present, didn't pay)</span>
+            <span className="text-warning font-medium">- Sponsored (Present, didn't pay)</span>
             <span className="font-mono font-semibold text-warning">{presentSponsoredCount} × R{fare} = -R{sponsoredDeduction}</span>
+          </div>
+        )}
+        {presentUnpaidCount > 0 && (
+          <div className="flex items-center justify-between text-muted">
+            <span className="text-crimson-400 font-medium">- Didn't Pay / Unpaid (Present, didn't pay fare)</span>
+            <span className="font-mono font-semibold text-crimson-400 font-bold">{presentUnpaidCount} × R{fare} = -R{unpaidDeduction}</span>
           </div>
         )}
         {absentPaidCount !== undefined && absentPaidCount > 0 && (
@@ -3806,6 +3960,158 @@ function CashCalculatorCard({
           </div>
         )}
       </div>
+
+      {/* Bus Stop-by-Stop Cash Reconciler (Only for Busses) */}
+      {isBus && busStopsBreakdown && busStopsBreakdown.length > 0 && (
+        <div className="mt-3 border-t border-line/60 pt-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
+              <Bus className="h-4 w-4 text-emerald-400 shrink-0" />
+              <span>Bus Stop Cash Breakdown & Envelope Reconciler</span>
+            </div>
+            <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300 border border-emerald-500/30">
+              {busStopsBreakdown.length} stop{busStopsBreakdown.length > 1 ? 's' : ''}
+            </span>
+          </div>
+
+          <p className="mb-2 text-[11px] text-muted">
+            Total cash expected from each bus stop based on riders who paid. Enter the physical envelope cash from each stop to spot discrepancies immediately.
+          </p>
+
+          <div className="space-y-2 mb-2">
+            {busStopsBreakdown.map((item) => {
+              const physicalVal = stopPhysicalCash[item.stopName];
+              const hasInput = physicalVal !== undefined && physicalVal !== '';
+              const numPhysical = Number(physicalVal) || 0;
+              const diff = numPhysical - item.totalStopCash;
+
+              return (
+                <div
+                  key={item.stopName}
+                  className="rounded-lg border border-line bg-card-2/50 p-2.5 text-xs transition-colors hover:bg-card-2/80"
+                >
+                  <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+                    <div className="flex items-center gap-1.5 font-semibold text-ink">
+                      <MapPin className="h-3.5 w-3.5 text-crimson-400 shrink-0" />
+                      <span>{item.stopName}</span>
+                      <span className="text-[10px] text-muted font-normal">
+                        ({item.presentCount}/{item.totalRiders} present)
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono font-bold text-ink text-xs">
+                        Expected: <span className="text-emerald-400 font-bold">R{item.totalStopCash}</span>
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Rider Payment Composition */}
+                  <div className="flex items-center gap-1.5 flex-wrap text-[11px] text-muted mb-2">
+                    <span className="font-medium text-emerald-300">
+                      {item.payingCount} paying (R{item.payingCount * fare})
+                    </span>
+                    {item.unpaidCount > 0 && (
+                      <>
+                        <span>·</span>
+                        <span className="text-crimson-400 font-medium font-mono font-semibold">
+                          {item.unpaidCount} didn't pay (-R{item.unpaidCount * fare})
+                        </span>
+                      </>
+                    )}
+                    {item.sponsoredCount > 0 && (
+                      <>
+                        <span>·</span>
+                        <span className="text-warning font-medium">
+                          {item.sponsoredCount} sponsored
+                        </span>
+                      </>
+                    )}
+                    {item.absentPaidCount > 0 && (
+                      <>
+                        <span>·</span>
+                        <span className="text-emerald-400 font-medium">
+                          +{item.absentPaidCount} absent-paid (+R{item.absentPaidCount * fare})
+                        </span>
+                      </>
+                    )}
+                    {item.arrearsCash > 0 && (
+                      <>
+                        <span>·</span>
+                        <span className="text-emerald-400 font-medium">
+                          +R{item.arrearsCash} arrears
+                        </span>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Physical Cash Envelope Input & Discrepancy Check */}
+                  <div className="flex items-center justify-between gap-2 rounded-md bg-card p-2 border border-line/60 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <label className="text-[11px] text-muted whitespace-nowrap font-medium">
+                        Physical Cash:
+                      </label>
+                      <div className="relative">
+                        <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted font-mono text-xs">
+                          R
+                        </span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="10"
+                          value={physicalVal ?? ''}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setStopPhysicalCash((prev) => {
+                              const next = { ...prev, [item.stopName]: val };
+                              try {
+                                localStorage.setItem('crc_rep_bus_stop_cash', JSON.stringify(next));
+                              } catch {
+                                // Ignore storage error
+                              }
+                              return next;
+                            });
+                          }}
+                          placeholder={String(item.totalStopCash)}
+                          className="input-field w-24 py-1 pl-6 pr-2 text-xs font-mono font-bold"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="text-[11px] font-medium">
+                      {!hasInput ? (
+                        <span className="text-muted italic">Awaiting envelope cash</span>
+                      ) : diff === 0 ? (
+                        <span className="inline-flex items-center gap-1 font-bold text-emerald-400 bg-emerald-950/40 border border-emerald-500/30 px-2 py-0.5 rounded">
+                          <Check className="h-3 w-3" />
+                          Matches Calculator (R{item.totalStopCash})
+                        </span>
+                      ) : diff > 0 ? (
+                        <span className="inline-flex items-center gap-1 font-bold text-amber-400 bg-amber-950/40 border border-amber-500/30 px-2 py-0.5 rounded">
+                          +R{diff} Surplus (Physical cash has MORE than calculator)
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 font-bold text-crimson-400 bg-crimson-950/40 border border-crimson-500/30 px-2 py-0.5 rounded">
+                          -R{Math.abs(diff)} Shortfall (Physical cash has LESS than calculator)
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {busStopsBreakdown.length > 1 && (
+            <div className="mt-2.5 flex items-center justify-between rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-2.5 text-xs font-semibold text-ink">
+              <span className="text-muted">Total Expected Across All Bus Stops:</span>
+              <span className="font-mono text-sm font-bold text-emerald-400">
+                R{busStopsBreakdown.reduce((sum, item) => sum + item.totalStopCash, 0)}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Cross-Taxi Sponsorships (Paying for someone in another taxi) */}
       <div className="mt-3 border-t border-line/60 pt-3">
@@ -4241,7 +4547,7 @@ function CashCalculatorCard({
       {/* Live total */}
       <div className="mt-3 space-y-1 rounded-lg border border-crimson-500/20 bg-crimson-900/10 p-3 text-xs">
         <div className="flex items-center justify-between text-muted">
-          <span>Base Passenger Cash</span>
+          <span>Base Passenger Cash ({Math.max(0, presentCount - presentSponsoredCount - presentUnpaidCount)} paying)</span>
           <span className="font-mono font-semibold text-ink">R{baseCash}</span>
         </div>
         {absentPaidCash !== undefined && absentPaidCash > 0 && (
@@ -4360,9 +4666,27 @@ function StopGroupedChecklist({
       {stops.map((stop) => {
         const stopRiders = byStop[stop] || [];
         if (stopRiders.length === 0) return null;
-        const stopPresent = stopRiders.filter((r) => presentIds.has(r.id)).length;
-        const stopTouched = stopRiders.filter((r) => presentIds.has(r.id) || absentIds.has(r.id)).length;
+        const stopPresent = stopRiders.filter((r) => presentIds.has(r.id) || presentIds.has(String(r.id))).length;
+        const stopTouched = stopRiders.filter((r) => presentIds.has(r.id) || absentIds.has(r.id) || presentIds.has(String(r.id)) || absentIds.has(String(r.id))).length;
         const isExpanded = expandedStops.has(stop);
+
+        // Calculate stop cash (strictly for buses to reconcile stop physical cash)
+        const stopSponsored = stopRiders.filter((r) => (presentIds.has(r.id) || presentIds.has(String(r.id))) && (sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id)) || Boolean(r.sponsored))).length;
+        const stopUnpaid = stopRiders.filter((r) => (presentIds.has(r.id) || presentIds.has(String(r.id))) && (unpaidIds.has(r.id) || unpaidIds.has(String(r.id)) || Boolean(r.didNotPay))).length;
+        const stopPaying = Math.max(0, stopPresent - stopSponsored - stopUnpaid);
+        const stopAbsentPaid = stopRiders.filter((r) => (absentIds.has(r.id) || absentIds.has(String(r.id))) && (absentPaidIds?.has(r.id) || absentPaidIds?.has(String(r.id)))).length;
+        let stopArrears = 0;
+        if (riderDebtsMap && collectedCancellationIds) {
+          for (const r of stopRiders) {
+            const debts = riderDebtsMap[r.id] || riderDebtsMap[String(r.id)] || [];
+            for (const d of debts) {
+              if (collectedCancellationIds.has(d.id)) {
+                stopArrears += parseDebtAmount(d.structure_debt);
+              }
+            }
+          }
+        }
+        const stopCash = (stopPaying * 40) + (stopAbsentPaid * 40) + stopArrears;
 
         const redirectedRiders = stopRiders.filter((r) => hubDisplayName(vehicleType, r.stop) !== stop);
         const redirectedFrom = Array.from(new Set(redirectedRiders.map((r) => hubDisplayName(vehicleType, r.stop))));
@@ -4384,6 +4708,15 @@ function StopGroupedChecklist({
                 )}
               </div>
               <div className="flex items-center gap-2">
+                {vehicleType === 'Bus' && (
+                  <span
+                    className="inline-flex items-center gap-1 rounded bg-emerald-500/15 px-2 py-0.5 font-mono text-xs font-bold text-emerald-300 border border-emerald-500/30 shadow-xs"
+                    title={`${stopPaying} paying × R40${stopAbsentPaid ? ` + ${stopAbsentPaid} absent-paid` : ''}${stopArrears ? ` + R${stopArrears} arrears` : ''}`}
+                  >
+                    <Wallet className="h-3 w-3 text-emerald-400" />
+                    <span>R{stopCash}</span>
+                  </span>
+                )}
                 <span className="text-xs text-muted">{stopPresent}/{stopRiders.length} present · {stopTouched}/{stopRiders.length} checked</span>
                 <span className={`flex h-2 w-2 rounded-full ${stopTouched === stopRiders.length ? 'bg-success' : 'bg-crimson-500'}`} />
               </div>

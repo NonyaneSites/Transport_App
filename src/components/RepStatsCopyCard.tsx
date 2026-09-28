@@ -111,7 +111,7 @@ export function RepStatsCopyCard({
 
   // 4. Unpaid riders (didn't pay fare)
   const unpaidPassengers = useMemo(() => {
-    return riders.filter((r) => unpaidIds.has(r.id));
+    return riders.filter((r) => unpaidIds.has(r.id) || unpaidIds.has(String(r.id)) || Boolean(r.didNotPay));
   }, [riders, unpaidIds]);
 
   // 5. Cancellations (unpaid absentees)

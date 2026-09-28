@@ -702,7 +702,7 @@ app.post('/api/manifests/:key/reopen-vehicle', (req, res) => {
 // Vehicle Draft Update
 app.post('/api/manifests/:key/draft', (req, res) => {
   const key = req.params.key;
-  const { vehicleId, draftState, repName, licensePlate } = req.body;
+  const { vehicleId, draftState, repName, licensePlate, fullVehicle, manifest: incomingManifest } = req.body;
 
   if (!vehicleId) {
     res.status(400).json({ error: 'vehicleId is required' });
@@ -713,14 +713,28 @@ app.post('/api/manifests/:key/draft', (req, res) => {
   const manifest = readJsonFile<{
     date: string;
     signups: unknown[];
-    vehicles: Array<{ id: string; repName?: string; licensePlate?: string; draftState?: unknown }>;
+    vehicles: Array<{ id: string; name?: string; type?: string; riders?: unknown[]; repName?: string; licensePlate?: string; draftState?: unknown }>;
     updated_at?: string;
   }>(filePath, { date: key, signups: [], vehicles: [] });
 
   const nowIso = new Date().toISOString();
 
+  // If server manifest file is empty or missing vehicles, seed from incoming manifest or fullVehicle
+  if ((!manifest.vehicles || manifest.vehicles.length === 0)) {
+    if (incomingManifest && Array.isArray(incomingManifest.vehicles) && incomingManifest.vehicles.length > 0) {
+      manifest.vehicles = incomingManifest.vehicles;
+      if (Array.isArray(incomingManifest.signups) && incomingManifest.signups.length > 0) {
+        manifest.signups = incomingManifest.signups;
+      }
+    } else if (fullVehicle && typeof fullVehicle === 'object') {
+      manifest.vehicles = [fullVehicle];
+    }
+  }
+
+  let found = false;
   manifest.vehicles = (manifest.vehicles || []).map((v) => {
-    if (v.id === vehicleId) {
+    if (String(v.id) === String(vehicleId)) {
+      found = true;
       return {
         ...v,
         repName: repName !== undefined ? repName : v.repName,
@@ -730,6 +744,16 @@ app.post('/api/manifests/:key/draft', (req, res) => {
     }
     return v;
   });
+
+  // If vehicle wasn't found in list but fullVehicle was supplied, append it
+  if (!found && fullVehicle && typeof fullVehicle === 'object') {
+    manifest.vehicles.push({
+      ...fullVehicle,
+      repName: repName !== undefined ? repName : fullVehicle.repName,
+      licensePlate: licensePlate !== undefined ? licensePlate : fullVehicle.licensePlate,
+      draftState: draftState !== undefined ? draftState : fullVehicle.draftState,
+    });
+  }
 
   manifest.updated_at = nowIso;
   atomicWriteJson(filePath, manifest);

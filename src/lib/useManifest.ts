@@ -10,7 +10,12 @@ import {
   dbRowToVehicle,
   resetManifest,
 } from './manifest';
-import { saveManifestToServer, broadcastLiveActionToServer, connectSyncEvents } from './serverApi';
+import {
+  saveManifestToServer,
+  updateVehicleDraftOnServer,
+  broadcastLiveActionToServer,
+  connectSyncEvents,
+} from './serverApi';
 import type { Manifest, Vehicle, Passenger, VehicleDraftState, LiveSyncAction } from './types';
 
 export interface ActiveCoRep {
@@ -97,10 +102,6 @@ export function mergeIncomingManifest(
           notes: Object.fromEntries(
             Object.entries({ ...(curDraft?.notes || {}), ...(incDraft.notes || {}) }).filter(([k]) => activeRiderStrSet.has(String(k)))
           ),
-          stopCashConfirmations: {
-            ...(curDraft?.stopCashConfirmations || {}),
-            ...(incDraft.stopCashConfirmations || {}),
-          },
           updatedAt: incDraft.updatedAt || curDraft?.updatedAt || new Date().toISOString(),
           updatedBy: incDraft.updatedBy || curDraft?.updatedBy,
         }
@@ -113,11 +114,6 @@ export function mergeIncomingManifest(
       submitted: Boolean(incV.submitted || currentActiveVehicle.submitted),
       submittedAt: incV.submittedAt || currentActiveVehicle.submittedAt,
       submittedBy: incV.submittedBy || currentActiveVehicle.submittedBy,
-      stopCashConfirmations: {
-        ...(currentActiveVehicle.stopCashConfirmations || {}),
-        ...(incV.stopCashConfirmations || {}),
-        ...(cleanDraftState.stopCashConfirmations || {}),
-      },
       draftState: cleanDraftState,
     };
   });
@@ -941,10 +937,6 @@ export function useManifest(
         unpaidIds: Array.from(mergedUnpaid),
         absentPaidIds: Array.from(mergedAbsentPaid),
         notes: { ...(existingDraft.notes ?? {}), ...(draftState.notes ?? {}) },
-        stopCashConfirmations: {
-          ...(existingDraft.stopCashConfirmations ?? {}),
-          ...(draftState.stopCashConfirmations ?? {}),
-        },
         repName: draftState.repName?.trim() || existingDraft.repName || targetVehicle?.repName,
         licensePlate: draftState.licensePlate?.trim() || existingDraft.licensePlate || targetVehicle?.licensePlate,
         coReps: Array.from(new Set([...(existingDraft.coReps ?? []), ...(draftState.coReps ?? [])])).filter(Boolean),
@@ -1037,10 +1029,32 @@ export function useManifest(
       },
     });
 
+    const targetVehRecord = updatedVehicles.find((v) => String(v.id) === String(vehicleId));
+
+    // Persist targeted draft directly to server disk so refresh or multi-device never loses work
+    updateVehicleDraftOnServer(
+      mergedManifest.date,
+      vehicleId,
+      mergedDraft || {},
+      repName,
+      licensePlate,
+      targetVehRecord,
+      mergedManifest
+    ).catch((err) => {
+      console.warn('[useManifest] Error saving draft to server:', err);
+    });
+
+    // Also persist immediately to mockStorage for local fallback
+    mockStorage.upsert(MANIFESTS_TABLE, {
+      date: mergedManifest.date,
+      signups: mergedManifest.signups,
+      vehicles: mergedManifest.vehicles,
+      updated_at: new Date().toISOString(),
+    });
+
     try {
-      const updatedVehicleRecord = updatedVehicles.find((v) => v.id === vehicleId);
-      if (updatedVehicleRecord) {
-        saveVehicleToDb(mergedManifest.date, updatedVehicleRecord).catch((err) => {
+      if (targetVehRecord) {
+        saveVehicleToDb(mergedManifest.date, targetVehRecord).catch((err) => {
           console.warn('[useManifest] Error saving individual vehicle:', err);
         });
       }
