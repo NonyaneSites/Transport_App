@@ -1,6 +1,17 @@
 import { jsPDF } from 'jspdf';
 import autoTable, { type RowInput } from 'jspdf-autotable';
-import { type LedgerEntry, BANK_DETAILS, extractServiceCode, extractNameAndService, isEntrySponsorshipOrUnpaid, cleanSponsorshipNote, isDreamWeekDate } from './ledger';
+import {
+  type LedgerEntry,
+  BANK_DETAILS,
+  extractServiceCode,
+  extractNameAndService,
+  isEntrySponsorshipOrUnpaid,
+  cleanSponsorshipNote,
+  isDreamWeekDate,
+  parseDebtAmount,
+  normalizeStructureCode,
+  sanitizePassengerDisplayName,
+} from './ledger';
 import { naturalCompare } from './sort';
 
 /**
@@ -92,15 +103,16 @@ export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[
   >();
 
   for (const entry of entries) {
-    const struct = (entry.structure || 'Unassigned Structure').trim();
+    const amount = parseDebtAmount(entry.structure_debt);
+    if (amount <= 0) continue;
+
+    const struct = normalizeStructureCode(entry.structure);
     const { cleanName, serviceCode } = extractNameAndService(entry.passenger_name, entry.service);
-    const person = cleanName || entry.passenger_name || 'Unknown';
+    const person = sanitizePassengerDisplayName(cleanName || entry.passenger_name) || 'Unknown';
     const instanceStr = formatCancellationInstance(entry.date, serviceCode || entry.service);
-    const rawDebt = Number(entry.structure_debt);
-    const amount = Number.isFinite(rawDebt) && rawDebt >= 0 ? rawDebt : 40;
 
     const isSponsorship = isEntrySponsorshipOrUnpaid(entry);
-    const personCategoryKey = `${person.toLowerCase()}:::${isSponsorship ? 'sponsorship' : 'cancellation'}`;
+    const personCategoryKey = `${person.toLowerCase().replace(/\s+/g, ' ')}:::${isSponsorship ? 'sponsorship' : 'cancellation'}`;
 
     if (!byStructure.has(struct)) {
       byStructure.set(struct, new Map());

@@ -97,6 +97,10 @@ export function mergeIncomingManifest(
           notes: Object.fromEntries(
             Object.entries({ ...(curDraft?.notes || {}), ...(incDraft.notes || {}) }).filter(([k]) => activeRiderStrSet.has(String(k)))
           ),
+          stopCashConfirmations: {
+            ...(curDraft?.stopCashConfirmations || {}),
+            ...(incDraft.stopCashConfirmations || {}),
+          },
           updatedAt: incDraft.updatedAt || curDraft?.updatedAt || new Date().toISOString(),
           updatedBy: incDraft.updatedBy || curDraft?.updatedBy,
         }
@@ -109,6 +113,11 @@ export function mergeIncomingManifest(
       submitted: Boolean(incV.submitted || currentActiveVehicle.submitted),
       submittedAt: incV.submittedAt || currentActiveVehicle.submittedAt,
       submittedBy: incV.submittedBy || currentActiveVehicle.submittedBy,
+      stopCashConfirmations: {
+        ...(currentActiveVehicle.stopCashConfirmations || {}),
+        ...(incV.stopCashConfirmations || {}),
+        ...(cleanDraftState.stopCashConfirmations || {}),
+      },
       draftState: cleanDraftState,
     };
   });
@@ -932,6 +941,10 @@ export function useManifest(
         unpaidIds: Array.from(mergedUnpaid),
         absentPaidIds: Array.from(mergedAbsentPaid),
         notes: { ...(existingDraft.notes ?? {}), ...(draftState.notes ?? {}) },
+        stopCashConfirmations: {
+          ...(existingDraft.stopCashConfirmations ?? {}),
+          ...(draftState.stopCashConfirmations ?? {}),
+        },
         repName: draftState.repName?.trim() || existingDraft.repName || targetVehicle?.repName,
         licensePlate: draftState.licensePlate?.trim() || existingDraft.licensePlate || targetVehicle?.licensePlate,
         coReps: Array.from(new Set([...(existingDraft.coReps ?? []), ...(draftState.coReps ?? [])])).filter(Boolean),

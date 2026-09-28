@@ -3,7 +3,10 @@ import {
   Search, X, Banknote, Plus, CheckCircle2,
   Calendar, MapPin, Car, Filter, Check, ChevronDown, ChevronUp,
 } from 'lucide-react';
-import { type LedgerEntry, evaluateLedgerSearch, isEntrySponsorshipOrUnpaid, normalizeStructureCode, structureSortComparator } from '@/lib/ledger';
+import {
+  type LedgerEntry, evaluateLedgerSearch, isEntrySponsorshipOrUnpaid,
+  normalizeStructureCode, structureSortComparator, parseDebtAmount, sanitizePassengerDisplayName,
+} from '@/lib/ledger';
 import type { ManualCancellation } from '@/pages/RepPage';
 import type { Passenger } from '@/lib/types';
 import { shortDate } from '@/lib/dates';
@@ -99,8 +102,8 @@ export function CancellationSearchModal({
   }, [pastCancellations, collectedCancellationIds]);
 
   const selectedLedgerCash = useMemo(() => {
-    return selectedEntries.reduce((sum, e) => sum + (Number(e.structure_debt) || fare), 0);
-  }, [selectedEntries, fare]);
+    return selectedEntries.reduce((sum, e) => sum + parseDebtAmount(e.structure_debt), 0);
+  }, [selectedEntries]);
 
   const manualCash = useMemo(() => {
     return manualCancellations.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
@@ -114,11 +117,15 @@ export function CancellationSearchModal({
     const map = new Map<string, LedgerEntry[]>();
 
     pastCancellations.forEach((entry) => {
-      const key = (entry.passenger_name || 'Unknown').trim().toLowerCase();
+      const cleanName = sanitizePassengerDisplayName(entry.passenger_name) || (entry.passenger_name || 'Unknown').trim();
+      const key = cleanName.toLowerCase().replace(/\s+/g, ' ');
       if (!map.has(key)) {
         map.set(key, []);
       }
-      map.get(key)!.push(entry);
+      map.get(key)!.push({
+        ...entry,
+        passenger_name: cleanName,
+      });
     });
 
     const groups: DebtorGroup[] = [];
@@ -127,10 +134,10 @@ export function CancellationSearchModal({
       const structureRaw = entries.find((e) => e.structure && e.structure.trim())?.structure?.trim() || '';
       const structure = normalizeStructureCode(structureRaw);
       const isVehicleRider = vehicleRiderNamesSet.has(normalizedName);
-      const totalAmount = entries.reduce((sum, e) => sum + (Number(e.structure_debt) || fare), 0);
+      const totalAmount = entries.reduce((sum, e) => sum + parseDebtAmount(e.structure_debt), 0);
       const settledEntries = entries.filter((e) => collectedCancellationIds.has(e.id));
       const settledCount = settledEntries.length;
-      const settledAmount = settledEntries.reduce((sum, e) => sum + (Number(e.structure_debt) || fare), 0);
+      const settledAmount = settledEntries.reduce((sum, e) => sum + parseDebtAmount(e.structure_debt), 0);
       const allSettled = settledCount === entries.length && entries.length > 0;
       const partialSettled = settledCount > 0 && !allSettled;
 
@@ -151,8 +158,8 @@ export function CancellationSearchModal({
       });
     });
 
-    return groups;
-  }, [pastCancellations, vehicleRiderNamesSet, collectedCancellationIds, fare]);
+    return groups.filter((g) => g.totalAmount > 0 && g.entries.length > 0);
+  }, [pastCancellations, vehicleRiderNamesSet, collectedCancellationIds]);
 
   // Filtered debtor groups based on tab, query, structure
   const filteredDebtorGroups = useMemo(() => {
@@ -478,7 +485,7 @@ export function CancellationSearchModal({
                       </div>
                       {group.entries.map((entry) => {
                         const isEntrySelected = collectedCancellationIds.has(entry.id);
-                        const debtAmount = Number(entry.structure_debt) || fare;
+                        const debtAmount = parseDebtAmount(entry.structure_debt);
 
                         return (
                           <div

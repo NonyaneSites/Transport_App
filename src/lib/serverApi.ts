@@ -275,6 +275,26 @@ export async function settleLedgerOnServer(ids: string[]): Promise<number> {
   }
 }
 
+export async function withdrawAbsenteesOnServer(
+  date: string,
+  riderNames: string[],
+  manifestKey?: string
+): Promise<number> {
+  if (!riderNames || riderNames.length === 0) return 0;
+  try {
+    const res = await fetch('/api/ledger/withdraw', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, riderNames, manifest_key: manifestKey }),
+    });
+    if (!res.ok) return 0;
+    const data = await res.json();
+    return data.count || 0;
+  } catch {
+    return 0;
+  }
+}
+
 export async function addManualLedgerOnServer(entry: Partial<LedgerEntry>): Promise<LedgerEntry | null> {
   try {
     const res = await fetch('/api/ledger/manual', {

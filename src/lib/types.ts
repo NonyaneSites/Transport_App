@@ -113,6 +113,10 @@ export interface StopCashConfirmation {
   confirmedBy?: string;
   confirmedAt?: string;
   notes?: string;
+  presentCount?: number;
+  absentCount?: number;
+  sponsoredCount?: number;
+  absentPaidCount?: number;
 }
 
 export interface VehicleDraftState {
@@ -196,6 +200,11 @@ export interface Vehicle {
    * while clearly retaining their source stop origin in rep checklists, vehicle cards, and WhatsApp exports.
    */
   stopRedirects?: Record<string, string>;
+  /**
+   * Stop-by-stop cash calculations and confirmations submitted by co-reps per stop.
+   * Allows each stop in a bus to calculate cash and be submitted independently.
+   */
+  stopCashConfirmations?: Record<string, StopCashConfirmation>;
   /**
    * In-progress, not-yet-submitted attendance for this vehicle, synced
    * live via Supabase Realtime so any device editing this vehicle's Rep

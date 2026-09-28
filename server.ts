@@ -819,6 +819,22 @@ function sanitizePassengerDisplayName(rawName: string): string {
   return name;
 }
 
+// Helper to safely parse debt amount
+function parseDebtAmount(val: unknown): number {
+  if (val === undefined || val === null || val === '') return 40;
+  if (typeof val === 'number') {
+    if (isNaN(val)) return 40;
+    return val;
+  }
+  const str = String(val).trim();
+  if (!str) return 40;
+  if (str === '0' || str === 'R0' || str === 'R 0' || str === '0.00' || str === 'R0.00') return 0;
+  const numStr = str.replace(/[^\d.]/g, '');
+  if (!numStr) return 40;
+  const parsed = Number(numStr);
+  return Number.isFinite(parsed) ? parsed : 40;
+}
+
 // Record reported sponsorships from attendance check-in or transfers
 app.post('/api/ledger/sponsorships', (req, res) => {
   const { sponsorships } = req.body || {};
@@ -1443,13 +1459,11 @@ app.get('/api/ledger', (req, res) => {
   let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
   let dirty = false;
 
-  // Filter out zero-debt items and sanitize boilerplate notes
+  // Filter out zero-debt items, parse numeric debt, and sanitize boilerplate notes
   const activeLedger = ledger
     .filter((entry) => {
-      if (typeof entry.structure_debt === 'number') {
-        return entry.structure_debt > 0;
-      }
-      return true;
+      const debt = parseDebtAmount(entry.structure_debt);
+      return debt > 0;
     })
     .map((entry) => {
       const isSpon = Boolean(entry.sponsored);
@@ -1457,6 +1471,7 @@ app.get('/api/ledger', (req, res) => {
       const origSn = typeof entry.sponsor_note === 'string' ? entry.sponsor_note : '';
       let cleanGn = cleanSponsorshipNote(origGn);
       let cleanSn = cleanSponsorshipNote(origSn);
+      const parsedDebt = parseDebtAmount(entry.structure_debt);
 
       // If entry is not sponsored, clean out vehicle summaries mentioning other people's sponsorships
       if (!isSpon) {
@@ -1467,11 +1482,20 @@ app.get('/api/ledger', (req, res) => {
         }
       }
 
-      if (cleanGn !== origGn || cleanSn !== origSn) {
+      if (cleanGn !== origGn || cleanSn !== origSn || entry.structure_debt !== parsedDebt) {
         dirty = true;
-        return { ...entry, sponsored: isSpon, general_notes: cleanGn, sponsor_note: cleanSn };
+        return {
+          ...entry,
+          sponsored: isSpon,
+          structure_debt: parsedDebt,
+          general_notes: cleanGn,
+          sponsor_note: cleanSn,
+        };
       }
-      return entry;
+      return {
+        ...entry,
+        structure_debt: parsedDebt,
+      };
     });
 
   if (dirty) {

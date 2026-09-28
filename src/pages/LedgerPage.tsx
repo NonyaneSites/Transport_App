@@ -203,7 +203,20 @@ export function LedgerPage() {
     });
   }, [entries, search, structureFilter]);
 
-  const totalDebt = filtered.reduce((sum, e) => sum + Number(e.structure_debt), 0);
+  const isFiltered = Boolean(search.trim() || structureFilter);
+
+  // All debtor groups across all entries (unfiltered)
+  const allGroups = useMemo(() => aggregateLedgerEntries(entries), [entries]);
+
+  // Total unique debtor rows across all structures
+  const totalDebtorsCount = useMemo(() => {
+    return allGroups.reduce((sum, g) => sum + g.rows.length, 0);
+  }, [allGroups]);
+
+  // Grand total outstanding debt across all structures
+  const grandTotalDebt = useMemo(() => {
+    return allGroups.reduce((sum, g) => sum + g.totalDebt, 0);
+  }, [allGroups]);
 
   const sponsorshipStats = useMemo(() => {
     const total = sponsorships.length;
@@ -291,6 +304,15 @@ export function LedgerPage() {
       };
     });
   }, [filtered, search]);
+
+  // Filtered debtor count and debt
+  const filteredDebtorsCount = useMemo(() => {
+    return groupedByStructure.reduce((sum, g) => sum + g.rows.length, 0);
+  }, [groupedByStructure]);
+
+  const filteredDebt = useMemo(() => {
+    return groupedByStructure.reduce((sum, g) => sum + g.totalDebt, 0);
+  }, [groupedByStructure]);
 
   async function handleImportFile(file: File) {
     setImporting(true);
@@ -830,7 +852,7 @@ export function LedgerPage() {
             <FileSpreadsheet className="h-4 w-4 shrink-0" />
             <span>Cancellations & Debtors</span>
             <span className="rounded-full bg-card-2 border border-line px-2 py-0.5 text-[11px] font-semibold text-muted">
-              {entries.length}
+              {totalDebtorsCount} {totalDebtorsCount === 1 ? 'debtor' : 'debtors'}
             </span>
           </button>
 
@@ -910,9 +932,24 @@ export function LedgerPage() {
             {/* Summary + download */}
             <div className="mb-4 sm:mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
-                <SummaryStat label="Total Debts" value={entries.length} />
-                <SummaryStat label="Filtered Debts" value={filtered.length} accent="crimson" />
-                <SummaryStat label="Total Debt" value={`R${totalDebt}`} accent="warning" />
+                <SummaryStat
+                  label={isFiltered ? "Filtered Debtors" : "Total Debtors"}
+                  value={isFiltered ? filteredDebtorsCount : totalDebtorsCount}
+                  subtext={isFiltered ? `of ${totalDebtorsCount} total debtors` : `${allGroups.length} active structures`}
+                  accent="crimson"
+                />
+                <SummaryStat
+                  label={isFiltered ? "Filtered Debt" : "Total Debt"}
+                  value={`R${isFiltered ? filteredDebt : grandTotalDebt}`}
+                  subtext={isFiltered ? `of R${grandTotalDebt} total debt` : 'Outstanding debt'}
+                  accent="warning"
+                />
+                <SummaryStat
+                  label={isFiltered ? "Filtered Trips" : "Missed Trips"}
+                  value={isFiltered ? filtered.length : entries.length}
+                  subtext={isFiltered ? `of ${entries.length} cancellation entries` : 'Total records'}
+                  accent="neutral"
+                />
                 <button
                   type="button"
                   onClick={() => {
@@ -926,7 +963,8 @@ export function LedgerPage() {
                 >
                   <SummaryStat
                     label="Sponsorships"
-                    value={sponsorships.length > 0 ? `${sponsorshipStats.total} (${sponsorshipStats.pending} pending)` : '0'}
+                    value={sponsorships.length > 0 ? `${sponsorshipStats.total}` : '0'}
+                    subtext={sponsorshipStats.pending > 0 ? `${sponsorshipStats.pending} pending audit` : 'All audited'}
                     accent={sponsorshipStats.pending > 0 ? 'warning' : 'success'}
                   />
                 </button>
@@ -1093,7 +1131,7 @@ export function LedgerPage() {
             {search.trim() && (
               <div className="mb-3 flex items-center justify-between rounded-lg border border-crimson-500/30 bg-crimson-500/10 px-3 py-1.5 text-xs text-crimson-300">
                 <span className="truncate mr-2">
-                  Filtering by: <strong>"{search.trim()}"</strong> · <strong>{filtered.length}</strong> debtor{filtered.length === 1 ? '' : 's'}
+                  Filtering by: <strong>"{search.trim()}"</strong> · <strong>{filteredDebtorsCount}</strong> debtor{filteredDebtorsCount === 1 ? '' : 's'} ({filtered.length} trip record{filtered.length === 1 ? '' : 's'})
                 </span>
                 <button
                   type="button"
@@ -2923,7 +2961,17 @@ export function LedgerPage() {
   );
 }
 
-function SummaryStat({ label, value, accent }: { label: string; value: string | number; accent?: 'crimson' | 'warning' | 'success' | 'neutral' }) {
+function SummaryStat({
+  label,
+  value,
+  subtext,
+  accent,
+}: {
+  label: string;
+  value: string | number;
+  subtext?: string;
+  accent?: 'crimson' | 'warning' | 'success' | 'neutral';
+}) {
   const color =
     accent === 'crimson'
       ? 'text-crimson-400'
@@ -2934,9 +2982,10 @@ function SummaryStat({ label, value, accent }: { label: string; value: string | 
       : 'text-ink';
   return (
     <div className="card flex items-center gap-3 p-3">
-      <div>
+      <div className="min-w-0">
         <div className={`font-display text-xl font-bold ${color}`}>{value}</div>
         <div className="text-[10px] font-medium uppercase tracking-wide text-muted">{label}</div>
+        {subtext && <div className="text-[10px] text-muted/70 truncate mt-0.5">{subtext}</div>}
       </div>
     </div>
   );

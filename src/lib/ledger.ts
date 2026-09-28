@@ -19,6 +19,25 @@ import { shortDate } from './dates';
 export type { ReportedSponsorship, SponsorshipStatus };
 
 /**
+ * Safely parses a debt amount from numbers, numeric strings, or formatted currency strings ("R40", "40", "40.00").
+ * Returns 0 if explicitly 0. Defaults to standard CANCELLATION_FEE (40) if null, undefined, empty, or unparseable.
+ */
+export function parseDebtAmount(val: unknown): number {
+  if (val === undefined || val === null || val === '') return CANCELLATION_FEE;
+  if (typeof val === 'number') {
+    if (isNaN(val)) return CANCELLATION_FEE;
+    return val;
+  }
+  const str = String(val).trim();
+  if (!str) return CANCELLATION_FEE;
+  if (str === '0' || str === 'R0' || str === 'R 0' || str === '0.00' || str === 'R0.00') return 0;
+  const numStr = str.replace(/[^\d.]/g, '');
+  if (!numStr) return CANCELLATION_FEE;
+  const parsed = Number(numStr);
+  return Number.isFinite(parsed) ? parsed : CANCELLATION_FEE;
+}
+
+/**
  * Normalizes structure strings to canonical structure codes.
  * - 'Unidentified', 'sunidentified', 'SUNIDENTIFIED', 'unidentified' -> 'Unidentified'
  * - 'No Structure', 'none', 'unassigned' -> 'No Structure'
@@ -684,19 +703,17 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
   }
 
   // Ensure all structures are normalized to canonical codes, passenger names are cleanly formatted,
-  // and exclude any entries whose debt has been reduced to zero
+  // ensure debts are parsed into numbers, and exclude any entries whose debt has been reduced to zero
   return entries
     .filter((e) => {
-      if (e.structure_debt !== undefined && e.structure_debt !== null) {
-        const d = Number(e.structure_debt);
-        if (Number.isFinite(d) && d <= 0) return false;
-      }
-      return true;
+      const d = parseDebtAmount(e.structure_debt);
+      return d > 0;
     })
     .map((e) => ({
       ...e,
       structure: normalizeStructureCode(e.structure),
-      passenger_name: sanitizePassengerDisplayName(e.passenger_name),
+      passenger_name: sanitizePassengerDisplayName(e.passenger_name) || (e.passenger_name || '').trim(),
+      structure_debt: parseDebtAmount(e.structure_debt),
       general_notes: cleanSponsorshipNote(e.general_notes),
       sponsor_note: cleanSponsorshipNote(e.sponsor_note),
     }));
@@ -1035,7 +1052,7 @@ export async function updateDebtorDetails(
         if (isLast) {
           rowDebt = debtPool;
         } else {
-          const defaultDebt = Number(ent.structure_debt) || 40;
+          const defaultDebt = parseDebtAmount(ent.structure_debt);
           rowDebt = Math.min(debtPool, defaultDebt);
           debtPool -= rowDebt;
         }
@@ -1101,7 +1118,7 @@ export async function recordPartialPayment(entryIds: string[], amountPaid: numbe
 
   for (const entry of sorted) {
     if (remainingToDeduct <= 0) break;
-    const currentDebt = Number(entry.structure_debt) || CANCELLATION_FEE;
+    const currentDebt = parseDebtAmount(entry.structure_debt);
 
     if (remainingToDeduct >= currentDebt) {
       // Entire entry is paid off
@@ -1521,15 +1538,15 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
   const byStructure = new Map<string, LedgerEntry[]>();
   for (const e of entries) {
     // If debt for this entry is 0 or less, exclude it completely
-    if (e.structure_debt !== undefined && e.structure_debt !== null) {
-      const d = Number(e.structure_debt);
-      if (Number.isFinite(d) && d <= 0) continue;
-    }
+    const debtVal = parseDebtAmount(e.structure_debt);
+    if (debtVal <= 0) continue;
+
     const key = normalizeStructureCode(e.structure);
     if (!byStructure.has(key)) byStructure.set(key, []);
     byStructure.get(key)!.push({
       ...e,
       structure: key,
+      structure_debt: debtVal,
     });
   }
 
@@ -1541,9 +1558,13 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
     for (const e of structEntries) {
       const isSponsorship = isEntrySponsorshipOrUnpaid(e);
       const catKey = isSponsorship ? 'sponsorship' : 'cancellation';
-      const nameKey = `${e.passenger_name.trim().toLowerCase()}:::${catKey}`;
+      const cleanName = sanitizePassengerDisplayName(e.passenger_name) || (e.passenger_name || '').trim();
+      const nameKey = `${cleanName.toLowerCase().replace(/\s+/g, ' ')}:::${catKey}`;
       if (!byCategoryAndName.has(nameKey)) byCategoryAndName.set(nameKey, []);
-      byCategoryAndName.get(nameKey)!.push(e);
+      byCategoryAndName.get(nameKey)!.push({
+        ...e,
+        passenger_name: cleanName,
+      });
     }
 
     const rows: AggregatedLedgerRow[] = Array.from(byCategoryAndName.values()).map((group) => {
@@ -1551,43 +1572,38 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
       const sorted = [...group].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
       const earliest = sorted[0];
       const latest = sorted[sorted.length - 1];
-      const amount = group.reduce((sum, e) => {
-        const d = Number(e.structure_debt);
-        return sum + (Number.isFinite(d) ? d : CANCELLATION_FEE);
-      }, 0);
 
       // Collect distinct service codes
       const serviceCodesSet = new Set<string>();
       const instances: AggregatedLedgerInstance[] = sorted
-        .filter((e) => {
-          const rawD = Number(e.structure_debt);
-          return !Number.isFinite(rawD) || rawD > 0;
-        })
+        .filter((e) => parseDebtAmount(e.structure_debt) > 0)
         .map((e) => {
-        const code = serviceCodeForEntry(e);
-        serviceCodesSet.add(code);
+          const code = serviceCodeForEntry(e);
+          serviceCodesSet.add(code);
 
-        // Format date into dd/mm/yy or 'Undated'
-        let dStr = e.date ? e.date : 'Undated';
-        if (e.date && e.date.includes('-')) {
-          const parts = e.date.split('-');
-          if (parts.length === 3) {
-            dStr = `${parts[2].slice(-2)}/${parts[1]}/${parts[0].slice(2)}`;
+          // Format date into dd/mm/yy or 'Undated'
+          let dStr = e.date ? e.date : 'Undated';
+          if (e.date && e.date.includes('-')) {
+            const parts = e.date.split('-');
+            if (parts.length === 3) {
+              dStr = `${parts[2].slice(-2)}/${parts[1]}/${parts[0].slice(2)}`;
+            }
           }
-        }
-        const rawD = Number(e.structure_debt);
-        const instDebt = Number.isFinite(rawD) ? rawD : CANCELLATION_FEE;
+          const instDebt = parseDebtAmount(e.structure_debt);
 
-        return {
-          id: e.id,
-          date: e.date,
-          service: e.service,
-          serviceCode: code,
-          amount: instDebt,
-          formatted: `${dStr}(${code})`,
-          notes: e.general_notes || e.sponsor_note || '',
-        };
-      });
+          return {
+            id: e.id,
+            date: e.date,
+            service: e.service,
+            serviceCode: code,
+            amount: instDebt,
+            formatted: `${dStr}(${code})`,
+            notes: e.general_notes || e.sponsor_note || '',
+          };
+        });
+
+      // Total debtor amount is the exact sum of all valid active instance debts
+      const amount = instances.reduce((sum, inst) => sum + inst.amount, 0);
 
       const serviceCodes = Array.from(serviceCodesSet);
       const formattedServices = serviceCodes.length > 0 ? `(${serviceCodes.join(', ')})` : '';
@@ -1599,19 +1615,21 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
         new Set(group.map((e) => cleanSponsorshipNote(e.general_notes || e.sponsor_note)).filter(Boolean))
       ).join('; ');
 
+      const displayName = latest.passenger_name || earliest.passenger_name;
+
       return {
-        key: `${structure}-${latest.passenger_name}-${isSponsorshipOrUnpaid ? 'sponsorship' : 'cancellation'}`,
+        key: `${structure}-${displayName}-${isSponsorshipOrUnpaid ? 'sponsorship' : 'cancellation'}`,
         structure,
         repName: latest.rep_name || latest.submitted_by || '—',
         vehicleName: latest.vehicle_name || '—',
-        name: latest.passenger_name,
+        name: displayName,
         service: latest.service,
         serviceCodes,
         formattedServices,
         latestDate: earliest.date || latest.date,
         formattedDateList,
         amount,
-        entryIds: group.map((e) => e.id),
+        entryIds: instances.map((ins) => ins.id),
         instances,
         isSponsorshipOrUnpaid,
         notes: combinedNotes,

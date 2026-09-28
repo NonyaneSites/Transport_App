@@ -319,6 +319,11 @@ export function reconcileManifestForSave(
         sponsoredIds: nextSpon,
         unpaidIds: nextUnpaid,
         absentPaidIds: nextAbsentPaid,
+        stopCashConfirmations: {
+          ...(remD.stopCashConfirmations || {}),
+          ...(baseD.stopCashConfirmations || {}),
+          ...(incD.stopCashConfirmations || {}),
+        },
         notes: { ...(remD.notes || {}), ...(incD.notes || {}) },
         repName: incD.repName !== baseD.repName ? (incD.repName || remD.repName) : remD.repName,
         licensePlate: incD.licensePlate !== baseD.licensePlate ? (incD.licensePlate || remD.licensePlate) : remD.licensePlate,
@@ -340,6 +345,11 @@ export function reconcileManifestForSave(
       submitted: isSubmitted,
       submittedAt: isSubmitted ? (incV.submittedAt || remoteV.submittedAt || new Date().toISOString()) : undefined,
       submittedBy: isSubmitted ? (incV.submittedBy || remoteV.submittedBy || incV.repName) : undefined,
+      stopCashConfirmations: {
+        ...(remoteV.stopCashConfirmations || {}),
+        ...(incV.stopCashConfirmations || {}),
+        ...(nextDraftState?.stopCashConfirmations || {}),
+      },
       draftState: nextDraftState,
     });
   }
@@ -469,12 +479,19 @@ export function vehicleToDbRow(manifestKey: string, v: Vehicle): Record<string, 
     rep_count: typeof v.repCount === 'number' ? v.repCount : null,
     stop_times: v.stopTimes || null,
     stop_redirects: v.stopRedirects || null,
-    draft_state: v.draftState || null,
+    draft_state: (v.draftState || v.stopCashConfirmations)
+      ? {
+          ...(v.draftState || {}),
+          stopCashConfirmations: v.stopCashConfirmations || v.draftState?.stopCashConfirmations,
+        }
+      : null,
     updated_at: new Date().toISOString(),
   };
 }
 
 export function dbRowToVehicle(row: Record<string, unknown>): Vehicle {
+  const rowDraftState = (row.draft_state || row.draftState) as VehicleDraftState | undefined;
+  const rowStopConfirmations = (rowDraftState?.stopCashConfirmations || (row as any).stop_cash_confirmations || (row as any).stopCashConfirmations) as Record<string, StopCashConfirmation> | undefined;
   return {
     id: String(row.id),
     name: String(row.name || ''),
@@ -507,7 +524,8 @@ export function dbRowToVehicle(row: Record<string, unknown>): Vehicle {
       : undefined,
     stopTimes: (row.stop_times || row.stopTimes) as Record<string, string> | undefined,
     stopRedirects: (row.stop_redirects || row.stopRedirects) as Record<string, string> | undefined,
-    draftState: (row.draft_state || row.draftState) as VehicleDraftState | undefined,
+    stopCashConfirmations: rowStopConfirmations,
+    draftState: rowDraftState,
   };
 }
 
@@ -729,6 +747,13 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
           const indAp = ind.draftState?.absentPaidIds ?? [];
           const mergedApIds = vAp.length > 0 ? vAp : indAp;
 
+          const mergedStopConfirmations = {
+            ...(ind.stopCashConfirmations || {}),
+            ...(v.stopCashConfirmations || {}),
+            ...(ind.draftState?.stopCashConfirmations || {}),
+            ...(v.draftState?.stopCashConfirmations || {}),
+          };
+
           mergedVehicles.push({
             ...ind,
             ...v,
@@ -739,6 +764,7 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
             submitted: isSubmitted,
             submittedAt,
             submittedBy,
+            stopCashConfirmations: mergedStopConfirmations,
             draftState: {
               ...(ind.draftState || {}),
               ...(v.draftState || {}),
@@ -747,6 +773,7 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
               generalNotes: generalNotes || v.draftState?.generalNotes || ind.draftState?.generalNotes,
               coReps: coReps || v.draftState?.coReps || ind.draftState?.coReps,
               submitted: isSubmitted,
+              stopCashConfirmations: mergedStopConfirmations,
               presentIds: (v.draftState?.presentIds ?? ind.draftState?.presentIds ?? []).filter((id) => activeRiderIds.has(String(id))),
               absentIds: (v.draftState?.absentIds ?? ind.draftState?.absentIds ?? []).filter((id) => activeRiderIds.has(String(id))),
               sponsoredIds: mergedSponIds.filter((id) => activeRiderIds.has(String(id))),

@@ -3,7 +3,7 @@ import type { Manifest, Passenger, Vehicle, ServiceType } from './types';
 import { SERVICE_TYPES, hubDisplayName } from './types';
 import { manifestKey, parseManifestKey } from './dates';
 import { loadManifest, upsertManifest } from './manifest';
-import { normalizeStructureCode, recordReportedSponsorships } from './ledger';
+import { normalizeStructureCode, recordReportedSponsorships, withdrawAbsentees } from './ledger';
 
 export type ServicePeriod = 'AM' | 'PM';
 
@@ -488,6 +488,13 @@ export async function transferPassengerAcrossServices(params: {
 
       await upsertManifest(updatedManifest);
 
+      // Ensure passenger is immediately withdrawn from cancellation ledger for this session
+      try {
+        await withdrawAbsentees(fromKey, [passenger.fullName]);
+      } catch (err) {
+        console.warn('[Transfer] withdrawAbsentees error (same-manifest):', err);
+      }
+
       if (isSponsored) {
         try {
           const sDef = SERVICE_TYPES.find((s) => s.value === fromService);
@@ -643,6 +650,14 @@ export async function transferPassengerAcrossServices(params: {
       upsertManifest(updatedSourceManifest),
       upsertManifest(updatedDestManifest),
     ]);
+
+    // Ensure passenger is immediately withdrawn from cancellation ledger across both source and destination
+    try {
+      await withdrawAbsentees(fromKey, [destinationPassenger.fullName]);
+      await withdrawAbsentees(toKey, [destinationPassenger.fullName]);
+    } catch (err) {
+      console.warn('[Transfer] withdrawAbsentees error (cross-service):', err);
+    }
 
     if (effectiveIsSponsored) {
       try {

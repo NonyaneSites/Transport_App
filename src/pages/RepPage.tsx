@@ -25,7 +25,7 @@ import {
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { vehicleRiders, saveVehicleToDb } from '@/lib/manifest';
-import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, recordReportedSponsorships, withdrawReportedSponsorships, cleanSponsorshipNote, type LedgerEntry } from '@/lib/ledger';
+import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, recordReportedSponsorships, withdrawReportedSponsorships, cleanSponsorshipNote, parseDebtAmount, type LedgerEntry } from '@/lib/ledger';
 import { submitVehicleToServer, reopenVehicleOnServer, type SubmitVehiclePayload } from '@/lib/serverApi';
 import { extractVehicleStats } from '@/lib/statsExport';
 import { syncVehicleStatsToGoogleSheet, sheetDateLabel } from '@/lib/googleSheetsSync';
@@ -1006,7 +1006,7 @@ export function RepPage() {
   const selectedLedgerCash = useMemo(() => {
     return pastCancellations
       .filter((e) => collectedCancellationIds.has(e.id))
-      .reduce((sum, e) => sum + (Number(e.structure_debt) || FARE), 0);
+      .reduce((sum, e) => sum + parseDebtAmount(e.structure_debt), 0);
   }, [pastCancellations, collectedCancellationIds]);
   const manualCancellationCash = manualCancellations.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
   const pastCancellationCash = selectedLedgerCash + manualCancellationCash;
@@ -4161,7 +4161,7 @@ function CashCalculatorCard({
                   <span className="font-semibold">{e.passenger_name}</span>
                   <span className="text-muted"> — {shortDate(e.date)} · {formatServicePeriodMode(e.service)}</span>
                   {e.structure && <span className="text-muted"> ({e.structure})</span>}
-                  <span className="ml-1.5 font-bold font-mono text-emerald-300">+R{e.structure_debt || fare}</span>
+                  <span className="ml-1.5 font-bold font-mono text-emerald-300">+R{parseDebtAmount(e.structure_debt)}</span>
                 </span>
                 <button
                   type="button"
@@ -4224,7 +4224,7 @@ function CashCalculatorCard({
                       </span>
                     </span>
                     <span className="shrink-0 flex items-center gap-1 font-mono text-[11px] font-bold text-crimson-400">
-                      {isSettled ? '✓ Settled' : `+ Settle R${e.structure_debt || fare}`}
+                      {isSettled ? '✓ Settled' : `+ Settle R${parseDebtAmount(e.structure_debt)}`}
                     </span>
                   </button>
                 );
@@ -4545,7 +4545,7 @@ const PassengerRow = React.memo(function PassengerRow({
 
   const totalDebtAmount = useMemo(() => {
     if (!outstandingDebts || outstandingDebts.length === 0) return 0;
-    return outstandingDebts.reduce((sum, d) => sum + (Number(d.structure_debt) || FARE), 0);
+    return outstandingDebts.reduce((sum, d) => sum + parseDebtAmount(d.structure_debt), 0);
   }, [outstandingDebts]);
 
   const settledDebtEntries = useMemo(() => {
@@ -4555,7 +4555,7 @@ const PassengerRow = React.memo(function PassengerRow({
 
   const settledDebtCount = settledDebtEntries.length;
   const settledDebtAmount = useMemo(() => {
-    return settledDebtEntries.reduce((sum, d) => sum + (Number(d.structure_debt) || FARE), 0);
+    return settledDebtEntries.reduce((sum, d) => sum + parseDebtAmount(d.structure_debt), 0);
   }, [settledDebtEntries]);
 
   function handleSponsoredToggle() {
@@ -4848,7 +4848,7 @@ const PassengerRow = React.memo(function PassengerRow({
           <div className="space-y-1.5">
             {outstandingDebts.map((d) => {
               const isSettled = collectedCancellationIds?.has(d.id);
-              const debtAmount = Number(d.structure_debt) || FARE;
+              const debtAmount = parseDebtAmount(d.structure_debt);
               return (
                 <div
                   key={d.id}
