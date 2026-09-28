@@ -397,10 +397,9 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
     ledger = ledger.filter((entry) => !(entry.manifest_key === key && riderSet.has(entry.passenger_name)));
   }
 
-  // Insert new absentees: CRITICAL FIX — non-sponsored absentees must NEVER have vehicle-wide sponsorship notes attached!
+  // Insert new absentees: regular cancellations in debt ledger (not auto-sent to sponsorship section)
   if (Array.isArray(absentees) && absentees.length > 0) {
     for (const a of absentees) {
-      const isSpon = Boolean(a.sponsored);
       ledger.push({
         id: `ledger_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         manifest_key: key,
@@ -413,12 +412,10 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
         submitted_by: (repName || '').trim(),
         rep_name: (repName || '').trim(),
         license_plate: (licensePlate || '').trim(),
-        sponsored: isSpon,
-        sponsor_note: isSpon ? cleanSponsorshipNote(a.sponsorNote) : '',
+        sponsored: false,
+        sponsor_note: '',
         structure_debt: 40,
-        general_notes: isSpon
-          ? (cleanSponsorshipNote(a.sponsorNote) || 'Reported sponsored')
-          : cleanPersonalAbsenteeNote((a as { notes?: string }).notes || ''),
+        general_notes: cleanPersonalAbsenteeNote((a as { notes?: string }).notes || ''),
         submitted_at: nowIso,
       });
     }
@@ -1311,6 +1308,7 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
         sponsor_note: noteText,
         structure_debt: 40,
         general_notes: noteText,
+        source: 'reported_sponsorship_audit',
         submitted_at: new Date().toISOString(),
       };
       ledger.unshift(newEntry);
@@ -1445,6 +1443,7 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
           sponsor_note: noteText,
           structure_debt: 40,
           general_notes: noteText,
+          source: 'reported_sponsorship_audit',
           submitted_at: now,
         });
         spon.ledger_entry_id = newEntryId;

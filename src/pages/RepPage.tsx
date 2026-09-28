@@ -24,9 +24,9 @@ import {
 } from '@/lib/types';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
-import { vehicleRiders, saveVehicleToDb } from '@/lib/manifest';
+import { vehicleRiders, saveVehicleToDb, loadManifest } from '@/lib/manifest';
 import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, recordReportedSponsorships, withdrawReportedSponsorships, cleanSponsorshipNote, parseDebtAmount, type LedgerEntry } from '@/lib/ledger';
-import { submitVehicleToServer, reopenVehicleOnServer, type SubmitVehiclePayload } from '@/lib/serverApi';
+import { submitVehicleToServer, reopenVehicleOnServer, saveManifestToServer, updateVehicleDraftOnServer, type SubmitVehiclePayload } from '@/lib/serverApi';
 import { extractVehicleStats } from '@/lib/statsExport';
 import { syncVehicleStatsToGoogleSheet, sheetDateLabel } from '@/lib/googleSheetsSync';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
@@ -1109,6 +1109,8 @@ export function RepPage() {
     sponseeName: string;
     taxiName: string;
     targetVehicleId?: string;
+    targetService?: string;
+    targetServiceLabel?: string;
     amount: number;
     note?: string;
   }) => {
@@ -1149,6 +1151,8 @@ export function RepPage() {
       sponseeName: data.sponseeName,
       taxiName: resolvedTaxiName,
       targetVehicleId: resolvedTargetVehId,
+      targetService: data.targetService,
+      targetServiceLabel: data.targetServiceLabel,
       fromVehicleId: selectedVehicle.id,
       fromVehicleName: selectedVehicle.name,
       amount: data.amount || FARE,
@@ -1162,6 +1166,60 @@ export function RepPage() {
     const targetVehId = resolvedTargetVehId;
     const sponseeId = resolvedSponseeId;
     const sponsorLabel = data.payerName ? `Sponsored by ${data.payerName}` : 'Sponsored';
+
+    // If target vehicle is in another service on this date, update that service's manifest and vehicle draft
+    const isDifferentService = Boolean(data.targetService && data.targetService !== service);
+    if (isDifferentService && sponseeId) {
+      try {
+        const targetKey = manifestKey(date, data.targetService as ServiceType);
+        const targetManifest = await loadManifest(targetKey);
+        if (targetManifest) {
+          const sSponId = String(sponseeId);
+          let foundTargetVehId = targetVehId;
+          const updatedTargetVehicles = targetManifest.vehicles.map((v) => {
+            const isMatch = targetVehId ? String(v.id) === String(targetVehId) : v.name.toLowerCase() === resolvedTaxiName.toLowerCase();
+            if (isMatch) {
+              foundTargetVehId = v.id;
+              const curSpon = (v.draftState?.sponsoredIds ?? []).map(String);
+              const nextSpon = curSpon.includes(sSponId) ? curSpon : [...curSpon, sSponId];
+              const nextNotes = { ...(v.draftState?.notes || {}), [sSponId]: sponsorLabel };
+              return {
+                ...v,
+                draftState: {
+                  ...v.draftState,
+                  sponsoredIds: nextSpon,
+                  notes: nextNotes,
+                },
+              };
+            }
+            return v;
+          });
+
+          const updatedTargetSignups = targetManifest.signups.map((p) => {
+            if (String(p.id) === sSponId) {
+              return { ...p, sponsored: true, sponsorNote: sponsorLabel };
+            }
+            return p;
+          });
+
+          const nextTargetManifest = {
+            ...targetManifest,
+            vehicles: updatedTargetVehicles,
+            signups: updatedTargetSignups,
+          };
+
+          await saveManifestToServer(nextTargetManifest, false).catch(() => {});
+          if (foundTargetVehId) {
+            const tgtVeh = updatedTargetVehicles.find((v) => v.id === foundTargetVehId);
+            if (tgtVeh?.draftState) {
+              updateVehicleDraftOnServer(targetKey, foundTargetVehId, tgtVeh.draftState, undefined, undefined, tgtVeh, nextTargetManifest).catch(() => {});
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[RepPage] Cross-service sponsorship target update note:', err);
+      }
+    }
 
     const targetVeh = manifest.vehicles.find((v) => targetVehId ? v.id === targetVehId : v.name.toLowerCase() === resolvedTaxiName.toLowerCase());
     const finalTargetVehId = targetVeh?.id || targetVehId;
@@ -1232,7 +1290,8 @@ export function RepPage() {
       });
     }
 
-    setBatchActionMsg(`✓ Recorded: ${data.payerName || 'Rider'} paid R${data.amount || FARE} for ${data.sponseeName} in ${data.taxiName}. Auto-sponsored!`);
+    const serviceSuffix = data.targetServiceLabel ? ` (${data.targetServiceLabel})` : '';
+    setBatchActionMsg(`✓ Recorded: ${data.payerName || 'Rider'} paid R${data.amount || FARE} for ${data.sponseeName} in ${data.taxiName}${serviceSuffix}. Auto-sponsored!`);
     setTimeout(() => setBatchActionMsg(null), 4000);
   };
 
@@ -3707,6 +3766,9 @@ export function RepPage() {
           onAddExternalSponsorship={addExternalSponsorship}
           onRemoveSponsee={removeExternalSponsee}
           fare={FARE}
+          currentDate={date}
+          currentService={service}
+          currentServiceLabel={serviceLabel}
         />
       )}
     </div>
@@ -4295,30 +4357,13 @@ function CashCalculatorCard({
                       </button>
                     ))
                   ) : (
-                    <div className="p-2 text-center text-muted text-[11px]">
-                      No passenger found with that name. You can enter details manually below:
+                    <div className="p-3 text-center text-muted text-[11px] space-y-1">
+                      <p className="font-semibold text-ink">No passenger found matching "{sponseeSearchQuery.trim()}"</p>
+                      <p className="text-[10px] text-muted">
+                        Only passengers allocated to a vehicle by the admin can be sponsored. If their name wasn't added by the admin, they will not appear on this list.
+                      </p>
                     </div>
                   )}
-                </div>
-              )}
-
-              {/* Manual fallback if not found in another vehicle */}
-              {!selectedSponsee && sponseeSearchQuery.trim().length > 0 && otherRiderMatches.length === 0 && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                  <input
-                    type="text"
-                    value={customSponseeName}
-                    onChange={(e) => setCustomSponseeName(e.target.value)}
-                    placeholder="Sponsee name"
-                    className="input-field py-1 text-xs"
-                  />
-                  <input
-                    type="text"
-                    value={customTaxiName}
-                    onChange={(e) => setCustomTaxiName(e.target.value)}
-                    placeholder="In which taxi? (e.g. Taxi 2)"
-                    className="input-field py-1 text-xs"
-                  />
                 </div>
               )}
             </div>
@@ -4363,11 +4408,7 @@ function CashCalculatorCard({
               <button
                 type="button"
                 onClick={handleConfirmAddSponsorship}
-                disabled={
-                  isSubmittingSponsorship ||
-                  (!selectedSponsee && !customSponseeName.trim() && !sponseeSearchQuery.trim()) ||
-                  (!selectedSponsee && !customTaxiName.trim())
-                }
+                disabled={isSubmittingSponsorship || !selectedSponsee}
                 className="btn-crimson py-1.5 px-3 text-xs font-bold flex items-center gap-1.5 disabled:opacity-40"
               >
                 {isSubmittingSponsorship ? (

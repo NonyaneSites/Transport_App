@@ -931,7 +931,7 @@ export function LedgerPage() {
 
             {/* Summary + download */}
             <div className="mb-4 sm:mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 sm:gap-3">
                 <SummaryStat
                   label={isFiltered ? "Filtered Debtors" : "Total Debtors"}
                   value={isFiltered ? filteredDebtorsCount : totalDebtorsCount}
@@ -944,12 +944,6 @@ export function LedgerPage() {
                   subtext={isFiltered ? `of R${grandTotalDebt} total debt` : 'Outstanding debt'}
                   accent="warning"
                 />
-                <SummaryStat
-                  label={isFiltered ? "Filtered Trips" : "Missed Trips"}
-                  value={isFiltered ? filtered.length : entries.length}
-                  subtext={isFiltered ? `of ${entries.length} cancellation entries` : 'Total records'}
-                  accent="neutral"
-                />
                 <button
                   type="button"
                   onClick={() => {
@@ -958,7 +952,7 @@ export function LedgerPage() {
                       history.replaceState(null, '', window.location.pathname + window.location.search + '#sponsorships');
                     }
                   }}
-                  className="text-left w-full"
+                  className="text-left w-full col-span-2 sm:col-span-1"
                   title="Switch to Reported Sponsorships review"
                 >
                   <SummaryStat
@@ -1131,7 +1125,7 @@ export function LedgerPage() {
             {search.trim() && (
               <div className="mb-3 flex items-center justify-between rounded-lg border border-crimson-500/30 bg-crimson-500/10 px-3 py-1.5 text-xs text-crimson-300">
                 <span className="truncate mr-2">
-                  Filtering by: <strong>"{search.trim()}"</strong> · <strong>{filteredDebtorsCount}</strong> debtor{filteredDebtorsCount === 1 ? '' : 's'} ({filtered.length} trip record{filtered.length === 1 ? '' : 's'})
+                  Filtering by: <strong>"{search.trim()}"</strong> · <strong>{filteredDebtorsCount}</strong> debtor{filteredDebtorsCount === 1 ? '' : 's'}
                 </span>
                 <button
                   type="button"
@@ -2388,7 +2382,7 @@ export function LedgerPage() {
                             onClick={() => setAddAmount('80')}
                             className="text-[10px] text-muted hover:text-ink underline"
                           >
-                            R80 (2 trips)
+                            R80 (2 cancellations)
                           </button>
                         </div>
                       </div>
@@ -2710,7 +2704,7 @@ export function LedgerPage() {
                       <div className="flex items-center justify-between">
                         <div>
                           <span className="text-xs font-bold uppercase tracking-wider text-ink block">
-                            Cancellation Dates & Trips ({editInstances.length})
+                            Cancellation Dates ({editInstances.length})
                           </span>
                           <p className="text-[11px] text-muted">
                             Modify any date, adjust service types, or remove a specific date in-between.

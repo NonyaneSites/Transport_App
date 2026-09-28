@@ -268,7 +268,7 @@ export function CancellationSearchModal({
             <div>
               <h2 className="font-display text-base font-bold text-ink">Find & Settle Cancellation Debt</h2>
               <p className="text-xs text-muted">
-                Search passengers with unpaid debt and tick which missed trips they are paying for today
+                Search passengers with unpaid debt and tick which missed cancellations they are paying for today
               </p>
             </div>
           </div>
@@ -420,7 +420,7 @@ export function CancellationSearchModal({
 
                       <div className="flex items-center gap-2 text-xs text-muted">
                         <span>
-                          {group.entries.length} unpaid trip{group.entries.length === 1 ? '' : 's'}
+                          {group.entries.length} cancellation{group.entries.length === 1 ? '' : 's'}
                         </span>
                         <span>•</span>
                         <span className="font-semibold text-ink">
@@ -470,14 +470,14 @@ export function CancellationSearchModal({
                           toggleExpandDebtor(group.normalizedName);
                         }}
                         className="rounded-lg p-1 text-muted hover:text-ink hover:bg-card transition-colors"
-                        title={isExpanded ? 'Hide trip breakdown' : 'Show trip breakdown'}
+                        title={isExpanded ? 'Hide breakdown' : 'Show breakdown'}
                       >
                         {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                       </button>
                     </div>
                   </div>
 
-                  {/* Expanded Breakdown of Individual Trip Dates */}
+                  {/* Expanded Breakdown of Individual Cancellation Dates */}
                   {isExpanded && (
                     <div className="border-t border-line/60 bg-card/60 p-2.5 space-y-1.5">
                       <div className="text-[10px] font-bold uppercase tracking-wider text-muted px-1">
@@ -605,7 +605,7 @@ export function CancellationSearchModal({
                 Settled Today:
               </span>
               <span className="font-mono text-sm font-bold text-ink">
-                {totalSettledCount} trip{totalSettledCount === 1 ? '' : 's'}
+                {totalSettledCount} cancellation{totalSettledCount === 1 ? '' : 's'}
               </span>
               <span className="text-muted">·</span>
               <span className="font-display text-sm font-bold text-crimson-400">

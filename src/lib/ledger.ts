@@ -593,7 +593,6 @@ export async function insertAbsentees(
   }
 
   const rows = absentees.map((p) => {
-    const isSpon = Boolean(p.sponsored);
     return {
       manifest_key: manifestKey,
       date,
@@ -605,12 +604,10 @@ export async function insertAbsentees(
       submitted_by: submittedBy,
       rep_name: repName,
       license_plate: licensePlate,
-      sponsored: isSpon,
-      sponsor_note: isSpon ? cleanSponsorshipNote(p.sponsorNote) : '',
+      sponsored: false, // Absentees are regular cancellations, never auto-sent to sponsorship section!
+      sponsor_note: '',
       structure_debt: CANCELLATION_FEE,
-      general_notes: isSpon
-        ? (cleanSponsorshipNote(p.sponsorNote) || 'Reported sponsored')
-        : cleanPersonalAbsenteeNote((p as { notes?: string }).notes || ''),
+      general_notes: cleanPersonalAbsenteeNote((p as { notes?: string }).notes || ''),
     };
   });
 
@@ -1487,38 +1484,52 @@ export interface AggregatedLedgerGroup {
 /**
  * Determines whether a ledger entry represents an unaccounted sponsorship / unpaid debt
  * or a standard cancellation debt.
+ * Per specification:
+ * - Only "Did not pay" (unpaid riders) and audited unaccounted sponsorships added
+ *   by the cancellation admin via the reported sponsorships section belong in the
+ *   sponsorship section of the ledger.
+ * - Absentees must NEVER be automatically sent to the sponsorship section.
  */
 export function isEntrySponsorshipOrUnpaid(e: {
+  id?: string;
+  source?: string | null;
   sponsored?: boolean | null;
   general_notes?: string | null;
   sponsor_note?: string | null;
 }): boolean {
-  if (e.sponsored) return true;
+  const idStr = String(e.id || '').toLowerCase();
   const sn = (e.sponsor_note || '').toLowerCase().trim();
-  if (
-    sn.includes('sponsor') ||
-    sn.includes('unaccounted') ||
-    sn.includes('unpaid') ||
-    sn.includes('did not pay')
-  ) {
-    return true;
-  }
-  // Strip any accidental vehicle-level summaries before evaluating general_notes
   const rawGn = cleanPersonalAbsenteeNote(e.general_notes || '');
-  const gn = rawGn.toLowerCase();
-  // Check for specific debt/sponsorship phrases directed at this passenger:
+  const gn = rawGn.toLowerCase().trim();
+  const src = (e.source || '').toLowerCase().trim();
+
+  // 1. Unpaid ride debt ("Did not pay")
   if (
-    gn.includes('unaccounted sponsorship') ||
-    gn.includes('unpaid sponsorship') ||
-    gn.includes('unpaid ride') ||
+    sn.includes('did not pay') ||
+    sn.includes('unpaid ride') ||
     gn.includes('did not pay') ||
-    gn.includes('actually sponsored')
+    gn.includes('unpaid ride')
   ) {
     return true;
   }
-  if (/^(?:unaccounted|unpaid)\b/i.test(gn)) {
+
+  // 2. Unaccounted sponsorships explicitly audited and added to debt ledger by the Cancellation Admin:
+  // These entries have id starting with ledger_sp_ or source = 'reported_sponsorship_audit' / 'cancellation_admin',
+  // or notes specifically stating "unaccounted sponsorship" or "unpaid sponsorship"
+  if (
+    idStr.startsWith('ledger_sp_') ||
+    src === 'reported_sponsorship_audit' ||
+    src === 'cancellation_admin' ||
+    sn.includes('unaccounted sponsorship') ||
+    gn.includes('unaccounted sponsorship') ||
+    sn.includes('unpaid sponsorship') ||
+    gn.includes('unpaid sponsorship')
+  ) {
     return true;
   }
+
+  // Regular absentees (even if marked sponsored on vehicle check-in or having a sponsor note)
+  // are NOT sent into the sponsorship section of the ledger!
   return false;
 }
 
@@ -2655,6 +2666,7 @@ export async function verifyBatchSponsorships(
           sponsor_note: noteText,
           structure_debt: CANCELLATION_FEE,
           general_notes: noteText,
+          source: 'reported_sponsorship_audit',
           submitted_at: now,
         };
         currentLedger.unshift(newEntry);
