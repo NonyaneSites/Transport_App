@@ -86,7 +86,7 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
             <span>Target: <strong className="text-ink">{shortDate(date)}</strong></span>
             {isDreamWeekDay && (
               <span className="ml-1 rounded bg-crimson-500/20 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-crimson-300">
-                DreamWeek
+                DreamWeek · R45
               </span>
             )}
           </div>

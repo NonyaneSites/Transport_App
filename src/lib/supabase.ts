@@ -1,7 +1,8 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
-const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
-const supabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
+const env = typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env : (process.env as unknown as Record<string, string>);
+const supabaseUrl = (env.VITE_SUPABASE_URL as string | undefined)?.trim();
+const supabaseAnonKey = (env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
 
 export const MANIFESTS_TABLE = 'transport_manifests';
 export const LEDGER_TABLE = 'cancellation_ledger';

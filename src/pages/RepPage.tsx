@@ -12,7 +12,7 @@ import { useManifest } from '@/lib/useManifest';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey, shortDate } from '@/lib/dates';
 import {
   SERVICE_TYPES,
-  CANCELLATION_FEE,
+  getFareForDate,
   sortByRouteSequence,
   type ServiceType,
   type Passenger,
@@ -40,9 +40,6 @@ import {
   extractStructureFromText,
 } from '@/lib/transfer';
 
-const FARE = CANCELLATION_FEE; // R40 fixed passenger fare
-const SYNC_DEBOUNCE_MS = 1500; // 1500ms debounce: batches rapid check-in taps to minimize network egress and mobile data usage
-
 export interface ManualCancellation {
   id: string;
   passengerName: string;
@@ -50,6 +47,8 @@ export interface ManualCancellation {
   amount: number;
   note?: string;
 }
+
+const SYNC_DEBOUNCE_MS = 1500; // 1500ms debounce: batches rapid check-in taps to minimize network egress and mobile data usage
 
 function makeClientId(): string {
   try {
@@ -93,6 +92,7 @@ export function RepPage() {
       return upcomingSunday();
     }
   });
+  const FARE = useMemo(() => getFareForDate(date), [date]);
   const [service, setService] = useState<ServiceType>(() => {
     try {
       return (localStorage.getItem('crc_rep_selected_service') as ServiceType) || 'PM_Normal';
@@ -1042,7 +1042,7 @@ export function RepPage() {
   const selectedLedgerCash = useMemo(() => {
     return pastCancellations
       .filter((e) => collectedCancellationIds.has(e.id))
-      .reduce((sum, e) => sum + parseDebtAmount(e.structure_debt), 0);
+      .reduce((sum, e) => sum + parseDebtAmount(e.structure_debt, e.date), 0);
   }, [pastCancellations, collectedCancellationIds]);
   const manualCancellationCash = manualCancellations.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
   const pastCancellationCash = selectedLedgerCash + manualCancellationCash;
@@ -1081,7 +1081,7 @@ export function RepPage() {
         const debts = riderDebtsMap[r.id] || riderDebtsMap[String(r.id)] || [];
         for (const d of debts) {
           if (collectedCancellationIds.has(d.id)) {
-            arrearsCash += parseDebtAmount(d.structure_debt);
+            arrearsCash += parseDebtAmount(d.structure_debt, d.date);
           }
         }
       }
@@ -1100,7 +1100,7 @@ export function RepPage() {
         totalStopCash,
       };
     });
-  }, [selectedVehicle, riders, presentIds, sponsoredIds, unpaidIds, absentIds, absentPaidIds, riderDebtsMap, collectedCancellationIds]);
+  }, [selectedVehicle, riders, presentIds, sponsoredIds, unpaidIds, absentIds, absentPaidIds, riderDebtsMap, collectedCancellationIds, FARE]);
 
   const addExternalSponsorship = async (data: {
     payerId?: string;
@@ -1384,7 +1384,7 @@ export function RepPage() {
     }
     setBatchActionMsg(`✓ Removed cross-vehicle sponsorship${targetEntry?.sponseeName ? ` for ${targetEntry.sponseeName}` : ''}.`);
     setTimeout(() => setBatchActionMsg(null), 4000);
-  }, [manifest, selectedVehicle, externalSponsees, baseCash, pastCancellationCash, save, broadcastLiveAction]);
+  }, [manifest, selectedVehicle, externalSponsees, baseCash, pastCancellationCash, FARE, save, broadcastLiveAction]);
 
   // Conflict-Safe Debounced Background Sync & Instant Local Cache
   useEffect(() => {
@@ -2343,7 +2343,7 @@ export function RepPage() {
         const submittedVehicle = submittedManifest.vehicles.find((v) => v.id === selectedVehicle.id);
         if (submittedVehicle) {
           const sheetPassengerLookup = (id: string) => submittedManifest!.signups.find((p) => p.id === id);
-          const vehicleStats = extractVehicleStats(submittedVehicle, sheetPassengerLookup);
+          const vehicleStats = extractVehicleStats(submittedVehicle, sheetPassengerLookup, parsedDate);
           syncVehicleStatsToGoogleSheet(vehicleStats, sheetDateLabel(parsedDate), parsedServiceLabel || serviceLabel).catch(() => {});
         }
       } catch (err) {
@@ -4622,11 +4622,12 @@ function CashCalculatorCard({
 }
 
 function StopGroupedChecklist({
-  riders, vehicleType, orderedStops, stopRedirects, presentIds, absentIds, absentPaidIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
+  riders, vehicleType, fare = 40, orderedStops, stopRedirects, presentIds, absentIds, absentPaidIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
   riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemoveRider, externalSponsorLocks,
 }: {
   riders: Passenger[];
   vehicleType: 'Bus' | 'Taxi';
+  fare?: number;
   orderedStops?: string[];
   stopRedirects?: Record<string, string>;
   presentIds: Set<string>;
@@ -4722,12 +4723,12 @@ function StopGroupedChecklist({
             const debts = riderDebtsMap[r.id] || riderDebtsMap[String(r.id)] || [];
             for (const d of debts) {
               if (collectedCancellationIds.has(d.id)) {
-                stopArrears += parseDebtAmount(d.structure_debt);
+                stopArrears += parseDebtAmount(d.structure_debt, d.date);
               }
             }
           }
         }
-        const stopCash = (stopPaying * 40) + (stopAbsentPaid * 40) + stopArrears;
+        const stopCash = (stopPaying * fare) + (stopAbsentPaid * fare) + stopArrears;
 
         const redirectedRiders = stopRiders.filter((r) => hubDisplayName(vehicleType, r.stop) !== stop);
         const redirectedFrom = Array.from(new Set(redirectedRiders.map((r) => hubDisplayName(vehicleType, r.stop))));
@@ -4752,7 +4753,7 @@ function StopGroupedChecklist({
                 {vehicleType === 'Bus' && (
                   <span
                     className="inline-flex items-center gap-1 rounded bg-emerald-500/15 px-2 py-0.5 font-mono text-xs font-bold text-emerald-300 border border-emerald-500/30 shadow-xs"
-                    title={`${stopPaying} paying × R40${stopAbsentPaid ? ` + ${stopAbsentPaid} absent-paid` : ''}${stopArrears ? ` + R${stopArrears} arrears` : ''}`}
+                    title={`${stopPaying} paying × R${fare}${stopAbsentPaid ? ` + ${stopAbsentPaid} absent-paid` : ''}${stopArrears ? ` + R${stopArrears} arrears` : ''}`}
                   >
                     <Wallet className="h-3 w-3 text-emerald-400" />
                     <span>R{stopCash}</span>

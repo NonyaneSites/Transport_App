@@ -12,29 +12,30 @@ import {
 } from './serverApi';
 import type { ReportedSponsorship, SponsorshipStatus } from './serverApi';
 import type { Passenger, Vehicle } from './types';
-import { CANCELLATION_FEE } from './types';
+import { CANCELLATION_FEE, getFareForDate, isDreamWeekDate } from './types';
 import { naturalCompare } from './sort';
 import { shortDate } from './dates';
 
 export type { ReportedSponsorship, SponsorshipStatus };
 
 /**
- * Safely parses a debt amount from numbers, numeric strings, or formatted currency strings ("R40", "40", "40.00").
- * Returns 0 if explicitly 0. Defaults to standard CANCELLATION_FEE (40) if null, undefined, empty, or unparseable.
+ * Safely parses a debt amount from numbers, numeric strings, or formatted currency strings ("R40", "R45", "40", "45", "40.00").
+ * Returns 0 if explicitly 0. Defaults to the date's standard fee (R45 for DreamWeek weekdays, R40 for Sunday/default) if null, undefined, empty, or unparseable.
  */
-export function parseDebtAmount(val: unknown): number {
-  if (val === undefined || val === null || val === '') return CANCELLATION_FEE;
+export function parseDebtAmount(val: unknown, dateStr?: string | null): number {
+  const fallback = dateStr ? getFareForDate(dateStr) : CANCELLATION_FEE;
+  if (val === undefined || val === null || val === '') return fallback;
   if (typeof val === 'number') {
-    if (isNaN(val)) return CANCELLATION_FEE;
+    if (isNaN(val)) return fallback;
     return val;
   }
   const str = String(val).trim();
-  if (!str) return CANCELLATION_FEE;
+  if (!str) return fallback;
   if (str === '0' || str === 'R0' || str === 'R 0' || str === '0.00' || str === 'R0.00') return 0;
   const numStr = str.replace(/[^\d.]/g, '');
-  if (!numStr) return CANCELLATION_FEE;
+  if (!numStr) return fallback;
   const parsed = Number(numStr);
-  return Number.isFinite(parsed) ? parsed : CANCELLATION_FEE;
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 /**
@@ -592,6 +593,7 @@ export async function insertAbsentees(
     if (delError) throw delError;
   }
 
+  const effectiveFare = getFareForDate(date);
   const rows = absentees.map((p) => {
     return {
       manifest_key: manifestKey,
@@ -606,7 +608,7 @@ export async function insertAbsentees(
       license_plate: licensePlate,
       sponsored: false, // Absentees are regular cancellations, never auto-sent to sponsorship section!
       sponsor_note: '',
-      structure_debt: CANCELLATION_FEE,
+      structure_debt: effectiveFare,
       general_notes: cleanPersonalAbsenteeNote((p as { notes?: string }).notes || ''),
     };
   });
@@ -626,7 +628,7 @@ export async function insertAbsentees(
         license_plate: licensePlate,
         sponsored: false,
         sponsor_note: u.unpaidNote ? `Did not pay: ${u.unpaidNote}` : 'Did not pay',
-        structure_debt: CANCELLATION_FEE,
+        structure_debt: effectiveFare,
         general_notes: `Unpaid ride (Did not pay)${u.unpaidNote ? ` - ${u.unpaidNote}` : ''}`,
       });
     }
@@ -816,7 +818,8 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
   const structureCode = normalizeStructureCode(input.structure);
 
   const rawAmt = Number(input.amount);
-  const debtAmt = Number.isFinite(rawAmt) && rawAmt >= 0 ? rawAmt : CANCELLATION_FEE;
+  const defaultDebt = getFareForDate(input.date);
+  const debtAmt = Number.isFinite(rawAmt) && rawAmt >= 0 ? rawAmt : defaultDebt;
 
   const row = {
     manifest_key: manifestKey,
@@ -1361,10 +1364,10 @@ export function parseHistoricalCancellationWorkbook(buffer: ArrayBuffer): Histor
     // Extract clean name and service code
     const { cleanName, serviceCode } = extractNameAndService(rawNameVal, rawServiceVal);
 
-    // Debt parsing: Read the explicit debt column or fallback to standard cancellation fee.
-    // The cancellation admin determines and adjusts debt amounts directly.
+    // Debt parsing: Read the explicit debt column or fallback to standard fee for this date.
+    // For DreamWeek weekdays, the price is R45; for Sunday it is R40.
     const debtRaw = debtCol !== -1 ? raw[debtCol] : undefined;
-    let structureDebt = CANCELLATION_FEE;
+    let structureDebt = getFareForDate(finalDate);
     if (debtRaw != null && String(debtRaw).trim() !== '') {
       const debtStr = String(debtRaw).replace(/[^\d.]/g, '');
       const parsedDebt = Number(debtStr);
@@ -1549,7 +1552,7 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
   const byStructure = new Map<string, LedgerEntry[]>();
   for (const e of entries) {
     // If debt for this entry is 0 or less, exclude it completely
-    const debtVal = parseDebtAmount(e.structure_debt);
+    const debtVal = parseDebtAmount(e.structure_debt, e.date);
     if (debtVal <= 0) continue;
 
     const key = normalizeStructureCode(e.structure);
@@ -1587,7 +1590,7 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
       // Collect distinct service codes
       const serviceCodesSet = new Set<string>();
       const instances: AggregatedLedgerInstance[] = sorted
-        .filter((e) => parseDebtAmount(e.structure_debt) > 0)
+        .filter((e) => parseDebtAmount(e.structure_debt, e.date) > 0)
         .map((e) => {
           const code = serviceCodeForEntry(e);
           serviceCodesSet.add(code);
@@ -1600,7 +1603,7 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
               dStr = `${parts[2].slice(-2)}/${parts[1]}/${parts[0].slice(2)}`;
             }
           }
-          const instDebt = parseDebtAmount(e.structure_debt);
+          const instDebt = parseDebtAmount(e.structure_debt, e.date);
 
           return {
             id: e.id,
@@ -2629,13 +2632,14 @@ export async function verifyBatchSponsorships(
         (e.manifest_key === spon.manifest_key && e.passenger_name.toLowerCase() === spon.passenger_name.toLowerCase() && Boolean(e.sponsored))
       );
 
+      const effectiveFee = getFareForDate(spon.date);
       if (existingLedgerIdx >= 0) {
         const existingId = currentLedger[existingLedgerIdx].id;
         spon.ledger_entry_id = existingId;
         currentLedger[existingLedgerIdx].general_notes = noteText;
         currentLedger[existingLedgerIdx].sponsor_note = noteText;
         currentLedger[existingLedgerIdx].sponsored = true;
-        currentLedger[existingLedgerIdx].structure_debt = CANCELLATION_FEE;
+        currentLedger[existingLedgerIdx].structure_debt = effectiveFee;
         ledgerChanged = true;
 
         await supabase
@@ -2644,7 +2648,7 @@ export async function verifyBatchSponsorships(
             general_notes: noteText,
             sponsor_note: noteText,
             sponsored: true,
-            structure_debt: CANCELLATION_FEE,
+            structure_debt: effectiveFee,
           })
           .eq('id', existingId);
       } else {
@@ -2664,7 +2668,7 @@ export async function verifyBatchSponsorships(
           license_plate: '',
           sponsored: true,
           sponsor_note: noteText,
-          structure_debt: CANCELLATION_FEE,
+          structure_debt: effectiveFee,
           general_notes: noteText,
           source: 'reported_sponsorship_audit',
           submitted_at: now,

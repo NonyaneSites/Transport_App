@@ -134,10 +134,10 @@ export function CancellationSearchModal({
       const structureRaw = entries.find((e) => e.structure && e.structure.trim())?.structure?.trim() || '';
       const structure = normalizeStructureCode(structureRaw);
       const isVehicleRider = vehicleRiderNamesSet.has(normalizedName);
-      const totalAmount = entries.reduce((sum, e) => sum + parseDebtAmount(e.structure_debt), 0);
+      const totalAmount = entries.reduce((sum, e) => sum + parseDebtAmount(e.structure_debt, e.date), 0);
       const settledEntries = entries.filter((e) => collectedCancellationIds.has(e.id));
       const settledCount = settledEntries.length;
-      const settledAmount = settledEntries.reduce((sum, e) => sum + parseDebtAmount(e.structure_debt), 0);
+      const settledAmount = settledEntries.reduce((sum, e) => sum + parseDebtAmount(e.structure_debt, e.date), 0);
       const allSettled = settledCount === entries.length && entries.length > 0;
       const partialSettled = settledCount > 0 && !allSettled;
 
@@ -485,7 +485,7 @@ export function CancellationSearchModal({
                       </div>
                       {group.entries.map((entry) => {
                         const isEntrySelected = collectedCancellationIds.has(entry.id);
-                        const debtAmount = parseDebtAmount(entry.structure_debt);
+                        const debtAmount = parseDebtAmount(entry.structure_debt, entry.date);
 
                         return (
                           <div

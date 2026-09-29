@@ -398,6 +398,7 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
   }
 
   // Insert new absentees: regular cancellations in debt ledger (not auto-sent to sponsorship section)
+  const effectiveDebt = getFareForDate(parsedDate || key);
   if (Array.isArray(absentees) && absentees.length > 0) {
     for (const a of absentees) {
       ledger.push({
@@ -414,7 +415,7 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
         license_plate: (licensePlate || '').trim(),
         sponsored: false,
         sponsor_note: '',
-        structure_debt: 40,
+        structure_debt: effectiveDebt,
         general_notes: cleanPersonalAbsenteeNote((a as { notes?: string }).notes || ''),
         submitted_at: nowIso,
       });
@@ -457,7 +458,7 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
           license_plate: (licensePlate || '').trim(),
           sponsored: false,
           sponsor_note: u.unpaidNote ? `Did not pay: ${u.unpaidNote}` : 'Did not pay',
-          structure_debt: 40,
+          structure_debt: effectiveDebt,
           general_notes: `Unpaid ride (Did not pay)${u.unpaidNote ? ` - ${u.unpaidNote}` : ''}`,
           submitted_at: nowIso,
         });
@@ -840,20 +841,37 @@ function sanitizePassengerDisplayName(rawName: string): string {
   return name;
 }
 
+// DreamWeek weekday vs Sunday pricing helper
+function isDreamWeekDate(dateStr?: string | null): boolean {
+  if (!dateStr || typeof dateStr !== 'string') return false;
+  const parts = dateStr.trim().split('-');
+  if (parts.length !== 3) return false;
+  const [y, m, d] = parts.map(Number);
+  if (!y || !m || !d) return false;
+  const dt = new Date(y, m - 1, d);
+  if (isNaN(dt.getTime())) return false;
+  return dt.getDay() !== 0; // 0 = Sunday
+}
+
+function getFareForDate(dateStr?: string | null): number {
+  return isDreamWeekDate(dateStr) ? 45 : 40;
+}
+
 // Helper to safely parse debt amount
-function parseDebtAmount(val: unknown): number {
-  if (val === undefined || val === null || val === '') return 40;
+function parseDebtAmount(val: unknown, dateStr?: string | null): number {
+  const fallback = dateStr ? getFareForDate(dateStr) : 40;
+  if (val === undefined || val === null || val === '') return fallback;
   if (typeof val === 'number') {
-    if (isNaN(val)) return 40;
+    if (isNaN(val)) return fallback;
     return val;
   }
   const str = String(val).trim();
-  if (!str) return 40;
+  if (!str) return fallback;
   if (str === '0' || str === 'R0' || str === 'R 0' || str === '0.00' || str === 'R0.00') return 0;
   const numStr = str.replace(/[^\d.]/g, '');
-  if (!numStr) return 40;
+  if (!numStr) return fallback;
   const parsed = Number(numStr);
-  return Number.isFinite(parsed) ? parsed : 40;
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 // Record reported sponsorships from attendance check-in or transfers
@@ -1283,11 +1301,12 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
       (e.manifest_key === spon.manifest_key && e.passenger_name.toLowerCase() === spon.passenger_name.toLowerCase() && Boolean(e.sponsored))
     );
 
+    const auditDebt = getFareForDate(spon.date);
     if (existingLedgerIdx >= 0) {
       ledger[existingLedgerIdx].general_notes = noteText;
       ledger[existingLedgerIdx].sponsor_note = noteText;
       ledger[existingLedgerIdx].sponsored = true;
-      ledger[existingLedgerIdx].structure_debt = 40;
+      ledger[existingLedgerIdx].structure_debt = auditDebt;
       spon.ledger_entry_id = ledger[existingLedgerIdx].id;
       ledgerChanged = true;
     } else {
@@ -1306,7 +1325,7 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
         license_plate: '',
         sponsored: true,
         sponsor_note: noteText,
-        structure_debt: 40,
+        structure_debt: auditDebt,
         general_notes: noteText,
         source: 'reported_sponsorship_audit',
         submitted_at: new Date().toISOString(),
@@ -1412,6 +1431,7 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
 
     if (status === 'unpaid_sponsorship' || status === 'unaccounted_sponsorship') {
       const noteText = cleanSponsorshipNote(spon.sponsor_note);
+      const batchAuditDebt = getFareForDate(spon.date);
 
       const existingLedgerIdx = ledger.findIndex((e) =>
         (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
@@ -1422,7 +1442,7 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
         ledger[existingLedgerIdx].general_notes = noteText;
         ledger[existingLedgerIdx].sponsor_note = noteText;
         ledger[existingLedgerIdx].sponsored = true;
-        ledger[existingLedgerIdx].structure_debt = 40;
+        ledger[existingLedgerIdx].structure_debt = batchAuditDebt;
         spon.ledger_entry_id = ledger[existingLedgerIdx].id;
         ledgerChanged = true;
       } else {
@@ -1441,7 +1461,7 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
           license_plate: '',
           sponsored: true,
           sponsor_note: noteText,
-          structure_debt: 40,
+          structure_debt: batchAuditDebt,
           general_notes: noteText,
           source: 'reported_sponsorship_audit',
           submitted_at: now,
@@ -1583,7 +1603,7 @@ app.post('/api/ledger/manual', (req, res) => {
     license_plate: entry.license_plate || '',
     sponsored: Boolean(entry.sponsored),
     sponsor_note: cleanSponsorshipNote(entry.sponsor_note),
-    structure_debt: typeof entry.structure_debt === 'number' ? entry.structure_debt : 40,
+    structure_debt: typeof entry.structure_debt === 'number' ? entry.structure_debt : getFareForDate(entry.date),
     general_notes: cleanSponsorshipNote(entry.general_notes),
     submitted_at: entry.submitted_at || new Date().toISOString(),
   };

@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import type { Manifest, Vehicle, Passenger } from './types';
+import { getFareForDate } from './types';
 import { sortVehiclesNatural } from './sort';
 import { shortDate, parseManifestKey, prettyDate } from './dates';
 
@@ -82,7 +83,8 @@ export function joinPassengerStats(passengers: Passenger[]): string {
  */
 export function extractVehicleStats(
   vehicle: Vehicle,
-  passengerLookup: (id: string) => Passenger | undefined
+  passengerLookup: (id: string) => Passenger | undefined,
+  dateStr?: string | null
 ): ExtractedVehicleStats {
   const rawRiders = (vehicle?.riders || [])
     .map(passengerLookup)
@@ -134,19 +136,20 @@ export function extractVehicleStats(
           .join(', ');
   const cancellationListStr = joinPassengerStats(absentRiders);
 
-  // R40 per paying present passenger (Buses free or 0 fare unless actual cash recorded)
+  // R45 per paying present passenger for DreamWeek weekdays; R40 for Sunday (Buses free or 0 fare unless actual cash recorded)
   const draftCash = vehicle?.draftState?.cashCollected;
   const actualCashTotal = draftCash
     ? (Number(draftCash.base) || 0) + (Number(draftCash.external) || 0) + (Number(draftCash.pastCancellations) || 0)
     : undefined;
 
+  const standardFare = getFareForDate(dateStr);
   const unpaidCount = vehicle?.draftState?.unpaidIds?.length ?? rawRiders.filter((r) => r.didNotPay).length;
   const fareCollected =
     actualCashTotal !== undefined
       ? actualCashTotal
       : (vehicle?.type || 'Taxi') === 'Bus'
       ? 0
-      : Math.max(0, presentRiders.length - sponsoredRiders.length - unpaidCount) * 40;
+      : Math.max(0, presentRiders.length - sponsoredRiders.length - unpaidCount) * standardFare;
 
   return {
     vehicleId: vehicle?.id || '',
@@ -182,7 +185,8 @@ export function extractAllVehicleStats(manifest: Manifest): ExtractedVehicleStat
   const signups = manifest?.signups || [];
   const passengerLookup = (id: string) => signups.find((p) => p.id === id);
   const sorted = sortVehiclesNatural(manifest?.vehicles || []);
-  return sorted.map((v) => extractVehicleStats(v, passengerLookup));
+  const manifestDate = manifest?.date ? parseManifestKey(manifest.date).date : undefined;
+  return sorted.map((v) => extractVehicleStats(v, passengerLookup, manifestDate));
 }
 
 /**

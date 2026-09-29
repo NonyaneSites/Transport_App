@@ -327,6 +327,32 @@ export const SERVICE_TYPES: { value: ServiceType; label: string; period: 'AM' | 
 
 export const RESET_PASSWORD = 'CRC2026!';
 export const CANCELLATION_FEE = 40;
+export const DREAMWEEK_FARE = 45;
+
+/**
+ * Returns true if a 'YYYY-MM-DD' date string falls on a weekday (Monday–Saturday, or non-Sunday).
+ * DreamWeek conference sessions occur on weekdays (Tue–Fri).
+ */
+export function isDreamWeekDate(dateStr?: string | null): boolean {
+  if (!dateStr || typeof dateStr !== 'string') return false;
+  const parts = dateStr.trim().split('-');
+  if (parts.length !== 3) return false;
+  const [y, m, d] = parts.map(Number);
+  if (!y || !m || !d) return false;
+  const dt = new Date(y, m - 1, d);
+  if (isNaN(dt.getTime())) return false;
+  return dt.getDay() !== 0; // 0 = Sunday
+}
+
+/**
+ * Returns the appropriate fare for a given date.
+ * For DreamWeek specifically (weekdays, i.e. non-Sunday), the price is R45.
+ * For standard Sunday services, the price is R40.
+ */
+export function getFareForDate(dateStr?: string | null): number {
+  return isDreamWeekDate(dateStr) ? DREAMWEEK_FARE : CANCELLATION_FEE;
+}
+
 export const MIN_TAXI_THRESHOLD = 15;
 export const MIN_AM_NORMAL_THRESHOLD = 14;
 

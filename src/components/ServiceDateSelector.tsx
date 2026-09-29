@@ -36,7 +36,7 @@ export function ServiceDateSelector({ date, service, onDateChange, onServiceChan
               {prettyDate(date)}
               {isDreamWeekDay && (
                 <span className="ml-1.5 rounded bg-crimson-500/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-crimson-300 border border-crimson-500/30">
-                  DreamWeek
+                  DreamWeek · R45
                 </span>
               )}
             </p>

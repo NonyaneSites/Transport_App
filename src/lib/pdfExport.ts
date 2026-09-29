@@ -103,7 +103,7 @@ export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[
   >();
 
   for (const entry of entries) {
-    const amount = parseDebtAmount(entry.structure_debt);
+    const amount = parseDebtAmount(entry.structure_debt, entry.date);
     if (amount <= 0) continue;
 
     const struct = normalizeStructureCode(entry.structure);

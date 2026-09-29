@@ -18,6 +18,7 @@ import {
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
   type ReportedSponsorship, type SponsorshipStatus,
 } from '@/lib/ledger';
+import { getFareForDate } from '@/lib/types';
 import { downloadCancellationDebtPdf } from '@/lib/pdfExport';
 
 function HighlightMatch({ text, query }: { text: string; query: string }) {
@@ -1749,10 +1750,10 @@ export function LedgerPage() {
                         disabled={isBatchConfirming}
                         onClick={() => handleConfirmIndications(undefined, 'unaccounted_sponsorship')}
                         className="rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
-                        title="Confirm selected as Unaccounted Sponsorship (Add R40 Debt) and clear out"
+                        title="Confirm selected as Unaccounted Sponsorship (Add Debt) and clear out"
                       >
                         <AlertTriangle className="h-3.5 w-3.5" />
-                        <span>Unaccounted (R40)</span>
+                        <span>Unaccounted (Add Debt)</span>
                       </button>
 
                       <button
@@ -1760,10 +1761,10 @@ export function LedgerPage() {
                         disabled={isBatchConfirming}
                         onClick={() => handleConfirmIndications(undefined, 'unpaid_sponsorship')}
                         className="rounded-lg bg-crimson-600 hover:bg-crimson-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
-                        title="Confirm selected as Unpaid Sponsorship (Add R40 Debt) and clear out"
+                        title="Confirm selected as Unpaid Sponsorship (Add Debt) and clear out"
                       >
                         <XCircle className="h-3.5 w-3.5" />
-                        <span>Unpaid (R40)</span>
+                        <span>Unpaid (Add Debt)</span>
                       </button>
                     </>
                   ) : (
@@ -2011,10 +2012,10 @@ export function LedgerPage() {
                                           ✓ Actually Sponsored (No Action)
                                         </option>
                                         <option value="unaccounted_sponsorship" className="bg-card text-amber-400 font-semibold">
-                                          ⚠️ Unaccounted Sponsorship (Add R40 Debt)
+                                          ⚠️ Unaccounted Sponsorship (Add R{getFareForDate(s.date)} Debt)
                                         </option>
                                         <option value="unpaid_sponsorship" className="bg-card text-crimson-400 font-semibold">
-                                          ❌ Unpaid Sponsorship (Add R40 Debt)
+                                          ❌ Unpaid Sponsorship (Add R{getFareForDate(s.date)} Debt)
                                         </option>
                                       </select>
 
@@ -2067,12 +2068,12 @@ export function LedgerPage() {
                                     ) : s.status === 'unpaid_sponsorship' ? (
                                       <div className="flex items-center gap-1.5 text-xs font-semibold text-crimson-400">
                                         <AlertTriangle className="h-4 w-4 shrink-0" />
-                                        <span>In Ledger: Unpaid (R40)</span>
+                                        <span>In Ledger: Unpaid (R{getFareForDate(s.date)})</span>
                                       </div>
                                     ) : s.status === 'unaccounted_sponsorship' ? (
                                       <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-400">
                                         <AlertTriangle className="h-4 w-4 shrink-0" />
-                                        <span>In Ledger: Unaccounted (R40)</span>
+                                        <span>In Ledger: Unaccounted (R{getFareForDate(s.date)})</span>
                                       </div>
                                     ) : (
                                       <div className="flex items-center gap-1.5 text-xs text-amber-300 font-medium">
@@ -2173,7 +2174,16 @@ export function LedgerPage() {
                             onClick={() => setPaymentAmount('40')}
                             className="rounded-md bg-card-2 px-2.5 py-1 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60 active:bg-card"
                           >
-                            R40 (1 session)
+                            R40
+                          </button>
+                        )}
+                        {paymentTarget.amount >= 45 && (
+                          <button
+                            type="button"
+                            onClick={() => setPaymentAmount('45')}
+                            className="rounded-md bg-card-2 px-2.5 py-1 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60 active:bg-card"
+                          >
+                            R45 (DreamWeek)
                           </button>
                         )}
                         {paymentTarget.amount >= 80 && (
@@ -2371,6 +2381,14 @@ export function LedgerPage() {
                           <span className="text-[10px] text-muted">·</span>
                           <button
                             type="button"
+                            onClick={() => setAddAmount('45')}
+                            className="text-[10px] text-muted hover:text-ink underline"
+                          >
+                            R45 (DreamWeek)
+                          </button>
+                          <span className="text-[10px] text-muted">·</span>
+                          <button
+                            type="button"
                             onClick={() => setAddAmount('20')}
                             className="text-[10px] text-muted hover:text-ink underline"
                           >
@@ -2382,7 +2400,7 @@ export function LedgerPage() {
                             onClick={() => setAddAmount('80')}
                             className="text-[10px] text-muted hover:text-ink underline"
                           >
-                            R80 (2 cancellations)
+                            R80
                           </button>
                         </div>
                       </div>
@@ -2394,7 +2412,13 @@ export function LedgerPage() {
                           type="date"
                           required
                           value={addDate}
-                          onChange={(e) => setAddDate(e.target.value)}
+                          onChange={(e) => {
+                            const newDate = e.target.value;
+                            setAddDate(newDate);
+                            if (addAmount === '40' || addAmount === '45') {
+                              setAddAmount(String(getFareForDate(newDate)));
+                            }
+                          }}
                           className="input-field w-full text-sm font-mono py-2"
                         />
                       </div>
@@ -2602,7 +2626,7 @@ export function LedgerPage() {
                       <div className="space-y-2 pt-2 border-t border-line/60">
                         <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
                           <div className="grid grid-cols-3 sm:flex sm:flex-wrap items-center gap-1.5">
-                            {[0, 20, 40, 60, 80, 120].map((preset) => (
+                            {[0, 20, 40, 45, 60, 80, 120].map((preset) => (
                               <button
                                 key={preset}
                                 type="button"
@@ -2618,7 +2642,7 @@ export function LedgerPage() {
                             ))}
                           </div>
 
-                          <div className="grid grid-cols-3 sm:flex items-center gap-1.5">
+                          <div className="grid grid-cols-4 sm:flex items-center gap-1.5">
                             <button
                               type="button"
                               onClick={() => handleTotalDebtChange(String(Math.max(0, (Number(editDebt) || 0) - 20)))}
@@ -2642,6 +2666,14 @@ export function LedgerPage() {
                               title="Add R40"
                             >
                               +R40
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleTotalDebtChange(String((Number(editDebt) || 0) + 45))}
+                              className="rounded-md border border-line bg-card py-1.5 px-2 text-xs font-semibold text-emerald-400 hover:bg-card-2 active:bg-card-2 transition-colors text-center"
+                              title="Add R45"
+                            >
+                              +R45
                             </button>
                           </div>
                         </div>

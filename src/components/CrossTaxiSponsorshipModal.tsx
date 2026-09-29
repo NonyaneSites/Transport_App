@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { HeartHandshake, X, Search, Trash2, Plus, Check, Loader2, Bus, AlertCircle } from 'lucide-react';
 import type { Passenger, Vehicle, ExternalSponsee, ServiceType } from '@/lib/types';
-import { SERVICE_TYPES } from '@/lib/types';
+import { SERVICE_TYPES, getFareForDate } from '@/lib/types';
 import { loadManifest, vehicleRiders } from '@/lib/manifest';
 import { manifestKey, shortDate } from '@/lib/dates';
 
@@ -47,11 +47,12 @@ export function CrossTaxiSponsorshipModal({
   externalSponsees,
   onAddExternalSponsorship,
   onRemoveSponsee,
-  fare = 40,
+  fare,
   currentDate,
   currentService,
   currentServiceLabel,
 }: CrossTaxiSponsorshipModalProps) {
+  const effectiveFare = fare !== undefined ? fare : getFareForDate(currentDate);
   const [payerMode, setPayerMode] = useState<'select' | 'custom'>('select');
   const [selectedPayerId, setSelectedPayerId] = useState<string>('');
   const [customPayerName, setCustomPayerName] = useState('');
@@ -70,7 +71,11 @@ export function CrossTaxiSponsorshipModal({
     stop?: string;
   } | null>(null);
 
-  const [sponsorAmount, setSponsorAmount] = useState<number>(fare);
+  const [sponsorAmount, setSponsorAmount] = useState<number>(effectiveFare);
+
+  useEffect(() => {
+    setSponsorAmount(effectiveFare);
+  }, [effectiveFare]);
   const [sponsorNote, setSponsorNote] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -252,7 +257,7 @@ export function CrossTaxiSponsorshipModal({
         targetVehicleId: selectedSponsee.vehicleId,
         targetService: selectedSponsee.serviceValue,
         targetServiceLabel: selectedSponsee.serviceLabel,
-        amount: sponsorAmount > 0 ? sponsorAmount : fare,
+        amount: sponsorAmount > 0 ? sponsorAmount : effectiveFare,
         note: sponsorNote.trim() || undefined,
       });
 
@@ -261,7 +266,7 @@ export function CrossTaxiSponsorshipModal({
       setCustomPayerName('');
       setSponseeSearchQuery('');
       setSelectedSponsee(null);
-      setSponsorAmount(fare);
+      setSponsorAmount(effectiveFare);
       setSponsorNote('');
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : 'Failed to record sponsorship');

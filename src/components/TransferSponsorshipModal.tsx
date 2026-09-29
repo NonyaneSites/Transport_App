@@ -8,7 +8,7 @@ import {
   Share2,
 } from 'lucide-react';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
-import { SERVICE_TYPES, CANCELLATION_FEE } from '@/lib/types';
+import { SERVICE_TYPES, getFareForDate } from '@/lib/types';
 import { parseManifestKey } from '@/lib/dates';
 import { sortVehiclesNatural } from '@/lib/sort';
 import { getCompatibleServices, getServiceVehicles, transferPassengerAcrossServices } from '@/lib/transfer';
@@ -39,6 +39,7 @@ export function TransferSponsorshipModal({
   onSuccess,
 }: TransferSponsorshipModalProps) {
   const { date: sessionDate } = parseManifestKey(manifest.date);
+  const currentFare = getFareForDate(sessionDate);
 
   // Compatible target services in the same time session window (AM or PM)
   const compatibleServices = useMemo(
@@ -163,7 +164,7 @@ export function TransferSponsorshipModal({
           license_plate: parentVeh?.licensePlate || '',
           sponsored: true,
           sponsor_note: entryNote,
-          structure_debt: CANCELLATION_FEE,
+          structure_debt: currentFare,
           general_notes: entryNote,
           submitted_at: new Date().toISOString(),
         };
@@ -193,7 +194,7 @@ export function TransferSponsorshipModal({
         }
 
         onSuccess(
-          `Successfully recorded ${cleanName} on Structure ${struct || 'Unassigned'} Ledger (R40 Debt) with note: "${effectiveNote}".`,
+          `Successfully recorded ${cleanName} on Structure ${struct || 'Unassigned'} Ledger (R${currentFare} Debt) with note: "${effectiveNote}".`,
           selectedPassengerId
         );
         onClose();
@@ -366,7 +367,7 @@ export function TransferSponsorshipModal({
                 }`}
               >
                 <FileText className="h-4 w-4" />
-                <span>Structure Debt Ledger (R40)</span>
+                <span>Structure Debt Ledger (R{currentFare})</span>
               </button>
 
               <button
@@ -392,7 +393,7 @@ export function TransferSponsorshipModal({
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted">Debt Amount:</span>
-                <span className="font-bold text-crimson-400">R40.00 (Unaccounted Sponsorship)</span>
+                <span className="font-bold text-crimson-400">R{currentFare}.00 (Unaccounted Sponsorship)</span>
               </div>
               <p className="text-[11px] text-muted pt-1 border-t border-line/50">
                 Immediately records this sponsorship as an outstanding debt under this passenger's structure in the Cancellation & Debt Ledger.
@@ -520,7 +521,7 @@ export function TransferSponsorshipModal({
             ) : destinationType === 'ledger' ? (
               <>
                 <FileText className="h-4 w-4" />
-                <span>Transfer to Ledger (R40)</span>
+                <span>Transfer to Ledger (R{currentFare})</span>
               </>
             ) : (
               <>
