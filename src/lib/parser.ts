@@ -1188,6 +1188,14 @@ function processExtractedCandidates(
       skipped++;
       continue;
     }
+    // Scope to the selected AM/PM period BEFORE de-duplicating. Otherwise a person
+    // who RSVP'd for both AM and PM on the same date has their older PM signup
+    // superseded by a newer AM row, which is then dropped by the service filter,
+    // silently losing the PM passenger (e.g. Gate 4 Normal on 23 Aug 2026).
+    if (!matchesService(sub.row, sub.headers, opts.selectedService, sub.sheetName)) {
+      skipped++;
+      continue;
+    }
     submissionsForSelectedDate.push(sub);
   }
 
