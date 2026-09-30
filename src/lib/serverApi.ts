@@ -69,29 +69,42 @@ export interface ManifestSummary {
 
 const PENDING_QUEUE_KEY = 'crc_pending_submissions_queue';
 
-// Server availability detection to avoid hammering static CDN hosts (e.g. Vercel) with failed /api/* calls
+function checkIsLocalhost(): boolean {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname;
+  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '0.0.0.0';
+}
+
+// Server availability detection:
+// CRITICAL VERCEL CDN OPTIMISATION:
+// In production (Vercel, custom domain, or any remote hosting), there is NO Express server mounted at /api/*.
+// All database persistence and real-time synchronization run directly through Supabase via client-side SDK.
+// Any HTTP call to /api/* on Vercel hits Vercel's CDN Edge, gets rewritten to /index.html (HTML),
+// and burns monthly CDN requests.
+// Therefore, serverApi is STRICTLY disabled outside localhost.
 let serverAvailable: boolean | null = null;
-let lastServerCheck = 0;
-const SERVER_CHECK_COOLDOWN = 120_000; // 2 minutes cooldown if server is determined unreachable or returns HTML
 
 export function isServerOnline(): boolean {
-  if (serverAvailable === false && Date.now() - lastServerCheck < SERVER_CHECK_COOLDOWN) {
+  if (typeof window === 'undefined') return false;
+  if (!checkIsLocalhost()) {
     return false;
   }
-  return true;
+  return serverAvailable !== false;
 }
 
 export function markServerOffline(): void {
   serverAvailable = false;
-  lastServerCheck = Date.now();
 }
 
 export function markServerOnline(): void {
   serverAvailable = true;
-  lastServerCheck = Date.now();
 }
 
 function isJsonResponse(res: Response): boolean {
+  if (res.status === 404) {
+    markServerOffline();
+    return false;
+  }
   const cType = res.headers.get('content-type') || '';
   if (cType.includes('text/html')) {
     // This is an SPA rewrite returning index.html, NOT a backend API server!
@@ -110,6 +123,14 @@ interface PendingQueueItem {
 }
 
 function getPendingQueue(): PendingQueueItem[] {
+  if (!isServerOnline()) {
+    try {
+      localStorage.removeItem(PENDING_QUEUE_KEY);
+    } catch {
+      // ignore
+    }
+    return [];
+  }
   try {
     const raw = localStorage.getItem(PENDING_QUEUE_KEY);
     return raw ? JSON.parse(raw) : [];
@@ -119,6 +140,7 @@ function getPendingQueue(): PendingQueueItem[] {
 }
 
 function savePendingQueue(queue: PendingQueueItem[]): void {
+  if (!isServerOnline()) return;
   try {
     localStorage.setItem(PENDING_QUEUE_KEY, JSON.stringify(queue));
   } catch {
@@ -127,6 +149,7 @@ function savePendingQueue(queue: PendingQueueItem[]): void {
 }
 
 export function queueOfflineAction(type: PendingQueueItem['type'], key: string, payload: unknown): void {
+  if (!isServerOnline()) return;
   const queue = getPendingQueue();
   queue.push({
     id: `queue_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -190,10 +213,6 @@ export async function fetchManifestFromServer(key: string): Promise<Manifest | n
   if (!isServerOnline()) return null;
   try {
     const res = await fetch(`/api/manifests/${encodeURIComponent(key)}`);
-    if (res.status === 404) {
-      markServerOnline();
-      return null;
-    }
     if (!res.ok || !isJsonResponse(res)) return null;
     markServerOnline();
     const data = await res.json();
@@ -481,17 +500,20 @@ export async function recordReportedSponsorshipsOnServer(
   }
 }
 
-// Broadcast lightweight live action to central server for instant cross-device delivery
+// Broadcast lightweight live action to central server for instant cross-device delivery (localhost dev only)
 export async function broadcastLiveActionToServer(action: LiveSyncAction): Promise<void> {
   if (!isServerOnline()) return;
   try {
-    await fetch('/api/sync/live-action', {
+    const res = await fetch('/api/sync/live-action', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(action),
     });
+    if (!res.ok || !isJsonResponse(res)) {
+      markServerOffline();
+    }
   } catch {
-    // Non-blocking
+    markServerOffline();
   }
 }
 
@@ -507,11 +529,6 @@ export function connectSyncEvents(
     return () => {};
   }
 
-  let es: EventSource | null = null;
-  let isClosed = false;
-  let retryCount = 0;
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
   // Local window and cross-tab storage listeners for instant updates
   const handleSponsorshipsEvent = () => onSponsorshipsUpdate?.();
   const handleLedgerEvent = () => onLedgerUpdate?.();
@@ -523,6 +540,23 @@ export function connectSyncEvents(
     }
   };
 
+  window.addEventListener('crc_sponsorships_updated', handleSponsorshipsEvent);
+  window.addEventListener('crc_ledger_updated', handleLedgerEvent);
+  window.addEventListener('storage', handleStorageEvent);
+
+  // If running on Vercel / production or server is offline, Supabase Realtime channels and BroadcastChannel handle all synchronization.
+  // Return early to prevent any EventSource connection attempts to /api/sync/events.
+  if (!isServerOnline()) {
+    return () => {
+      window.removeEventListener('crc_sponsorships_updated', handleSponsorshipsEvent);
+      window.removeEventListener('crc_ledger_updated', handleLedgerEvent);
+      window.removeEventListener('storage', handleStorageEvent);
+    };
+  }
+
+  let es: EventSource | null = null;
+  let isClosed = false;
+
   const handleVisibility = () => {
     if (typeof document !== 'undefined' && !document.hidden && !isClosed) {
       if (!es && isServerOnline()) {
@@ -531,28 +565,17 @@ export function connectSyncEvents(
     }
   };
 
-  window.addEventListener('crc_sponsorships_updated', handleSponsorshipsEvent);
-  window.addEventListener('crc_ledger_updated', handleLedgerEvent);
-  window.addEventListener('storage', handleStorageEvent);
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', handleVisibility);
   }
 
   function connect() {
-    if (isClosed || !window.EventSource) return;
-    if (!isServerOnline()) return; // Don't hammer static CDN if server is offline
-    if (typeof document !== 'undefined' && document.hidden) return; // Don't reconnect while tab is hidden
-
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
+    if (isClosed || !window.EventSource || !isServerOnline()) return;
 
     try {
       es = new EventSource('/api/sync/events');
 
       es.onopen = () => {
-        retryCount = 0;
         markServerOnline();
       };
 
@@ -594,32 +617,10 @@ export function connectSyncEvents(
       es.onerror = () => {
         es?.close();
         es = null;
-        if (isClosed) return;
-
-        retryCount++;
-        // If it failed 3 times consecutively (e.g. running on Vercel where /api/sync/events is HTML),
-        // mark server offline and stop infinite request loops!
-        if (retryCount >= 3) {
-          markServerOffline();
-          return;
-        }
-
-        const delay = Math.min(5000 * Math.pow(1.5, retryCount), 60000);
-        reconnectTimer = setTimeout(() => {
-          if (!isClosed && (typeof document === 'undefined' || !document.hidden)) {
-            connect();
-          }
-        }, delay);
+        markServerOffline();
       };
     } catch {
-      if (!isClosed) {
-        retryCount++;
-        if (retryCount >= 3) {
-          markServerOffline();
-          return;
-        }
-        reconnectTimer = setTimeout(connect, 10000);
-      }
+      markServerOffline();
     }
   }
 
@@ -627,10 +628,6 @@ export function connectSyncEvents(
 
   return () => {
     isClosed = true;
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
     es?.close();
     es = null;
     window.removeEventListener('crc_sponsorships_updated', handleSponsorshipsEvent);

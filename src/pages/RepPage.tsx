@@ -26,7 +26,7 @@ import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { vehicleRiders, saveVehicleToDb, loadManifest } from '@/lib/manifest';
 import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, recordReportedSponsorships, withdrawReportedSponsorships, cleanSponsorshipNote, parseDebtAmount, type LedgerEntry } from '@/lib/ledger';
-import { submitVehicleToServer, reopenVehicleOnServer, saveManifestToServer, updateVehicleDraftOnServer, type SubmitVehiclePayload } from '@/lib/serverApi';
+import { submitVehicleToServer, reopenVehicleOnServer, saveManifestToServer, updateVehicleDraftOnServer, isServerOnline, type SubmitVehiclePayload } from '@/lib/serverApi';
 import { extractVehicleStats } from '@/lib/statsExport';
 import { syncVehicleStatsToGoogleSheet, sheetDateLabel } from '@/lib/googleSheetsSync';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
@@ -1490,8 +1490,8 @@ export function RepPage() {
         // storage unavailable
       }
 
-      // Synchronous beacon flush ensures zero loss on refresh or browser exit
-      if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+      // Synchronous beacon flush ensures zero loss on refresh or browser exit (only when local Express server is active)
+      if (isServerOnline() && typeof navigator !== 'undefined' && navigator.sendBeacon) {
         try {
           const payload = JSON.stringify({
             vehicleId: selectedVehicleId,
