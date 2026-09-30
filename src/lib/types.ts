@@ -19,6 +19,7 @@ export interface Passenger {
   sponsorNote?: string;
   didNotPay?: boolean;
   unpaidNote?: string;
+  notes?: string;
   walkIn?: boolean;
   createdBy?: string;
   createdClientId?: string;
@@ -140,6 +141,7 @@ export interface VehicleDraftState {
    * calculator's name/vehicle/amount fields across devices.
    */
   externalSponsees?: ExternalSponsee[];
+  submitted?: boolean;
   recentlyEditedRiders?: Record<string, number>;
   updatedAt?: string;
   updatedBy?: string;

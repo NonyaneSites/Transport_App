@@ -2079,6 +2079,7 @@ export function RepPage() {
       vehicleId: selectedVehicle.id,
       riderId: pIdStr,
       status: 'present',
+      repName: repName.trim() || 'Co-rep',
       clientId: clientIdRef.current,
       timestamp: Date.now(),
     });

@@ -50,7 +50,7 @@ export interface ReportedSponsorship {
   sponsor_note: string;
   status: SponsorshipStatus;
   status_updated_at?: string;
-  ledger_entry_id?: string;
+  ledger_entry_id?: string | null;
   submitted_at: string;
 }
 
@@ -68,6 +68,38 @@ export interface ManifestSummary {
 }
 
 const PENDING_QUEUE_KEY = 'crc_pending_submissions_queue';
+
+// Server availability detection to avoid hammering static CDN hosts (e.g. Vercel) with failed /api/* calls
+let serverAvailable: boolean | null = null;
+let lastServerCheck = 0;
+const SERVER_CHECK_COOLDOWN = 120_000; // 2 minutes cooldown if server is determined unreachable or returns HTML
+
+export function isServerOnline(): boolean {
+  if (serverAvailable === false && Date.now() - lastServerCheck < SERVER_CHECK_COOLDOWN) {
+    return false;
+  }
+  return true;
+}
+
+export function markServerOffline(): void {
+  serverAvailable = false;
+  lastServerCheck = Date.now();
+}
+
+export function markServerOnline(): void {
+  serverAvailable = true;
+  lastServerCheck = Date.now();
+}
+
+function isJsonResponse(res: Response): boolean {
+  const cType = res.headers.get('content-type') || '';
+  if (cType.includes('text/html')) {
+    // This is an SPA rewrite returning index.html, NOT a backend API server!
+    markServerOffline();
+    return false;
+  }
+  return cType.includes('application/json');
+}
 
 interface PendingQueueItem {
   id: string;
@@ -109,7 +141,7 @@ export function queueOfflineAction(type: PendingQueueItem['type'], key: string, 
 // Flush pending queue when network is restored
 export async function flushPendingQueue(): Promise<number> {
   const queue = getPendingQueue();
-  if (queue.length === 0) return 0;
+  if (queue.length === 0 || !isServerOnline()) return 0;
 
   const remaining: PendingQueueItem[] = [];
   let flushedCount = 0;
@@ -137,21 +169,33 @@ export async function flushPendingQueue(): Promise<number> {
 
 if (typeof window !== 'undefined') {
   window.addEventListener('online', () => {
-    flushPendingQueue().catch(() => {});
-  });
-  // Periodic background check for queued items
-  setInterval(() => {
-    if (navigator.onLine) {
+    if (getPendingQueue().length > 0) {
       flushPendingQueue().catch(() => {});
     }
-  }, 10000);
+  });
+  // Periodic background check for queued items — only when items exist and tab is visible!
+  setInterval(() => {
+    if (
+      navigator.onLine &&
+      isServerOnline() &&
+      (typeof document === 'undefined' || !document.hidden) &&
+      getPendingQueue().length > 0
+    ) {
+      flushPendingQueue().catch(() => {});
+    }
+  }, 60000);
 }
 
 export async function fetchManifestFromServer(key: string): Promise<Manifest | null> {
+  if (!isServerOnline()) return null;
   try {
     const res = await fetch(`/api/manifests/${encodeURIComponent(key)}`);
-    if (res.status === 404) return null;
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (res.status === 404) {
+      markServerOnline();
+      return null;
+    }
+    if (!res.ok || !isJsonResponse(res)) return null;
+    markServerOnline();
     const data = await res.json();
     const manifest = (data && data.manifest ? data.manifest : data) as Manifest;
     return manifest && typeof manifest === 'object' && Array.isArray(manifest.vehicles) ? manifest : null;
@@ -162,13 +206,18 @@ export async function fetchManifestFromServer(key: string): Promise<Manifest | n
 }
 
 export async function saveManifestToServer(manifest: Manifest, allowQueue = true): Promise<Manifest> {
+  if (!isServerOnline()) {
+    if (allowQueue) queueOfflineAction('save_manifest', manifest.date, manifest);
+    return manifest;
+  }
   try {
     const res = await fetch(`/api/manifests/${encodeURIComponent(manifest.date)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(manifest),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok || !isJsonResponse(res)) throw new Error(`HTTP ${res.status}`);
+    markServerOnline();
     const data = await res.json();
     return data.manifest as Manifest;
   } catch (err) {
@@ -184,13 +233,18 @@ export async function submitVehicleToServer(
   payload: SubmitVehiclePayload,
   allowQueue = true
 ): Promise<{ success: boolean; manifest: Manifest; submittedAt: string }> {
+  if (!isServerOnline()) {
+    if (allowQueue) queueOfflineAction('submit_vehicle', key, payload);
+    return { success: true, manifest: { date: key, signups: [], vehicles: [] }, submittedAt: new Date().toISOString() };
+  }
   try {
     const res = await fetch(`/api/manifests/${encodeURIComponent(key)}/submit-vehicle`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok || !isJsonResponse(res)) throw new Error(`HTTP ${res.status}`);
+    markServerOnline();
     const data = await res.json();
     return data;
   } catch (err) {
@@ -206,13 +260,18 @@ export async function reopenVehicleOnServer(
   payload: ReopenVehiclePayload,
   allowQueue = true
 ): Promise<{ success: boolean; manifest: Manifest }> {
+  if (!isServerOnline()) {
+    if (allowQueue) queueOfflineAction('reopen_vehicle', key, payload);
+    return { success: true, manifest: { date: key, signups: [], vehicles: [] } };
+  }
   try {
     const res = await fetch(`/api/manifests/${encodeURIComponent(key)}/reopen-vehicle`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok || !isJsonResponse(res)) throw new Error(`HTTP ${res.status}`);
+    markServerOnline();
     const data = await res.json();
     return data;
   } catch (err) {
@@ -232,21 +291,27 @@ export async function updateVehicleDraftOnServer(
   fullVehicle?: Vehicle,
   manifest?: Manifest
 ): Promise<void> {
+  if (!isServerOnline()) return;
   try {
-    await fetch(`/api/manifests/${encodeURIComponent(key)}/draft`, {
+    const res = await fetch(`/api/manifests/${encodeURIComponent(key)}/draft`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ vehicleId, draftState, repName, licensePlate, fullVehicle, manifest }),
     });
+    if (res.ok && isJsonResponse(res)) {
+      markServerOnline();
+    }
   } catch (err) {
     console.debug('[ServerAPI] updateVehicleDraft note:', err);
   }
 }
 
 export async function listManifestsFromServer(): Promise<ManifestSummary[]> {
+  if (!isServerOnline()) return [];
   try {
     const res = await fetch('/api/manifests');
-    if (!res.ok) return [];
+    if (!res.ok || !isJsonResponse(res)) return [];
+    markServerOnline();
     return await res.json();
   } catch {
     return [];
@@ -254,9 +319,11 @@ export async function listManifestsFromServer(): Promise<ManifestSummary[]> {
 }
 
 export async function listLedgerFromServer(): Promise<LedgerEntry[]> {
+  if (!isServerOnline()) return [];
   try {
     const res = await fetch('/api/ledger');
-    if (!res.ok) return [];
+    if (!res.ok || !isJsonResponse(res)) return [];
+    markServerOnline();
     return await res.json();
   } catch {
     return [];
@@ -264,13 +331,15 @@ export async function listLedgerFromServer(): Promise<LedgerEntry[]> {
 }
 
 export async function settleLedgerOnServer(ids: string[]): Promise<number> {
+  if (!isServerOnline()) return 0;
   try {
     const res = await fetch('/api/ledger/settle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
     });
-    if (!res.ok) return 0;
+    if (!res.ok || !isJsonResponse(res)) return 0;
+    markServerOnline();
     const data = await res.json();
     return data.count || 0;
   } catch {
@@ -279,13 +348,15 @@ export async function settleLedgerOnServer(ids: string[]): Promise<number> {
 }
 
 export async function addManualLedgerOnServer(entry: Partial<LedgerEntry>): Promise<LedgerEntry | null> {
+  if (!isServerOnline()) return null;
   try {
     const res = await fetch('/api/ledger/manual', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(entry),
     });
-    if (!res.ok) return null;
+    if (!res.ok || !isJsonResponse(res)) return null;
+    markServerOnline();
     const data = await res.json();
     return data.entry;
   } catch {
@@ -294,8 +365,12 @@ export async function addManualLedgerOnServer(entry: Partial<LedgerEntry>): Prom
 }
 
 export async function deleteLedgerOnServer(id: string): Promise<boolean> {
+  if (!isServerOnline()) return false;
   try {
     const res = await fetch(`/api/ledger/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (res.ok && isJsonResponse(res)) {
+      markServerOnline();
+    }
     return res.ok;
   } catch {
     return false;
@@ -312,12 +387,16 @@ export async function updateDebtorOnServer(payload: {
     instances: Array<{ id?: string; date: string; service: string; amount: number }>;
   };
 }): Promise<boolean> {
+  if (!isServerOnline()) return false;
   try {
     const res = await fetch('/api/ledger/update-debtor', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    if (res.ok && isJsonResponse(res)) {
+      markServerOnline();
+    }
     return res.ok;
   } catch {
     return false;
@@ -326,9 +405,11 @@ export async function updateDebtorOnServer(payload: {
 
 // Fetch reported sponsorships from server
 export async function listReportedSponsorshipsFromServer(): Promise<ReportedSponsorship[]> {
+  if (!isServerOnline()) return [];
   try {
     const res = await fetch('/api/ledger/sponsorships');
-    if (!res.ok) return [];
+    if (!res.ok || !isJsonResponse(res)) return [];
+    markServerOnline();
     return (await res.json()) as ReportedSponsorship[];
   } catch (err) {
     console.warn('[ServerAPI] listReportedSponsorships error:', err);
@@ -341,15 +422,17 @@ export async function verifySponsorshipOnServer(
   sponsorshipId: string,
   status: SponsorshipStatus
 ): Promise<{ success: boolean; sponsorship?: ReportedSponsorship; ledgerUpdated?: boolean }> {
+  if (!isServerOnline()) return { success: false };
   try {
     const res = await fetch('/api/ledger/verify-sponsorship', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sponsorshipId, status }),
     });
-    if (!res.ok) {
+    if (!res.ok || !isJsonResponse(res)) {
       return { success: false };
     }
+    markServerOnline();
     return (await res.json()) as { success: boolean; sponsorship?: ReportedSponsorship; ledgerUpdated?: boolean };
   } catch (err) {
     console.warn('[ServerAPI] verifySponsorship error:', err);
@@ -361,15 +444,17 @@ export async function verifySponsorshipOnServer(
 export async function verifyBatchSponsorshipsOnServer(
   items: Array<{ sponsorshipId: string; status: SponsorshipStatus }>
 ): Promise<{ success: boolean; updatedCount: number; ledgerUpdated?: boolean }> {
+  if (!isServerOnline()) return { success: false, updatedCount: 0 };
   try {
     const res = await fetch('/api/ledger/verify-sponsorships-batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ items }),
     });
-    if (!res.ok) {
+    if (!res.ok || !isJsonResponse(res)) {
       return { success: false, updatedCount: 0 };
     }
+    markServerOnline();
     return (await res.json()) as { success: boolean; updatedCount: number; ledgerUpdated?: boolean };
   } catch (err) {
     console.warn('[ServerAPI] verifyBatchSponsorships error:', err);
@@ -381,12 +466,16 @@ export async function verifyBatchSponsorshipsOnServer(
 export async function recordReportedSponsorshipsOnServer(
   sponsorships: ReportedSponsorship[]
 ): Promise<void> {
+  if (!isServerOnline()) return;
   try {
-    await fetch('/api/ledger/sponsorships', {
+    const res = await fetch('/api/ledger/sponsorships', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sponsorships }),
     });
+    if (res.ok && isJsonResponse(res)) {
+      markServerOnline();
+    }
   } catch (err) {
     console.debug('[ServerAPI] recordReportedSponsorships error:', err);
   }
@@ -394,6 +483,7 @@ export async function recordReportedSponsorshipsOnServer(
 
 // Broadcast lightweight live action to central server for instant cross-device delivery
 export async function broadcastLiveActionToServer(action: LiveSyncAction): Promise<void> {
+  if (!isServerOnline()) return;
   try {
     await fetch('/api/sync/live-action', {
       method: 'POST',
@@ -419,6 +509,8 @@ export function connectSyncEvents(
 
   let es: EventSource | null = null;
   let isClosed = false;
+  let retryCount = 0;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Local window and cross-tab storage listeners for instant updates
   const handleSponsorshipsEvent = () => onSponsorshipsUpdate?.();
@@ -431,14 +523,38 @@ export function connectSyncEvents(
     }
   };
 
+  const handleVisibility = () => {
+    if (typeof document !== 'undefined' && !document.hidden && !isClosed) {
+      if (!es && isServerOnline()) {
+        connect();
+      }
+    }
+  };
+
   window.addEventListener('crc_sponsorships_updated', handleSponsorshipsEvent);
   window.addEventListener('crc_ledger_updated', handleLedgerEvent);
   window.addEventListener('storage', handleStorageEvent);
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleVisibility);
+  }
 
   function connect() {
     if (isClosed || !window.EventSource) return;
+    if (!isServerOnline()) return; // Don't hammer static CDN if server is offline
+    if (typeof document !== 'undefined' && document.hidden) return; // Don't reconnect while tab is hidden
+
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+
     try {
       es = new EventSource('/api/sync/events');
+
+      es.onopen = () => {
+        retryCount = 0;
+        markServerOnline();
+      };
 
       es.addEventListener('manifest_updated', (e) => {
         try {
@@ -477,13 +593,32 @@ export function connectSyncEvents(
 
       es.onerror = () => {
         es?.close();
-        if (!isClosed) {
-          setTimeout(connect, 3000);
+        es = null;
+        if (isClosed) return;
+
+        retryCount++;
+        // If it failed 3 times consecutively (e.g. running on Vercel where /api/sync/events is HTML),
+        // mark server offline and stop infinite request loops!
+        if (retryCount >= 3) {
+          markServerOffline();
+          return;
         }
+
+        const delay = Math.min(5000 * Math.pow(1.5, retryCount), 60000);
+        reconnectTimer = setTimeout(() => {
+          if (!isClosed && (typeof document === 'undefined' || !document.hidden)) {
+            connect();
+          }
+        }, delay);
       };
     } catch {
       if (!isClosed) {
-        setTimeout(connect, 3000);
+        retryCount++;
+        if (retryCount >= 3) {
+          markServerOffline();
+          return;
+        }
+        reconnectTimer = setTimeout(connect, 10000);
       }
     }
   }
@@ -492,9 +627,17 @@ export function connectSyncEvents(
 
   return () => {
     isClosed = true;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     es?.close();
+    es = null;
     window.removeEventListener('crc_sponsorships_updated', handleSponsorshipsEvent);
     window.removeEventListener('crc_ledger_updated', handleLedgerEvent);
     window.removeEventListener('storage', handleStorageEvent);
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', handleVisibility);
+    }
   };
 }

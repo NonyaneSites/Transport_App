@@ -12,7 +12,7 @@ import {
 } from './serverApi';
 import type { ReportedSponsorship, SponsorshipStatus } from './serverApi';
 import type { Passenger, Vehicle } from './types';
-import { CANCELLATION_FEE, getFareForDate, isDreamWeekDate } from './types';
+import { CANCELLATION_FEE, getFareForDate } from './types';
 import { naturalCompare } from './sort';
 import { shortDate } from './dates';
 
@@ -280,6 +280,7 @@ export interface LedgerEntry {
   rep_name: string;
   structure_debt: number;
   general_notes: string;
+  source?: string;
 }
 
 export interface AbsenteeInput extends Passenger {
@@ -2259,7 +2260,7 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
       submittedBy?: string;
       repName?: string;
       riders?: string[];
-      draftState?: { sponsoredIds?: string[]; notes?: Record<string, string>; submitted?: boolean };
+      draftState?: { sponsoredIds?: string[]; notes?: Record<string, string>; submitted?: boolean; externalSponsees?: unknown[] };
     }>;
   }
   const manifestsTable = (mockStorage.getTable(MANIFESTS_TABLE) as unknown as StoredManifest[]) || [];
@@ -2512,7 +2513,7 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
 
     if (harvestedNew && harvestedRows.length > 0) {
       // Upsert harvested items into Supabase
-      supabase.from(SPONSORSHIPS_TABLE).upsert(harvestedRows, { onConflict: 'id' }).catch((err) => {
+      Promise.resolve(supabase.from(SPONSORSHIPS_TABLE).upsert(harvestedRows, { onConflict: 'id' })).catch((err: unknown) => {
         console.warn('[Ledger] Failed to persist harvested sponsorships to Supabase:', err);
       });
     }
