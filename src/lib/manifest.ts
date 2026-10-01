@@ -2,7 +2,6 @@ import { supabase, MANIFESTS_TABLE, VEHICLES_TABLE, mockStorage } from './supaba
 import type { Manifest, Passenger, Vehicle, VehicleDraftState } from './types';
 import { hubDisplayName } from './types';
 import { normalizePassengerText, getSubmissionTimestampEpoch } from './importer';
-import { saveManifestToServer, fetchManifestFromServer } from './serverApi';
 export { parseGoogleSheetSignups, type RawSheetRow } from './importer';
 
 /**
@@ -637,50 +636,37 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
   let manifest: Manifest | null = null;
   let loadedFromRemote = false;
 
-  // 1. Primary: Central Express Server API (persists manifests across devices & sessions)
+  // 1. Primary: Supabase table transport_manifests
   try {
-    const serverManifest = await fetchManifestFromServer(key);
-    if (serverManifest && Array.isArray(serverManifest.vehicles) && serverManifest.vehicles.length > 0) {
-      manifest = serverManifest;
+    const { data, error } = await supabase
+      .from(MANIFESTS_TABLE)
+      .select('date, signups, vehicles, created_at, updated_at')
+      .eq('date', key)
+      .maybeSingle();
+    if (error) {
+      console.warn('[Manifest] Failed to load remote manifest, reading local store:', error);
+    }
+    if (data) {
+      manifest = {
+        date: data.date,
+        signups: Array.isArray(data.signups) ? data.signups : [],
+        vehicles: Array.isArray(data.vehicles)
+          ? data.vehicles.map((v: Vehicle) => ({
+              ...v,
+              riders: Array.isArray(v.riders) ? v.riders : [],
+              orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
+            }))
+          : [],
+        created_at: data.created_at,
+        updated_at: data.updated_at,
+      };
       loadedFromRemote = true;
     }
   } catch (err) {
-    console.debug('[Manifest] Server fetch manifest note:', err);
+    console.warn('[Manifest] Exception loading manifest, checking local store:', err);
   }
 
-  // 2. Secondary: Supabase table transport_manifests
-  if (!manifest) {
-    try {
-      const { data, error } = await supabase
-        .from(MANIFESTS_TABLE)
-        .select('date, signups, vehicles, created_at, updated_at')
-        .eq('date', key)
-        .maybeSingle();
-      if (error) {
-        console.warn('[Manifest] Failed to load remote manifest, reading local store:', error);
-      }
-      if (data) {
-        manifest = {
-          date: data.date,
-          signups: Array.isArray(data.signups) ? data.signups : [],
-          vehicles: Array.isArray(data.vehicles)
-            ? data.vehicles.map((v: Vehicle) => ({
-                ...v,
-                riders: Array.isArray(v.riders) ? v.riders : [],
-                orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
-              }))
-            : [],
-          created_at: data.created_at,
-          updated_at: data.updated_at,
-        };
-        loadedFromRemote = true;
-      }
-    } catch (err) {
-      console.warn('[Manifest] Exception loading manifest, checking local store:', err);
-    }
-  }
-
-  // 3. Fallback to local storage if not yet loaded
+  // 2. Fallback to local storage if not yet loaded
   if (!manifest) {
     const localRow = mockStorage.getTable(MANIFESTS_TABLE).find((r) => r.date === key);
     if (localRow) {
@@ -723,35 +709,25 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
           const indTime = indDraft?.updatedAt ? new Date(indDraft.updatedAt).getTime() : 0;
           const fresherDraft = indTime >= vTime ? indDraft : (vDraft || indDraft);
 
-          const vPres = vDraft?.presentIds || [];
-          const indPres = indDraft?.presentIds || [];
           const mergedPresIds = indTime >= vTime
-            ? (indPres.length > 0 ? indPres : vPres)
-            : (vPres.length > 0 ? vPres : indPres);
+            ? (indDraft?.presentIds ?? vDraft?.presentIds ?? [])
+            : (vDraft?.presentIds ?? indDraft?.presentIds ?? []);
 
-          const vAbs = vDraft?.absentIds || [];
-          const indAbs = indDraft?.absentIds || [];
           const mergedAbsIds = indTime >= vTime
-            ? (indAbs.length > 0 ? indAbs : vAbs)
-            : (vAbs.length > 0 ? vAbs : indAbs);
+            ? (indDraft?.absentIds ?? vDraft?.absentIds ?? [])
+            : (vDraft?.absentIds ?? indDraft?.absentIds ?? []);
 
-          const vSpon = vDraft?.sponsoredIds || [];
-          const indSpon = indDraft?.sponsoredIds || [];
           const mergedSponIds = indTime >= vTime
-            ? (indSpon.length > 0 ? indSpon : vSpon)
-            : (vSpon.length > 0 ? vSpon : indSpon);
+            ? (indDraft?.sponsoredIds ?? vDraft?.sponsoredIds ?? [])
+            : (vDraft?.sponsoredIds ?? indDraft?.sponsoredIds ?? []);
 
-          const vUnp = vDraft?.unpaidIds || [];
-          const indUnp = indDraft?.unpaidIds || [];
           const mergedUnpIds = indTime >= vTime
-            ? (indUnp.length > 0 ? indUnp : vUnp)
-            : (vUnp.length > 0 ? vUnp : indUnp);
+            ? (indDraft?.unpaidIds ?? vDraft?.unpaidIds ?? [])
+            : (vDraft?.unpaidIds ?? indDraft?.unpaidIds ?? []);
 
-          const vAp = vDraft?.absentPaidIds || [];
-          const indAp = indDraft?.absentPaidIds || [];
           const mergedApIds = indTime >= vTime
-            ? (indAp.length > 0 ? indAp : vAp)
-            : (vAp.length > 0 ? vAp : indAp);
+            ? (indDraft?.absentPaidIds ?? vDraft?.absentPaidIds ?? [])
+            : (vDraft?.absentPaidIds ?? indDraft?.absentPaidIds ?? []);
 
           mergedVehicles.push({
             ...ind,
@@ -821,14 +797,6 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
 export async function resetManifest(key: string): Promise<void> {
   if (!key) return;
 
-  const emptyManifest: Manifest = {
-    date: key,
-    signups: [],
-    vehicles: [],
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
-
   // 1. Clear local mockStorage
   mockStorage.setTable(
     MANIFESTS_TABLE,
@@ -858,13 +826,6 @@ export async function resetManifest(key: string): Promise<void> {
     await supabase.from(VEHICLES_TABLE).delete().eq('manifest_key', key);
   } catch (err) {
     console.warn('[Manifest] Remote delete vehicles warning:', err);
-  }
-
-  // 3. Save to server endpoint
-  try {
-    await saveManifestToServer(emptyManifest, false);
-  } catch {
-    // ignore
   }
 }
 
@@ -994,8 +955,9 @@ export function unassignedPassengers(manifest: Manifest | null): Passenger[] {
 
   for (const v of manifest.vehicles || []) {
     for (const rId of v.riders || []) {
-      allocatedIds.add(rId);
-      const rider = manifest.signups.find((s) => s.id === rId);
+      const sRId = String(rId);
+      allocatedIds.add(sRId);
+      const rider = manifest.signups.find((s) => String(s.id) === sRId);
       if (rider) {
         const norm = normalizePassengerText(rider.fullName);
         if (norm) allocatedPersons.add(norm);
@@ -1006,7 +968,8 @@ export function unassignedPassengers(manifest: Manifest | null): Passenger[] {
   // Filter raw unassigned signups:
   // A signup is unassigned if it's not in allocatedIds AND either has no assignedTo OR points to a vehicle that no longer exists
   const rawUnassigned = manifest.signups.filter((p) => {
-    if (allocatedIds.has(p.id)) return false;
+    const sId = String(p.id);
+    if (allocatedIds.has(sId) || allocatedIds.has(p.id)) return false;
     if (!p.assignedTo) return true;
     return !activeVehicleIds.has(p.assignedTo);
   });

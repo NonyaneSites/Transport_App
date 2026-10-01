@@ -10,12 +10,6 @@ import {
   dbRowToVehicle,
   resetManifest,
 } from './manifest';
-import {
-  saveManifestToServer,
-  updateVehicleDraftOnServer,
-  broadcastLiveActionToServer,
-  connectSyncEvents,
-} from './serverApi';
 import type { Manifest, Vehicle, Passenger, VehicleDraftState, LiveSyncAction } from './types';
 
 export interface ActiveCoRep {
@@ -272,7 +266,6 @@ export function useManifest(
       event: 'live_action',
       payload: action,
     });
-    broadcastLiveActionToServer(action).catch(() => {});
   }, [safeChannelSend]);
 
   // Track the updatedAt timestamp of the last thing WE saved.
@@ -629,51 +622,9 @@ export function useManifest(
       window.addEventListener('pageshow', handlePageShow);
     }
 
-    // 6. Central Server SSE Live Connection (cross-device real-time sync for reps & admin)
-    const disconnectSSE = connectSyncEvents(
-      (data) => {
-        if (keyRef.current !== key) return;
-        if (data.key === key && data.manifest) {
-          const incoming = normalizeManifestData(data.manifest);
-          if (incoming) {
-            setManifest((prev) => mergeIncomingManifest(prev, incoming, activeVehicleIdRef.current));
-            setLastSyncedAt(Date.now());
-          }
-        }
-      },
-      undefined,
-      (data) => {
-        if (keyRef.current !== key) return;
-        if (data.key === key && data.vehicleId && data.draftState) {
-          setManifest((prev) => {
-            if (!prev) return prev;
-            const updatedVehicles = prev.vehicles.map((v) => {
-              if (v.id !== data.vehicleId) return v;
-              const isTargetActive = activeVehicleIdRef.current === data.vehicleId;
-              if (isTargetActive && v.draftState?.updatedBy === data.draftState.updatedBy) return v;
-              return {
-                ...v,
-                draftState: data.draftState,
-                repName: data.repName?.trim() || data.draftState.repName?.trim() || v.repName,
-                licensePlate: data.licensePlate?.trim() || data.draftState.licensePlate?.trim() || v.licensePlate,
-              };
-            });
-            return { ...prev, vehicles: updatedVehicles };
-          });
-          setLastSyncedAt(Date.now());
-        }
-      },
-      undefined,
-      (action) => {
-        if (keyRef.current !== key) return;
-        handleIncomingLiveAction(action);
-      }
-    );
-
     return () => {
       keyRef.current = null;
       clearInterval(pollInterval);
-      disconnectSSE();
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', handleVisibilityChange);
       }
@@ -753,9 +704,6 @@ export function useManifest(
       await syncVehiclesToDb(merged.date, merged.vehicles).catch((err) => {
         console.warn('[useManifest] Error saving individual vehicles:', err);
       });
-
-      // Also persist to server endpoint for instant multi-client replication
-      saveManifestToServer(merged).catch(() => {});
 
       const { error: upsertError, data } = await supabase
         .from(MANIFESTS_TABLE)
@@ -891,32 +839,10 @@ export function useManifest(
         }
       });
 
-      // Merge sponsorships: preserve existing sponsorships from other reps
+      // Direct sponsorship and unpaid status from the user's latest draftState
       const mergedSponsored = new Set(draftState.sponsoredIds ?? []);
-      (existingDraft.sponsoredIds ?? []).forEach((id) => {
-        const lastEdit = localEditedMap[id] ?? 0;
-        if (now - lastEdit > 15000) {
-          mergedSponsored.add(id);
-        }
-      });
-
-      // Merge unpaid marks: preserve existing unpaid flags from other reps
       const mergedUnpaid = new Set(draftState.unpaidIds ?? []);
-      (existingDraft.unpaidIds ?? []).forEach((id) => {
-        const lastEdit = localEditedMap[id] ?? 0;
-        if (now - lastEdit > 15000) {
-          mergedUnpaid.add(id);
-        }
-      });
-
-      // Merge absent paid marks: preserve existing absent paid flags from other reps
       const mergedAbsentPaid = new Set(draftState.absentPaidIds ?? []);
-      (existingDraft.absentPaidIds ?? []).forEach((id) => {
-        const lastEdit = localEditedMap[id] ?? 0;
-        if (now - lastEdit > 15000) {
-          mergedAbsentPaid.add(id);
-        }
-      });
 
       // Merge manual cancellations by ID
       const manualMap = new Map<string, { id: string; passengerName: string; structure?: string; amount: number; note?: string }>();
@@ -1031,19 +957,6 @@ export function useManifest(
 
     const targetVehRecord = updatedVehicles.find((v) => String(v.id) === String(vehicleId));
 
-    // Persist targeted draft directly to server disk so refresh or multi-device never loses work
-    updateVehicleDraftOnServer(
-      mergedManifest.date,
-      vehicleId,
-      mergedDraft || {},
-      repName,
-      licensePlate,
-      targetVehRecord,
-      mergedManifest
-    ).catch((err) => {
-      console.warn('[useManifest] Error saving draft to server:', err);
-    });
-
     // Also persist immediately to mockStorage for local fallback
     mockStorage.upsert(MANIFESTS_TABLE, {
       date: mergedManifest.date,
@@ -1115,8 +1028,6 @@ export function useManifest(
             });
           }
         }
-
-        saveManifestToServer(updated).catch(() => {});
 
         const { data: saved } = await supabase
           .from(MANIFESTS_TABLE)

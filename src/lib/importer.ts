@@ -31,8 +31,8 @@ export function normalizePassengerText(str?: string | null): string {
  * 2. Their normalized `fullName` matches.
  */
 export function isSamePassenger(
-  a: Pick<Passenger, 'id' | 'fullName' | 'stop'>,
-  b: Pick<Passenger, 'id' | 'fullName' | 'stop'>
+  a: Pick<Passenger, 'id' | 'fullName' | 'stop'> & { phone?: string; userEmail?: string },
+  b: Pick<Passenger, 'id' | 'fullName' | 'stop'> & { phone?: string; userEmail?: string }
 ): boolean {
   if (!a || !b) return false;
 
@@ -45,7 +45,18 @@ export function isSamePassenger(
   const aName = normalizePassengerText(a.fullName);
   const bName = normalizePassengerText(b.fullName);
 
-  return Boolean(aName && bName && aName === bName);
+  if (!aName || !bName || aName !== bName) {
+    return false;
+  }
+
+  // If both have valid phone numbers and they are completely different, they are different people!
+  const aPhone = sanitizePhone(a.phone);
+  const bPhone = sanitizePhone(b.phone);
+  if (aPhone && bPhone && aPhone !== bPhone) {
+    return false;
+  }
+
+  return true;
 }
 
 /**

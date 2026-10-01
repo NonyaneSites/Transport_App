@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import type { Passenger, ServiceType } from './types';
-import { MIN_TAXI_THRESHOLD, MIN_AM_NORMAL_THRESHOLD, hubDisplayName } from './types';
+import { MIN_TAXI_THRESHOLD, MIN_AM_NORMAL_THRESHOLD, hubDisplayName, isDreamWeekDate } from './types';
 import { sanitizeTransportValue } from './transportSanitization';
 import {
   toTitleCase,
@@ -627,16 +627,32 @@ export function findDateColumn(headers: string[]): string | null {
 
   return headers.find((h) => {
     const lh = lower(clean(h));
+    // Must NOT be cell day, birthday, timestamp, contact, service type, leader, or stop
+    if (
+      lh.includes('cell') ||
+      lh.includes('homecell') ||
+      lh.includes('birth') ||
+      lh.includes('completion') ||
+      lh.includes('submission') ||
+      lh.includes('created') ||
+      lh.includes('timestamp') ||
+      lh.includes('phone') ||
+      lh.includes('email') ||
+      lh.includes('contact') ||
+      lh.includes('leader') ||
+      lh.includes('structure') ||
+      lh.includes('stop') ||
+      lh.includes('area') ||
+      lh.includes('name') ||
+      (lh.includes('service') && !lh.includes('date') && !lh.includes('day'))
+    ) {
+      return false;
+    }
     return (
-      (lh.includes('date') || lh.includes('day') || lh.includes('night') || lh.includes('attending') || lh.includes('evening')) &&
-      !lh.includes('birth') &&
-      !lh.includes('completion') &&
-      !lh.includes('submission') &&
-      !lh.includes('created') &&
-      !lh.includes('timestamp') &&
-      !lh.includes('phone') &&
-      !lh.includes('email') &&
-      !lh.includes('contact')
+      lh.includes('date') ||
+      (lh.includes('day') && !lh.includes('today')) ||
+      lh.includes('night') ||
+      lh.includes('evening date')
     );
   }) || null;
 }
@@ -986,10 +1002,14 @@ export function matchesService(
   const amCol = findColumn(headers, ['am service type', 'am service', 'am serving']);
   const pmCol = findColumn(headers, ['pm service type', 'pm service', 'pm serving']);
   if (amCol && pmCol) {
-    const amVal = clean(row[amCol]);
-    const pmVal = clean(row[pmCol]);
-    if (selectedPeriod === 'AM' && !amVal && pmVal) return false;
-    if (selectedPeriod === 'PM' && !pmVal && amVal) return false;
+    const isNegative = (s: unknown) => {
+      const l = lower(clean(s));
+      return !l || l === 'no' || l === 'n' || l.startsWith('no ') || l === 'none' || l === 'n/a' || l === 'na' || l === '-' || l.includes('not attending');
+    };
+    const hasAm = !isNegative(row[amCol]);
+    const hasPm = !isNegative(row[pmCol]);
+    if (selectedPeriod === 'AM' && !hasAm && hasPm) return false;
+    if (selectedPeriod === 'PM' && !hasPm && hasAm) return false;
   }
 
   return true;
@@ -1098,17 +1118,20 @@ export function isIdentityHeader(header: string): boolean {
 export function isSignupSheet(sheetName: string, headers: string[]): boolean {
   if (!sheetName) return false;
 
-  // 1. Skip sheets matching known computed/summary patterns (e.g. "PM Table", "AM Table", "SZ1 Goal tracker")
-  if (NON_SIGNUP_SHEET_PATTERN.test(sheetName.trim())) {
-    return false;
-  }
-
-  // 2. Must contain at least one expected passenger identity column
+  // 1. Must contain at least one expected passenger identity column (Name, Surname, Full Name, etc.)
   if (!headers || headers.length === 0) {
     return false;
   }
 
-  return headers.some(isIdentityHeader);
+  const hasIdentity = headers.some(isIdentityHeader);
+  // If the sheet has passenger identity columns, it is ALWAYS a valid signup sheet!
+  // (Excel often creates tabs named "Table 1", "Responses Table", "Signups Tracker", etc.)
+  if (hasIdentity) {
+    return true;
+  }
+
+  // 2. If it does not contain passenger identity columns, skip it
+  return false;
 }
 
 /**
@@ -1202,11 +1225,16 @@ function processExtractedCandidates(
   // Pass 2: For submissions matching the selected date, group by person.
   // If a person submitted more than once FOR THIS SAME DATE (e.g. updated stop/phone),
   // their most recent submission for this date takes precedence.
+  // If two people share the same name but have different phone numbers, both are preserved!
   const personGroups = new Map<string, RawCandidate[]>();
   for (const sub of submissionsForSelectedDate) {
-    const group = personGroups.get(sub.normalizedName);
+    const phoneKey = sanitizePhone(sub.phone);
+    const dedupeKey = phoneKey
+      ? `${sub.normalizedName}__${phoneKey}`
+      : (sub.userEmail ? `${sub.normalizedName}__${sub.userEmail.toLowerCase().trim()}` : sub.normalizedName);
+    const group = personGroups.get(dedupeKey);
     if (!group) {
-      personGroups.set(sub.normalizedName, [sub]);
+      personGroups.set(dedupeKey, [sub]);
     } else {
       group.push(sub);
     }
@@ -1251,9 +1279,10 @@ function processExtractedCandidates(
   const normalCount = dateMatchedCandidates.filter((c) => c.category === 'Normal').length;
 
   const selectedService = opts.selectedService;
+  const isDreamWeek = isDreamWeekDate(opts.selectedDate);
   const passengers: Passenger[] = [];
 
-  // Pass 3: Filter and apply auto-merging logic based on selectedService and 15-passenger minimum
+  // Pass 3: Filter and apply auto-merging logic based on selectedService
   for (const c of dateMatchedCandidates) {
     if (!matchesService(c.row, c.headers, opts.selectedService, c.sheetName)) {
       continue;
@@ -1261,26 +1290,21 @@ function processExtractedCandidates(
 
     let include = false;
 
-    if (selectedService === 'AM_Ushers') {
+    if (isDreamWeek) {
+      // In DreamWeek conference sessions, all attendees travel together regardless of serving vs normal
+      include = true;
+    } else if (selectedService === 'PM_Serving' || selectedService === 'PM_Normal') {
+      // In PM Service, all attendees travel together to the evening service
+      include = true;
+    } else if (selectedService === 'AM_Ushers') {
       // Dedicated Ushers (Early) service
       include = c.category === 'Ushers';
-    } else if (selectedService === 'AM_Normal' || selectedService === 'PM_Normal') {
-      // Dedicated Normal transport service
-      include = c.category === 'Normal';
+    } else if (selectedService === 'AM_Normal') {
+      // Dedicated Normal transport service (or all if sheet does not distinguish category)
+      include = c.category === 'Normal' || (ushersCount === 0 && dateMatchedCandidates.filter((x) => x.category === 'Serving').length === 0);
     } else if (selectedService === 'AM_Serving') {
-      // AM Serving main service
-      if (c.category === 'Serving') {
-        include = true;
-      } else if (c.category === 'Ushers') {
-        // Auto-merge into AM Serving if not enough for a dedicated Ushers taxi (< 15)
-        include = ushersCount < MIN_TAXI_THRESHOLD;
-      } else if (c.category === 'Normal') {
-        // Auto-merge into AM Serving if not enough for a normal taxi (< 14)
-        include = normalCount < MIN_AM_NORMAL_THRESHOLD;
-      }
-    } else if (selectedService === 'PM_Serving') {
-      // PM Serving
-      include = c.category === 'Serving' || c.category === 'Ushers';
+      // AM Serving main service: auto-include Serving, Ushers, and Normal so no signups are lost
+      include = true;
     }
 
     if (include) {
@@ -1377,12 +1401,6 @@ export function parseWorkbook(file: ArrayBuffer | Uint8Array | string, opts: Par
 
   // Pass 1: Extract all raw row candidates across valid signup sheets in the workbook
   for (const sheetName of wb.SheetNames) {
-    // 1. Skip sheets matching dashboard / goal / table patterns by name
-    if (NON_SIGNUP_SHEET_PATTERN.test(sheetName.trim())) {
-      skippedSheets.push(sheetName);
-      continue;
-    }
-
     const sheet = wb.Sheets[sheetName];
     if (!sheet) continue;
 
@@ -1393,7 +1411,7 @@ export function parseWorkbook(file: ArrayBuffer | Uint8Array | string, opts: Par
     }
 
     const headers = Object.keys(rawRows[0]);
-    // 2. Validate sheet header has at least one expected identity column
+    // Validate sheet has at least one expected passenger identity column
     if (!isSignupSheet(sheetName, headers)) {
       skippedSheets.push(sheetName);
       continue;
@@ -1516,12 +1534,6 @@ export async function parseWorkbookAsync(
     // Yield control so UI can paint progress updates
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    // 1. Skip sheets matching dashboard / goal / table patterns by name
-    if (NON_SIGNUP_SHEET_PATTERN.test(sheetName.trim())) {
-      skippedSheets.push(sheetName);
-      continue;
-    }
-
     const sheet = wb.Sheets[sheetName];
     if (!sheet) continue;
 
@@ -1532,7 +1544,7 @@ export async function parseWorkbookAsync(
     }
 
     const headers = Object.keys(rawRows[0]);
-    // 2. Validate sheet header has at least one expected identity column
+    // Validate sheet has at least one expected passenger identity column
     if (!isSignupSheet(sheetName, headers)) {
       skippedSheets.push(sheetName);
       continue;

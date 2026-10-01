@@ -26,7 +26,9 @@ import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { vehicleRiders, saveVehicleToDb, loadManifest } from '@/lib/manifest';
 import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, recordReportedSponsorships, withdrawReportedSponsorships, cleanSponsorshipNote, parseDebtAmount, type LedgerEntry } from '@/lib/ledger';
-import { submitVehicleToServer, reopenVehicleOnServer, saveManifestToServer, updateVehicleDraftOnServer, isServerOnline, type SubmitVehiclePayload } from '@/lib/serverApi';
+import { supabase, MANIFESTS_TABLE } from '@/lib/supabase';
+import { type SubmitVehiclePayload } from '@/lib/types';
+import { isServerOnline, submitVehicleToServer, reopenVehicleOnServer } from '@/lib/serverApi';
 import { extractVehicleStats } from '@/lib/statsExport';
 import { syncVehicleStatsToGoogleSheet, sheetDateLabel } from '@/lib/googleSheetsSync';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
@@ -148,6 +150,8 @@ export function RepPage() {
   const generalNotesFocusedRef = useRef(false);
   const clientIdRef = useRef<string>(makeClientId());
   const recentlyEditedRidersRef = useRef<Map<string, number>>(new Map());
+  const recentlyToggledSponsoredRef = useRef<Map<string, boolean>>(new Map());
+  const recentlyToggledUnpaidRef = useRef<Map<string, boolean>>(new Map());
 
   const handleLiveActionReceived = useCallback((action: LiveSyncAction) => {
     if (action.clientId === clientIdRef.current) return;
@@ -613,15 +617,21 @@ export function RepPage() {
       });
     }
 
-    const sponIds = new Set<string>((draft.sponsoredIds ?? []).map(String));
-    const unpIds = new Set<string>((draft.unpaidIds ?? []).map(String));
+    const hasSponDraft = Array.isArray(draft.sponsoredIds);
+    const sponIds = new Set<string>(hasSponDraft ? draft.sponsoredIds!.map(String) : []);
+    if (!hasSponDraft) {
+      vehicleRidersList.forEach((r) => {
+        if (r.sponsored) sponIds.add(String(r.id));
+      });
+    }
 
-    // CRITICAL: Also populate from existing passenger record if draft didn't specify them
-    vehicleRidersList.forEach((r) => {
-      const sId = String(r.id);
-      if (r.sponsored) sponIds.add(sId);
-      if (r.didNotPay) unpIds.add(sId);
-    });
+    const hasUnpDraft = Array.isArray(draft.unpaidIds);
+    const unpIds = new Set<string>(hasUnpDraft ? draft.unpaidIds!.map(String) : []);
+    if (!hasUnpDraft) {
+      vehicleRidersList.forEach((r) => {
+        if (r.didNotPay) unpIds.add(String(r.id));
+      });
+    }
 
     setPresentIds(pIds);
     setAbsentIds(aIds);
@@ -703,14 +713,17 @@ export function RepPage() {
     // 2. Direct synchronization of sponsored and unpaid statuses across all co-reps (turning on and off)
     if (draft.sponsoredIds !== undefined) {
       const remoteSponsored = new Set(draft.sponsoredIds.map(String));
-      setSponsoredIds((prev) => {
+      setSponsoredIds(() => {
         const next = new Set<string>(remoteSponsored);
-        // Retain optimistic local tap ONLY if this specific rider was edited locally within the last 3000ms
-        for (const id of prev) {
-          const sId = String(id);
-          const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? recentlyEditedRidersRef.current.get(id) ?? 0;
-          if (now - lastEdit < 3000 && !remoteSponsored.has(sId)) {
-            next.add(sId);
+        // Explicit user intent: if locally toggled within the last 5000ms, strictly enforce that intent
+        for (const [rId, isSpon] of recentlyToggledSponsoredRef.current.entries()) {
+          const lastEdit = recentlyEditedRidersRef.current.get(rId) ?? 0;
+          if (now - lastEdit < 5000) {
+            if (isSpon) {
+              next.add(rId);
+            } else {
+              next.delete(rId);
+            }
           }
         }
         return next;
@@ -719,14 +732,17 @@ export function RepPage() {
 
     if (draft.unpaidIds !== undefined) {
       const remoteUnpaid = new Set(draft.unpaidIds.map(String));
-      setUnpaidIds((prev) => {
+      setUnpaidIds(() => {
         const next = new Set<string>(remoteUnpaid);
-        // Retain optimistic local tap ONLY if this specific rider was edited locally within the last 3000ms
-        for (const id of prev) {
-          const sId = String(id);
-          const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? recentlyEditedRidersRef.current.get(id) ?? 0;
-          if (now - lastEdit < 3000 && !remoteUnpaid.has(sId)) {
-            next.add(sId);
+        // Explicit user intent: if locally toggled within the last 5000ms, strictly enforce that intent
+        for (const [rId, isUnp] of recentlyToggledUnpaidRef.current.entries()) {
+          const lastEdit = recentlyEditedRidersRef.current.get(rId) ?? 0;
+          if (now - lastEdit < 5000) {
+            if (isUnp) {
+              next.add(rId);
+            } else {
+              next.delete(rId);
+            }
           }
         }
         return next;
@@ -834,14 +850,21 @@ export function RepPage() {
     // Pick whichever draft has the freshest edits or merge them so no checked-in riders are lost
     let draft: VehicleDraftState | undefined = undefined;
     if (localDraft && cloudDraft) {
+      const isLocalFresher = Boolean(
+        localDraft.updatedAt &&
+        (!cloudDraft.updatedAt || new Date(localDraft.updatedAt) >= new Date(cloudDraft.updatedAt))
+      );
+      const fresher = isLocalFresher ? localDraft : cloudDraft;
+      const older = isLocalFresher ? cloudDraft : localDraft;
+
       const mergedDraft: VehicleDraftState = {
         ...cloudDraft,
         ...localDraft,
         presentIds: Array.from(new Set([...(cloudDraft.presentIds || []), ...(localDraft.presentIds || [])].map(String))),
         absentIds: Array.from(new Set([...(cloudDraft.absentIds || []), ...(localDraft.absentIds || [])].map(String))),
-        sponsoredIds: Array.from(new Set([...(cloudDraft.sponsoredIds || []), ...(localDraft.sponsoredIds || [])].map(String))),
-        unpaidIds: Array.from(new Set([...(cloudDraft.unpaidIds || []), ...(localDraft.unpaidIds || [])].map(String))),
-        absentPaidIds: Array.from(new Set([...(cloudDraft.absentPaidIds || []), ...(localDraft.absentPaidIds || [])].map(String))),
+        sponsoredIds: fresher.sponsoredIds !== undefined ? fresher.sponsoredIds.map(String) : (older.sponsoredIds || []).map(String),
+        unpaidIds: fresher.unpaidIds !== undefined ? fresher.unpaidIds.map(String) : (older.unpaidIds || []).map(String),
+        absentPaidIds: fresher.absentPaidIds !== undefined ? fresher.absentPaidIds.map(String) : (older.absentPaidIds || []).map(String),
         notes: { ...(cloudDraft.notes || {}), ...(localDraft.notes || {}) },
         repName: localDraft.repName || cloudDraft.repName || vehicle.repName || '',
         licensePlate: localDraft.licensePlate || cloudDraft.licensePlate || vehicle.licensePlate || '',
@@ -989,7 +1012,7 @@ export function RepPage() {
 
   const sponsoredRidersMissingInfo = useMemo(() => {
     return riders.filter((r) => {
-      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id)) || Boolean(r.sponsored);
+      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id));
       if (!isSpon) return false;
       const note = (notes[r.id] ?? notes[String(r.id)] ?? r.sponsorNote ?? '').trim();
       return note.length === 0;
@@ -1009,7 +1032,7 @@ export function RepPage() {
   const presentSponsoredCount = useMemo(() => {
     return riders.filter((r) => {
       const isPres = presentIds.has(r.id) || presentIds.has(String(r.id));
-      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id)) || Boolean(r.sponsored);
+      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id));
       return isPres && isSpon;
     }).length;
   }, [riders, presentIds, sponsoredIds]);
@@ -1017,8 +1040,8 @@ export function RepPage() {
   const presentUnpaidCount = useMemo(() => {
     return riders.filter((r) => {
       const isPres = presentIds.has(r.id) || presentIds.has(String(r.id));
-      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id)) || Boolean(r.sponsored);
-      const isUnp = unpaidIds.has(r.id) || unpaidIds.has(String(r.id)) || Boolean(r.didNotPay);
+      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id));
+      const isUnp = unpaidIds.has(r.id) || unpaidIds.has(String(r.id));
       return isPres && !isSpon && isUnp;
     }).length;
   }, [riders, presentIds, sponsoredIds, unpaidIds]);
@@ -1071,8 +1094,8 @@ export function RepPage() {
     return ordered.map((stopName) => {
       const stopRiders = groups[stopName] || [];
       const stopPresentRiders = stopRiders.filter((r) => presentIds.has(r.id) || presentIds.has(String(r.id)));
-      const stopSponsoredRiders = stopPresentRiders.filter((r) => sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id)) || Boolean(r.sponsored));
-      const stopUnpaidRiders = stopPresentRiders.filter((r) => !stopSponsoredRiders.includes(r) && (unpaidIds.has(r.id) || unpaidIds.has(String(r.id)) || Boolean(r.didNotPay)));
+      const stopSponsoredRiders = stopPresentRiders.filter((r) => sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id)));
+      const stopUnpaidRiders = stopPresentRiders.filter((r) => !stopSponsoredRiders.includes(r) && (unpaidIds.has(r.id) || unpaidIds.has(String(r.id))));
       const stopPayingRiders = stopPresentRiders.filter((r) => !stopSponsoredRiders.includes(r) && !stopUnpaidRiders.includes(r));
       const stopAbsentPaidRiders = stopRiders.filter((r) => (absentIds.has(r.id) || absentIds.has(String(r.id))) && (absentPaidIds.has(r.id) || absentPaidIds.has(String(r.id))));
 
@@ -1208,13 +1231,20 @@ export function RepPage() {
             signups: updatedTargetSignups,
           };
 
-          await saveManifestToServer(nextTargetManifest, false).catch(() => {});
           if (foundTargetVehId) {
             const tgtVeh = updatedTargetVehicles.find((v) => v.id === foundTargetVehId);
-            if (tgtVeh?.draftState) {
-              updateVehicleDraftOnServer(targetKey, foundTargetVehId, tgtVeh.draftState, undefined, undefined, tgtVeh, nextTargetManifest).catch(() => {});
+            if (tgtVeh) {
+              saveVehicleToDb(targetKey, tgtVeh).catch(() => {});
             }
           }
+          await supabase.from(MANIFESTS_TABLE).upsert(
+            {
+              date: nextTargetManifest.date,
+              signups: nextTargetManifest.signups,
+              vehicles: nextTargetManifest.vehicles,
+            },
+            { onConflict: 'date' }
+          );
         }
       } catch (err) {
         console.warn('[RepPage] Cross-service sponsorship target update note:', err);
@@ -1637,9 +1667,34 @@ export function RepPage() {
       } else {
         next.delete(sId);
         next.delete(passengerId);
+        next.delete(String(passengerId));
       }
       return next;
     });
+
+    recentlyToggledSponsoredRef.current.set(sId, nextVal);
+    recentlyToggledSponsoredRef.current.set(passengerId, nextVal);
+
+    if (nextVal) {
+      setUnpaidIds((prev) => {
+        if (!prev.has(sId) && !prev.has(passengerId)) return prev;
+        const n = new Set(prev);
+        n.delete(sId);
+        n.delete(passengerId);
+        return n;
+      });
+      recentlyToggledUnpaidRef.current.set(sId, false);
+      recentlyToggledUnpaidRef.current.set(passengerId, false);
+    } else {
+      // Turned off: clear note if it exists
+      setNotes((prev) => {
+        if (!prev[sId] && !prev[passengerId]) return prev;
+        const next = { ...prev };
+        delete next[sId];
+        delete next[passengerId];
+        return next;
+      });
+    }
 
     if (selectedVehicleId) {
       broadcastLiveAction({
@@ -1674,11 +1729,14 @@ export function RepPage() {
       } else {
         next.delete(sId);
         next.delete(passengerId);
+        next.delete(String(passengerId));
       }
       return next;
     });
 
-    // If marked as didn't pay, they physically attended the bus/taxi — auto mark them present
+    recentlyToggledUnpaidRef.current.set(sId, nextVal);
+    recentlyToggledUnpaidRef.current.set(passengerId, nextVal);
+
     if (nextVal) {
       setPresentIds((prev) => new Set(prev).add(sId).add(passengerId));
       setAbsentIds((prev) => {
@@ -1687,6 +1745,24 @@ export function RepPage() {
         n.delete(sId);
         n.delete(passengerId);
         return n;
+      });
+      setSponsoredIds((prev) => {
+        if (!prev.has(sId) && !prev.has(passengerId)) return prev;
+        const n = new Set(prev);
+        n.delete(sId);
+        n.delete(passengerId);
+        return n;
+      });
+      recentlyToggledSponsoredRef.current.set(sId, false);
+      recentlyToggledSponsoredRef.current.set(passengerId, false);
+    } else {
+      // Turned off: clear note if it exists
+      setNotes((prev) => {
+        if (!prev[sId] && !prev[passengerId]) return prev;
+        const next = { ...prev };
+        delete next[sId];
+        delete next[passengerId];
+        return next;
       });
     }
 
@@ -4714,8 +4790,8 @@ function StopGroupedChecklist({
         const isExpanded = expandedStops.has(stop);
 
         // Calculate stop cash (strictly for buses to reconcile stop physical cash)
-        const stopSponsored = stopRiders.filter((r) => (presentIds.has(r.id) || presentIds.has(String(r.id))) && (sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id)) || Boolean(r.sponsored))).length;
-        const stopUnpaid = stopRiders.filter((r) => (presentIds.has(r.id) || presentIds.has(String(r.id))) && (unpaidIds.has(r.id) || unpaidIds.has(String(r.id)) || Boolean(r.didNotPay))).length;
+        const stopSponsored = stopRiders.filter((r) => (presentIds.has(r.id) || presentIds.has(String(r.id))) && (sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id)))).length;
+        const stopUnpaid = stopRiders.filter((r) => (presentIds.has(r.id) || presentIds.has(String(r.id))) && (unpaidIds.has(r.id) || unpaidIds.has(String(r.id)))).length;
         const stopPaying = Math.max(0, stopPresent - stopSponsored - stopUnpaid);
         const stopAbsentPaid = stopRiders.filter((r) => (absentIds.has(r.id) || absentIds.has(String(r.id))) && (absentPaidIds?.has(r.id) || absentPaidIds?.has(String(r.id)))).length;
         let stopArrears = 0;
@@ -4783,8 +4859,8 @@ function StopGroupedChecklist({
                       onToggleUnpaid={onToggleUnpaid}
                       onToggleAbsentPaid={onToggleAbsentPaid}
                       onSetNote={onSetNote}
-                      isSponsored={sponsoredIds.has(p.id) || sponsoredIds.has(String(p.id)) || Boolean(p.sponsored)}
-                      isUnpaid={unpaidIds.has(p.id) || unpaidIds.has(String(p.id)) || Boolean(p.didNotPay)}
+                      isSponsored={sponsoredIds.has(p.id) || sponsoredIds.has(String(p.id))}
+                      isUnpaid={unpaidIds.has(p.id) || unpaidIds.has(String(p.id))}
                       noteText={notes[p.id] ?? notes[String(p.id)] ?? p.sponsorNote ?? p.unpaidNote ?? ''}
                       redirectedFrom={isRedirected ? origStop : undefined}
                       disabled={disabled}
@@ -4793,7 +4869,7 @@ function StopGroupedChecklist({
                       onToggleCancellation={onToggleCancellation}
                       onRemoveRider={onRemoveRider}
                       canRemove={canRemoveRider ? canRemoveRider(p) : false}
-                      externalLock={externalSponsorLocks?.get(String(p.id)) || externalSponsorLocks?.get(p.fullName.trim().toLowerCase())}
+                      externalLock={externalSponsorLocks?.get(String(p.id)) || externalSponsorLocks?.get(`name:${p.fullName.trim().toLowerCase()}`)}
                     />
                   );
                 })}
@@ -4864,8 +4940,8 @@ function AlphabeticalChecklist({
             onToggleUnpaid={onToggleUnpaid}
             onToggleAbsentPaid={onToggleAbsentPaid}
             onSetNote={onSetNote}
-            isSponsored={sponsoredIds.has(p.id) || sponsoredIds.has(String(p.id)) || Boolean(p.sponsored)}
-            isUnpaid={unpaidIds.has(p.id) || unpaidIds.has(String(p.id)) || Boolean(p.didNotPay)}
+            isSponsored={sponsoredIds.has(p.id) || sponsoredIds.has(String(p.id))}
+            isUnpaid={unpaidIds.has(p.id) || unpaidIds.has(String(p.id))}
             noteText={notes[p.id] ?? notes[String(p.id)] ?? p.sponsorNote ?? p.unpaidNote ?? ''}
             redirectedFrom={isRedirected ? origStop : undefined}
             disabled={disabled}
@@ -4874,7 +4950,7 @@ function AlphabeticalChecklist({
             onToggleCancellation={onToggleCancellation}
             onRemoveRider={onRemoveRider}
             canRemove={canRemoveRider ? canRemoveRider(p) : false}
-            externalLock={externalSponsorLocks?.get(String(p.id)) || externalSponsorLocks?.get(p.fullName.trim().toLowerCase())}
+            externalLock={externalSponsorLocks?.get(String(p.id)) || externalSponsorLocks?.get(`name:${p.fullName.trim().toLowerCase()}`)}
           />
         );
       })}
@@ -4916,6 +4992,8 @@ const PassengerRow = React.memo(function PassengerRow({
   useEffect(() => {
     if (isSponsored || isUnpaid || !!noteText) {
       setShowNote(true);
+    } else {
+      setShowNote(false);
     }
   }, [isSponsored, isUnpaid, noteText]);
 
@@ -4936,12 +5014,22 @@ const PassengerRow = React.memo(function PassengerRow({
 
   function handleSponsoredToggle() {
     onToggleSponsored(String(passenger.id));
-    if (!isSponsored) setShowNote(true);
+    if (isSponsored) {
+      setShowNote(false);
+      onSetNote(String(passenger.id), '');
+    } else {
+      setShowNote(true);
+    }
   }
 
   function handleUnpaidToggle() {
     onToggleUnpaid(String(passenger.id));
-    if (!isUnpaid) setShowNote(true);
+    if (isUnpaid) {
+      setShowNote(false);
+      onSetNote(String(passenger.id), '');
+    } else {
+      setShowNote(true);
+    }
   }
 
   return (

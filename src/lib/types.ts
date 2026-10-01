@@ -635,3 +635,62 @@ export function orderVehicleStopsCanonical(stops: string[]): string[] {
   return sortByRouteSequence(stops, (s) => s);
 }
 
+export type SponsorshipStatus = 'pending' | 'actually_sponsored' | 'unpaid_sponsorship' | 'unaccounted_sponsorship';
+
+export interface ReportedSponsorship {
+  id: string;
+  manifest_key: string;
+  date: string;
+  service: string;
+  passenger_id?: string;
+  passenger_name: string;
+  structure: string;
+  stop?: string;
+  vehicle_name: string;
+  rep_name: string;
+  sponsor_note: string;
+  status: SponsorshipStatus;
+  status_updated_at?: string;
+  ledger_entry_id?: string | null;
+  submitted_at: string;
+}
+
+export interface SubmitVehiclePayload {
+  vehicleId: string;
+  vehicle?: Vehicle;
+  allVehicles?: Vehicle[];
+  repName: string;
+  licensePlate: string;
+  coReps?: string[];
+  generalNotes?: string;
+  draftState: VehicleDraftState;
+  absentees: Array<Passenger & { sponsored?: boolean; sponsorNote?: string }>;
+  sponsoredRiders?: Array<{
+    id: string;
+    fullName: string;
+    structure?: string;
+    stop?: string;
+    vehicleName?: string;
+    vehicle_name?: string;
+    taxiName?: string;
+    sponsorNote?: string;
+  }>;
+  unpaidRiders?: Array<{
+    id: string;
+    fullName: string;
+    structure?: string;
+    stop?: string;
+    unpaidNote?: string;
+  }>;
+  allRiderNames: string[];
+  serviceLabel: string;
+  parsedDate: string;
+  updatedSignups?: Manifest['signups'];
+}
+
+export interface ReopenVehiclePayload {
+  vehicleId: string;
+  allRiderNames: string[];
+}
+
+

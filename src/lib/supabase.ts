@@ -8,6 +8,7 @@ export const MANIFESTS_TABLE = 'transport_manifests';
 export const LEDGER_TABLE = 'cancellation_ledger';
 export const VEHICLES_TABLE = 'transport_vehicles';
 export const SPONSORSHIPS_TABLE = 'sponsorship_audits';
+export const PROFILES_TABLE = 'profiles';
 
 const isConfigured = Boolean(
   supabaseUrl &&
@@ -31,6 +32,7 @@ export class MockSupabaseStorage {
     [LEDGER_TABLE]: [],
     [VEHICLES_TABLE]: [],
     [SPONSORSHIPS_TABLE]: [],
+    [PROFILES_TABLE]: [],
   };
   private listeners: Set<(table: string, payload: StoragePayload) => void> = new Set();
 
@@ -67,6 +69,11 @@ export class MockSupabaseStorage {
       if (sponsorships) {
         const parsed = JSON.parse(sponsorships);
         if (Array.isArray(parsed)) this.memoryStore[SPONSORSHIPS_TABLE] = parsed;
+      }
+      const profiles = localStorage.getItem(`crc_transport_${PROFILES_TABLE}`);
+      if (profiles) {
+        const parsed = JSON.parse(profiles);
+        if (Array.isArray(parsed)) this.memoryStore[PROFILES_TABLE] = parsed;
       }
     } catch {
       // Ignore local storage parse errors
@@ -315,13 +322,48 @@ export class MockQueryBuilder {
 }
 
 export function createMockClient() {
+  let mockUser: { id: string; email: string } | null = null;
+  try {
+    const stored = localStorage.getItem('crc_mock_auth_user');
+    if (stored) mockUser = JSON.parse(stored);
+  } catch {
+    // ignore
+  }
+
   return {
     auth: {
-      getSession: async () => ({ data: { session: null }, error: null }),
-      onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
-      signInWithPassword: async () => ({ data: null, error: { message: "Auth disabled in mock mode" } }),
-      signUp: async () => ({ data: null, error: { message: "Auth disabled in mock mode" } }),
-      signOut: async () => ({ error: null }),
+      getSession: async () => ({ data: { session: mockUser ? { user: mockUser } : null }, error: null }),
+      onAuthStateChange: (cb: (event: string, session: { user: { id: string; email: string } } | null) => void) => {
+        if (mockUser) cb('SIGNED_IN', { user: mockUser });
+        return { data: { subscription: { unsubscribe: () => {} } } };
+      },
+      signInWithPassword: async ({ email }: { email: string; password?: string }) => {
+        mockUser = { id: `mock_${btoa(email).replace(/[^a-zA-Z0-9]/g, '').slice(0, 12) || 'user'}`, email };
+        try {
+          localStorage.setItem('crc_mock_auth_user', JSON.stringify(mockUser));
+        } catch {
+          // ignore localStorage write errors
+        }
+        return { data: { user: mockUser }, error: null };
+      },
+      signUp: async ({ email }: { email: string; password?: string }) => {
+        mockUser = { id: `mock_${btoa(email).replace(/[^a-zA-Z0-9]/g, '').slice(0, 12) || 'user'}`, email };
+        try {
+          localStorage.setItem('crc_mock_auth_user', JSON.stringify(mockUser));
+        } catch {
+          // ignore localStorage write errors
+        }
+        return { data: { user: mockUser }, error: null };
+      },
+      signOut: async () => {
+        mockUser = null;
+        try {
+          localStorage.removeItem('crc_mock_auth_user');
+        } catch {
+          // ignore localStorage remove errors
+        }
+        return { error: null };
+      },
     },
     from(tableName: string) {
       return new MockQueryBuilder(tableName);

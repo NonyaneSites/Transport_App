@@ -633,13 +633,14 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
    * Completely immune to rapid multi-click race conditions.
    */
   function unassignRider(vehicleId: string, passengerId: string) {
+    const sPassengerId = String(passengerId);
     mutateAndSave((prev) => {
-      const targetPassenger = prev.signups.find((p) => p.id === passengerId);
+      const targetPassenger = prev.signups.find((p) => String(p.id) === sPassengerId);
       const targetNormName = targetPassenger ? normalizePassengerText(targetPassenger.fullName) : '';
 
       // Clear assignedTo for this passenger and any duplicate signup records for this same person
       const updatedSignups = prev.signups.map((p) => {
-        if (p.id === passengerId) return { ...p, assignedTo: null };
+        if (String(p.id) === sPassengerId) return { ...p, assignedTo: null };
         if (targetNormName && normalizePassengerText(p.fullName) === targetNormName) {
           return { ...p, assignedTo: null };
         }
@@ -688,9 +689,9 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     mutateAndSave((prev) => {
       const vehicle = prev.vehicles.find((v) => v.id === vehicleId);
       if (!vehicle || vehicle.riders.length === 0) return prev;
-      const riderIds = new Set(vehicle.riders);
+      const riderIds = new Set(vehicle.riders.map(String));
       const updatedSignups = prev.signups.map((p) =>
-        riderIds.has(p.id) ? { ...p, assignedTo: null } : p
+        riderIds.has(String(p.id)) ? { ...p, assignedTo: null } : p
       );
       const updatedVehicles = prev.vehicles.map((v) =>
         v.id === vehicleId
@@ -819,21 +820,22 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   ) {
     if (!passengerId || !toVehicleId || fromVehicleId === toVehicleId) return;
 
+    const sPassengerId = String(passengerId);
     mutateAndSave((prev) => {
-      const passenger = prev.signups.find((p) => p.id === passengerId);
+      const passenger = prev.signups.find((p) => String(p.id) === sPassengerId);
       if (!passenger) return prev;
 
       const isUnassigning = toVehicleId === 'unassigned' || !toVehicleId;
       const toVehicle = !isUnassigning ? prev.vehicles.find((v) => v.id === toVehicleId) : null;
       if (!isUnassigning && !toVehicle) return prev;
 
-      const targetPassenger = prev.signups.find((p) => p.id === passengerId);
+      const targetPassenger = prev.signups.find((p) => String(p.id) === sPassengerId);
       const targetNormName = targetPassenger ? normalizePassengerText(targetPassenger.fullName) : '';
       const poolKey = toVehicle && targetPassenger ? hubDisplayName(toVehicle.type, targetPassenger.stop) : '';
 
       // 1. Update signups
       const updatedSignups = prev.signups.map((p) => {
-        if (p.id === passengerId) return { ...p, assignedTo: isUnassigning ? null : toVehicleId };
+        if (String(p.id) === sPassengerId) return { ...p, assignedTo: isUnassigning ? null : toVehicleId };
         if (isUnassigning && targetNormName && normalizePassengerText(p.fullName) === targetNormName) {
           return { ...p, assignedTo: null };
         }
