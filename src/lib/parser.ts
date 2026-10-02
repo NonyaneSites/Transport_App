@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import type { Passenger, ServiceType } from './types';
-import { MIN_TAXI_THRESHOLD, MIN_AM_NORMAL_THRESHOLD, hubDisplayName, isDreamWeekDate } from './types';
+import { MIN_TAXI_THRESHOLD, MIN_AM_NORMAL_THRESHOLD, hubDisplayName } from './types';
 import { sanitizeTransportValue } from './transportSanitization';
 import {
   toTitleCase,
@@ -1279,7 +1279,6 @@ function processExtractedCandidates(
   const normalCount = dateMatchedCandidates.filter((c) => c.category === 'Normal').length;
 
   const selectedService = opts.selectedService;
-  const isDreamWeek = isDreamWeekDate(opts.selectedDate);
   const passengers: Passenger[] = [];
 
   // Pass 3: Filter and apply auto-merging logic based on selectedService
@@ -1290,21 +1289,29 @@ function processExtractedCandidates(
 
     let include = false;
 
-    if (isDreamWeek) {
-      // In DreamWeek conference sessions, all attendees travel together regardless of serving vs normal
-      include = true;
-    } else if (selectedService === 'PM_Serving' || selectedService === 'PM_Normal') {
-      // In PM Service, all attendees travel together to the evening service
-      include = true;
+    if (selectedService === 'PM_Serving') {
+      // Dedicated PM Serving service (Serving & Ushers)
+      include = c.category === 'Serving' || c.category === 'Ushers';
+    } else if (selectedService === 'PM_Normal') {
+      // Dedicated PM Normal transport service
+      include = c.category === 'Normal';
     } else if (selectedService === 'AM_Ushers') {
       // Dedicated Ushers (Early) service
       include = c.category === 'Ushers';
     } else if (selectedService === 'AM_Normal') {
-      // Dedicated Normal transport service (or all if sheet does not distinguish category)
-      include = c.category === 'Normal' || (ushersCount === 0 && dateMatchedCandidates.filter((x) => x.category === 'Serving').length === 0);
+      // Dedicated AM Normal transport service
+      include = c.category === 'Normal';
     } else if (selectedService === 'AM_Serving') {
-      // AM Serving main service: auto-include Serving, Ushers, and Normal so no signups are lost
-      include = true;
+      // AM Serving main service
+      if (c.category === 'Serving') {
+        include = true;
+      } else if (c.category === 'Ushers') {
+        // Auto-merge into AM Serving if not enough for a dedicated Ushers taxi (< 15)
+        include = ushersCount < MIN_TAXI_THRESHOLD;
+      } else if (c.category === 'Normal') {
+        // Auto-merge into AM Serving if not enough for a normal taxi (< 14)
+        include = normalCount < MIN_AM_NORMAL_THRESHOLD;
+      }
     }
 
     if (include) {
