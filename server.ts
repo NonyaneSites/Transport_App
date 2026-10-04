@@ -1505,7 +1505,7 @@ app.get('/api/ledger', (req, res) => {
   // Filter out zero-debt items, parse numeric debt, and sanitize boilerplate notes
   const activeLedger = ledger
     .filter((entry) => {
-      const debt = parseDebtAmount(entry.structure_debt);
+      const debt = parseDebtAmount(entry.structure_debt, entry.date as string);
       return debt > 0;
     })
     .map((entry) => {
@@ -1514,7 +1514,7 @@ app.get('/api/ledger', (req, res) => {
       const origSn = typeof entry.sponsor_note === 'string' ? entry.sponsor_note : '';
       let cleanGn = cleanSponsorshipNote(origGn);
       let cleanSn = cleanSponsorshipNote(origSn);
-      const parsedDebt = parseDebtAmount(entry.structure_debt);
+      const parsedDebt = parseDebtAmount(entry.structure_debt, entry.date as string);
 
       // If entry is not sponsored, clean out vehicle summaries mentioning other people's sponsorships
       if (!isSpon) {
@@ -1626,6 +1626,29 @@ app.delete('/api/ledger/:id', (req, res) => {
 
   broadcastSse('ledger_updated', { timestamp: Date.now() });
   res.json({ success: true, removed: before - ledger.length });
+});
+
+// Update specific ledger entry (e.g. partial payment or fee adjustment)
+app.patch('/api/ledger/:id', (req, res) => {
+  const id = req.params.id;
+  const updates = req.body || {};
+  let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+  const idx = ledger.findIndex((e) => e.id === id);
+  if (idx !== -1) {
+    if (updates.structure_debt !== undefined && Number(updates.structure_debt) <= 0) {
+      ledger = ledger.filter((e) => e.id !== id);
+    } else {
+      ledger[idx] = { ...ledger[idx], ...updates };
+      if (updates.structure_debt !== undefined) {
+        ledger[idx].structure_debt = Number(updates.structure_debt);
+      }
+    }
+    atomicWriteJson(LEDGER_FILE, ledger);
+    broadcastSse('ledger_updated', { timestamp: Date.now() });
+    res.json({ success: true, entry: ledger[idx] });
+  } else {
+    res.status(404).json({ error: 'Entry not found' });
+  }
 });
 
 // Update debtor details and instances

@@ -113,19 +113,78 @@ export function extractMemberType(row: RawRow, headers: string[], structure?: st
   return undefined;
 }
 
+/**
+ * Values indicating negative or non-serving responses in ministry or serving columns.
+ */
+export function isNonServingValue(val: unknown): boolean {
+  if (val === undefined || val === null) return true;
+  const v = lower(clean(val));
+  if (!v) return true;
+  return (
+    v === 'no' ||
+    v === 'n' ||
+    v === 'none' ||
+    v === 'n/a' ||
+    v === 'na' ||
+    v === '-' ||
+    v === '--' ||
+    v === 'nil' ||
+    v === 'null' ||
+    v === 'normal' ||
+    v === 'not serving' ||
+    v === 'not attending' ||
+    v === 'just attending' ||
+    v.startsWith('no ') ||
+    v.startsWith('no,') ||
+    v.includes('not serving') ||
+    v.includes('just attending') ||
+    v.includes('first time visiting') ||
+    v.includes('no, i am not') ||
+    v.includes('i am not serving')
+  );
+}
+
 export function extractCategoryAndMinistry(
   row: RawRow,
   headers: string[],
-  sheetName?: string
+  sheetName?: string,
+  selectedService?: ServiceType
 ): { category: 'Ushers' | 'Serving' | 'Normal'; ministry: string } {
-  const serviceTypeCol = findColumn(headers, [
-    'am service type',
-    'pm service type',
-    'service type',
-    'servicetype',
-    'which service are you attending',
-  ]);
-  const servingCol = findColumn(headers, ['serving ministry', 'serving', 'ministry']);
+  const isPM = selectedService?.startsWith('PM');
+  const isAM = selectedService?.startsWith('AM');
+
+  // Candidate service type columns in order of relevance to the active session
+  const serviceTypePatterns = isPM
+    ? [
+        'pm service type',
+        'pm service',
+        'pm serving',
+        'service type',
+        'servicetype',
+        'which service are you attending',
+        'service attending',
+      ]
+    : isAM
+    ? [
+        'am service type',
+        'am service',
+        'am serving',
+        'service type',
+        'servicetype',
+        'which service are you attending',
+        'service attending',
+      ]
+    : [
+        'service type',
+        'servicetype',
+        'which service are you attending',
+        'am service type',
+        'pm service type',
+        'service attending',
+      ];
+
+  const serviceTypeCol = findColumn(headers, serviceTypePatterns);
+  const servingCol = findColumn(headers, ['serving ministry', 'serving', 'ministry', 'are you serving']);
 
   const rawService = serviceTypeCol ? clean(row[serviceTypeCol]) : '';
   const rawMinistry = servingCol ? clean(row[servingCol]) : '';
@@ -141,28 +200,41 @@ export function extractCategoryAndMinistry(
     serviceLower.includes('ushers(early)') ||
     (serviceLower.includes('usher') && serviceLower.includes('early')) ||
     (serviceLower.includes('early') && ministryLower.includes('usher')) ||
-    sheetLower.includes('usher')
+    sheetLower.includes('usher') ||
+    ministryLower.includes('usher (early)') ||
+    ministryLower.includes('ushers (early)')
   ) {
-    return { category: 'Ushers', ministry: rawMinistry || 'Usher (Early)' };
+    return { category: 'Ushers', ministry: !isNonServingValue(rawMinistry) ? rawMinistry : 'Usher (Early)' };
   }
 
-  // 2. Explicit Normal / Non-serving
+  // 2. Explicit Non-serving / Normal indicators
+  const isServingQuestion = servingCol && (lower(clean(servingCol)).includes('are you serving') || lower(clean(servingCol)) === 'serving');
+  const answeredNoToServing = isServingQuestion && isNonServingValue(rawMinistry);
+  const explicitNonServingMinistry = Boolean(rawMinistry) && isNonServingValue(rawMinistry);
+
   if (
+    answeredNoToServing ||
     serviceLower === 'normal' ||
     serviceLower.startsWith('normal') ||
+    serviceLower.includes('normal') ||
     (sheetLower.includes('normal') && !sheetLower.includes('serving'))
   ) {
     return { category: 'Normal', ministry: '' };
   }
 
-  // 3. Serving
+  // 3. Explicit Serving indicators
+  const hasValidMinistry = Boolean(rawMinistry) && !explicitNonServingMinistry && !isNonServingValue(rawMinistry);
+  const answeredYesToServing = isServingQuestion && (ministryLower === 'yes' || ministryLower.startsWith('yes') || ministryLower.includes('yes, i am'));
+
   if (
     serviceLower.includes('serving') ||
     SERVING_KEYWORDS.some((k) => ministryLower.includes(k) || serviceLower.includes(k)) ||
-    Boolean(rawMinistry) ||
-    sheetLower.includes('serving')
+    hasValidMinistry ||
+    answeredYesToServing ||
+    (sheetLower.includes('serving') && !explicitNonServingMinistry && !isNonServingValue(rawMinistry))
   ) {
-    return { category: 'Serving', ministry: rawMinistry || 'Serving' };
+    const finalMinistry = hasValidMinistry ? rawMinistry : (answeredYesToServing ? 'Serving' : (rawMinistry || 'Serving'));
+    return { category: 'Serving', ministry: finalMinistry };
   }
 
   return { category: 'Normal', ministry: '' };
@@ -953,16 +1025,43 @@ export function matchesService(
     return false;
   }
 
+  // Check if both AM and PM columns exist in the row FIRST
+  const amCol = findColumn(headers, ['am service type', 'am service', 'am serving']);
+  const pmCol = findColumn(headers, ['pm service type', 'pm service', 'pm serving']);
+  if (amCol && pmCol) {
+    const isNegative = (s: unknown) => {
+      const l = lower(clean(s));
+      return !l || l === 'no' || l === 'n' || l.startsWith('no ') || l === 'none' || l === 'n/a' || l === 'na' || l === '-' || l.includes('not attending');
+    };
+    const hasAm = !isNegative(row[amCol]);
+    const hasPm = !isNegative(row[pmCol]);
+    if (selectedPeriod === 'AM' && !hasAm && hasPm) return false;
+    if (selectedPeriod === 'PM' && !hasPm && hasAm) return false;
+  }
+
   // Check row service column for AM / PM indicators
+  const candidatePatterns = selectedPeriod === 'PM'
+    ? [
+        'pm service type',
+        'pm service',
+        'pm serving',
+        'which service are you attending',
+        'service attending',
+        'service type',
+        'servicetype',
+      ]
+    : [
+        'am service type',
+        'am service',
+        'am serving',
+        'which service are you attending',
+        'service attending',
+        'service type',
+        'servicetype',
+      ];
+
   const serviceCol =
-    findColumn(headers, [
-      'am service type',
-      'pm service type',
-      'service type',
-      'servicetype',
-      'which service are you attending',
-      'service attending',
-    ]) ||
+    findColumn(headers, candidatePatterns) ||
     headers.find((h) => {
       const lh = lower(clean(h));
       return (lh === 'service' || lh.startsWith('service ')) && !lh.includes('date');
@@ -996,20 +1095,6 @@ export function matchesService(
         return false;
       }
     }
-  }
-
-  // Check if both AM and PM columns exist in the row
-  const amCol = findColumn(headers, ['am service type', 'am service', 'am serving']);
-  const pmCol = findColumn(headers, ['pm service type', 'pm service', 'pm serving']);
-  if (amCol && pmCol) {
-    const isNegative = (s: unknown) => {
-      const l = lower(clean(s));
-      return !l || l === 'no' || l === 'n' || l.startsWith('no ') || l === 'none' || l === 'n/a' || l === 'na' || l === '-' || l.includes('not attending');
-    };
-    const hasAm = !isNegative(row[amCol]);
-    const hasPm = !isNegative(row[pmCol]);
-    if (selectedPeriod === 'AM' && !hasAm && hasPm) return false;
-    if (selectedPeriod === 'PM' && !hasPm && hasAm) return false;
   }
 
   return true;
@@ -1118,20 +1203,17 @@ export function isIdentityHeader(header: string): boolean {
 export function isSignupSheet(sheetName: string, headers: string[]): boolean {
   if (!sheetName) return false;
 
-  // 1. Must contain at least one expected passenger identity column (Name, Surname, Full Name, etc.)
+  // 1. Skip sheets matching known computed/summary patterns (e.g. "PM Table", "AM Table", "SZ1 Goal tracker")
+  if (NON_SIGNUP_SHEET_PATTERN.test(sheetName.trim())) {
+    return false;
+  }
+
+  // 2. Must contain at least one expected passenger identity column (Name, Surname, Full Name, etc.)
   if (!headers || headers.length === 0) {
     return false;
   }
 
-  const hasIdentity = headers.some(isIdentityHeader);
-  // If the sheet has passenger identity columns, it is ALWAYS a valid signup sheet!
-  // (Excel often creates tabs named "Table 1", "Responses Table", "Signups Tracker", etc.)
-  if (hasIdentity) {
-    return true;
-  }
-
-  // 2. If it does not contain passenger identity columns, skip it
-  return false;
+  return headers.some(isIdentityHeader);
 }
 
 /**
@@ -1456,7 +1538,7 @@ export function parseWorkbook(file: ArrayBuffer | Uint8Array | string, opts: Par
       const phone = extractPhone(row, headers);
       const userEmail = extractEmail(row, headers);
       const hub = hubDisplayName('Taxi', stop);
-      const { category, ministry } = extractCategoryAndMinistry(row, headers, sheetName);
+      const { category, ministry } = extractCategoryAndMinistry(row, headers, sheetName, opts.selectedService);
       const memberType = extractMemberType(row, headers, structure);
       const homecellLeader = extractHomecellLeader(row, headers);
       const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
@@ -1589,7 +1671,7 @@ export async function parseWorkbookAsync(
       const phone = extractPhone(row, headers);
       const userEmail = extractEmail(row, headers);
       const hub = hubDisplayName('Taxi', stop);
-      const { category, ministry } = extractCategoryAndMinistry(row, headers, sheetName);
+      const { category, ministry } = extractCategoryAndMinistry(row, headers, sheetName, opts.selectedService);
       const memberType = extractMemberType(row, headers, structure);
       const homecellLeader = extractHomecellLeader(row, headers);
       const id = `${name}-${stop}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');

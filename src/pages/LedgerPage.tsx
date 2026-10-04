@@ -10,7 +10,7 @@ import { connectSyncEvents } from '@/lib/serverApi';
 import {
   listLedgerEntries, deleteLedgerEntry, downloadLedgerExcel,
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
-  recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch,
+  recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch, parseDebtAmount,
   updateDebtorWithInstances, normalizeDateToYMD, normalizeStructureCode, structureSortComparator,
   listReportedSponsorships, verifyBatchSponsorships, groupSponsorshipsByStructure, sanitizePassengerDisplayName,
   cleanSponsorshipNote, cleanAndDeduplicateSponsorships,
@@ -173,7 +173,9 @@ export function LedgerPage() {
   const structures = useMemo(() => {
     const set = new Set<string>();
     entries.forEach((e) => {
-      if (e.structure) set.add(normalizeStructureCode(e.structure));
+      if (e.structure && parseDebtAmount(e.structure_debt, e.date) > 0) {
+        set.add(normalizeStructureCode(e.structure));
+      }
     });
     sponsorships.forEach((s) => {
       if (s.structure) set.add(normalizeStructureCode(s.structure));
@@ -219,17 +221,20 @@ export function LedgerPage() {
     return allGroups.reduce((sum, g) => sum + g.totalDebt, 0);
   }, [allGroups]);
 
-  const sponsorshipStats = useMemo(() => {
-    const total = sponsorships.length;
-    const pending = sponsorships.filter((s) => s.status === 'pending').length;
-    const confirmed = sponsorships.filter((s) => s.status === 'actually_sponsored').length;
-    const debt = sponsorships.filter((s) => s.status === 'unaccounted_sponsorship' || s.status === 'unpaid_sponsorship').length;
-    return { total, pending, confirmed, debt };
+  const dedupedSponsorships = useMemo(() => {
+    return cleanAndDeduplicateSponsorships(sponsorships);
   }, [sponsorships]);
 
+  const sponsorshipStats = useMemo(() => {
+    const total = dedupedSponsorships.length;
+    const pending = dedupedSponsorships.filter((s) => s.status === 'pending').length;
+    const confirmed = dedupedSponsorships.filter((s) => s.status === 'actually_sponsored').length;
+    const debt = dedupedSponsorships.filter((s) => s.status === 'unaccounted_sponsorship' || s.status === 'unpaid_sponsorship').length;
+    return { total, pending, confirmed, debt };
+  }, [dedupedSponsorships]);
+
   const filteredSponsorships = useMemo(() => {
-    const deduped = cleanAndDeduplicateSponsorships(sponsorships);
-    let list = deduped.map((s) => ({
+    let list = dedupedSponsorships.map((s) => ({
       ...s,
       passenger_name: sanitizePassengerDisplayName(s.passenger_name),
       structure: normalizeStructureCode(s.structure),
@@ -258,7 +263,7 @@ export function LedgerPage() {
       );
     }
     return list;
-  }, [sponsorships, structureFilter, sponsorshipFilter, search]);
+  }, [dedupedSponsorships, structureFilter, sponsorshipFilter, search]);
 
   const groupedSponsorships = useMemo(() => {
     return groupSponsorshipsByStructure(filteredSponsorships);
@@ -994,7 +999,7 @@ export function LedgerPage() {
                     <span className="truncate">Import</span>
                   </button>
                   <button
-                    onClick={() => downloadCancellationDebtPdf(filtered.length > 0 ? filtered : entries)}
+                    onClick={() => downloadCancellationDebtPdf(isFiltered ? filtered : entries)}
                     className="btn-crimson flex items-center justify-center gap-1.5 text-xs py-2 px-2 shadow-sm"
                     title="Download official PDF report grouped by Structure and Person with CRC banking info"
                   >
@@ -1002,7 +1007,7 @@ export function LedgerPage() {
                     <span className="truncate">Debt PDF</span>
                   </button>
                   <button
-                    onClick={() => downloadLedgerExcel(filtered.length > 0 ? filtered : entries, `SZ_Cancellation_List_${new Date().toISOString().slice(0,10)}.xlsx`)}
+                    onClick={() => downloadLedgerExcel(isFiltered ? filtered : entries, `SZ_Cancellation_List_${new Date().toISOString().slice(0,10)}.xlsx`)}
                     className="btn-success flex items-center justify-center gap-1.5 text-xs py-2 px-2"
                     title="Export to Excel spreadsheet"
                   >

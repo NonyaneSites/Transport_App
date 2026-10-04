@@ -396,6 +396,23 @@ export async function deleteLedgerOnServer(id: string): Promise<boolean> {
   }
 }
 
+export async function updateLedgerOnServer(id: string, updates: Record<string, unknown>): Promise<boolean> {
+  if (!isServerOnline()) return false;
+  try {
+    const res = await fetch(`/api/ledger/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    if (res.ok && isJsonResponse(res)) {
+      markServerOnline();
+    }
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function updateDebtorOnServer(payload: {
   existingEntryIds: string[];
   updates: {

@@ -544,3 +544,84 @@ test('DreamWeek: parses various date representations and multi-select evening ce
   assert.strictEqual(resFri.passengers[0].fullName, 'Rider Four');
 });
 
+test('PM Serving upload correctly separates serving from normal signups across 360 responses', () => {
+  const wb = XLSX.utils.book_new();
+  const rows: Record<string, string>[] = [];
+
+  // 10 actual PM servers (5 Choir, 5 Ushers)
+  for (let i = 1; i <= 5; i++) {
+    rows.push({
+      'Timestamp': `2026-08-23 10:0${i}:00`,
+      'Full Name': `Server Choir ${i}`,
+      'Phone Number': `082111000${i}`,
+      'Service Date': '23 August 2026',
+      'Which service are you attending': 'PM Service',
+      'Are you serving?': 'Yes',
+      'Serving Ministry': 'Choir',
+      'Do you need transport?': 'Yes',
+      'Pickup Stop': '56 Jorissen',
+      'Structure': 'S1',
+    });
+  }
+  for (let i = 1; i <= 5; i++) {
+    rows.push({
+      'Timestamp': `2026-08-23 10:1${i}:00`,
+      'Full Name': `Server Usher ${i}`,
+      'Phone Number': `082222000${i}`,
+      'Service Date': '23 August 2026',
+      'Which service are you attending': 'PM Service',
+      'Are you serving?': 'Yes',
+      'Serving Ministry': 'Usher',
+      'Do you need transport?': 'Yes',
+      'Pickup Stop': 'Apex',
+      'Structure': 'S2',
+    });
+  }
+
+  // 350 PM Normal attendees answering "No" or "None" or "N/A"
+  for (let i = 1; i <= 350; i++) {
+    const noVal = i % 3 === 0 ? 'No' : i % 3 === 1 ? 'None' : 'N/A';
+    rows.push({
+      'Timestamp': `2026-08-23 11:${String(i % 60).padStart(2, '0')}:00`,
+      'Full Name': `Normal Attendee ${i}`,
+      'Phone Number': `083${String(i).padStart(7, '0')}`,
+      'Service Date': '23 August 2026',
+      'Which service are you attending': 'PM Service',
+      'Are you serving?': noVal,
+      'Serving Ministry': noVal,
+      'Do you need transport?': 'Yes',
+      'Pickup Stop': 'Gate 2',
+      'Structure': 'S3',
+    });
+  }
+
+  assert.strictEqual(rows.length, 360, 'Total test rows must be 360');
+
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'PM RSVPs');
+  const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+
+  // When parsing for PM_Serving, only the 10 servers must be returned (NOT all 360!)
+  const resServing = parseWorkbook(buf, {
+    selectedDate: '2026-08-23',
+    selectedService: 'PM_Serving',
+  });
+  assert.strictEqual(
+    resServing.passengers.length,
+    10,
+    `PM Serving must see exactly 10 signups, but saw ${resServing.passengers.length}`
+  );
+  assert.ok(resServing.passengers.every((p) => p.category === 'Serving' || p.category === 'Ushers'));
+
+  // When parsing for PM_Normal, all 350 normal attendees must be returned
+  const resNormal = parseWorkbook(buf, {
+    selectedDate: '2026-08-23',
+    selectedService: 'PM_Normal',
+  });
+  assert.strictEqual(
+    resNormal.passengers.length,
+    350,
+    `PM Normal must see exactly 350 signups, but saw ${resNormal.passengers.length}`
+  );
+  assert.ok(resNormal.passengers.every((p) => p.category === 'Normal'));
+});
+

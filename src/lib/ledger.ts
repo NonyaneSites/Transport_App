@@ -5,6 +5,7 @@ import {
   settleLedgerOnServer,
   addManualLedgerOnServer,
   deleteLedgerOnServer,
+  updateLedgerOnServer,
   updateDebtorOnServer,
   listReportedSponsorshipsFromServer,
   verifyBatchSponsorshipsOnServer,
@@ -763,8 +764,17 @@ export async function updateLedgerEntry(id: string, updates: Partial<LedgerEntry
     await deleteLedgerEntry(id);
     return;
   }
-  const { error } = await supabase.from(LEDGER_TABLE).update(updates).eq('id', id);
-  if (error) throw error;
+  try {
+    await updateLedgerOnServer(id, updates as Record<string, unknown>);
+  } catch (err) {
+    console.debug('[Ledger] Server update note:', err);
+  }
+  try {
+    const { error } = await supabase.from(LEDGER_TABLE).update(updates).eq('id', id);
+    if (error) console.warn('[Ledger] Supabase update note:', error);
+  } catch {
+    // local fallback
+  }
 }
 
 export interface ManualLedgerEntryInput {
@@ -1104,13 +1114,25 @@ export async function updateDebtorDetails(
 export async function recordPartialPayment(entryIds: string[], amountPaid: number): Promise<void> {
   if (entryIds.length === 0 || amountPaid <= 0) return;
 
-  const { data: entries, error } = await supabase
-    .from(LEDGER_TABLE)
-    .select('id, structure_debt, date')
-    .in('id', entryIds);
+  let entries: Array<{ id: string; structure_debt: unknown; date?: string }> = [];
+  try {
+    const { data, error } = await supabase
+      .from(LEDGER_TABLE)
+      .select('id, structure_debt, date')
+      .in('id', entryIds);
+    if (!error && data && data.length > 0) {
+      entries = data;
+    }
+  } catch {
+    // fallback to listLedgerEntries
+  }
 
-  if (error) throw error;
-  if (!entries || entries.length === 0) return;
+  if (entries.length === 0) {
+    const all = await listLedgerEntries();
+    entries = all.filter((e) => entryIds.includes(e.id));
+  }
+
+  if (entries.length === 0) return;
 
   // Sort ascending by date (oldest debt settled first)
   const sorted = [...entries].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
@@ -1119,7 +1141,7 @@ export async function recordPartialPayment(entryIds: string[], amountPaid: numbe
 
   for (const entry of sorted) {
     if (remainingToDeduct <= 0) break;
-    const currentDebt = parseDebtAmount(entry.structure_debt);
+    const currentDebt = parseDebtAmount(entry.structure_debt, entry.date);
 
     if (remainingToDeduct >= currentDebt) {
       // Entire entry is paid off
