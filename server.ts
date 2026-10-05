@@ -1181,28 +1181,23 @@ function cleanSponsorshipNote(note?: unknown): string {
   let trimmed = note.trim();
   if (!trimmed) return '';
 
-  if (/^(?:unaccounted|unpaid)?\s*sponsorships?$/i.test(trimmed)) return '';
-  if (/^(?:unaccounted|unpaid)$/i.test(trimmed)) return '';
   if (/^actually\s*sponsored$/i.test(trimmed)) return '';
   if (/^pending\s*verification$/i.test(trimmed)) return '';
   if (/^(?:(?:from|in)\s+)?(?:taxi|vehicle|bus)\s*\d+$/i.test(trimmed)) return '';
   if (/^vehicle:\s*.*$/i.test(trimmed)) return '';
 
-  // Pattern: "Unaccounted Sponsorship (from ...)"
-  if (/^unaccounted\s*sponsorship\s*\(from\s*[^)]+\)$/i.test(trimmed)) return '';
-
   const mReported = trimmed.match(/^(?:unaccounted|unpaid)\s*sponsorship\s*\(reported\s*sponsor:\s*(.*?)\)$/i);
   if (mReported && mReported[1]) {
     const inner = mReported[1].trim();
-    if (!inner || /^(?:unaccounted|unpaid|sponsorship)$/i.test(inner)) return '';
-    return cleanSponsorshipNote(inner);
+    if (!inner || /^(?:unaccounted|unpaid|sponsorship)$/i.test(inner)) return 'Unaccounted Sponsorship';
+    return inner;
   }
 
   const mColon = trimmed.match(/^(?:unaccounted|unpaid)\s*sponsorship:\s*(.*)$/i);
   if (mColon && mColon[1]) {
     const after = mColon[1].trim();
-    if (!after || /^(?:unaccounted|unpaid|sponsorship)$/i.test(after)) return '';
-    return cleanSponsorshipNote(after);
+    if (!after || /^(?:unaccounted|unpaid|sponsorship)$/i.test(after)) return 'Unaccounted Sponsorship';
+    return after;
   }
 
   // Strip vehicle mentions like "(Taxi 1)", "(from Taxi 2)", "(in Vehicle 3)", "(Bus 4)"
@@ -1218,7 +1213,6 @@ function cleanSponsorshipNote(note?: unknown): string {
   // Strip general notes boilerplate if accidental full notes got attached
   trimmed = trimmed.replace(/(?:co-reps|cash collected|external sponsees|past cancellations)[^;.]*(?:[;.]|$)/gi, '').trim();
 
-  if (/^(?:unaccounted|unpaid)?\s*sponsorships?$/i.test(trimmed)) return '';
   if (/^(?:(?:from|in)\s+)?(?:taxi|vehicle|bus)\s*\d+$/i.test(trimmed)) return '';
 
   return trimmed;
@@ -1293,7 +1287,10 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
   let ledgerChanged = false;
 
   if (status === 'unpaid_sponsorship' || status === 'unaccounted_sponsorship') {
-    const noteText = cleanSponsorshipNote(spon.sponsor_note);
+    const rawNote = spon.sponsor_note ? cleanSponsorshipNote(spon.sponsor_note) : '';
+    const noteText = status === 'unaccounted_sponsorship'
+      ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
+      : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
 
     // Check if debt entry already exists for this sponsorship
     const existingLedgerIdx = ledger.findIndex((e) =>
@@ -1307,6 +1304,7 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
       ledger[existingLedgerIdx].sponsor_note = noteText;
       ledger[existingLedgerIdx].sponsored = true;
       ledger[existingLedgerIdx].structure_debt = auditDebt;
+      ledger[existingLedgerIdx].submitted_by = 'Cancellation Admin';
       spon.ledger_entry_id = ledger[existingLedgerIdx].id;
       ledgerChanged = true;
     } else {
@@ -1430,7 +1428,10 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
     spon.status_updated_at = now;
 
     if (status === 'unpaid_sponsorship' || status === 'unaccounted_sponsorship') {
-      const noteText = cleanSponsorshipNote(spon.sponsor_note);
+      const rawNote = spon.sponsor_note ? cleanSponsorshipNote(spon.sponsor_note) : '';
+      const noteText = status === 'unaccounted_sponsorship'
+        ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
+        : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
       const batchAuditDebt = getFareForDate(spon.date);
 
       const existingLedgerIdx = ledger.findIndex((e) =>
@@ -1443,6 +1444,7 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
         ledger[existingLedgerIdx].sponsor_note = noteText;
         ledger[existingLedgerIdx].sponsored = true;
         ledger[existingLedgerIdx].structure_debt = batchAuditDebt;
+        ledger[existingLedgerIdx].submitted_by = 'Cancellation Admin';
         spon.ledger_entry_id = ledger[existingLedgerIdx].id;
         ledgerChanged = true;
       } else {
@@ -1509,23 +1511,27 @@ app.get('/api/ledger', (req, res) => {
       return debt > 0;
     })
     .map((entry) => {
-      const isSpon = Boolean(entry.sponsored);
       const origGn = typeof entry.general_notes === 'string' ? entry.general_notes : '';
       const origSn = typeof entry.sponsor_note === 'string' ? entry.sponsor_note : '';
-      let cleanGn = cleanSponsorshipNote(origGn);
-      let cleanSn = cleanSponsorshipNote(origSn);
+      const isUnaccOrUnpaid = /unaccounted|did not pay|unpaid/i.test(origGn) || /unaccounted|did not pay|unpaid/i.test(origSn);
+      const isSpon = Boolean(entry.sponsored) || isUnaccOrUnpaid;
+      let cleanGn = origGn;
+      let cleanSn = origSn;
       const parsedDebt = parseDebtAmount(entry.structure_debt, entry.date as string);
 
       // If entry is not sponsored, clean out vehicle summaries mentioning other people's sponsorships
       if (!isSpon) {
         cleanSn = '';
         cleanGn = cleanPersonalAbsenteeNote(origGn);
-        if (/sponsorship|paid by|unaccounted/i.test(cleanGn)) {
+        if (/sponsorship|paid by/i.test(cleanGn)) {
           cleanGn = '';
         }
+      } else {
+        cleanGn = cleanSponsorshipNote(origGn);
+        cleanSn = cleanSponsorshipNote(origSn);
       }
 
-      if (cleanGn !== origGn || cleanSn !== origSn || entry.structure_debt !== parsedDebt) {
+      if (cleanGn !== origGn || cleanSn !== origSn || entry.structure_debt !== parsedDebt || entry.sponsored !== isSpon) {
         dirty = true;
         return {
           ...entry,
@@ -1543,18 +1549,19 @@ app.get('/api/ledger', (req, res) => {
 
   if (dirty) {
     ledger = ledger.map((e) => {
-      const isSpon = Boolean(e.sponsored);
-      const gn = typeof e.general_notes === 'string' ? e.general_notes : '';
-      const sn = typeof e.sponsor_note === 'string' ? e.sponsor_note : '';
-      let cleanedGn = (!isSpon) ? cleanPersonalAbsenteeNote(gn) : cleanSponsorshipNote(gn);
-      if (!isSpon && /sponsorship|paid by|unaccounted/i.test(cleanedGn)) {
+      const origGn = typeof e.general_notes === 'string' ? e.general_notes : '';
+      const origSn = typeof e.sponsor_note === 'string' ? e.sponsor_note : '';
+      const isUnaccOrUnpaid = /unaccounted|did not pay|unpaid/i.test(origGn) || /unaccounted|did not pay|unpaid/i.test(origSn);
+      const isSpon = Boolean(e.sponsored) || isUnaccOrUnpaid;
+      let cleanedGn = (!isSpon) ? cleanPersonalAbsenteeNote(origGn) : cleanSponsorshipNote(origGn);
+      if (!isSpon && /sponsorship|paid by/i.test(cleanedGn)) {
         cleanedGn = '';
       }
       return {
         ...e,
         sponsored: isSpon,
         general_notes: cleanedGn,
-        sponsor_note: isSpon ? cleanSponsorshipNote(sn) : '',
+        sponsor_note: isSpon ? cleanSponsorshipNote(origSn) : '',
       };
     });
     atomicWriteJson(LEDGER_FILE, ledger);
@@ -1589,6 +1596,22 @@ app.post('/api/ledger/manual', (req, res) => {
     return;
   }
 
+  const debtType = entry.debtType || (entry.sponsored ? 'unaccounted_sponsorship' : 'cancellation');
+  const isSponsored = debtType !== 'cancellation';
+  let noteText = '';
+  const rawNote = entry.notes ? String(entry.notes).trim() : (entry.general_notes ? String(entry.general_notes).trim() : '');
+  if (debtType === 'unaccounted_sponsorship') {
+    noteText = rawNote && !rawNote.toLowerCase().includes('unaccounted')
+      ? `Unaccounted Sponsorship: ${rawNote}`
+      : (rawNote || 'Unaccounted Sponsorship');
+  } else if (debtType === 'unpaid_sponsorship') {
+    noteText = rawNote && !rawNote.toLowerCase().includes('did not pay')
+      ? `Did not pay: ${rawNote}`
+      : (rawNote || 'Did not pay');
+  } else {
+    noteText = rawNote;
+  }
+
   const newEntry = {
     id: entry.id || `manual_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     manifest_key: entry.manifest_key || `manual-${Date.now()}`,
@@ -1598,13 +1621,13 @@ app.post('/api/ledger/manual', (req, res) => {
     stop: entry.stop || 'Manual Entry',
     structure: entry.structure || '',
     vehicle_name: entry.vehicle_name || 'Manual Entry',
-    submitted_by: entry.submitted_by || 'Admin',
-    rep_name: entry.rep_name || 'Admin',
+    submitted_by: 'Cancellation Admin',
+    rep_name: entry.rep_name || 'Cancellation Admin',
     license_plate: entry.license_plate || '',
-    sponsored: Boolean(entry.sponsored),
-    sponsor_note: cleanSponsorshipNote(entry.sponsor_note),
+    sponsored: isSponsored,
+    sponsor_note: isSponsored ? noteText : '',
     structure_debt: typeof entry.structure_debt === 'number' ? entry.structure_debt : getFareForDate(entry.date),
-    general_notes: cleanSponsorshipNote(entry.general_notes),
+    general_notes: noteText,
     submitted_at: entry.submitted_at || new Date().toISOString(),
   };
 
@@ -1664,8 +1687,21 @@ app.post('/api/ledger/update-debtor', (req, res) => {
 
   const cleanName = updates?.name ? String(updates.name).trim() : '';
   const rawStruct = updates?.structure ? String(updates.structure).trim() : 'No Structure';
-  const isSponsored = Boolean(updates?.isSponsored);
-  const notes = cleanSponsorshipNote(updates?.notes);
+  const debtType = updates?.debtType || (updates?.isSponsored ? 'unaccounted_sponsorship' : 'cancellation');
+  const isSponsored = debtType !== 'cancellation';
+  let noteText = '';
+  const rawNote = updates?.notes ? String(updates.notes).trim() : '';
+  if (debtType === 'unaccounted_sponsorship') {
+    noteText = rawNote && !rawNote.toLowerCase().includes('unaccounted')
+      ? `Unaccounted Sponsorship: ${rawNote}`
+      : (rawNote || 'Unaccounted Sponsorship');
+  } else if (debtType === 'unpaid_sponsorship') {
+    noteText = rawNote && !rawNote.toLowerCase().includes('did not pay')
+      ? `Did not pay: ${rawNote}`
+      : (rawNote || 'Did not pay');
+  } else {
+    noteText = rawNote;
+  }
 
   const instances = Array.isArray(updates?.instances) ? updates.instances : [];
   // If the person's debt for a particular date or service was reduced to zero, remove that debt
@@ -1698,8 +1734,9 @@ app.post('/api/ledger/update-debtor', (req, res) => {
             structure: rawStruct,
             structure_debt: validAmt,
             sponsored: isSponsored,
-            sponsor_note: notes,
-            general_notes: notes,
+            sponsor_note: isSponsored ? noteText : '',
+            general_notes: noteText,
+            submitted_by: 'Cancellation Admin',
           };
         }
       } else {
@@ -1714,13 +1751,13 @@ app.post('/api/ledger/update-debtor', (req, res) => {
           stop: template.stop || 'Structure Stop',
           structure: rawStruct,
           vehicle_name: template.vehicle_name || '—',
-          submitted_by: template.submitted_by || 'Admin Manual Edit',
+          submitted_by: 'Cancellation Admin',
           rep_name: template.rep_name || '',
           license_plate: template.license_plate || '',
           sponsored: isSponsored,
-          sponsor_note: notes,
+          sponsor_note: isSponsored ? noteText : '',
           structure_debt: validAmt,
-          general_notes: notes,
+          general_notes: noteText,
           submitted_at: new Date().toISOString(),
         });
       }

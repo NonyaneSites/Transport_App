@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { HeartHandshake, X, Search, Trash2, Plus, Check, Loader2, Bus, AlertCircle } from 'lucide-react';
+import { HeartHandshake, X, Search, Trash2, Plus, Check, Loader2, AlertCircle } from 'lucide-react';
 import type { Passenger, Vehicle, ExternalSponsee, ServiceType } from '@/lib/types';
 import { SERVICE_TYPES, getFareForDate } from '@/lib/types';
 import { loadManifest, vehicleRiders } from '@/lib/manifest';
@@ -38,6 +38,18 @@ interface SponseeCandidate {
   serviceLabel: string;
 }
 
+export interface SelectedSponseeItem {
+  id: string;
+  fullName: string;
+  vehicleId: string;
+  vehicleName: string;
+  serviceValue?: string;
+  serviceLabel?: string;
+  structure?: string;
+  stop?: string;
+  amount: number;
+}
+
 export function CrossTaxiSponsorshipModal({
   isOpen,
   onClose,
@@ -60,25 +72,20 @@ export function CrossTaxiSponsorshipModal({
   // Target Service Selection: defaults to 'CURRENT', or can be a specific ServiceType or 'ALL'
   const [targetServiceFilter, setTargetServiceFilter] = useState<string>('CURRENT');
   const [sponseeSearchQuery, setSponseeSearchQuery] = useState('');
-  const [selectedSponsee, setSelectedSponsee] = useState<{
-    id: string;
-    fullName: string;
-    vehicleId: string;
-    vehicleName: string;
-    serviceValue?: string;
-    serviceLabel?: string;
-    structure?: string;
-    stop?: string;
-  } | null>(null);
+  
+  // Multi-person selection state
+  const [selectedSponsees, setSelectedSponsees] = useState<SelectedSponseeItem[]>([]);
 
-  const [sponsorAmount, setSponsorAmount] = useState<number>(effectiveFare);
+  // Custom sponsee addition fallback
+  const [isAddingCustomSponsee, setIsAddingCustomSponsee] = useState(false);
+  const [customSponseeName, setCustomSponseeName] = useState('');
+  const [customSponseeTaxi, setCustomSponseeTaxi] = useState('');
+  const [customSponseeStructure, setCustomSponseeStructure] = useState('');
 
-  useEffect(() => {
-    setSponsorAmount(effectiveFare);
-  }, [effectiveFare]);
   const [sponsorNote, setSponsorNote] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   // Cache for loaded manifests across services for this date
   const [manifestCache, setManifestCache] = useState<Record<string, { vehicle: Vehicle; riders: Passenger[]; service: ServiceType; serviceLabel: string }[]>>({});
@@ -86,6 +93,11 @@ export function CrossTaxiSponsorshipModal({
 
   // Format current service label
   const activeServiceLabel = currentServiceLabel || SERVICE_TYPES.find((s) => s.value === currentService)?.label || 'Current Service';
+
+  // Total cash for currently selected sponsees
+  const totalSelectedCash = useMemo(() => {
+    return selectedSponsees.reduce((sum, s) => sum + (Number(s.amount) || effectiveFare), 0);
+  }, [selectedSponsees, effectiveFare]);
 
   // Load vehicles created by admin for a selected service on this date
   useEffect(() => {
@@ -220,17 +232,79 @@ export function CrossTaxiSponsorshipModal({
       const structMatch = c.passenger.structure ? c.passenger.structure.toLowerCase().includes(query) : false;
       const vehMatch = c.vehicle.name.toLowerCase().includes(query);
       return nameMatch || structMatch || vehMatch;
-    }).slice(0, 12);
+    }).slice(0, 20);
   }, [candidatePool, sponseeSearchQuery]);
 
   const totalExternalCash = useMemo(() => {
     return externalSponsees.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
   }, [externalSponsees]);
 
+  // Toggle or add candidate to selected list
+  function toggleCandidate(candidate: SponseeCandidate) {
+    setErrorMsg(null);
+    const candidateId = String(candidate.passenger.id);
+    const existingIndex = selectedSponsees.findIndex((s) => s.id === candidateId);
+
+    if (existingIndex >= 0) {
+      // Remove
+      setSelectedSponsees((prev) => prev.filter((_, idx) => idx !== existingIndex));
+    } else {
+      // Add
+      const newItem: SelectedSponseeItem = {
+        id: candidateId,
+        fullName: candidate.passenger.fullName,
+        vehicleId: candidate.vehicle.id,
+        vehicleName: candidate.vehicle.name,
+        serviceValue: candidate.serviceValue,
+        serviceLabel: candidate.serviceLabel,
+        structure: candidate.passenger.structure,
+        stop: candidate.passenger.stop,
+        amount: effectiveFare,
+      };
+      setSelectedSponsees((prev) => [...prev, newItem]);
+    }
+  }
+
+  function handleAddCustomSponsee() {
+    if (!customSponseeName.trim()) {
+      setErrorMsg('Please enter a sponsee passenger name.');
+      return;
+    }
+    const cleanTaxi = customSponseeTaxi.trim() || 'Other Vehicle';
+    const fakeId = `custom-sponsee-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const newItem: SelectedSponseeItem = {
+      id: fakeId,
+      fullName: customSponseeName.trim(),
+      vehicleId: '',
+      vehicleName: cleanTaxi,
+      serviceValue: targetServiceFilter !== 'CURRENT' && targetServiceFilter !== 'ALL' ? targetServiceFilter : currentService,
+      serviceLabel: activeServiceLabel,
+      structure: customSponseeStructure.trim() || undefined,
+      amount: effectiveFare,
+    };
+    setSelectedSponsees((prev) => [...prev, newItem]);
+    setCustomSponseeName('');
+    setCustomSponseeTaxi('');
+    setCustomSponseeStructure('');
+    setIsAddingCustomSponsee(false);
+  }
+
+  function updateSponseeAmount(id: string, amount: number) {
+    setSelectedSponsees((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, amount: Math.max(0, amount) } : s))
+    );
+  }
+
+  function removeSelectedSponsee(id: string) {
+    setSelectedSponsees((prev) => prev.filter((s) => s.id !== id));
+  }
+
   if (!isOpen) return null;
 
   async function handleAdd() {
     setErrorMsg(null);
+    setSuccessMsg(null);
+
     let finalPayer = '';
     if (payerMode === 'select' && selectedPayerId) {
       finalPayer = thisVehicleRiders.find((r) => String(r.id) === String(selectedPayerId))?.fullName || '';
@@ -241,33 +315,40 @@ export function CrossTaxiSponsorshipModal({
       finalPayer = `Passenger in ${thisVehicleName || 'this vehicle'}`;
     }
 
-    if (!selectedSponsee) {
-      setErrorMsg('Please search and select the specific passenger allocated by admin in their vehicle.');
+    if (selectedSponsees.length === 0) {
+      setErrorMsg('Please select at least 1 passenger to sponsor.');
       return;
     }
 
     try {
       setIsSubmitting(true);
-      await onAddExternalSponsorship({
-        payerId: selectedPayerId || undefined,
-        payerName: finalPayer,
-        sponseeId: selectedSponsee.id,
-        sponseeName: selectedSponsee.fullName,
-        taxiName: selectedSponsee.vehicleName,
-        targetVehicleId: selectedSponsee.vehicleId,
-        targetService: selectedSponsee.serviceValue,
-        targetServiceLabel: selectedSponsee.serviceLabel,
-        amount: sponsorAmount > 0 ? sponsorAmount : effectiveFare,
-        note: sponsorNote.trim() || undefined,
-      });
 
-      // Reset form
-      setSelectedPayerId('');
-      setCustomPayerName('');
-      setSponseeSearchQuery('');
-      setSelectedSponsee(null);
-      setSponsorAmount(effectiveFare);
-      setSponsorNote('');
+      // Sponsor ALL selected people
+      for (const sponsee of selectedSponsees) {
+        await onAddExternalSponsorship({
+          payerId: selectedPayerId || undefined,
+          payerName: finalPayer,
+          sponseeId: sponsee.id.startsWith('custom-') ? undefined : sponsee.id,
+          sponseeName: sponsee.fullName,
+          taxiName: sponsee.vehicleName,
+          targetVehicleId: sponsee.vehicleId || undefined,
+          targetService: sponsee.serviceValue,
+          targetServiceLabel: sponsee.serviceLabel,
+          amount: sponsee.amount > 0 ? sponsee.amount : effectiveFare,
+          note: sponsorNote.trim() || undefined,
+        });
+      }
+
+      setSuccessMsg(`✓ Successfully sponsored ${selectedSponsees.length} passenger${selectedSponsees.length > 1 ? 's' : ''}!`);
+      setTimeout(() => {
+        setSuccessMsg(null);
+        // Reset form
+        setSelectedPayerId('');
+        setCustomPayerName('');
+        setSponseeSearchQuery('');
+        setSelectedSponsees([]);
+        setSponsorNote('');
+      }, 1500);
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : 'Failed to record sponsorship');
     } finally {
@@ -277,7 +358,7 @@ export function CrossTaxiSponsorshipModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-3 backdrop-blur-sm animate-fade-in">
-      <div className="card max-h-[92vh] w-full max-w-lg overflow-y-auto border-amber-500/40 bg-card p-4 sm:p-5 shadow-2xl space-y-4">
+      <div className="card max-h-[92vh] w-full max-w-xl overflow-y-auto border-amber-500/40 bg-card p-4 sm:p-5 shadow-2xl space-y-4">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-line pb-3">
           <div className="flex items-center gap-2">
@@ -294,7 +375,7 @@ export function CrossTaxiSponsorshipModal({
                 )}
               </h2>
               <p className="text-[11px] text-muted">
-                Collect fare cash in <span className="text-amber-300 font-semibold">{thisVehicleName}</span> for a rider in another vehicle
+                Collect fare cash in <span className="text-amber-300 font-semibold">{thisVehicleName}</span> for one or multiple riders in other vehicles
               </p>
             </div>
           </div>
@@ -311,10 +392,10 @@ export function CrossTaxiSponsorshipModal({
         {externalSponsees.length > 0 && (
           <div className="space-y-2 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
             <div className="flex items-center justify-between text-xs font-bold text-amber-300">
-              <span>Active Sponsees from this Taxi:</span>
+              <span>Active Sponsees Paid from this Taxi:</span>
               <span className="font-mono text-ink">Total: +R{totalExternalCash}</span>
             </div>
-            <div className="divide-y divide-line/60">
+            <div className="divide-y divide-line/60 max-h-40 overflow-y-auto pr-1">
               {externalSponsees.map((s) => (
                 <div key={s.id} className="flex items-center justify-between py-2 text-xs">
                   <div className="min-w-0 pr-2">
@@ -351,15 +432,29 @@ export function CrossTaxiSponsorshipModal({
 
         {/* Add Sponsorship Form */}
         <div className="rounded-xl border border-line bg-card-2/50 p-3.5 text-xs space-y-3.5">
-          <div className="font-bold text-ink flex items-center gap-1.5 text-xs uppercase tracking-wide">
-            <Plus className="h-3.5 w-3.5 text-amber-400" />
-            <span>Record Sponsorship (Collect Cash Here)</span>
+          <div className="font-bold text-ink flex items-center justify-between text-xs uppercase tracking-wide">
+            <div className="flex items-center gap-1.5">
+              <Plus className="h-3.5 w-3.5 text-amber-400" />
+              <span>Record Cross Sponsorship (Multi-Person Supported)</span>
+            </div>
+            {selectedSponsees.length > 0 && (
+              <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/40">
+                {selectedSponsees.length} Selected (R{totalSelectedCash})
+              </span>
+            )}
           </div>
 
           {errorMsg && (
-            <div className="rounded-lg border border-crimson-500/40 bg-crimson-500/10 p-2.5 text-xs text-crimson-300 flex items-center gap-1.5">
+            <div className="rounded-lg border border-crimson-500/40 bg-crimson-500/10 p-2.5 text-xs text-crimson-300 flex items-center gap-1.5 animate-fade-in">
               <AlertCircle className="h-4 w-4 shrink-0" />
               <span>{errorMsg}</span>
+            </div>
+          )}
+
+          {successMsg && (
+            <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-2.5 text-xs text-emerald-300 flex items-center gap-1.5 animate-fade-in">
+              <Check className="h-4 w-4 shrink-0 text-emerald-400" />
+              <span>{successMsg}</span>
             </div>
           )}
 
@@ -417,7 +512,7 @@ export function CrossTaxiSponsorshipModal({
             )}
           </div>
 
-          {/* Step 2: Service Selection & Search Rider from Vehicles Admin Made */}
+          {/* Step 2: Service Selection & Search Rider(s) */}
           <div className="space-y-2 pt-1 border-t border-line/60">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
               <label className="block font-semibold text-ink text-[11px]">
@@ -434,7 +529,6 @@ export function CrossTaxiSponsorshipModal({
                 value={targetServiceFilter}
                 onChange={(e) => {
                   setTargetServiceFilter(e.target.value);
-                  setSelectedSponsee(null);
                 }}
                 className="input-field py-1.5 text-xs font-semibold bg-card cursor-pointer border-amber-500/40 text-amber-300"
               >
@@ -460,115 +554,216 @@ export function CrossTaxiSponsorshipModal({
               )}
             </div>
 
+            {/* Search Box */}
             <div className="space-y-1.5 pt-1">
-              <label className="block font-semibold text-ink text-[11px]">
-                Search passenger name (allocated to vehicle by admin):
-              </label>
+              <div className="flex items-center justify-between">
+                <label className="block font-semibold text-ink text-[11px]">
+                  Search passenger name(s) across vehicles:
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setIsAddingCustomSponsee(!isAddingCustomSponsee)}
+                  className="text-[11px] text-amber-300 hover:text-amber-200 underline font-medium"
+                >
+                  {isAddingCustomSponsee ? 'Hide Custom Entry' : '+ Custom Name Sponsee'}
+                </button>
+              </div>
+
+              {/* Custom Sponsee Input Section */}
+              {isAddingCustomSponsee && (
+                <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 space-y-2 animate-fade-in">
+                  <p className="text-[11px] text-amber-200 font-semibold">
+                    Add passenger manually if not in pre-allocated list:
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <input
+                      type="text"
+                      placeholder="Passenger Name (e.g. Sipho)"
+                      value={customSponseeName}
+                      onChange={(e) => setCustomSponseeName(e.target.value)}
+                      className="input-field py-1 text-xs"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Vehicle / Taxi Name (e.g. Taxi 2)"
+                      value={customSponseeTaxi}
+                      onChange={(e) => setCustomSponseeTaxi(e.target.value)}
+                      className="input-field py-1 text-xs"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Structure (e.g. S1)"
+                      value={customSponseeStructure}
+                      onChange={(e) => setCustomSponseeStructure(e.target.value)}
+                      className="input-field py-1 text-xs"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleAddCustomSponsee}
+                    className="btn-amber text-xs py-1 px-3 w-full font-bold"
+                  >
+                    Add to Sponsorship List (+R{effectiveFare})
+                  </button>
+                </div>
+              )}
+
               <div className="relative">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
                 <input
                   type="text"
                   value={sponseeSearchQuery}
-                  onChange={(e) => {
-                    setSponseeSearchQuery(e.target.value);
-                    if (selectedSponsee && selectedSponsee.fullName !== e.target.value) {
-                      setSelectedSponsee(null);
-                    }
-                  }}
-                  placeholder="Type name or structure (e.g. Sipho, Sarah, S2)..."
+                  onChange={(e) => setSponseeSearchQuery(e.target.value)}
+                  placeholder="Type name or structure (e.g. Sipho, Sarah, S2)... select multiple"
                   className="input-field py-1.5 pl-8 text-xs font-medium"
                 />
+                {sponseeSearchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSponseeSearchQuery('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted hover:text-ink text-xs"
+                  >
+                    Clear
+                  </button>
+                )}
               </div>
             </div>
 
-            {/* Selected Sponsee Confirmation Card */}
-            {selectedSponsee && (
-              <div className="rounded-lg border border-emerald-500/40 bg-emerald-950/30 p-2.5 text-xs flex items-center justify-between animate-fade-in">
-                <div className="flex items-center gap-2">
-                  <div className="flex h-7 w-7 items-center justify-center rounded-md bg-emerald-500/20 text-emerald-400 shrink-0">
-                    <Check className="h-4 w-4" />
+            {/* Selected Sponsees Cards (Multi-Person Basket) */}
+            {selectedSponsees.length > 0 && (
+              <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-3 space-y-2 animate-fade-in">
+                <div className="flex items-center justify-between text-xs font-bold text-amber-300">
+                  <div className="flex items-center gap-1.5">
+                    <Check className="h-4 w-4 text-emerald-400" />
+                    <span>Passengers to Sponsor ({selectedSponsees.length}):</span>
                   </div>
-                  <div>
-                    <div className="font-bold text-ink flex items-center gap-1.5 flex-wrap">
-                      <span>{selectedSponsee.fullName}</span>
-                      {selectedSponsee.structure && (
-                        <span className="rounded bg-card-2 px-1 py-0.2 text-[10px] text-muted border border-line">
-                          {selectedSponsee.structure}
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-[11px] text-emerald-300 flex items-center gap-1.5 mt-0.5">
-                      <Bus className="h-3 w-3" />
-                      <span>Allocated Vehicle: <strong>{selectedSponsee.vehicleName}</strong></span>
-                      {selectedSponsee.serviceLabel && (
-                        <span className="text-muted">· {selectedSponsee.serviceLabel}</span>
-                      )}
-                    </div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-ink">Total Cash: R{totalSelectedCash}</span>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedSponsees([])}
+                      className="text-[10px] text-crimson-300 hover:text-crimson-200 underline"
+                    >
+                      Clear all
+                    </button>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setSelectedSponsee(null)}
-                  className="text-xs text-muted hover:text-ink px-2 py-1 rounded border border-line bg-card shrink-0"
-                >
-                  Change
-                </button>
-              </div>
-            )}
 
-            {/* Live Search Candidate Results (Strictly from Admin-Created Vehicles) */}
-            {!selectedSponsee && sponseeSearchQuery.trim().length > 0 && (
-              <div className="rounded-lg border border-line bg-card p-1.5 space-y-1 max-h-48 overflow-y-auto">
-                {searchMatches.length > 0 ? (
-                  searchMatches.map(({ passenger, vehicle, serviceValue, serviceLabel }) => (
-                    <button
-                      key={`${serviceValue}-${vehicle.id}-${passenger.id}`}
-                      type="button"
-                      onClick={() => {
-                        setSelectedSponsee({
-                          id: passenger.id,
-                          fullName: passenger.fullName,
-                          vehicleId: vehicle.id,
-                          vehicleName: vehicle.name,
-                          serviceValue,
-                          serviceLabel,
-                          structure: passenger.structure,
-                          stop: passenger.stop,
-                        });
-                        setSponseeSearchQuery(passenger.fullName);
-                      }}
-                      className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-card-2 transition-colors border border-transparent hover:border-line"
+                <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                  {selectedSponsees.map((item) => (
+                    <div
+                      key={item.id}
+                      className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-card p-2 text-xs"
                     >
-                      <div className="min-w-0 pr-2">
-                        <div className="font-semibold text-ink flex items-center gap-1.5 flex-wrap">
-                          <span>{passenger.fullName}</span>
-                          {passenger.structure && (
-                            <span className="rounded bg-card-2 px-1 py-0.2 text-[9px] text-muted border border-line">
-                              {passenger.structure}
+                      <div className="min-w-0 flex-1">
+                        <div className="font-bold text-ink flex items-center gap-1.5 flex-wrap">
+                          <span>{item.fullName}</span>
+                          {item.structure && (
+                            <span className="rounded bg-card-2 px-1 py-0.2 text-[10px] text-muted border border-line">
+                              {item.structure}
+                            </span>
+                          )}
+                          <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300 border border-amber-500/30">
+                            In {item.vehicleName}
+                          </span>
+                          {item.serviceLabel && (
+                            <span className="text-[10px] text-muted truncate max-w-[120px]">
+                              · {item.serviceLabel}
                             </span>
                           )}
                         </div>
-                        <div className="text-[10px] text-muted truncate">
-                          Stop: {passenger.stop}
+                      </div>
+
+                      {/* Custom fare per person & remove */}
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <div className="flex items-center gap-1">
+                          <span className="text-[10px] text-muted font-mono">R</span>
+                          <input
+                            type="number"
+                            min={0}
+                            step={10}
+                            value={item.amount}
+                            onChange={(e) => updateSponseeAmount(item.id, Number(e.target.value))}
+                            className="w-14 rounded border border-line bg-card-2 px-1 py-0.5 text-xs font-mono font-bold text-ink text-right"
+                          />
                         </div>
+                        <button
+                          type="button"
+                          onClick={() => removeSelectedSponsee(item.id)}
+                          className="rounded p-1 text-muted hover:text-crimson-300 hover:bg-card-2 transition-colors"
+                          title="Remove from list"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
                       </div>
-                      <div className="flex flex-col items-end gap-0.5 shrink-0">
-                        <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/30">
-                          {vehicle.name}
-                        </span>
-                        {serviceLabel && (
-                          <span className="text-[9px] text-muted truncate max-w-[130px]">
-                            {serviceLabel}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Live Search Candidate Results with Multi-Select checkmarks */}
+            {sponseeSearchQuery.trim().length > 0 && (
+              <div className="rounded-lg border border-line bg-card p-1.5 space-y-1 max-h-52 overflow-y-auto">
+                <div className="text-[10px] text-muted font-semibold uppercase px-2 py-0.5">
+                  Click to select / unselect candidates ({searchMatches.length} matching):
+                </div>
+                {searchMatches.length > 0 ? (
+                  searchMatches.map((candidate) => {
+                    const isSelected = selectedSponsees.some((s) => s.id === String(candidate.passenger.id));
+                    return (
+                      <button
+                        key={`${candidate.serviceValue}-${candidate.vehicle.id}-${candidate.passenger.id}`}
+                        type="button"
+                        onClick={() => toggleCandidate(candidate)}
+                        className={`flex w-full items-center justify-between rounded px-2.5 py-1.5 text-left text-xs transition-colors border ${
+                          isSelected
+                            ? 'bg-amber-500/20 border-amber-500/60 text-amber-200'
+                            : 'hover:bg-card-2 border-transparent hover:border-line'
+                        }`}
+                      >
+                        <div className="min-w-0 pr-2 flex items-center gap-2">
+                          <div
+                            className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                              isSelected
+                                ? 'bg-amber-500 border-amber-500 text-black'
+                                : 'border-line text-transparent'
+                            }`}
+                          >
+                            <Check className="h-3 w-3 stroke-[3]" />
+                          </div>
+                          <div>
+                            <div className="font-semibold text-ink flex items-center gap-1.5 flex-wrap">
+                              <span>{candidate.passenger.fullName}</span>
+                              {candidate.passenger.structure && (
+                                <span className="rounded bg-card-2 px-1 py-0.2 text-[9px] text-muted border border-line">
+                                  {candidate.passenger.structure}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-muted truncate">
+                              Stop: {candidate.passenger.stop || 'Standard'}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex flex-col items-end gap-0.5 shrink-0">
+                          <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/30">
+                            {candidate.vehicle.name}
                           </span>
-                        )}
-                      </div>
-                    </button>
-                  ))
+                          {candidate.serviceLabel && (
+                            <span className="text-[9px] text-muted truncate max-w-[130px]">
+                              {candidate.serviceLabel}
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })
                 ) : (
                   <div className="p-3 text-center text-xs text-muted space-y-1">
                     <p className="font-semibold text-ink">No passenger found matching "{sponseeSearchQuery.trim()}"</p>
                     <p className="text-[11px] text-muted">
-                      Only passengers allocated to a vehicle by the admin for this service will appear here. If their name wasn't added by the admin, they cannot be selected.
+                      Use the "+ Custom Name Sponsee" button above if you need to sponsor someone not in the system yet.
                     </p>
                   </div>
                 )}
@@ -576,38 +771,25 @@ export function CrossTaxiSponsorshipModal({
             )}
           </div>
 
-          {/* Step 3: Fare & Note */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 border-t border-line/60">
-            <div>
-              <label className="block font-semibold text-ink text-[11px] mb-1">Fare Cash Collected (R):</label>
-              <input
-                type="number"
-                min={0}
-                step={10}
-                value={sponsorAmount}
-                onChange={(e) => setSponsorAmount(Math.max(0, Number(e.target.value)))}
-                className="input-field py-1.5 text-xs font-mono font-bold"
-              />
-            </div>
-            <div>
-              <label className="block font-semibold text-ink text-[11px] mb-1">Optional Note:</label>
-              <input
-                type="text"
-                value={sponsorNote}
-                onChange={(e) => setSponsorNote(e.target.value)}
-                placeholder="e.g. Brother paying for sister"
-                className="input-field py-1.5 text-xs"
-              />
-            </div>
+          {/* Step 3: Optional General Note */}
+          <div className="pt-1 border-t border-line/60">
+            <label className="block font-semibold text-ink text-[11px] mb-1">Optional Note for All Sponsees:</label>
+            <input
+              type="text"
+              value={sponsorNote}
+              onChange={(e) => setSponsorNote(e.target.value)}
+              placeholder="e.g. Cell leader paying for attendees / Parent paying for family"
+              className="input-field py-1.5 text-xs"
+            />
           </div>
 
-          {/* Submit Button (Only enabled when a real sponsee is picked from admin's vehicles) */}
+          {/* Submit Button (Multi-person enabled) */}
           <button
             type="button"
             onClick={handleAdd}
-            disabled={isSubmitting || !selectedSponsee}
+            disabled={isSubmitting || selectedSponsees.length === 0}
             className={`w-full py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm rounded-xl transition-all ${
-              selectedSponsee && !isSubmitting
+              selectedSponsees.length > 0 && !isSubmitting
                 ? 'btn-amber cursor-pointer hover:scale-[1.01]'
                 : 'bg-card-2 border border-line text-muted cursor-not-allowed opacity-60'
             }`}
@@ -615,15 +797,18 @@ export function CrossTaxiSponsorshipModal({
             {isSubmitting ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
-                <span>Auto-Sponsoring in {selectedSponsee?.vehicleName || 'vehicle'}…</span>
+                <span>Auto-Sponsoring {selectedSponsees.length} passenger{selectedSponsees.length > 1 ? 's' : ''}…</span>
               </>
-            ) : selectedSponsee ? (
+            ) : selectedSponsees.length > 0 ? (
               <>
                 <HeartHandshake className="h-4 w-4" />
-                <span>Collect +R{sponsorAmount} & Auto-Sponsor {selectedSponsee.fullName} in {selectedSponsee.vehicleName}</span>
+                <span>
+                  Collect +R{totalSelectedCash} & Auto-Sponsor {selectedSponsees.length}{' '}
+                  {selectedSponsees.length === 1 ? `(${selectedSponsees[0].fullName})` : `Passengers`}
+                </span>
               </>
             ) : (
-              <span>Select a passenger from an admin vehicle above to record sponsorship</span>
+              <span>Select one or more passengers above to record sponsorship</span>
             )}
           </button>
         </div>

@@ -188,31 +188,26 @@ export function cleanSponsorshipNote(note?: string | null): string {
   let trimmed = note.trim();
   if (!trimmed) return '';
 
-  // Exact boilerplate matches (case-insensitive)
-  if (/^(?:unaccounted|unpaid)?\s*sponsorships?$/i.test(trimmed)) return '';
-  if (/^(?:unaccounted|unpaid)$/i.test(trimmed)) return '';
+  // Exact boilerplate matches (case-insensitive) - do NOT strip 'unaccounted' or 'unpaid'
   if (/^actually\s*sponsored$/i.test(trimmed)) return '';
   if (/^pending\s*verification$/i.test(trimmed)) return '';
   if (/^(?:(?:from|in)\s+)?(?:taxi|vehicle|bus)\s*\d+$/i.test(trimmed)) return '';
   if (/^vehicle:\s*.*$/i.test(trimmed)) return '';
 
-  // Pattern: "Unaccounted Sponsorship (from ...)"
-  if (/^unaccounted\s*sponsorship\s*\(from\s*[^)]+\)$/i.test(trimmed)) return '';
-
   // Pattern: "Unaccounted Sponsorship (Reported sponsor: XYZ)"
   const mReported = trimmed.match(/^(?:unaccounted|unpaid)\s*sponsorship\s*\(reported\s*sponsor:\s*(.*?)\)$/i);
   if (mReported && mReported[1]) {
     const inner = mReported[1].trim();
-    if (!inner || /^(?:unaccounted|unpaid|sponsorship)$/i.test(inner)) return '';
-    return cleanSponsorshipNote(inner);
+    if (!inner || /^(?:unaccounted|unpaid|sponsorship)$/i.test(inner)) return 'Unaccounted Sponsorship';
+    return inner;
   }
 
   // Pattern: "Unaccounted Sponsorship: XYZ" or "Unpaid Sponsorship: XYZ"
   const mColon = trimmed.match(/^(?:unaccounted|unpaid)\s*sponsorship:\s*(.*)$/i);
   if (mColon && mColon[1]) {
     const after = mColon[1].trim();
-    if (!after || /^(?:unaccounted|unpaid|sponsorship)$/i.test(after)) return '';
-    return cleanSponsorshipNote(after);
+    if (!after || /^(?:unaccounted|unpaid|sponsorship)$/i.test(after)) return 'Unaccounted Sponsorship';
+    return after;
   }
 
   // Strip vehicle mentions like "(Taxi 1)", "(from Taxi 2)", "(in Vehicle 3)", "(Bus 4)"
@@ -226,9 +221,8 @@ export function cleanSponsorshipNote(note?: string | null): string {
   trimmed = trimmed.replace(/^(?:taxi|vehicle|bus)\s*\d+\s*[-–—:]\s*/gi, '').trim();
 
   // Strip general notes boilerplate if accidental full notes got attached
-  trimmed = trimmed.replace(/(?:co-reps|cash collected|external sponsees|past cancellations|sponsorships):?[^;.]*(?:[;.]|$)/gi, '').trim();
+  trimmed = trimmed.replace(/(?:co-reps|cash collected|external sponsees|past cancellations):?[^;.]*(?:[;.]|$)/gi, '').trim();
 
-  if (/^(?:unaccounted|unpaid)?\s*sponsorships?$/i.test(trimmed)) return '';
   if (/^(?:(?:from|in)\s+)?(?:taxi|vehicle|bus)\s*\d+$/i.test(trimmed)) return '';
 
   return trimmed;
@@ -786,6 +780,7 @@ export interface ManualLedgerEntryInput {
   date: string;
   notes?: string;
   isSponsored?: boolean;
+  debtType?: 'cancellation' | 'unaccounted_sponsorship' | 'unpaid_sponsorship';
 }
 
 /**
@@ -832,6 +827,19 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
   const defaultDebt = getFareForDate(input.date);
   const debtAmt = Number.isFinite(rawAmt) && rawAmt >= 0 ? rawAmt : defaultDebt;
 
+  const debtType = input.debtType || (input.isSponsored ? 'unaccounted_sponsorship' : 'cancellation');
+  const isSponsored = debtType !== 'cancellation';
+  let noteText = (input.notes || '').trim();
+  if (debtType === 'unaccounted_sponsorship') {
+    noteText = noteText && !noteText.toLowerCase().includes('unaccounted')
+      ? `Unaccounted Sponsorship: ${noteText}`
+      : (noteText || 'Unaccounted Sponsorship');
+  } else if (debtType === 'unpaid_sponsorship') {
+    noteText = noteText && !noteText.toLowerCase().includes('did not pay')
+      ? `Did not pay: ${noteText}`
+      : (noteText || 'Did not pay');
+  }
+
   const row = {
     manifest_key: manifestKey,
     date: normalizeDateToYMD(input.date) || input.date,
@@ -843,10 +851,10 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
     submitted_by: 'Cancellation Admin',
     rep_name: '',
     license_plate: '',
-    sponsored: !!input.isSponsored,
-    sponsor_note: input.isSponsored ? cleanSponsorshipNote(input.notes) : '',
+    sponsored: isSponsored,
+    sponsor_note: isSponsored ? noteText : '',
     structure_debt: debtAmt,
-    general_notes: cleanSponsorshipNote(input.notes),
+    general_notes: noteText,
   };
 
   try {
@@ -891,14 +899,34 @@ export async function updateDebtorWithInstances(
     name: string;
     structure: string;
     isSponsored?: boolean;
+    debtType?: 'cancellation' | 'unaccounted_sponsorship' | 'unpaid_sponsorship';
     notes?: string;
     instances: DebtorInstanceUpdateItem[];
   }
 ): Promise<void> {
   const structCode = normalizeStructureCode(updates.structure);
   const cleanName = updates.name.trim();
-  const isSponsored = !!updates.isSponsored;
-  const noteText = isSponsored ? cleanSponsorshipNote(updates.notes) : '';
+  const debtType = updates.debtType || (updates.isSponsored ? 'unaccounted_sponsorship' : 'cancellation');
+  const isSponsored = debtType !== 'cancellation';
+
+  let finalSponsorNote = '';
+  let finalGeneralNotes = '';
+  const rawNote = (updates.notes || '').trim();
+
+  if (debtType === 'unaccounted_sponsorship') {
+    finalSponsorNote = rawNote && !rawNote.toLowerCase().includes('unaccounted')
+      ? `Unaccounted Sponsorship: ${rawNote}`
+      : (rawNote || 'Unaccounted Sponsorship');
+    finalGeneralNotes = finalSponsorNote;
+  } else if (debtType === 'unpaid_sponsorship') {
+    finalSponsorNote = rawNote && !rawNote.toLowerCase().includes('did not pay')
+      ? `Did not pay: ${rawNote}`
+      : (rawNote || 'Did not pay');
+    finalGeneralNotes = finalSponsorNote;
+  } else {
+    finalSponsorNote = '';
+    finalGeneralNotes = rawNote;
+  }
 
   // If the person's debt for a particular date or service was reduced to zero, remove that debt
   const activeInstances = (updates.instances || []).filter((inst) => {
@@ -914,7 +942,8 @@ export async function updateDebtorWithInstances(
         name: cleanName,
         structure: structCode,
         isSponsored,
-        notes: noteText,
+        debtType,
+        notes: finalSponsorNote,
         instances: activeInstances,
       },
     });
@@ -959,8 +988,9 @@ export async function updateDebtorWithInstances(
           structure: structCode,
           structure_debt: validAmount,
           sponsored: isSponsored,
-          sponsor_note: noteText,
-          general_notes: noteText,
+          sponsor_note: finalSponsorNote,
+          general_notes: finalGeneralNotes,
+          submitted_by: 'Cancellation Admin',
         })
         .eq('id', inst.id);
     } else {
@@ -973,13 +1003,13 @@ export async function updateDebtorWithInstances(
         stop: templateEntry?.stop || 'Structure Stop',
         structure: structCode,
         vehicle_name: templateEntry?.vehicle_name || '—',
-        submitted_by: templateEntry?.submitted_by || 'Admin Manual Edit',
+        submitted_by: 'Cancellation Admin',
         rep_name: templateEntry?.rep_name || '',
         license_plate: templateEntry?.license_plate || '',
         sponsored: isSponsored,
-        sponsor_note: noteText,
+        sponsor_note: finalSponsorNote,
         structure_debt: validAmount,
-        general_notes: noteText,
+        general_notes: finalGeneralNotes,
       };
 
       const { data: newEntry } = await supabase
@@ -1522,39 +1552,45 @@ export function isEntrySponsorshipOrUnpaid(e: {
   sponsored?: boolean | null;
   general_notes?: string | null;
   sponsor_note?: string | null;
+  debtType?: string | null;
+  debt_type?: string | null;
+  status?: string | null;
 }): boolean {
   const idStr = String(e.id || '').toLowerCase();
-  const sn = (e.sponsor_note || '').toLowerCase().trim();
-  const rawGn = cleanPersonalAbsenteeNote(e.general_notes || '');
-  const gn = rawGn.toLowerCase().trim();
-  const src = (e.source || '').toLowerCase().trim();
+  const sn = String(e.sponsor_note || '').toLowerCase().trim();
+  const gn = String(e.general_notes || '').toLowerCase().trim();
+  const src = String(e.source || '').toLowerCase().trim();
+  const dt = String((e as Record<string, unknown>).debtType || (e as Record<string, unknown>).debt_type || (e as Record<string, unknown>).status || '').toLowerCase().trim();
 
   // 1. Unpaid ride debt ("Did not pay")
   if (
+    dt === 'unpaid_sponsorship' ||
     sn.includes('did not pay') ||
     sn.includes('unpaid ride') ||
-    gn.includes('did not pay') ||
-    gn.includes('unpaid ride')
-  ) {
-    return true;
-  }
-
-  // 2. Unaccounted sponsorships explicitly audited and added to debt ledger by the Cancellation Admin:
-  // These entries have id starting with ledger_sp_ or source = 'reported_sponsorship_audit' / 'cancellation_admin',
-  // or notes specifically stating "unaccounted sponsorship" or "unpaid sponsorship"
-  if (
-    idStr.startsWith('ledger_sp_') ||
-    src === 'reported_sponsorship_audit' ||
-    src === 'cancellation_admin' ||
-    sn.includes('unaccounted sponsorship') ||
-    gn.includes('unaccounted sponsorship') ||
     sn.includes('unpaid sponsorship') ||
+    gn.includes('did not pay') ||
+    gn.includes('unpaid ride') ||
     gn.includes('unpaid sponsorship')
   ) {
     return true;
   }
 
-  // Regular absentees (even if marked sponsored on vehicle check-in or having a sponsor note)
+  // 2. Unaccounted sponsorships explicitly audited or set by Cancellation Admin:
+  if (
+    dt === 'unaccounted_sponsorship' ||
+    idStr.startsWith('ledger_sp_') ||
+    src === 'reported_sponsorship_audit' ||
+    src === 'cancellation_admin' ||
+    sn.includes('unaccounted') ||
+    gn.includes('unaccounted') ||
+    sn.includes('sponsorship') ||
+    gn.includes('sponsorship') ||
+    (Boolean(e.sponsored) && (sn.length > 0 || gn.length > 0))
+  ) {
+    return true;
+  }
+
+  // Regular absentees (even if marked sponsored on vehicle check-in without admin auditing)
   // are NOT sent into the sponsorship section of the ledger!
   return false;
 }
@@ -1652,6 +1688,8 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
         new Set(group.map((e) => cleanSponsorshipNote(e.general_notes || e.sponsor_note)).filter(Boolean))
       ).join('; ');
 
+      const finalRowNotes = combinedNotes || (isSponsorshipOrUnpaid ? 'Unaccounted Sponsorship' : '');
+
       const displayName = latest.passenger_name || earliest.passenger_name;
 
       return {
@@ -1669,7 +1707,7 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
         entryIds: instances.map((ins) => ins.id),
         instances,
         isSponsorshipOrUnpaid,
-        notes: combinedNotes,
+        notes: finalRowNotes,
       };
     })
     .filter((r) => r.amount > 0 && r.instances.length > 0)
@@ -2225,6 +2263,118 @@ export async function withdrawReportedSponsorships(
 }
 
 /**
+ * Records a single individual sponsorship claim (e.g. when rep toggles Sponsored or adds cross-sponsorship).
+ * Instantly synchronizes with Supabase sponsorship_audits, server, and local storage.
+ */
+export async function recordSingleSponsorshipClaim(claim: {
+  passenger_id?: string;
+  passenger_name: string;
+  structure?: string;
+  stop?: string;
+  vehicle_name: string;
+  date: string;
+  service: string;
+  manifest_key?: string;
+  sponsor_note?: string;
+  rep_name?: string;
+  status?: SponsorshipStatus;
+}): Promise<void> {
+  const cleanName = sanitizePassengerDisplayName(claim.passenger_name);
+  if (!cleanName) return;
+  const cleanDate = normalizeDateToYMD(claim.date) || claim.date.split('_')[0];
+  const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const id = `sp_${cleanDate}_${normName}`;
+  const now = new Date().toISOString();
+
+  const record: ReportedSponsorship = {
+    id,
+    manifest_key: claim.manifest_key || `${cleanDate}_${claim.service.replace(/\s+/g, '_')}`,
+    date: cleanDate,
+    service: claim.service,
+    passenger_id: claim.passenger_id || '',
+    passenger_name: cleanName,
+    structure: normalizeStructureCode(claim.structure),
+    stop: (claim.stop || '').trim(),
+    vehicle_name: claim.vehicle_name || 'Vehicle',
+    rep_name: claim.rep_name || 'Transport Rep',
+    sponsor_note: cleanSponsorshipNote(claim.sponsor_note),
+    status: claim.status || 'pending',
+    submitted_at: now,
+  };
+
+  // 1. Save to Supabase (try SPONSORSHIPS_TABLE and fallback to reported_sponsorships)
+  try {
+    const { error } = await supabase.from(SPONSORSHIPS_TABLE).upsert([record], { onConflict: 'id' });
+    if (error) {
+      await supabase.from('reported_sponsorships').upsert([record], { onConflict: 'id' }).catch(() => {});
+    }
+  } catch (err) {
+    console.debug('[Ledger] Supabase single sponsorship claim note:', err);
+  }
+
+  // 2. Save to central server API
+  try {
+    await recordReportedSponsorshipsOnServer([record]);
+  } catch {
+    /* ignore server error */
+  }
+
+  // 3. Update localStorage
+  try {
+    const raw = localStorage.getItem(LOCAL_SPONSORSHIPS_KEY);
+    let list: ReportedSponsorship[] = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(list)) list = [];
+    const idx = list.findIndex((s) => s.id === record.id);
+    if (idx >= 0) {
+      list[idx] = { ...list[idx], ...record };
+    } else {
+      list.push(record);
+    }
+    list = cleanAndDeduplicateSponsorships(list);
+    localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(list));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: list }));
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Withdraws a single pending sponsorship claim when a rep un-toggles sponsored.
+ */
+export async function withdrawSingleSponsorshipClaim(
+  date: string,
+  passengerName: string
+): Promise<void> {
+  const cleanName = sanitizePassengerDisplayName(passengerName);
+  if (!cleanName) return;
+  const cleanDate = normalizeDateToYMD(date) || date.split('_')[0];
+  const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const id = `sp_${cleanDate}_${normName}`;
+
+  try {
+    await supabase.from(SPONSORSHIPS_TABLE).delete().eq('id', id).eq('status', 'pending');
+  } catch {
+    /* ignore */
+  }
+
+  try {
+    const raw = localStorage.getItem(LOCAL_SPONSORSHIPS_KEY);
+    if (raw) {
+      const list = JSON.parse(raw) as ReportedSponsorship[];
+      const filtered = list.filter((s) => !(s.id === id && s.status === 'pending'));
+      localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(filtered));
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: filtered }));
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
  * Retrieves all reported sponsorships for administrative verification.
  * Primary source of truth is the Supabase sponsorship_audits table.
  * Automatically harvests sponsorships from existing submitted manifests/drafts
@@ -2243,7 +2393,7 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
     console.debug('[Ledger] Server fetch sponsorships note:', err);
   }
 
-  // 2. Secondary: Supabase table sponsorship_audits
+  // 2. Secondary: Supabase table sponsorship_audits (and fallback to reported_sponsorships)
   try {
     const { data, error } = await supabase
       .from(SPONSORSHIPS_TABLE)
@@ -2252,6 +2402,15 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
 
     if (!error && Array.isArray(data) && data.length > 0) {
       list = cleanAndDeduplicateSponsorships([...list, ...(data as ReportedSponsorship[])]);
+    } else if (error) {
+      // Try fallback to reported_sponsorships table if sponsorship_audits had schema error
+      const { data: altData, error: altErr } = await supabase
+        .from('reported_sponsorships')
+        .select('*')
+        .order('submitted_at', { ascending: false });
+      if (!altErr && Array.isArray(altData) && altData.length > 0) {
+        list = cleanAndDeduplicateSponsorships([...list, ...(altData as ReportedSponsorship[])]);
+      }
     }
   } catch (err) {
     console.debug('[Ledger] Supabase listReportedSponsorships note:', err);
@@ -2286,6 +2445,22 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
     }>;
   }
   const manifestsTable = (mockStorage.getTable(MANIFESTS_TABLE) as unknown as StoredManifest[]) || [];
+
+  // Also harvest manifests directly from remote Supabase transport_manifests table so all historical signups are loaded
+  try {
+    const { data: remoteManifests } = await supabase
+      .from(MANIFESTS_TABLE)
+      .select('date, signups, vehicles');
+    if (Array.isArray(remoteManifests)) {
+      for (const rm of remoteManifests) {
+        if (!manifestsTable.some((m) => m.date === rm.date)) {
+          manifestsTable.push(rm as unknown as StoredManifest);
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
   const allKnownSignups: Array<{ id: string; fullName: string; stop?: string; structure?: string }> = [];
   for (const m of manifestsTable) {
     if (Array.isArray(m.signups)) {
@@ -2647,7 +2822,10 @@ export async function verifyBatchSponsorships(
     updatedCount++;
 
     if (status === 'unpaid_sponsorship' || status === 'unaccounted_sponsorship') {
-      const noteText = cleanSponsorshipNote(spon.sponsor_note);
+      const rawNote = spon.sponsor_note ? cleanSponsorshipNote(spon.sponsor_note) : '';
+      const noteText = status === 'unaccounted_sponsorship'
+        ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
+        : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
 
       // Check if debt entry already exists for this sponsorship
       const existingLedgerIdx = currentLedger.findIndex((e) =>

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Loader2, AlertTriangle, FileSpreadsheet, Search, Filter, XCircle,
   ChevronDown, ChevronRight, Upload, CheckCircle2, FileText, Banknote, X, UserPlus, Plus,
-  Pencil, Trash2, HeartHandshake, Clock, Check, CheckSquare, Square,
+  Pencil, Trash2, HeartHandshake, Clock, Check, CheckSquare, Square, Database, Copy,
 } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
@@ -43,6 +43,45 @@ function HighlightMatch({ text, query }: { text: string; query: string }) {
     </span>
   );
 }
+
+export const SUPABASE_SPONSORSHIPS_SQL = `-- Run in Supabase SQL Editor to create table for reported sponsorships:
+CREATE TABLE IF NOT EXISTS sponsorship_audits (
+  id text PRIMARY KEY,
+  manifest_key text NOT NULL DEFAULT '',
+  date text NOT NULL DEFAULT '',
+  service text NOT NULL DEFAULT '',
+  passenger_id text DEFAULT '',
+  passenger_name text NOT NULL,
+  structure text NOT NULL DEFAULT '',
+  stop text NOT NULL DEFAULT '',
+  vehicle_name text NOT NULL DEFAULT '',
+  rep_name text NOT NULL DEFAULT '',
+  sponsor_note text NOT NULL DEFAULT '',
+  status text NOT NULL DEFAULT 'pending', -- 'pending', 'actually_sponsored', 'unaccounted_sponsorship', 'unpaid_sponsorship'
+  status_updated_at timestamptz,
+  ledger_entry_id text DEFAULT '',
+  submitted_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE sponsorship_audits ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "anon_select_sponsorships" ON sponsorship_audits;
+CREATE POLICY "anon_select_sponsorships" ON sponsorship_audits FOR SELECT TO anon, authenticated USING (true);
+
+DROP POLICY IF EXISTS "anon_insert_sponsorships" ON sponsorship_audits;
+CREATE POLICY "anon_insert_sponsorships" ON sponsorship_audits FOR INSERT TO anon, authenticated WITH CHECK (true);
+
+DROP POLICY IF EXISTS "anon_update_sponsorships" ON sponsorship_audits;
+CREATE POLICY "anon_update_sponsorships" ON sponsorship_audits FOR UPDATE TO anon, authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "anon_delete_sponsorships" ON sponsorship_audits;
+CREATE POLICY "anon_delete_sponsorships" ON sponsorship_audits FOR DELETE TO anon, authenticated USING (true);
+
+CREATE INDEX IF NOT EXISTS idx_sponsorship_audits_date ON sponsorship_audits(date);
+CREATE INDEX IF NOT EXISTS idx_sponsorship_audits_status ON sponsorship_audits(status);
+CREATE INDEX IF NOT EXISTS idx_sponsorship_audits_structure ON sponsorship_audits(structure);
+
+CREATE OR REPLACE VIEW reported_sponsorships AS SELECT * FROM sponsorship_audits;`;
 
 export function LedgerPage() {
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
@@ -106,6 +145,8 @@ export function LedgerPage() {
   const [selectedSponIds, setSelectedSponIds] = useState<Set<string>>(new Set());
   const [stagedIndications, setStagedIndications] = useState<Record<string, SponsorshipStatus>>({});
   const [isBatchConfirming, setIsBatchConfirming] = useState(false);
+  const [showSupabaseSetupModal, setShowSupabaseSetupModal] = useState(false);
+  const [copiedSql, setCopiedSql] = useState(false);
 
   // Historical Cancellation Import
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -403,13 +444,21 @@ export function LedgerPage() {
     setEditName(row.name);
     setEditStructure(normalizeStructureCode(row.structure));
     setEditDebt(String(row.amount));
-    setEditNotes(cleanSponsorshipNote(row.notes));
     setEditIsSponsored(row.isSponsorshipOrUnpaid);
     if (row.isSponsorshipOrUnpaid) {
-      const isUnpaid = (row.notes || '').toLowerCase().includes('unpaid');
+      const lowerNotes = (row.notes || '').toLowerCase();
+      const isUnpaid = lowerNotes.includes('unpaid') || lowerNotes.includes('did not pay');
       setEditDebtType(isUnpaid ? 'unpaid_sponsorship' : 'unaccounted_sponsorship');
+      let cleanNote = (row.notes || '')
+        .replace(/^unaccounted\s*sponsorship\s*[:(]?\s*/i, '')
+        .replace(/^did\s*not\s*pay\s*[:(]?\s*/i, '')
+        .replace(/\)$/, '')
+        .trim();
+      if (/^(?:unaccounted|unpaid|sponsorship)$/i.test(cleanNote)) cleanNote = '';
+      setEditNotes(cleanNote);
     } else {
       setEditDebtType('cancellation');
+      setEditNotes(row.notes || '');
     }
     // Initialize editable instances list from row.instances with normalized dates
     const initialInstances: DebtorInstanceUpdateItem[] = row.instances.map((inst) => ({
@@ -531,7 +580,18 @@ export function LedgerPage() {
     setEditError(null);
     try {
       const isSpon = editDebtType !== 'cancellation';
-      const finalNotes = isSpon ? cleanSponsorshipNote(editNotes) : '';
+      let finalNotes = editNotes.trim();
+      if (editDebtType === 'unaccounted_sponsorship') {
+        finalNotes = finalNotes && !finalNotes.toLowerCase().includes('unaccounted')
+          ? `Unaccounted Sponsorship: ${finalNotes}`
+          : (finalNotes || 'Unaccounted Sponsorship');
+      } else if (editDebtType === 'unpaid_sponsorship') {
+        finalNotes = finalNotes && !finalNotes.toLowerCase().includes('did not pay')
+          ? `Did not pay: ${finalNotes}`
+          : (finalNotes || 'Did not pay');
+      } else {
+        finalNotes = cleanPersonalAbsenteeNote(finalNotes);
+      }
 
       // If the person's debt for a particular date or service was reduced to zero, remove that debt instance
       const nonZeroInstances = editInstances.filter((inst) => {
@@ -545,6 +605,7 @@ export function LedgerPage() {
           name: editName.trim(),
           structure: targetStructure,
           isSponsored: isSpon,
+          debtType: editDebtType,
           notes: finalNotes,
           instances: [],
         });
@@ -553,6 +614,7 @@ export function LedgerPage() {
           name: editName.trim(),
           structure: targetStructure,
           isSponsored: isSpon,
+          debtType: editDebtType,
           notes: finalNotes,
           instances: nonZeroInstances,
         });
@@ -640,7 +702,16 @@ export function LedgerPage() {
     setAddError(null);
     try {
       const isSpon = addDebtType !== 'cancellation';
-      const finalNotes = isSpon ? cleanSponsorshipNote(addNotes) : '';
+      let finalNotes = addNotes.trim();
+      if (addDebtType === 'unaccounted_sponsorship') {
+        finalNotes = finalNotes && !finalNotes.toLowerCase().includes('unaccounted')
+          ? `Unaccounted Sponsorship: ${finalNotes}`
+          : (finalNotes || 'Unaccounted Sponsorship');
+      } else if (addDebtType === 'unpaid_sponsorship') {
+        finalNotes = finalNotes && !finalNotes.toLowerCase().includes('did not pay')
+          ? `Did not pay: ${finalNotes}`
+          : (finalNotes || 'Did not pay');
+      }
 
       await addManualLedgerEntry({
         firstName: addFirstName,
@@ -651,6 +722,7 @@ export function LedgerPage() {
         date: addDate,
         notes: finalNotes,
         isSponsored: isSpon,
+        debtType: addDebtType,
       });
 
       const refreshed = await listLedgerEntries();
@@ -1393,20 +1465,26 @@ export function LedgerPage() {
                                       <div className="font-bold text-ink text-sm leading-snug">
                                         <HighlightMatch text={row.name} query={search} />
                                       </div>
-                                      {(cleanSponsorshipNote(row.notes) || row.instances.length > 1) && (
-                                        <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
-                                          {cleanSponsorshipNote(row.notes) && (
-                                            <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/15 text-amber-200 border border-amber-500/30">
-                                              {cleanSponsorshipNote(row.notes)}
+                                      {(() => {
+                                        const raw = row.notes || '';
+                                        const isUnpaid = raw.toLowerCase().includes('did not pay') || raw.toLowerCase().includes('unpaid');
+                                        const clean = cleanSponsorshipNote(raw);
+                                        const label = isUnpaid ? 'Did not pay' : 'Unaccounted';
+                                        const hasExtra = clean && clean !== 'Unaccounted Sponsorship' && clean !== 'Did not pay';
+                                        return (
+                                          <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                                            <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/15 text-amber-200 border border-amber-500/30">
+                                              <span className="font-semibold">{label}</span>
+                                              {hasExtra && <span className="text-amber-300/80 font-normal">({clean})</span>}
                                             </span>
-                                          )}
-                                          {row.instances.length > 1 && (
-                                            <span className="text-[10px] text-muted rounded bg-card-2 px-1.5 py-0.5 border border-line/60">
-                                              {row.instances.length}x
-                                            </span>
-                                          )}
-                                        </div>
-                                      )}
+                                            {row.instances.length > 1 && (
+                                              <span className="text-[10px] text-muted rounded bg-card-2 px-1.5 py-0.5 border border-line/60">
+                                                {row.instances.length}x
+                                              </span>
+                                            )}
+                                          </div>
+                                        );
+                                      })()}
                                     </div>
                                     <button
                                       type="button"
@@ -1501,13 +1579,19 @@ export function LedgerPage() {
                                         </div>
                                       </td>
                                       <td className="px-3.5 py-2.5 align-top">
-                                        {cleanSponsorshipNote(row.notes) ? (
-                                          <span className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-amber-500/15 text-amber-200 border border-amber-500/30">
-                                            {cleanSponsorshipNote(row.notes)}
-                                          </span>
-                                        ) : (
-                                          <span className="text-xs text-muted/50">—</span>
-                                        )}
+                                        {(() => {
+                                          const raw = row.notes || '';
+                                          const isUnpaid = raw.toLowerCase().includes('did not pay') || raw.toLowerCase().includes('unpaid');
+                                          const clean = cleanSponsorshipNote(raw);
+                                          const label = isUnpaid ? 'Did not pay' : 'Unaccounted Sponsorship';
+                                          const hasExtra = clean && clean !== 'Unaccounted Sponsorship' && clean !== 'Did not pay';
+                                          return (
+                                            <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium bg-amber-500/15 text-amber-200 border border-amber-500/30">
+                                              <span className="font-semibold">{label}</span>
+                                              {hasExtra && <span className="text-amber-300/80 font-normal">({clean})</span>}
+                                            </span>
+                                          );
+                                        })()}
                                       </td>
                                       <td className="px-3.5 py-2.5 align-top">
                                         <div className="flex items-center gap-1.5">
@@ -1567,15 +1651,26 @@ export function LedgerPage() {
           /* Reported Sponsorships Audit View (Grouped by Structure) */
           <div className="space-y-4 sm:space-y-6">
             {/* Sponsorship Summary Stats */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
-              <SummaryStat label="Total Reported" value={sponsorshipStats.total} />
-              <SummaryStat
-                label="Pending Audit"
-                value={sponsorshipStats.pending}
-                accent={sponsorshipStats.pending > 0 ? 'warning' : 'neutral'}
-              />
-              <SummaryStat label="Actually Sponsored" value={sponsorshipStats.confirmed} accent="success" />
-              <SummaryStat label="Added to Debt Ledger" value={sponsorshipStats.debt} accent="crimson" />
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3 flex-1">
+                <SummaryStat label="Total Reported" value={sponsorshipStats.total} />
+                <SummaryStat
+                  label="Pending Audit"
+                  value={sponsorshipStats.pending}
+                  accent={sponsorshipStats.pending > 0 ? 'warning' : 'neutral'}
+                />
+                <SummaryStat label="Actually Sponsored" value={sponsorshipStats.confirmed} accent="success" />
+                <SummaryStat label="Added to Debt Ledger" value={sponsorshipStats.debt} accent="crimson" />
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSupabaseSetupModal(true)}
+                className="flex items-center justify-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3.5 py-2.5 text-xs font-bold text-amber-300 hover:bg-amber-500/20 transition-all shadow-xs shrink-0 self-start md:self-auto"
+                title="View Supabase table schema SQL and setup instructions"
+              >
+                <Database className="h-4 w-4 text-amber-400" />
+                <span>Setup Supabase Table</span>
+              </button>
             </div>
 
             {/* Status Announcement Notice */}
@@ -2985,6 +3080,89 @@ export function LedgerPage() {
               ))}
             </datalist>
           </>
+        )}
+
+        {/* Supabase Sponsorships Table Setup Modal */}
+        {showSupabaseSetupModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 sm:p-4 backdrop-blur-sm animate-fade-in">
+            <div className="card max-h-[92vh] w-full max-w-2xl overflow-y-auto border-amber-500/50 bg-card p-4 sm:p-6 shadow-2xl space-y-4">
+              <div className="flex items-center justify-between border-b border-line pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-500/20 text-amber-300">
+                    <Database className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h2 className="font-display text-base sm:text-lg font-bold text-ink">
+                      Supabase Sponsorships Table Setup
+                    </h2>
+                    <p className="text-xs text-muted">
+                      Holds all riders claiming sponsorship with names, structures, vehicles, dates, services, and audit status
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowSupabaseSetupModal(false)}
+                  className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink transition-colors"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="space-y-3 text-xs text-muted">
+                <p className="text-ink font-medium">
+                  Run this SQL in your <strong>Supabase Dashboard → SQL Editor</strong> to create the table and view:
+                </p>
+
+                <div className="rounded-xl border border-line bg-card-2 p-3 font-mono text-[11px] text-amber-200 overflow-x-auto relative">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(SUPABASE_SPONSORSHIPS_SQL);
+                      setCopiedSql(true);
+                      setTimeout(() => setCopiedSql(false), 3000);
+                    }}
+                    className="absolute top-2.5 right-2.5 flex items-center gap-1 rounded-md bg-amber-500 px-2.5 py-1 text-[11px] font-bold text-black shadow-xs hover:bg-amber-400 transition-all cursor-pointer"
+                  >
+                    {copiedSql ? (
+                      <>
+                        <Check className="h-3.5 w-3.5" />
+                        <span>Copied!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3.5 w-3.5" />
+                        <span>Copy SQL</span>
+                      </>
+                    )}
+                  </button>
+                  <pre className="whitespace-pre-wrap pr-20">{SUPABASE_SPONSORSHIPS_SQL}</pre>
+                </div>
+
+                <div className="rounded-xl border border-line/70 bg-card-2/40 p-3 space-y-1.5">
+                  <h4 className="font-bold text-ink text-xs uppercase tracking-wide">Table Specifications:</h4>
+                  <ul className="list-disc list-inside space-y-1 text-muted text-[11px]">
+                    <li><strong className="text-ink font-mono">passenger_name</strong> — Names of people claiming sponsorship</li>
+                    <li><strong className="text-ink font-mono">structure</strong> — Cell / ministry structure (e.g. S1, S2, Z1)</li>
+                    <li><strong className="text-ink font-mono">vehicle_name</strong> — Specific vehicle/taxi they are travelling in</li>
+                    <li><strong className="text-ink font-mono">date & service</strong> — Date and service period (e.g. 2026-08-23, AM Service)</li>
+                    <li><strong className="text-ink font-mono">status</strong> — Cancellation admin status: <span className="text-amber-300">pending</span>, <span className="text-emerald-300">actually_sponsored (approved)</span>, or <span className="text-crimson-300">unpaid/unaccounted (denied)</span></li>
+                    <li><strong className="text-ink font-mono">sponsor_note & rep_name</strong> — Rep reporting the claim and sponsor details</li>
+                  </ul>
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-3 border-t border-line">
+                <button
+                  type="button"
+                  onClick={() => setShowSupabaseSetupModal(false)}
+                  className="btn-secondary text-xs px-4 py-2"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </main>
       <Footer />

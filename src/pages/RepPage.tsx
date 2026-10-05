@@ -25,7 +25,20 @@ import {
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
 import { vehicleRiders, saveVehicleToDb, loadManifest } from '@/lib/manifest';
-import { insertAbsentees, withdrawAbsentees, listLedgerEntries, settleLedgerEntries, extractServiceCode, recordReportedSponsorships, withdrawReportedSponsorships, cleanSponsorshipNote, parseDebtAmount, type LedgerEntry } from '@/lib/ledger';
+import {
+  insertAbsentees,
+  withdrawAbsentees,
+  listLedgerEntries,
+  settleLedgerEntries,
+  extractServiceCode,
+  recordReportedSponsorships,
+  withdrawReportedSponsorships,
+  recordSingleSponsorshipClaim,
+  withdrawSingleSponsorshipClaim,
+  cleanSponsorshipNote,
+  parseDebtAmount,
+  type LedgerEntry,
+} from '@/lib/ledger';
 import { supabase, MANIFESTS_TABLE } from '@/lib/supabase';
 import { type SubmitVehiclePayload } from '@/lib/types';
 import { isServerOnline, submitVehicleToServer, reopenVehicleOnServer } from '@/lib/serverApi';
@@ -1253,14 +1266,30 @@ export function RepPage() {
 
     const targetVeh = manifest.vehicles.find((v) => targetVehId ? v.id === targetVehId : v.name.toLowerCase() === resolvedTaxiName.toLowerCase());
     const finalTargetVehId = targetVeh?.id || targetVehId;
+    const isSelfTarget = resolvedTargetVehId ? resolvedTargetVehId === selectedVehicle.id : resolvedTaxiName.toLowerCase() === selectedVehicle.name.toLowerCase();
+
+    if (isSelfTarget && sponseeId) {
+      setSponsoredIds((prev) => new Set(prev).add(String(sponseeId)));
+      setNotes((prev) => ({ ...prev, [String(sponseeId)]: sponsorLabel }));
+    }
 
     const updatedVehicles = manifest.vehicles.map((v) => {
       if (v.id === selectedVehicle.id) {
+        const curSpon = (v.draftState?.sponsoredIds ?? []).map(String);
+        const nextSpon = isSelfTarget && sponseeId && !curSpon.includes(String(sponseeId))
+          ? [...curSpon, String(sponseeId)]
+          : curSpon;
+        const nextNotes = isSelfTarget && sponseeId
+          ? { ...(v.draftState?.notes || {}), [String(sponseeId)]: sponsorLabel }
+          : (v.draftState?.notes || {});
+
         return {
           ...v,
           draftState: {
             ...v.draftState,
             externalSponsees: nextExternalSponsees,
+            sponsoredIds: nextSpon,
+            notes: nextNotes,
             cashCollected: {
               base: baseCash,
               external: nextExternalSponsees.reduce((sum, s) => sum + (s.amount || FARE), 0),
@@ -1318,6 +1347,27 @@ export function RepPage() {
         clientId: clientIdRef.current,
         timestamp: Date.now(),
       });
+    }
+
+    // Persist claim immediately to Supabase sponsorship_audits & server so ledger page reported sponsorships has it in real-time
+    try {
+      const cleanDate = normalizeDateToYMD(date || manifest.date) || date;
+      const matchedP = manifest.signups.find((p) => String(p.id) === String(sponseeId) || p.fullName.toLowerCase() === data.sponseeName.toLowerCase());
+      await recordSingleSponsorshipClaim({
+        passenger_id: sponseeId,
+        passenger_name: data.sponseeName,
+        structure: matchedP?.structure || '',
+        stop: matchedP?.stop || '',
+        vehicle_name: resolvedTaxiName || data.taxiName,
+        date: cleanDate,
+        service: serviceLabel,
+        manifest_key: manifestKey(date, service),
+        sponsor_note: data.note ? `${data.note} (Paid by ${data.payerName} in ${selectedVehicle.name})` : `Paid by ${data.payerName} in ${selectedVehicle.name}`,
+        rep_name: repName || data.payerName || 'Co-rep',
+        status: 'pending',
+      });
+    } catch (e) {
+      console.warn('[RepPage] Instant recordSingleSponsorshipClaim note:', e);
     }
 
     const serviceSuffix = data.targetServiceLabel ? ` (${data.targetServiceLabel})` : '';
@@ -1706,9 +1756,29 @@ export function RepPage() {
         clientId: clientIdRef.current,
         timestamp: now,
       });
-      // Persistence happens via the debounced updateVehicleDraft sync (safe merge against server).
+
+      const targetRider = riders.find((r) => String(r.id) === sId || String(r.id) === String(passengerId));
+      if (targetRider) {
+        if (nextVal) {
+          recordSingleSponsorshipClaim({
+            passenger_id: sId,
+            passenger_name: targetRider.fullName,
+            structure: targetRider.structure || '',
+            stop: targetRider.stop || '',
+            vehicle_name: selectedVehicle?.name || 'Vehicle',
+            date: date || manifest?.date || '',
+            service: serviceLabel,
+            manifest_key: manifestKey(date, service),
+            sponsor_note: notes[sId] || targetRider.sponsorNote || '',
+            rep_name: repName.trim() || 'Transport Rep',
+            status: 'pending',
+          }).catch(() => {});
+        } else {
+          withdrawSingleSponsorshipClaim(date || manifest?.date || '', targetRider.fullName).catch(() => {});
+        }
+      }
     }
-  }, [selectedVehicleId, repName, broadcastLiveAction, externalSponsorLocks, riders, removeExternalSponsee]);
+  }, [selectedVehicleId, selectedVehicle, date, service, serviceLabel, manifest, notes, repName, broadcastLiveAction, externalSponsorLocks, riders, removeExternalSponsee]);
 
   const handleToggleUnpaid = useCallback((passengerId: string) => {
     const sId = String(passengerId);
@@ -4859,7 +4929,13 @@ function StopGroupedChecklist({
                       onToggleUnpaid={onToggleUnpaid}
                       onToggleAbsentPaid={onToggleAbsentPaid}
                       onSetNote={onSetNote}
-                      isSponsored={sponsoredIds.has(p.id) || sponsoredIds.has(String(p.id))}
+                      isSponsored={
+                        sponsoredIds.has(p.id) ||
+                        sponsoredIds.has(String(p.id)) ||
+                        Boolean(p.sponsored) ||
+                        Boolean(externalSponsorLocks?.has(String(p.id))) ||
+                        Boolean(externalSponsorLocks?.has(`name:${p.fullName.trim().toLowerCase()}`))
+                      }
                       isUnpaid={unpaidIds.has(p.id) || unpaidIds.has(String(p.id))}
                       noteText={notes[p.id] ?? notes[String(p.id)] ?? p.sponsorNote ?? p.unpaidNote ?? ''}
                       redirectedFrom={isRedirected ? origStop : undefined}
@@ -4940,7 +5016,13 @@ function AlphabeticalChecklist({
             onToggleUnpaid={onToggleUnpaid}
             onToggleAbsentPaid={onToggleAbsentPaid}
             onSetNote={onSetNote}
-            isSponsored={sponsoredIds.has(p.id) || sponsoredIds.has(String(p.id))}
+            isSponsored={
+              sponsoredIds.has(p.id) ||
+              sponsoredIds.has(String(p.id)) ||
+              Boolean(p.sponsored) ||
+              Boolean(externalSponsorLocks?.has(String(p.id))) ||
+              Boolean(externalSponsorLocks?.has(`name:${p.fullName.trim().toLowerCase()}`))
+            }
             isUnpaid={unpaidIds.has(p.id) || unpaidIds.has(String(p.id))}
             noteText={notes[p.id] ?? notes[String(p.id)] ?? p.sponsorNote ?? p.unpaidNote ?? ''}
             redirectedFrom={isRedirected ? origStop : undefined}
@@ -5065,6 +5147,21 @@ const PassengerRow = React.memo(function PassengerRow({
             {isAbsent && isAbsentPaid && (
               <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300 border border-emerald-500/40">
                 Paid (Absent)
+              </span>
+            )}
+            {(isSponsored || externalLock || Boolean(passenger.sponsored)) && (
+              <span
+                className="inline-flex items-center gap-1 rounded bg-amber-500/25 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/50 shadow-xs"
+                title={
+                  externalLock
+                    ? `Cross-sponsored: paid in ${externalLock.fromVehicleName} by ${externalLock.payerName}`
+                    : noteText
+                    ? `Sponsored: ${noteText}`
+                    : 'Sponsored rider'
+                }
+              >
+                <HeartHandshake className="h-3 w-3 text-amber-400" />
+                <span>SPONSORED{externalLock ? ` (In ${externalLock.fromVehicleName})` : ''}</span>
               </span>
             )}
             {!touched && !disabled && (

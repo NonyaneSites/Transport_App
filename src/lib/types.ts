@@ -635,7 +635,13 @@ export function orderVehicleStopsCanonical(stops: string[]): string[] {
   return sortByRouteSequence(stops, (s) => s);
 }
 
-export type SponsorshipStatus = 'pending' | 'actually_sponsored' | 'unpaid_sponsorship' | 'unaccounted_sponsorship';
+export type SponsorshipStatus =
+  | 'pending'
+  | 'actually_sponsored'
+  | 'unpaid_sponsorship'
+  | 'unaccounted_sponsorship'
+  | 'approved'
+  | 'denied';
 
 export interface ReportedSponsorship {
   id: string;
