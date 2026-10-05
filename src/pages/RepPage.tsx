@@ -2314,7 +2314,13 @@ export function RepPage() {
         : '';
 
       const absentees = riders
-        .filter((r) => (absentIds.has(r.id) || absentIds.has(String(r.id))) && !(absentPaidIds.has(r.id) || absentPaidIds.has(String(r.id))))
+        .filter((r) => {
+          const isPres = presentIds.has(r.id) || presentIds.has(String(r.id));
+          const isAbsPaid = absentPaidIds.has(r.id) || absentPaidIds.has(String(r.id));
+          const isExplicitAbs = absentIds.has(r.id) || absentIds.has(String(r.id));
+          // If explicitly marked absent, OR not marked present and not paid while absent
+          return (isExplicitAbs || !isPres) && !isAbsPaid;
+        })
         .map((r) => ({
           ...r,
           present: false,
@@ -2347,7 +2353,7 @@ export function RepPage() {
 
       const finalizedDraft: VehicleDraftState = {
         presentIds: Array.from(presentIds),
-        absentIds: Array.from(absentIds),
+        absentIds: Array.from(new Set([...absentIds, ...absentees.map((a) => a.id)])),
         absentPaidIds: Array.from(absentPaidIds),
         sponsoredIds: Array.from(sponsoredIds),
         unpaidIds: Array.from(unpaidIds),
@@ -2364,10 +2370,12 @@ export function RepPage() {
         updatedBy: clientIdRef.current,
       };
 
+      const thisVehicleRiderIdSet = new Set(riders.map((r) => String(r.id)));
+
       const updatedSignups = manifest.signups.map((p) => {
         const sId = String(p.id);
         const isPres = presentIds.has(p.id) || presentIds.has(sId);
-        const isAbs = absentIds.has(p.id) || absentIds.has(sId);
+        const isAbs = absentIds.has(p.id) || absentIds.has(sId) || (thisVehicleRiderIdSet.has(sId) && !isPres);
         const isSpon = sponsoredIds.has(p.id) || sponsoredIds.has(sId);
         const isUnpd = unpaidIds.has(p.id) || unpaidIds.has(sId);
         const pNote = (notes[p.id] ?? notes[sId] ?? p.sponsorNote ?? '').trim();

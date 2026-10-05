@@ -194,22 +194,6 @@ export function cleanSponsorshipNote(note?: string | null): string {
   if (/^(?:(?:from|in)\s+)?(?:taxi|vehicle|bus)\s*\d+$/i.test(trimmed)) return '';
   if (/^vehicle:\s*.*$/i.test(trimmed)) return '';
 
-  // Pattern: "Unaccounted Sponsorship (Reported sponsor: XYZ)"
-  const mReported = trimmed.match(/^(?:unaccounted|unpaid)\s*sponsorship\s*\(reported\s*sponsor:\s*(.*?)\)$/i);
-  if (mReported && mReported[1]) {
-    const inner = mReported[1].trim();
-    if (!inner || /^(?:unaccounted|unpaid|sponsorship)$/i.test(inner)) return 'Unaccounted Sponsorship';
-    return inner;
-  }
-
-  // Pattern: "Unaccounted Sponsorship: XYZ" or "Unpaid Sponsorship: XYZ"
-  const mColon = trimmed.match(/^(?:unaccounted|unpaid)\s*sponsorship:\s*(.*)$/i);
-  if (mColon && mColon[1]) {
-    const after = mColon[1].trim();
-    if (!after || /^(?:unaccounted|unpaid|sponsorship)$/i.test(after)) return 'Unaccounted Sponsorship';
-    return after;
-  }
-
   // Strip vehicle mentions like "(Taxi 1)", "(from Taxi 2)", "(in Vehicle 3)", "(Bus 4)"
   trimmed = trimmed.replace(/\s*\((?:(?:from|in)\s+)?(?:taxi|vehicle|bus)(?:\s*\d+)?(?:\s*-[^)]*)?\)/gi, '').trim();
 
@@ -671,47 +655,86 @@ export async function withdrawAbsentees(
 }
 
 export async function listLedgerEntries(): Promise<LedgerEntry[]> {
-  let entries: LedgerEntry[] = [];
+  const mergedMap = new Map<string, LedgerEntry>();
+  const seenInstances = new Set<string>();
+
   // 1. Primary: Central Express Server API
   try {
     const serverEntries = await listLedgerFromServer();
-    if (serverEntries && serverEntries.length > 0) {
-      entries = serverEntries;
+    if (Array.isArray(serverEntries) && serverEntries.length > 0) {
+      for (const e of serverEntries) {
+        if (e && e.id) {
+          mergedMap.set(String(e.id), e);
+          const baseDate = normalizeDateToYMD(e.date) || (e.manifest_key ? String(e.manifest_key).split('_')[0] : '');
+          const normName = sanitizePassengerDisplayName(e.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+          if (baseDate && normName) {
+            seenInstances.add(`${baseDate}::${normName}`);
+          }
+        }
+      }
     }
   } catch (err) {
     console.debug('[Ledger] Server fetch note:', err);
   }
 
-  // 2. Secondary: Supabase / Mock store
-  if (entries.length === 0) {
-    try {
-      const { data } = await supabase
-        .from(LEDGER_TABLE)
-        .select('*')
-        .order('submitted_at', { ascending: false });
-      if (data && Array.isArray(data)) {
-        entries = data as LedgerEntry[];
+  // 2. Secondary: Supabase / Mock store (only for entries not already loaded from the primary server)
+  try {
+    const { data } = await supabase
+      .from(LEDGER_TABLE)
+      .select('*')
+      .order('submitted_at', { ascending: false });
+    if (data && Array.isArray(data)) {
+      for (const e of data as LedgerEntry[]) {
+        if (!e || !e.id) continue;
+        const baseDate = normalizeDateToYMD(e.date) || (e.manifest_key ? String(e.manifest_key).split('_')[0] : '');
+        const normName = sanitizePassengerDisplayName(e.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+        const instanceKey = `${baseDate}::${normName}`;
+
+        if (!mergedMap.has(String(e.id)) && (!baseDate || !normName || !seenInstances.has(instanceKey))) {
+          mergedMap.set(String(e.id), e);
+          if (baseDate && normName) {
+            seenInstances.add(instanceKey);
+          }
+        }
       }
-    } catch (err) {
-      console.warn('[Ledger] Exception fetching ledger entries:', err);
     }
+  } catch (err) {
+    console.warn('[Ledger] Exception fetching ledger entries:', err);
   }
+
+  const entries = Array.from(mergedMap.values());
 
   // Ensure all structures are normalized to canonical codes, passenger names are cleanly formatted,
   // ensure debts are parsed into numbers, and exclude any entries whose debt has been reduced to zero
   return entries
     .filter((e) => {
-      const d = parseDebtAmount(e.structure_debt);
+      const rawVal = (e.structure_debt !== undefined && e.structure_debt !== null && Number(e.structure_debt) > 0)
+        ? e.structure_debt
+        : ((e as Record<string, unknown>).fee || e.structure_debt);
+      const d = parseDebtAmount(rawVal, e.date || e.manifest_key);
       return d > 0;
     })
-    .map((e) => ({
-      ...e,
-      structure: normalizeStructureCode(e.structure),
-      passenger_name: sanitizePassengerDisplayName(e.passenger_name) || (e.passenger_name || '').trim(),
-      structure_debt: parseDebtAmount(e.structure_debt),
-      general_notes: cleanSponsorshipNote(e.general_notes),
-      sponsor_note: cleanSponsorshipNote(e.sponsor_note),
-    }));
+    .map((e) => {
+      const rawVal = (e.structure_debt !== undefined && e.structure_debt !== null && Number(e.structure_debt) > 0)
+        ? e.structure_debt
+        : ((e as Record<string, unknown>).fee || e.structure_debt);
+      const isSpon = isEntrySponsorshipOrUnpaid(e);
+      const parsedDate = e.date || (e.manifest_key ? String(e.manifest_key).split('_')[0] : '');
+
+      return {
+        ...e,
+        date: parsedDate,
+        structure: normalizeStructureCode(e.structure),
+        passenger_name: sanitizePassengerDisplayName(e.passenger_name) || (e.passenger_name || '').trim(),
+        structure_debt: parseDebtAmount(rawVal, parsedDate),
+        general_notes: isSpon
+          ? (cleanSponsorshipNote(e.general_notes) || e.general_notes || '')
+          : cleanPersonalAbsenteeNote(e.general_notes),
+        sponsor_note: isSpon
+          ? (cleanSponsorshipNote(e.sponsor_note) || e.sponsor_note || '')
+          : '',
+      };
+    });
 }
 
 export async function listLedgerByDate(date: string): Promise<LedgerEntry[]> {
@@ -1577,6 +1600,7 @@ export function isEntrySponsorshipOrUnpaid(e: {
 
   // 2. Unaccounted sponsorships explicitly audited or set by Cancellation Admin:
   if (
+    Boolean(e.sponsored) ||
     dt === 'unaccounted_sponsorship' ||
     idStr.startsWith('ledger_sp_') ||
     src === 'reported_sponsorship_audit' ||
@@ -1584,8 +1608,7 @@ export function isEntrySponsorshipOrUnpaid(e: {
     sn.includes('unaccounted') ||
     gn.includes('unaccounted') ||
     sn.includes('sponsorship') ||
-    gn.includes('sponsorship') ||
-    (Boolean(e.sponsored) && (sn.length > 0 || gn.length > 0))
+    gn.includes('sponsorship')
   ) {
     return true;
   }
@@ -1607,7 +1630,10 @@ export function isEntrySponsorshipOrUnpaid(e: {
  *
  * Segregates entries into regular Cancellations vs Unaccounted Sponsorships & Unpaid.
  */
-export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedgerGroup[] {
+export function aggregateLedgerEntries(
+  entries: LedgerEntry[],
+  sortBy: 'name' | 'amount' | 'date' = 'name'
+): AggregatedLedgerGroup[] {
   const byStructure = new Map<string, LedgerEntry[]>();
   for (const e of entries) {
     // If debt for this entry is 0 or less, exclude it completely
@@ -1712,14 +1738,17 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
     })
     .filter((r) => r.amount > 0 && r.instances.length > 0)
     .sort((a, b) => {
-      // Order people with highest debt at the top (descending debt amount)
-      if (b.amount !== a.amount) {
-        return b.amount - a.amount;
+      if (sortBy === 'amount') {
+        if (b.amount !== a.amount) return b.amount - a.amount;
+        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
       }
-      // For tie-breaking debts: earliest date ascending (1st Jan first, 31st Dec last)
-      const dateDiff = (a.latestDate || '').localeCompare(b.latestDate || '');
-      if (dateDiff !== 0) return dateDiff;
-      return a.name.localeCompare(b.name);
+      if (sortBy === 'date') {
+        const dateDiff = (a.latestDate || '').localeCompare(b.latestDate || '');
+        if (dateDiff !== 0) return dateDiff;
+        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+      }
+      // Default: Alphabetical by Name (stable, predictable order that never shifts when editing debts)
+      return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
     });
 
     const reps: string[] = [];

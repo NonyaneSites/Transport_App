@@ -44,7 +44,69 @@ function HighlightMatch({ text, query }: { text: string; query: string }) {
   );
 }
 
-export const SUPABASE_SPONSORSHIPS_SQL = `-- Run in Supabase SQL Editor to create table for reported sponsorships:
+export const SUPABASE_SPONSORSHIPS_SQL = `-- Run in Supabase SQL Editor to set up Cancellation Ledger and Sponsorship Audits tables:
+
+-- 1. CANCELLATION LEDGER TABLE (Tracks all cancellation debts and unaccounted sponsorships)
+CREATE TABLE IF NOT EXISTS cancellation_ledger (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  manifest_key text NOT NULL DEFAULT '',
+  date text NOT NULL DEFAULT '',
+  service text NOT NULL DEFAULT '',
+  passenger_name text NOT NULL,
+  stop text NOT NULL DEFAULT 'Unknown',
+  structure text NOT NULL DEFAULT '',
+  vehicle_name text NOT NULL DEFAULT '',
+  submitted_by text NOT NULL DEFAULT '',
+  rep_name text NOT NULL DEFAULT '',
+  license_plate text NOT NULL DEFAULT '',
+  sponsored boolean NOT NULL DEFAULT false,
+  sponsor_note text NOT NULL DEFAULT '',
+  structure_debt numeric NOT NULL DEFAULT 40,
+  general_notes text NOT NULL DEFAULT '',
+  submitted_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Ensure all required columns exist if table was previously created
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'rep_name') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN rep_name text NOT NULL DEFAULT '';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'license_plate') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN license_plate text NOT NULL DEFAULT '';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'sponsored') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN sponsored boolean NOT NULL DEFAULT false;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'sponsor_note') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN sponsor_note text NOT NULL DEFAULT '';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'structure_debt') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN structure_debt numeric NOT NULL DEFAULT 40;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'general_notes') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN general_notes text NOT NULL DEFAULT '';
+  END IF;
+END $$;
+
+ALTER TABLE cancellation_ledger ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "anon_select_ledger" ON cancellation_ledger;
+CREATE POLICY "anon_select_ledger" ON cancellation_ledger FOR SELECT TO anon, authenticated USING (true);
+
+DROP POLICY IF EXISTS "anon_insert_ledger" ON cancellation_ledger;
+CREATE POLICY "anon_insert_ledger" ON cancellation_ledger FOR INSERT TO anon, authenticated WITH CHECK (true);
+
+DROP POLICY IF EXISTS "anon_update_ledger" ON cancellation_ledger;
+CREATE POLICY "anon_update_ledger" ON cancellation_ledger FOR UPDATE TO anon, authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "anon_delete_ledger" ON cancellation_ledger;
+CREATE POLICY "anon_delete_ledger" ON cancellation_ledger FOR DELETE TO anon, authenticated USING (true);
+
+CREATE INDEX IF NOT EXISTS idx_cancellation_ledger_date ON cancellation_ledger(date);
+CREATE INDEX IF NOT EXISTS idx_cancellation_ledger_structure ON cancellation_ledger(structure);
+CREATE INDEX IF NOT EXISTS idx_cancellation_ledger_manifest_key ON cancellation_ledger(manifest_key);
+
+-- 2. SPONSORSHIP AUDITS TABLE (Tracks all reported sponsorships and verification audits)
 CREATE TABLE IF NOT EXISTS sponsorship_audits (
   id text PRIMARY KEY,
   manifest_key text NOT NULL DEFAULT '',
@@ -1468,9 +1530,13 @@ export function LedgerPage() {
                                       {(() => {
                                         const raw = row.notes || '';
                                         const isUnpaid = raw.toLowerCase().includes('did not pay') || raw.toLowerCase().includes('unpaid');
-                                        const clean = cleanSponsorshipNote(raw);
+                                        const clean = cleanSponsorshipNote(raw)
+                                          .replace(/^unaccounted\s*sponsorship\s*[:(]?\s*/i, '')
+                                          .replace(/^did\s*not\s*pay\s*[:(]?\s*/i, '')
+                                          .replace(/\)$/, '')
+                                          .trim();
                                         const label = isUnpaid ? 'Did not pay' : 'Unaccounted';
-                                        const hasExtra = clean && clean !== 'Unaccounted Sponsorship' && clean !== 'Did not pay';
+                                        const hasExtra = clean && clean.toLowerCase() !== 'unaccounted sponsorship' && clean.toLowerCase() !== 'did not pay';
                                         return (
                                           <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
                                             <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/15 text-amber-200 border border-amber-500/30">
@@ -1582,9 +1648,13 @@ export function LedgerPage() {
                                         {(() => {
                                           const raw = row.notes || '';
                                           const isUnpaid = raw.toLowerCase().includes('did not pay') || raw.toLowerCase().includes('unpaid');
-                                          const clean = cleanSponsorshipNote(raw);
+                                          const clean = cleanSponsorshipNote(raw)
+                                            .replace(/^unaccounted\s*sponsorship\s*[:(]?\s*/i, '')
+                                            .replace(/^did\s*not\s*pay\s*[:(]?\s*/i, '')
+                                            .replace(/\)$/, '')
+                                            .trim();
                                           const label = isUnpaid ? 'Did not pay' : 'Unaccounted Sponsorship';
-                                          const hasExtra = clean && clean !== 'Unaccounted Sponsorship' && clean !== 'Did not pay';
+                                          const hasExtra = clean && clean.toLowerCase() !== 'unaccounted sponsorship' && clean.toLowerCase() !== 'did not pay';
                                           return (
                                             <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium bg-amber-500/15 text-amber-200 border border-amber-500/30">
                                               <span className="font-semibold">{label}</span>

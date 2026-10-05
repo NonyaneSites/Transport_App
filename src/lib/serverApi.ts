@@ -69,26 +69,10 @@ export interface ManifestSummary {
 
 const PENDING_QUEUE_KEY = 'crc_pending_submissions_queue';
 
-function checkIsLocalhost(): boolean {
-  if (typeof window === 'undefined') return false;
-  const host = window.location.hostname;
-  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '0.0.0.0';
-}
-
-// Server availability detection:
-// CRITICAL VERCEL CDN OPTIMISATION:
-// In production (Vercel, custom domain, or any remote hosting), there is NO Express server mounted at /api/*.
-// All database persistence and real-time synchronization run directly through Supabase via client-side SDK.
-// Any HTTP call to /api/* on Vercel hits Vercel's CDN Edge, gets rewritten to /index.html (HTML),
-// and burns monthly CDN requests.
-// Therefore, serverApi is STRICTLY disabled outside localhost.
 let serverAvailable: boolean | null = null;
 
 export function isServerOnline(): boolean {
   if (typeof window === 'undefined') return false;
-  if (!checkIsLocalhost()) {
-    return false;
-  }
   return serverAvailable !== false;
 }
 

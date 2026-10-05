@@ -1186,20 +1186,6 @@ function cleanSponsorshipNote(note?: unknown): string {
   if (/^(?:(?:from|in)\s+)?(?:taxi|vehicle|bus)\s*\d+$/i.test(trimmed)) return '';
   if (/^vehicle:\s*.*$/i.test(trimmed)) return '';
 
-  const mReported = trimmed.match(/^(?:unaccounted|unpaid)\s*sponsorship\s*\(reported\s*sponsor:\s*(.*?)\)$/i);
-  if (mReported && mReported[1]) {
-    const inner = mReported[1].trim();
-    if (!inner || /^(?:unaccounted|unpaid|sponsorship)$/i.test(inner)) return 'Unaccounted Sponsorship';
-    return inner;
-  }
-
-  const mColon = trimmed.match(/^(?:unaccounted|unpaid)\s*sponsorship:\s*(.*)$/i);
-  if (mColon && mColon[1]) {
-    const after = mColon[1].trim();
-    if (!after || /^(?:unaccounted|unpaid|sponsorship)$/i.test(after)) return 'Unaccounted Sponsorship';
-    return after;
-  }
-
   // Strip vehicle mentions like "(Taxi 1)", "(from Taxi 2)", "(in Vehicle 3)", "(Bus 4)"
   trimmed = trimmed.replace(/\s*\((?:(?:from|in)\s+)?(?:taxi|vehicle|bus)(?:\s*\d+)?(?:\s*-[^)]*)?\)/gi, '').trim();
 
@@ -1507,17 +1493,26 @@ app.get('/api/ledger', (req, res) => {
   // Filter out zero-debt items, parse numeric debt, and sanitize boilerplate notes
   const activeLedger = ledger
     .filter((entry) => {
-      const debt = parseDebtAmount(entry.structure_debt, entry.date as string);
+      const rawVal = (entry.structure_debt !== undefined && entry.structure_debt !== null && Number(entry.structure_debt) > 0)
+        ? entry.structure_debt
+        : (entry.fee || entry.structure_debt);
+      const debt = parseDebtAmount(rawVal, (entry.date as string) || (entry.manifest_key as string));
       return debt > 0;
     })
     .map((entry) => {
       const origGn = typeof entry.general_notes === 'string' ? entry.general_notes : '';
       const origSn = typeof entry.sponsor_note === 'string' ? entry.sponsor_note : '';
-      const isUnaccOrUnpaid = /unaccounted|did not pay|unpaid/i.test(origGn) || /unaccounted|did not pay|unpaid/i.test(origSn);
+      const dt = String(entry.debt_type || entry.debtType || '').toLowerCase();
+      const isUnaccOrUnpaid = /unaccounted|did not pay|unpaid/i.test(origGn) ||
+        /unaccounted|did not pay|unpaid/i.test(origSn) ||
+        dt.includes('sponsorship');
       const isSpon = Boolean(entry.sponsored) || isUnaccOrUnpaid;
       let cleanGn = origGn;
       let cleanSn = origSn;
-      const parsedDebt = parseDebtAmount(entry.structure_debt, entry.date as string);
+      const rawVal = (entry.structure_debt !== undefined && entry.structure_debt !== null && Number(entry.structure_debt) > 0)
+        ? entry.structure_debt
+        : (entry.fee || entry.structure_debt);
+      const parsedDebt = parseDebtAmount(rawVal, (entry.date as string) || (entry.manifest_key as string));
 
       // If entry is not sponsored, clean out vehicle summaries mentioning other people's sponsorships
       if (!isSpon) {
@@ -1527,14 +1522,21 @@ app.get('/api/ledger', (req, res) => {
           cleanGn = '';
         }
       } else {
-        cleanGn = cleanSponsorshipNote(origGn);
-        cleanSn = cleanSponsorshipNote(origSn);
+        cleanGn = cleanSponsorshipNote(origGn) || origGn;
+        cleanSn = cleanSponsorshipNote(origSn) || origSn;
+        if (!cleanSn && !cleanGn) {
+          cleanSn = 'Unaccounted Sponsorship';
+          cleanGn = 'Unaccounted Sponsorship';
+        }
       }
 
-      if (cleanGn !== origGn || cleanSn !== origSn || entry.structure_debt !== parsedDebt || entry.sponsored !== isSpon) {
+      const dateStr = (entry.date as string) || (entry.manifest_key ? String(entry.manifest_key).split('_')[0] : '');
+
+      if (cleanGn !== origGn || cleanSn !== origSn || entry.structure_debt !== parsedDebt || entry.sponsored !== isSpon || !entry.date) {
         dirty = true;
         return {
           ...entry,
+          date: entry.date || dateStr,
           sponsored: isSpon,
           structure_debt: parsedDebt,
           general_notes: cleanGn,
@@ -1543,6 +1545,7 @@ app.get('/api/ledger', (req, res) => {
       }
       return {
         ...entry,
+        date: entry.date || dateStr,
         structure_debt: parsedDebt,
       };
     });
@@ -1551,17 +1554,29 @@ app.get('/api/ledger', (req, res) => {
     ledger = ledger.map((e) => {
       const origGn = typeof e.general_notes === 'string' ? e.general_notes : '';
       const origSn = typeof e.sponsor_note === 'string' ? e.sponsor_note : '';
-      const isUnaccOrUnpaid = /unaccounted|did not pay|unpaid/i.test(origGn) || /unaccounted|did not pay|unpaid/i.test(origSn);
+      const dt = String(e.debt_type || e.debtType || '').toLowerCase();
+      const isUnaccOrUnpaid = /unaccounted|did not pay|unpaid/i.test(origGn) ||
+        /unaccounted|did not pay|unpaid/i.test(origSn) ||
+        dt.includes('sponsorship');
       const isSpon = Boolean(e.sponsored) || isUnaccOrUnpaid;
-      let cleanedGn = (!isSpon) ? cleanPersonalAbsenteeNote(origGn) : cleanSponsorshipNote(origGn);
+      let cleanedGn = (!isSpon) ? cleanPersonalAbsenteeNote(origGn) : (cleanSponsorshipNote(origGn) || origGn);
       if (!isSpon && /sponsorship|paid by/i.test(cleanedGn)) {
         cleanedGn = '';
       }
+      const cleanedSn = isSpon ? (cleanSponsorshipNote(origSn) || origSn || 'Unaccounted Sponsorship') : '';
+      const dateStr = (e.date as string) || (e.manifest_key ? String(e.manifest_key).split('_')[0] : '');
+      const rawVal = (e.structure_debt !== undefined && e.structure_debt !== null && Number(e.structure_debt) > 0)
+        ? e.structure_debt
+        : (e.fee || e.structure_debt);
+      const parsedDebt = parseDebtAmount(rawVal, dateStr);
+
       return {
         ...e,
+        date: e.date || dateStr,
+        structure_debt: parsedDebt,
         sponsored: isSpon,
         general_notes: cleanedGn,
-        sponsor_note: isSpon ? cleanSponsorshipNote(origSn) : '',
+        sponsor_note: cleanedSn,
       };
     });
     atomicWriteJson(LEDGER_FILE, ledger);
