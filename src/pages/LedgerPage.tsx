@@ -13,7 +13,7 @@ import {
   recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch, parseDebtAmount,
   updateDebtorWithInstances, normalizeDateToYMD, normalizeStructureCode, structureSortComparator,
   listReportedSponsorships, verifyBatchSponsorships, groupSponsorshipsByStructure, sanitizePassengerDisplayName,
-  cleanSponsorshipNote, cleanAndDeduplicateSponsorships,
+  cleanSponsorshipNote, cleanPersonalAbsenteeNote, cleanAndDeduplicateSponsorships,
   type DebtorInstanceUpdateItem,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
   type ReportedSponsorship, type SponsorshipStatus,
