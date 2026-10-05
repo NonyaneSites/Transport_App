@@ -656,7 +656,6 @@ export async function withdrawAbsentees(
 
 export async function listLedgerEntries(): Promise<LedgerEntry[]> {
   const mergedMap = new Map<string, LedgerEntry>();
-  const seenInstances = new Set<string>();
 
   // 1. Primary: Central Express Server API
   try {
@@ -665,11 +664,6 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
       for (const e of serverEntries) {
         if (e && e.id) {
           mergedMap.set(String(e.id), e);
-          const baseDate = normalizeDateToYMD(e.date) || (e.manifest_key ? String(e.manifest_key).split('_')[0] : '');
-          const normName = sanitizePassengerDisplayName(e.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
-          if (baseDate && normName) {
-            seenInstances.add(`${baseDate}::${normName}`);
-          }
         }
       }
     }
@@ -677,7 +671,7 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
     console.debug('[Ledger] Server fetch note:', err);
   }
 
-  // 2. Secondary: Supabase / Mock store (only for entries not already loaded from the primary server)
+  // 2. Secondary: Supabase / Mock store
   try {
     const { data } = await supabase
       .from(LEDGER_TABLE)
@@ -685,21 +679,129 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
       .order('submitted_at', { ascending: false });
     if (data && Array.isArray(data)) {
       for (const e of data as LedgerEntry[]) {
-        if (!e || !e.id) continue;
-        const baseDate = normalizeDateToYMD(e.date) || (e.manifest_key ? String(e.manifest_key).split('_')[0] : '');
-        const normName = sanitizePassengerDisplayName(e.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
-        const instanceKey = `${baseDate}::${normName}`;
-
-        if (!mergedMap.has(String(e.id)) && (!baseDate || !normName || !seenInstances.has(instanceKey))) {
+        if (e && e.id && !mergedMap.has(String(e.id))) {
           mergedMap.set(String(e.id), e);
-          if (baseDate && normName) {
-            seenInstances.add(instanceKey);
-          }
         }
       }
     }
   } catch (err) {
     console.warn('[Ledger] Exception fetching ledger entries:', err);
+  }
+
+  // 3. Self-healing harvest: recover any absentees from submitted vehicle manifests
+  try {
+    const manifestsTable: Array<{
+      date?: string;
+      signups?: Array<{ id: string; fullName: string; stop?: string; structure?: string; present?: boolean; sponsored?: boolean; didNotPay?: boolean }>;
+      vehicles?: Array<{
+        id: string;
+        name: string;
+        submitted?: boolean;
+        submittedAt?: string;
+        submittedBy?: string;
+        repName?: string;
+        licensePlate?: string;
+        riders?: string[];
+        draftState?: {
+          submitted?: boolean;
+          presentIds?: string[];
+          absentIds?: string[];
+          absentPaidIds?: string[];
+          sponsoredIds?: string[];
+          notes?: Record<string, string>;
+        };
+      }>;
+    }> = (mockStorage.getTable(MANIFESTS_TABLE) as unknown as typeof manifestsTable) || [];
+
+    try {
+      const { data: remoteManifests } = await supabase
+        .from(MANIFESTS_TABLE)
+        .select('date, signups, vehicles');
+      if (Array.isArray(remoteManifests)) {
+        for (const rm of remoteManifests) {
+          if (!manifestsTable.some((m) => m.date === rm.date)) {
+            manifestsTable.push(rm as unknown as typeof manifestsTable[0]);
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+
+    // Build lookup keys of existing ledger entries: date::normalizedName
+    const existingKeys = new Set<string>();
+    for (const e of mergedMap.values()) {
+      const baseDate = normalizeDateToYMD(e.date) || e.date?.split('_')[0] || e.manifest_key?.split('_')[0] || '';
+      const normName = sanitizePassengerDisplayName(e.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (baseDate && normName) {
+        existingKeys.add(`${baseDate}::${normName}`);
+      }
+    }
+
+    for (const m of manifestsTable) {
+      if (!m.date) continue;
+      const parsedDate = m.date.split('_')[0] || m.date;
+      const parsedService = m.date.split('_')[1]?.replace(/_/g, ' ') || 'Service';
+      const allSignups = Array.isArray(m.signups) ? m.signups : [];
+
+      for (const v of m.vehicles || []) {
+        const isVehSubmitted = Boolean(v.submitted || v.draftState?.submitted);
+        if (!isVehSubmitted) continue;
+
+        const vehicleRiderIds = new Set((v.riders || []).map(String));
+        const vehicleSignups = allSignups.filter((p) => vehicleRiderIds.has(String(p.id)));
+        const rep = v.repName || v.submittedBy || 'Transport Rep';
+        const licensePlate = v.licensePlate || '';
+        const presentIds = new Set((v.draftState?.presentIds || []).map(String));
+        const absentPaidIds = new Set((v.draftState?.absentPaidIds || []).map(String));
+        const absentIds = new Set((v.draftState?.absentIds || []).map(String));
+        const notes = v.draftState?.notes || {};
+
+        for (const p of vehicleSignups) {
+          const sId = String(p.id);
+          const isPresent = Boolean(p.present || presentIds.has(sId) || presentIds.has(p.id));
+          const isPaidAbsent = Boolean(absentPaidIds.has(sId) || absentPaidIds.has(p.id));
+          const isAbsent = Boolean(absentIds.has(sId) || absentIds.has(p.id) || !isPresent);
+
+          // If they were absent and did not pay while absent, they owe a cancellation debt
+          if (isAbsent && !isPaidAbsent) {
+            const cleanName = sanitizePassengerDisplayName(p.fullName);
+            if (!cleanName) continue;
+            const baseDate = normalizeDateToYMD(parsedDate) || parsedDate.split('_')[0];
+            const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+            const lookupKey = `${baseDate}::${normName}`;
+
+            if (!existingKeys.has(lookupKey)) {
+              const personalNote = cleanPersonalAbsenteeNote(notes[sId] || notes[p.id] || '');
+              const fare = getFareForDate(baseDate);
+              const recoveredEntry: LedgerEntry = {
+                id: `ledger_recovered_${baseDate}_${normName}`,
+                manifest_key: m.date,
+                date: baseDate,
+                service: parsedService,
+                passenger_name: cleanName,
+                stop: (p.stop || '').trim() || 'Unknown',
+                structure: normalizeStructureCode(p.structure),
+                vehicle_name: v.name || 'Vehicle',
+                submitted_by: rep,
+                rep_name: rep,
+                license_plate: licensePlate,
+                sponsored: false,
+                sponsor_note: '',
+                structure_debt: fare,
+                general_notes: personalNote,
+                submitted_at: v.submittedAt || new Date().toISOString(),
+              };
+
+              mergedMap.set(recoveredEntry.id, recoveredEntry);
+              existingKeys.add(lookupKey);
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.debug('[Ledger] Absentee harvest note:', err);
   }
 
   const entries = Array.from(mergedMap.values());
@@ -1630,10 +1732,7 @@ export function isEntrySponsorshipOrUnpaid(e: {
  *
  * Segregates entries into regular Cancellations vs Unaccounted Sponsorships & Unpaid.
  */
-export function aggregateLedgerEntries(
-  entries: LedgerEntry[],
-  sortBy: 'name' | 'amount' | 'date' = 'name'
-): AggregatedLedgerGroup[] {
+export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedgerGroup[] {
   const byStructure = new Map<string, LedgerEntry[]>();
   for (const e of entries) {
     // If debt for this entry is 0 or less, exclude it completely
@@ -1738,17 +1837,14 @@ export function aggregateLedgerEntries(
     })
     .filter((r) => r.amount > 0 && r.instances.length > 0)
     .sort((a, b) => {
-      if (sortBy === 'amount') {
-        if (b.amount !== a.amount) return b.amount - a.amount;
-        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+      // Order people with highest debt at the top (descending debt amount)
+      if (b.amount !== a.amount) {
+        return b.amount - a.amount;
       }
-      if (sortBy === 'date') {
-        const dateDiff = (a.latestDate || '').localeCompare(b.latestDate || '');
-        if (dateDiff !== 0) return dateDiff;
-        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
-      }
-      // Default: Alphabetical by Name (stable, predictable order that never shifts when editing debts)
-      return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+      // For tie-breaking debts: earliest date ascending (1st Jan first, 31st Dec last)
+      const dateDiff = (a.latestDate || '').localeCompare(b.latestDate || '');
+      if (dateDiff !== 0) return dateDiff;
+      return a.name.localeCompare(b.name);
     });
 
     const reps: string[] = [];
