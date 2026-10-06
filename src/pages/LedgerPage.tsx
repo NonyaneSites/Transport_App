@@ -2242,6 +2242,7 @@ export function LedgerPage() {
                                         onChange={(e) => {
                                           const nextStatus = e.target.value as SponsorshipStatus;
                                           handleSetStagedIndication(s.id, nextStatus);
+                                          handleConfirmIndications([s.id], nextStatus);
                                         }}
                                         className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold border transition-all cursor-pointer ${
                                           currentIndication === 'actually_sponsored'

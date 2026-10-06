@@ -599,17 +599,19 @@ export async function insertAbsentees(
         manifest_key: manifestKey,
         date,
         service: serviceLabel,
-        passenger_name: u.fullName,
+        passenger_name: sanitizePassengerDisplayName(u.fullName),
         stop: u.stop || '',
-        structure: u.structure || '',
+        structure: normalizeStructureCode(u.structure),
         vehicle_name: vehicleName,
         submitted_by: submittedBy,
         rep_name: repName,
         license_plate: licensePlate,
-        sponsored: false,
+        sponsored: true,
+        debt_type: 'unpaid_sponsorship',
         sponsor_note: u.unpaidNote ? `Did not pay: ${u.unpaidNote}` : 'Did not pay',
         structure_debt: effectiveFare,
-        general_notes: `Unpaid ride (Did not pay)${u.unpaidNote ? ` - ${u.unpaidNote}` : ''}`,
+        general_notes: `Did not pay${u.unpaidNote ? `: ${u.unpaidNote}` : ''}`,
+        source: 'reported_sponsorship_audit',
       });
     }
   }
@@ -708,6 +710,54 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
     }
   } catch (err) {
     console.warn('[Ledger] Exception fetching ledger entries:', err);
+  }
+
+  // 3. Reconcile any confirmed unaccounted or unpaid sponsorships from local storage audits
+  try {
+    const localSponRaw = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_SPONSORSHIPS_KEY) : null;
+    if (localSponRaw) {
+      const audits = JSON.parse(localSponRaw) as ReportedSponsorship[];
+      if (Array.isArray(audits)) {
+        for (const spon of audits) {
+          if (spon.status === 'unaccounted_sponsorship' || spon.status === 'unpaid_sponsorship') {
+            const cleanName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
+            const alreadyInMap = Array.from(mergedMap.values()).some((e) =>
+              (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
+              (e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanName && Boolean(e.sponsored))
+            );
+            if (!alreadyInMap) {
+              const rawNote = spon.sponsor_note ? cleanSponsorshipNote(spon.sponsor_note) : '';
+              const noteText = spon.status === 'unaccounted_sponsorship'
+                ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
+                : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
+              const effectiveDebt = getFareForDate(spon.date);
+              const entryId = spon.ledger_entry_id || `ledger_sp_${spon.id || Date.now()}`;
+              mergedMap.set(entryId, {
+                id: entryId,
+                manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+                date: normalizeDateToYMD(spon.date) || spon.date,
+                service: spon.service || 'Service',
+                passenger_name: sanitizePassengerDisplayName(spon.passenger_name),
+                stop: spon.stop || '',
+                structure: normalizeStructureCode(spon.structure),
+                vehicle_name: spon.vehicle_name || '—',
+                submitted_by: 'Cancellation Admin',
+                rep_name: spon.rep_name || '',
+                license_plate: '',
+                sponsored: true,
+                sponsor_note: noteText,
+                structure_debt: effectiveDebt,
+                general_notes: noteText,
+                source: 'reported_sponsorship_audit',
+                submitted_at: spon.submitted_at || new Date().toISOString(),
+              });
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    /* ignore local reconciliation errors */
   }
 
   const entries = Array.from(mergedMap.values());

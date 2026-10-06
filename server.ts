@@ -448,23 +448,26 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
 
   if (effectiveUnpaid.length > 0) {
     for (const u of effectiveUnpaid) {
-      if (!ledger.some((e) => e.manifest_key === key && e.passenger_name.toLowerCase() === u.fullName.toLowerCase())) {
+      const cleanName = sanitizePassengerDisplayName(u.fullName);
+      if (!ledger.some((e) => e.manifest_key === key && sanitizePassengerDisplayName(e.passenger_name as string).toLowerCase() === cleanName.toLowerCase())) {
         ledger.push({
           id: `ledger_unpaid_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
           manifest_key: key,
           date: parsedDate || key,
           service: serviceLabel || 'Service',
-          passenger_name: u.fullName,
+          passenger_name: cleanName,
           stop: u.stop || '',
-          structure: u.structure || '',
+          structure: normalizeStructureCode(u.structure),
           vehicle_name: targetVehicleName,
           submitted_by: (repName || '').trim(),
           rep_name: (repName || '').trim(),
           license_plate: (licensePlate || '').trim(),
-          sponsored: false,
+          sponsored: true,
+          debt_type: 'unpaid_sponsorship',
           sponsor_note: u.unpaidNote ? `Did not pay: ${u.unpaidNote}` : 'Did not pay',
           structure_debt: effectiveDebt,
-          general_notes: `Unpaid ride (Did not pay)${u.unpaidNote ? ` - ${u.unpaidNote}` : ''}`,
+          general_notes: `Did not pay${u.unpaidNote ? `: ${u.unpaidNote}` : ''}`,
+          source: 'reported_sponsorship_audit',
           submitted_at: nowIso,
         });
       }
@@ -844,6 +847,72 @@ function sanitizePassengerDisplayName(rawName: string): string {
   name = name.replace(/\s+/g, ' ').trim();
 
   return name;
+}
+
+// Helper to normalize structure codes
+function normalizeStructureCode(raw: string | null | undefined): string {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return 'No Structure';
+
+  const lower = trimmed.toLowerCase();
+
+  // 1. Unidentified variants
+  if (
+    lower === 'unidentified' ||
+    lower === 'sunidentified' ||
+    lower === 's-unidentified' ||
+    lower === 's_unidentified' ||
+    lower === 'unassigned'
+  ) {
+    return 'Unidentified';
+  }
+
+  // 2. No Structure variants
+  if (
+    lower === 'no structure' ||
+    lower === 'none' ||
+    lower === 'no struct' ||
+    lower === 'nostructure' ||
+    lower === 'unknown'
+  ) {
+    return 'No Structure';
+  }
+
+  // 3. FTV structures
+  if (lower === 'ftv' || lower === 'ftv 20' || lower === 'ftv20' || lower === 'ftv-20') {
+    return 'FTV 20';
+  }
+
+  // 4. Standard S structures (e.g. S1, S2, S15, S2B)
+  const sMatch = trimmed.match(/^s\s*(\d+[a-z]?)$/i);
+  if (sMatch) {
+    return `S${sMatch[1].toUpperCase()}`;
+  }
+
+  // 5. YZ structures (e.g. YZ1, YZ12)
+  const yzMatch = trimmed.match(/^yz\s*(\d+[a-z]?)$/i);
+  if (yzMatch) {
+    return `YZ${yzMatch[1].toUpperCase()}`;
+  }
+
+  // 6. Bare numbers entered by user (e.g. "1" -> "S1", "14" -> "S14")
+  if (/^\d+[a-z]?$/i.test(trimmed)) {
+    return `S${trimmed.toUpperCase()}`;
+  }
+
+  // 7. "Structure 1" or "Structure S1" -> "S1"
+  const structWord = trimmed.match(/^Structure\s*(S?\d+[a-z]?)$/i);
+  if (structWord) {
+    const num = structWord[1].toUpperCase();
+    return num.startsWith('S') ? num : `S${num}`;
+  }
+
+  // 8. Accidental 's' prefix on other non-numeric words
+  if (lower.startsWith('s') && lower.slice(1) === 'unidentified') {
+    return 'Unidentified';
+  }
+
+  return trimmed;
 }
 
 // DreamWeek weekday vs Sunday pricing helper
@@ -1548,6 +1617,61 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
 app.get('/api/ledger', (req, res) => {
   let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
   let dirty = false;
+
+  // Reconcile any confirmed unaccounted sponsorships or unpaid sponsorships from audits
+  const audits = readJsonFile<Array<{
+    id: string;
+    manifest_key: string;
+    date: string;
+    service: string;
+    passenger_name: string;
+    structure: string;
+    stop?: string;
+    vehicle_name: string;
+    rep_name: string;
+    sponsor_note: string;
+    status: string;
+    submitted_at: string;
+    ledger_entry_id?: string | null;
+  }>>(SPONSORSHIPS_FILE, []);
+
+  for (const spon of audits) {
+    if (spon.status === 'unaccounted_sponsorship' || spon.status === 'unpaid_sponsorship') {
+      const cleanSponName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
+      const hasEntry = ledger.some((e) =>
+        (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
+        (e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(e.passenger_name as string).toLowerCase() === cleanSponName && Boolean(e.sponsored))
+      );
+      if (!hasEntry) {
+        const rawNote = spon.sponsor_note ? cleanSponsorshipNote(spon.sponsor_note) : '';
+        const noteText = spon.status === 'unaccounted_sponsorship'
+          ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
+          : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
+        const auditDebt = getFareForDate(spon.date);
+        const newId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        ledger.unshift({
+          id: newId,
+          manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+          date: normalizeDateToYMD(spon.date) || spon.date,
+          service: spon.service || 'Service',
+          passenger_name: sanitizePassengerDisplayName(spon.passenger_name),
+          stop: spon.stop || '',
+          structure: normalizeStructureCode(spon.structure),
+          vehicle_name: spon.vehicle_name || '—',
+          submitted_by: 'Cancellation Admin',
+          rep_name: spon.rep_name || '',
+          license_plate: '',
+          sponsored: true,
+          sponsor_note: noteText,
+          structure_debt: auditDebt,
+          general_notes: noteText,
+          source: 'reported_sponsorship_audit',
+          submitted_at: spon.submitted_at || new Date().toISOString(),
+        });
+        dirty = true;
+      }
+    }
+  }
 
   // Filter out zero-debt items, parse numeric debt, and sanitize boilerplate notes
   const activeLedger = ledger
