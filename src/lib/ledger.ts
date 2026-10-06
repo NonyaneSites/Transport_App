@@ -621,9 +621,36 @@ export async function insertAbsentees(
 }
 
 /**
+ * Fetches all ledger entries from Supabase using pagination to bypass the default 1000-row limit.
+ */
+export async function fetchAllLedgerFromSupabase(): Promise<LedgerEntry[]> {
+  const allRows: LedgerEntry[] = [];
+  const pageSize = 1000;
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from(LEDGER_TABLE)
+      .select('*')
+      .order('submitted_at', { ascending: false })
+      .range(from, from + pageSize - 1);
+
+    if (error || !data || data.length === 0) {
+      break;
+    }
+    allRows.push(...(data as LedgerEntry[]));
+    if (data.length < pageSize) {
+      break;
+    }
+    from += pageSize;
+  }
+  return allRows;
+}
+
+/**
  * Withdraws absentees for a given vehicle/session when a Rep reopens attendance
- * for editing. This ensures the cancellation ledger only reflects confirmed,
- * currently submitted attendance lists.
+ * for editing. Scoped strictly to the session manifestKey so same-day debts
+ * from other services are never mistakenly removed.
  */
 export async function withdrawAbsentees(
   manifestKey: string,
@@ -631,18 +658,16 @@ export async function withdrawAbsentees(
 ): Promise<void> {
   if (riderNames.length === 0) return;
   const normalizedNames = new Set(riderNames.map((n) => sanitizePassengerDisplayName(n).toLowerCase()));
-  const baseDate = normalizeDateToYMD(manifestKey) || manifestKey.split('_')[0];
 
   try {
-    const { data } = await supabase.from(LEDGER_TABLE).select('*');
-    if (Array.isArray(data)) {
+    const { data } = await supabase
+      .from(LEDGER_TABLE)
+      .select('id, passenger_name')
+      .eq('manifest_key', manifestKey);
+
+    if (Array.isArray(data) && data.length > 0) {
       const idsToDelete = data
-        .filter((entry) => {
-          const eDate = normalizeDateToYMD(entry.date) || entry.date?.split('_')[0] || entry.manifest_key?.split('_')[0];
-          const isSameSession = entry.manifest_key === manifestKey || (baseDate && eDate === baseDate);
-          const isRider = normalizedNames.has(sanitizePassengerDisplayName(entry.passenger_name).toLowerCase());
-          return isSameSession && isRider;
-        })
+        .filter((entry) => normalizedNames.has(sanitizePassengerDisplayName(entry.passenger_name).toLowerCase()))
         .map((e) => e.id);
 
       if (idsToDelete.length > 0) {
@@ -671,14 +696,11 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
     console.debug('[Ledger] Server fetch note:', err);
   }
 
-  // 2. Secondary: Supabase / Mock store
+  // 2. Secondary: Supabase with full pagination (guarantees no 1000-row cutoff)
   try {
-    const { data } = await supabase
-      .from(LEDGER_TABLE)
-      .select('*')
-      .order('submitted_at', { ascending: false });
-    if (data && Array.isArray(data)) {
-      for (const e of data as LedgerEntry[]) {
+    const supabaseEntries = await fetchAllLedgerFromSupabase();
+    if (Array.isArray(supabaseEntries) && supabaseEntries.length > 0) {
+      for (const e of supabaseEntries) {
         if (e && e.id && !mergedMap.has(String(e.id))) {
           mergedMap.set(String(e.id), e);
         }
@@ -688,138 +710,24 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
     console.warn('[Ledger] Exception fetching ledger entries:', err);
   }
 
-  // 3. Self-healing harvest: recover any absentees from submitted vehicle manifests
-  try {
-    const manifestsTable: Array<{
-      date?: string;
-      signups?: Array<{ id: string; fullName: string; stop?: string; structure?: string; present?: boolean; sponsored?: boolean; didNotPay?: boolean }>;
-      vehicles?: Array<{
-        id: string;
-        name: string;
-        submitted?: boolean;
-        submittedAt?: string;
-        submittedBy?: string;
-        repName?: string;
-        licensePlate?: string;
-        riders?: string[];
-        draftState?: {
-          submitted?: boolean;
-          presentIds?: string[];
-          absentIds?: string[];
-          absentPaidIds?: string[];
-          sponsoredIds?: string[];
-          notes?: Record<string, string>;
-        };
-      }>;
-    }> = (mockStorage.getTable(MANIFESTS_TABLE) as unknown as typeof manifestsTable) || [];
-
-    try {
-      const { data: remoteManifests } = await supabase
-        .from(MANIFESTS_TABLE)
-        .select('date, signups, vehicles');
-      if (Array.isArray(remoteManifests)) {
-        for (const rm of remoteManifests) {
-          if (!manifestsTable.some((m) => m.date === rm.date)) {
-            manifestsTable.push(rm as unknown as typeof manifestsTable[0]);
-          }
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-
-    // Build lookup keys of existing ledger entries: date::normalizedName
-    const existingKeys = new Set<string>();
-    for (const e of mergedMap.values()) {
-      const baseDate = normalizeDateToYMD(e.date) || e.date?.split('_')[0] || e.manifest_key?.split('_')[0] || '';
-      const normName = sanitizePassengerDisplayName(e.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
-      if (baseDate && normName) {
-        existingKeys.add(`${baseDate}::${normName}`);
-      }
-    }
-
-    for (const m of manifestsTable) {
-      if (!m.date) continue;
-      const parsedDate = m.date.split('_')[0] || m.date;
-      const parsedService = m.date.split('_')[1]?.replace(/_/g, ' ') || 'Service';
-      const allSignups = Array.isArray(m.signups) ? m.signups : [];
-
-      for (const v of m.vehicles || []) {
-        const isVehSubmitted = Boolean(v.submitted || v.draftState?.submitted);
-        if (!isVehSubmitted) continue;
-
-        const vehicleRiderIds = new Set((v.riders || []).map(String));
-        const vehicleSignups = allSignups.filter((p) => vehicleRiderIds.has(String(p.id)));
-        const rep = v.repName || v.submittedBy || 'Transport Rep';
-        const licensePlate = v.licensePlate || '';
-        const presentIds = new Set((v.draftState?.presentIds || []).map(String));
-        const absentPaidIds = new Set((v.draftState?.absentPaidIds || []).map(String));
-        const absentIds = new Set((v.draftState?.absentIds || []).map(String));
-        const notes = v.draftState?.notes || {};
-
-        for (const p of vehicleSignups) {
-          const sId = String(p.id);
-          const isPresent = Boolean(p.present || presentIds.has(sId) || presentIds.has(p.id));
-          const isPaidAbsent = Boolean(absentPaidIds.has(sId) || absentPaidIds.has(p.id));
-          const isAbsent = Boolean(absentIds.has(sId) || absentIds.has(p.id) || !isPresent);
-
-          // If they were absent and did not pay while absent, they owe a cancellation debt
-          if (isAbsent && !isPaidAbsent) {
-            const cleanName = sanitizePassengerDisplayName(p.fullName);
-            if (!cleanName) continue;
-            const baseDate = normalizeDateToYMD(parsedDate) || parsedDate.split('_')[0];
-            const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
-            const lookupKey = `${baseDate}::${normName}`;
-
-            if (!existingKeys.has(lookupKey)) {
-              const personalNote = cleanPersonalAbsenteeNote(notes[sId] || notes[p.id] || '');
-              const fare = getFareForDate(baseDate);
-              const recoveredEntry: LedgerEntry = {
-                id: `ledger_recovered_${baseDate}_${normName}`,
-                manifest_key: m.date,
-                date: baseDate,
-                service: parsedService,
-                passenger_name: cleanName,
-                stop: (p.stop || '').trim() || 'Unknown',
-                structure: normalizeStructureCode(p.structure),
-                vehicle_name: v.name || 'Vehicle',
-                submitted_by: rep,
-                rep_name: rep,
-                license_plate: licensePlate,
-                sponsored: false,
-                sponsor_note: '',
-                structure_debt: fare,
-                general_notes: personalNote,
-                submitted_at: v.submittedAt || new Date().toISOString(),
-              };
-
-              mergedMap.set(recoveredEntry.id, recoveredEntry);
-              existingKeys.add(lookupKey);
-            }
-          }
-        }
-      }
-    }
-  } catch (err) {
-    console.debug('[Ledger] Absentee harvest note:', err);
-  }
-
   const entries = Array.from(mergedMap.values());
 
   // Ensure all structures are normalized to canonical codes, passenger names are cleanly formatted,
-  // ensure debts are parsed into numbers, and exclude any entries whose debt has been reduced to zero
+  // ensure debts are parsed into numbers, and exclude any entries whose debt has been reduced to zero or settled
   return entries
     .filter((e) => {
-      const rawVal = (e.structure_debt !== undefined && e.structure_debt !== null && Number(e.structure_debt) > 0)
-        ? e.structure_debt
-        : ((e as Record<string, unknown>).fee || e.structure_debt);
+      let rawVal = e.structure_debt;
+      if (rawVal === undefined || rawVal === null || rawVal === '') {
+        rawVal = (e as Record<string, unknown>).fee;
+      }
       const d = parseDebtAmount(rawVal, e.date || e.manifest_key);
       return d > 0;
     })
     .map((e) => {
-      const rawVal = (e.structure_debt !== undefined && e.structure_debt !== null && Number(e.structure_debt) > 0)
-        ? e.structure_debt
-        : ((e as Record<string, unknown>).fee || e.structure_debt);
+      let rawVal = e.structure_debt;
+      if (rawVal === undefined || rawVal === null || rawVal === '') {
+        rawVal = (e as Record<string, unknown>).fee;
+      }
       const isSpon = isEntrySponsorshipOrUnpaid(e);
       const parsedDate = e.date || (e.manifest_key ? String(e.manifest_key).split('_')[0] : '');
 
@@ -2215,7 +2123,6 @@ export async function recordReportedSponsorships(
   vehicleName: string,
   repName: string
 ): Promise<void> {
-  const baseDate = normalizeDateToYMD(manifestKey) || manifestKey.split('_')[0];
   const now = new Date().toISOString();
   const normalizedRoster = new Set(allRiderNames.map((n) => sanitizePassengerDisplayName(n).toLowerCase()));
 
@@ -2224,16 +2131,12 @@ export async function recordReportedSponsorships(
     const { data: existingRows } = await supabase
       .from(SPONSORSHIPS_TABLE)
       .select('id, manifest_key, date, passenger_name, status')
-      .eq('status', 'pending');
+      .eq('status', 'pending')
+      .eq('manifest_key', manifestKey);
 
-    if (Array.isArray(existingRows)) {
+    if (Array.isArray(existingRows) && existingRows.length > 0) {
       const idsToDelete = existingRows
-        .filter((s) => {
-          const sDate = normalizeDateToYMD(s.date) || s.date?.split('_')[0] || s.manifest_key?.split('_')[0];
-          const isSameSession = s.manifest_key === manifestKey || (baseDate && sDate === baseDate);
-          const isRider = normalizedRoster.has(sanitizePassengerDisplayName(s.passenger_name).toLowerCase());
-          return isSameSession && isRider;
-        })
+        .filter((s) => normalizedRoster.has(sanitizePassengerDisplayName(s.passenger_name).toLowerCase()))
         .map((s) => s.id);
 
       if (idsToDelete.length > 0) {
@@ -2251,7 +2154,8 @@ export async function recordReportedSponsorships(
     if (!cleanName) continue;
     const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
     const cleanDate = normalizeDateToYMD(date || manifestKey) || (date || manifestKey).split('_')[0];
-    const id = `sp_${cleanDate}_${normName}`;
+    const sessionTag = manifestKey.replace(/[^a-zA-Z0-9]/g, '_');
+    const id = `sp_${sessionTag}_${normName}`;
 
     upsertRows.push({
       id,
@@ -2301,8 +2205,7 @@ export async function recordReportedSponsorships(
 
     if (allRiderNames.length > 0) {
       localList = localList.filter((s) => {
-        const sDate = normalizeDateToYMD(s.date) || s.date?.split('_')[0] || s.manifest_key?.split('_')[0];
-        const isSameSession = s.manifest_key === manifestKey || (baseDate && sDate === baseDate);
+        const isSameSession = s.manifest_key === manifestKey;
         const isRider = normalizedRoster.has(sanitizePassengerDisplayName(s.passenger_name).toLowerCase());
         return !(isSameSession && isRider && s.status === 'pending');
       });
@@ -2336,24 +2239,19 @@ export async function withdrawReportedSponsorships(
   riderNames: string[]
 ): Promise<void> {
   if (riderNames.length === 0) return;
-  const baseDate = normalizeDateToYMD(manifestKey) || manifestKey.split('_')[0];
   const normalizedRoster = new Set(riderNames.map((n) => sanitizePassengerDisplayName(n).toLowerCase()));
 
-  // 1. Delete pending rows from Supabase
+  // 1. Delete pending rows from Supabase scoped strictly to this manifest session
   try {
     const { data: existingRows } = await supabase
       .from(SPONSORSHIPS_TABLE)
       .select('id, manifest_key, date, passenger_name, status')
-      .eq('status', 'pending');
+      .eq('status', 'pending')
+      .eq('manifest_key', manifestKey);
 
-    if (Array.isArray(existingRows)) {
+    if (Array.isArray(existingRows) && existingRows.length > 0) {
       const idsToDelete = existingRows
-        .filter((s) => {
-          const sDate = normalizeDateToYMD(s.date) || s.date?.split('_')[0] || s.manifest_key?.split('_')[0];
-          const isSameSession = s.manifest_key === manifestKey || (baseDate && sDate === baseDate);
-          const isRider = normalizedRoster.has(sanitizePassengerDisplayName(s.passenger_name).toLowerCase());
-          return isSameSession && isRider;
-        })
+        .filter((s) => normalizedRoster.has(sanitizePassengerDisplayName(s.passenger_name).toLowerCase()))
         .map((s) => s.id);
 
       if (idsToDelete.length > 0) {
@@ -2370,8 +2268,7 @@ export async function withdrawReportedSponsorships(
     if (raw) {
       const list = JSON.parse(raw) as ReportedSponsorship[];
       const filtered = list.filter((s) => {
-        const sDate = normalizeDateToYMD(s.date) || s.date?.split('_')[0] || s.manifest_key?.split('_')[0];
-        const isSameSession = s.manifest_key === manifestKey || (baseDate && sDate === baseDate);
+        const isSameSession = s.manifest_key === manifestKey;
         const isRider = normalizedRoster.has(sanitizePassengerDisplayName(s.passenger_name).toLowerCase());
         return !(isSameSession && isRider && s.status === 'pending');
       });
@@ -2500,6 +2397,33 @@ export async function withdrawSingleSponsorshipClaim(
 }
 
 /**
+ * Fetches all reported sponsorships from Supabase using pagination.
+ */
+export async function fetchAllSponsorshipsFromSupabase(): Promise<ReportedSponsorship[]> {
+  const allRows: ReportedSponsorship[] = [];
+  const pageSize = 1000;
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from(SPONSORSHIPS_TABLE)
+      .select('*')
+      .order('submitted_at', { ascending: false })
+      .range(from, from + pageSize - 1);
+
+    if (error || !data || data.length === 0) {
+      break;
+    }
+    allRows.push(...(data as ReportedSponsorship[]));
+    if (data.length < pageSize) {
+      break;
+    }
+    from += pageSize;
+  }
+  return allRows;
+}
+
+/**
  * Retrieves all reported sponsorships for administrative verification.
  * Primary source of truth is the Supabase sponsorship_audits table.
  * Automatically harvests sponsorships from existing submitted manifests/drafts
@@ -2518,24 +2442,11 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
     console.debug('[Ledger] Server fetch sponsorships note:', err);
   }
 
-  // 2. Secondary: Supabase table sponsorship_audits (and fallback to reported_sponsorships)
+  // 2. Secondary: Supabase table sponsorship_audits with full pagination
   try {
-    const { data, error } = await supabase
-      .from(SPONSORSHIPS_TABLE)
-      .select('*')
-      .order('submitted_at', { ascending: false });
-
-    if (!error && Array.isArray(data) && data.length > 0) {
-      list = cleanAndDeduplicateSponsorships([...list, ...(data as ReportedSponsorship[])]);
-    } else if (error) {
-      // Try fallback to reported_sponsorships table if sponsorship_audits had schema error
-      const { data: altData, error: altErr } = await supabase
-        .from('reported_sponsorships')
-        .select('*')
-        .order('submitted_at', { ascending: false });
-      if (!altErr && Array.isArray(altData) && altData.length > 0) {
-        list = cleanAndDeduplicateSponsorships([...list, ...(altData as ReportedSponsorship[])]);
-      }
+    const supaRows = await fetchAllSponsorshipsFromSupabase();
+    if (supaRows.length > 0) {
+      list = cleanAndDeduplicateSponsorships([...list, ...supaRows]);
     }
   } catch (err) {
     console.debug('[Ledger] Supabase listReportedSponsorships note:', err);
@@ -2862,9 +2773,10 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
  */
 export async function verifySponsorshipStatus(
   sponsorshipId: string,
-  status: SponsorshipStatus
+  status: SponsorshipStatus,
+  sponsorship?: ReportedSponsorship
 ): Promise<{ success: boolean; sponsorship?: ReportedSponsorship; ledgerUpdated?: boolean }> {
-  const batchRes = await verifyBatchSponsorships([{ sponsorshipId, status }]);
+  const batchRes = await verifyBatchSponsorships([{ sponsorshipId, status, sponsorship }]);
   const freshList = await listReportedSponsorships();
   const updatedItem = freshList.find((s) => s.id === sponsorshipId);
   return {
@@ -2876,12 +2788,12 @@ export async function verifySponsorshipStatus(
 
 /**
  * Batch verifies reported sponsorships.
- * Primary path: Updates Supabase sponsorship_audits table and inserts/removes cancellation_ledger
- * rows accordingly, exactly mirroring the server endpoint logic so it operates seamlessly on
- * static deployments with no Node server.
+ * Primary path: Updates central server API and Supabase sponsorship_audits table,
+ * and inserts/removes cancellation_ledger rows accordingly so confirmed unaccounted sponsorships
+ * are immediately and persistently added to the actual cancellation list.
  */
 export async function verifyBatchSponsorships(
-  items: Array<{ sponsorshipId: string; status: SponsorshipStatus }>
+  items: Array<{ sponsorshipId: string; status: SponsorshipStatus; sponsorship?: ReportedSponsorship }>
 ): Promise<{ success: boolean; updatedCount: number; ledgerUpdated?: boolean }> {
   if (!items || items.length === 0) return { success: true, updatedCount: 0 };
 
@@ -2889,7 +2801,17 @@ export async function verifyBatchSponsorships(
   let updatedCount = 0;
   let ledgerChanged = false;
 
-  // 1. Fetch current sponsorships from Supabase
+  // 1. Primary: Mirror to Express server immediately
+  try {
+    const serverRes = await verifyBatchSponsorshipsOnServer(items);
+    if (serverRes && serverRes.ledgerUpdated) {
+      ledgerChanged = true;
+    }
+  } catch (err) {
+    console.warn('[Ledger] verifyBatchSponsorshipsOnServer note:', err);
+  }
+
+  // 2. Fetch current sponsorships from Supabase
   let currentAudits: ReportedSponsorship[] = [];
   try {
     const { data } = await supabase.from(SPONSORSHIPS_TABLE).select('*');
@@ -2913,20 +2835,17 @@ export async function verifyBatchSponsorships(
     }
   }
 
-  // 2. Fetch current ledger entries from Supabase to synchronize debts
+  // 3. Fetch current ledger entries from Supabase to synchronize debts
   let currentLedger: LedgerEntry[] = [];
   try {
-    const { data: lData } = await supabase.from(LEDGER_TABLE).select('*');
-    if (Array.isArray(lData)) {
-      currentLedger = lData as LedgerEntry[];
-    }
+    currentLedger = await fetchAllLedgerFromSupabase();
   } catch (err) {
     console.warn('[Ledger] Supabase ledger fetch for batch verify note:', err);
   }
 
-  // 3. Process each sponsorship item
+  // 4. Process each sponsorship item
   for (const item of items) {
-    const { sponsorshipId, status } = item || {};
+    const { sponsorshipId, status, sponsorship: incomingSpon } = item || {};
     if (!sponsorshipId || !status) continue;
 
     let sponIndex = currentAudits.findIndex((a) => a.id === sponsorshipId);
@@ -2938,6 +2857,16 @@ export async function verifyBatchSponsorships(
         const aNorm = sanitizePassengerDisplayName(a.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
         return aNorm && cleanReqId.includes(aNorm) && (cleanReqId.includes(aBase) || cleanReqId.includes(a.manifest_key.toLowerCase()));
       });
+    }
+
+    if (sponIndex < 0 && incomingSpon) {
+      currentAudits.push({
+        ...incomingSpon,
+        id: incomingSpon.id || sponsorshipId,
+        status,
+        status_updated_at: now,
+      });
+      sponIndex = currentAudits.length - 1;
     }
 
     if (sponIndex < 0) continue;
@@ -2952,10 +2881,11 @@ export async function verifyBatchSponsorships(
         ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
         : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
 
+      const cleanSponName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
       // Check if debt entry already exists for this sponsorship
       const existingLedgerIdx = currentLedger.findIndex((e) =>
         (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
-        (e.manifest_key === spon.manifest_key && e.passenger_name.toLowerCase() === spon.passenger_name.toLowerCase() && Boolean(e.sponsored))
+        (e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanSponName && Boolean(e.sponsored))
       );
 
       const effectiveFee = getFareForDate(spon.date);
@@ -2966,6 +2896,9 @@ export async function verifyBatchSponsorships(
         currentLedger[existingLedgerIdx].sponsor_note = noteText;
         currentLedger[existingLedgerIdx].sponsored = true;
         currentLedger[existingLedgerIdx].structure_debt = effectiveFee;
+        currentLedger[existingLedgerIdx].structure = normalizeStructureCode(spon.structure);
+        currentLedger[existingLedgerIdx].submitted_by = 'Cancellation Admin';
+        currentLedger[existingLedgerIdx].source = 'reported_sponsorship_audit';
         ledgerChanged = true;
 
         await supabase
@@ -2975,22 +2908,25 @@ export async function verifyBatchSponsorships(
             sponsor_note: noteText,
             sponsored: true,
             structure_debt: effectiveFee,
+            structure: normalizeStructureCode(spon.structure),
+            submitted_by: 'Cancellation Admin',
+            source: 'reported_sponsorship_audit',
           })
           .eq('id', existingId);
       } else {
-        const newEntryId = `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const newEntryId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         spon.ledger_entry_id = newEntryId;
         const newEntry: LedgerEntry = {
           id: newEntryId,
-          manifest_key: spon.manifest_key,
-          date: spon.date,
+          manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+          date: normalizeDateToYMD(spon.date) || spon.date,
           service: spon.service || 'Service',
-          passenger_name: spon.passenger_name,
+          passenger_name: sanitizePassengerDisplayName(spon.passenger_name),
           stop: spon.stop || '',
-          structure: spon.structure || '',
-          vehicle_name: spon.vehicle_name,
+          structure: normalizeStructureCode(spon.structure),
+          vehicle_name: spon.vehicle_name || '—',
           submitted_by: 'Cancellation Admin',
-          rep_name: spon.rep_name,
+          rep_name: spon.rep_name || '',
           license_plate: '',
           sponsored: true,
           sponsor_note: noteText,
@@ -3014,8 +2950,9 @@ export async function verifyBatchSponsorships(
         await supabase.from(LEDGER_TABLE).delete().eq('id', delId);
       } else {
         const beforeLen = currentLedger.length;
+        const cleanSponName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
         currentLedger = currentLedger.filter(
-          (e) => !(e.manifest_key === spon.manifest_key && e.passenger_name.toLowerCase() === spon.passenger_name.toLowerCase() && Boolean(e.sponsored))
+          (e) => !(e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanSponName && Boolean(e.sponsored))
         );
         if (currentLedger.length !== beforeLen) {
           ledgerChanged = true;
@@ -3055,26 +2992,19 @@ export async function verifyBatchSponsorships(
     }
   }
 
-  // 4. Update localStorage caches
+  // 5. Update localStorage caches
   try {
     localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(cleanAndDeduplicateSponsorships(currentAudits)));
   } catch {
     /* ignore */
   }
 
-  // 5. Fire window events for instant UI reactivity
+  // 6. Fire window events for instant UI reactivity
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: currentAudits }));
     if (ledgerChanged) {
       window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
     }
-  }
-
-  // 6. Optional: Mirror to server if online
-  try {
-    await verifyBatchSponsorshipsOnServer(items);
-  } catch {
-    // Non-critical: static deploy may not have Express server
   }
 
   return { success: true, updatedCount, ledgerUpdated: ledgerChanged };

@@ -69,7 +69,8 @@ export interface ManifestSummary {
 
 const PENDING_QUEUE_KEY = 'crc_pending_submissions_queue';
 
-let serverAvailable: boolean | null = null;
+let serverAvailable: boolean | null = true;
+let healthCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function isServerOnline(): boolean {
   if (typeof window === 'undefined') return false;
@@ -78,6 +79,24 @@ export function isServerOnline(): boolean {
 
 export function markServerOffline(): void {
   serverAvailable = false;
+  if (!healthCheckTimer) {
+    healthCheckTimer = setTimeout(async () => {
+      healthCheckTimer = null;
+      try {
+        const res = await fetch('/api/health');
+        if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+          markServerOnline();
+          flushPendingQueue().catch(() => {});
+        }
+      } catch {
+        // still offline, retry in 10s
+        healthCheckTimer = setTimeout(() => {
+          healthCheckTimer = null;
+          isServerOnline();
+        }, 10000);
+      }
+    }, 2500);
+  }
 }
 
 export function markServerOnline(): void {
@@ -85,10 +104,6 @@ export function markServerOnline(): void {
 }
 
 function isJsonResponse(res: Response): boolean {
-  if (res.status === 404) {
-    markServerOffline();
-    return false;
-  }
   const cType = res.headers.get('content-type') || '';
   if (cType.includes('text/html')) {
     // This is an SPA rewrite returning index.html, NOT a backend API server!
@@ -107,14 +122,6 @@ interface PendingQueueItem {
 }
 
 function getPendingQueue(): PendingQueueItem[] {
-  if (!isServerOnline()) {
-    try {
-      localStorage.removeItem(PENDING_QUEUE_KEY);
-    } catch {
-      // ignore
-    }
-    return [];
-  }
   try {
     const raw = localStorage.getItem(PENDING_QUEUE_KEY);
     return raw ? JSON.parse(raw) : [];
@@ -124,7 +131,6 @@ function getPendingQueue(): PendingQueueItem[] {
 }
 
 function savePendingQueue(queue: PendingQueueItem[]): void {
-  if (!isServerOnline()) return;
   try {
     localStorage.setItem(PENDING_QUEUE_KEY, JSON.stringify(queue));
   } catch {
@@ -423,6 +429,55 @@ export async function updateDebtorOnServer(payload: {
   }
 }
 
+export async function insertAbsenteesOnServer(payload: {
+  manifest_key: string;
+  date: string;
+  serviceLabel: string;
+  absentees: Array<{ fullName: string; stop?: string; structure?: string; notes?: string }>;
+  allRiderNames?: string[];
+  vehicleName?: string;
+  repName?: string;
+  licensePlate?: string;
+  submittedBy?: string;
+  generalNotes?: string;
+  unpaidRiders?: Array<{ fullName: string; stop?: string; structure?: string; unpaidNote?: string }>;
+}): Promise<boolean> {
+  if (!isServerOnline()) return false;
+  try {
+    const res = await fetch('/api/ledger/absentees', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok && isJsonResponse(res)) {
+      markServerOnline();
+    }
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function withdrawAbsenteesOnServer(payload: {
+  manifestKey: string;
+  riderNames: string[];
+}): Promise<boolean> {
+  if (!isServerOnline()) return false;
+  try {
+    const res = await fetch('/api/ledger/withdraw-absentees', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok && isJsonResponse(res)) {
+      markServerOnline();
+    }
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 // Fetch reported sponsorships from server
 export async function listReportedSponsorshipsFromServer(): Promise<ReportedSponsorship[]> {
   if (!isServerOnline()) return [];
@@ -440,14 +495,15 @@ export async function listReportedSponsorshipsFromServer(): Promise<ReportedSpon
 // Verify or update a reported sponsorship status
 export async function verifySponsorshipOnServer(
   sponsorshipId: string,
-  status: SponsorshipStatus
+  status: SponsorshipStatus,
+  sponsorship?: ReportedSponsorship
 ): Promise<{ success: boolean; sponsorship?: ReportedSponsorship; ledgerUpdated?: boolean }> {
   if (!isServerOnline()) return { success: false };
   try {
     const res = await fetch('/api/ledger/verify-sponsorship', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sponsorshipId, status }),
+      body: JSON.stringify({ sponsorshipId, status, sponsorship }),
     });
     if (!res.ok || !isJsonResponse(res)) {
       return { success: false };
@@ -462,7 +518,7 @@ export async function verifySponsorshipOnServer(
 
 // Batch verify or update reported sponsorships
 export async function verifyBatchSponsorshipsOnServer(
-  items: Array<{ sponsorshipId: string; status: SponsorshipStatus }>
+  items: Array<{ sponsorshipId: string; status: SponsorshipStatus; sponsorship?: ReportedSponsorship }>
 ): Promise<{ success: boolean; updatedCount: number; ledgerUpdated?: boolean }> {
   if (!isServerOnline()) return { success: false, updatedCount: 0 };
   try {
@@ -618,10 +674,16 @@ export function connectSyncEvents(
       es.onerror = () => {
         es?.close();
         es = null;
-        markServerOffline();
+        if (!isClosed) {
+          setTimeout(() => {
+            if (!isClosed && !es && isServerOnline()) {
+              connect();
+            }
+          }, 3500);
+        }
       };
     } catch {
-      markServerOffline();
+      // Ignore initial setup error
     }
   }
 

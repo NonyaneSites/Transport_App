@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-04_PM_Normal",
+  "signups": [],
+  "vehicles": [
+    {
+      "id": "v1",
+      "name": "Vehicle 1",
+      "type": "Taxi",
+      "riders": [],
+      "orderedStops": [],
+      "submitted": true,
+      "submittedAt": "2026-10-06T10:07:17.599Z",
+      "submittedBy": "Test Rep",
+      "repName": "Test Rep",
+      "licensePlate": "",
+      "coReps": [],
+      "generalNotes": "",
+      "draftState": {
+        "submitted": true,
+        "submittedAt": "2026-10-06T10:07:17.599Z",
+        "repName": "Test Rep",
+        "licensePlate": "",
+        "generalNotes": ""
+      }
+    }
+  ],
+  "updated_at": "2026-10-06T10:07:17.599Z"
+}

@@ -393,8 +393,13 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
 
   // Remove any previous ledger entries for these riders in this session
   if (Array.isArray(allRiderNames) && allRiderNames.length > 0) {
-    const riderSet = new Set(allRiderNames);
-    ledger = ledger.filter((entry) => !(entry.manifest_key === key && riderSet.has(entry.passenger_name)));
+    const riderSet = new Set(allRiderNames.map((n) => sanitizePassengerDisplayName(n).toLowerCase()));
+    ledger = ledger.filter((entry) => {
+      const eDate = normalizeDateToYMD(entry.date) || entry.date || (entry.manifest_key ? String(entry.manifest_key).split('_')[0] : '');
+      const isSameDate = entry.manifest_key === key || (parsedDate && eDate === normalizeDateToYMD(parsedDate));
+      const isRider = riderSet.has(sanitizePassengerDisplayName(entry.passenger_name).toLowerCase());
+      return !(isSameDate && isRider);
+    });
   }
 
   // Insert new absentees: regular cancellations in debt ledger (not auto-sent to sponsorship section)
@@ -1260,6 +1265,30 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
       return aNorm && cleanReqId.includes(aNorm) && (cleanReqId.includes(aBase) || cleanReqId.includes(a.manifest_key.toLowerCase()));
     });
   }
+
+  const incomingSingleSpon = req.body?.sponsorship;
+  if (sponIndex < 0 && incomingSingleSpon) {
+    const newSingleAudit: AuditItem = {
+      id: incomingSingleSpon.id || sponsorshipId,
+      manifest_key: incomingSingleSpon.manifest_key || '',
+      date: incomingSingleSpon.date || '',
+      service: incomingSingleSpon.service || 'Service',
+      passenger_id: incomingSingleSpon.passenger_id || '',
+      passenger_name: incomingSingleSpon.passenger_name || '',
+      structure: incomingSingleSpon.structure || '',
+      stop: incomingSingleSpon.stop || '',
+      vehicle_name: incomingSingleSpon.vehicle_name || '',
+      rep_name: incomingSingleSpon.rep_name || '',
+      sponsor_note: incomingSingleSpon.sponsor_note || '',
+      status: status,
+      status_updated_at: new Date().toISOString(),
+      ledger_entry_id: incomingSingleSpon.ledger_entry_id || null,
+      submitted_at: incomingSingleSpon.submitted_at || new Date().toISOString(),
+    };
+    audits.push(newSingleAudit);
+    sponIndex = audits.length - 1;
+  }
+
   if (sponIndex < 0) {
     res.status(404).json({ error: 'Sponsorship record not found' });
     return;
@@ -1279,9 +1308,10 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
       : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
 
     // Check if debt entry already exists for this sponsorship
+    const cleanSponName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
     const existingLedgerIdx = ledger.findIndex((e) =>
       (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
-      (e.manifest_key === spon.manifest_key && e.passenger_name.toLowerCase() === spon.passenger_name.toLowerCase() && Boolean(e.sponsored))
+      (e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanSponName && Boolean(e.sponsored))
     );
 
     const auditDebt = getFareForDate(spon.date);
@@ -1290,22 +1320,24 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
       ledger[existingLedgerIdx].sponsor_note = noteText;
       ledger[existingLedgerIdx].sponsored = true;
       ledger[existingLedgerIdx].structure_debt = auditDebt;
+      ledger[existingLedgerIdx].structure = normalizeStructureCode(spon.structure);
       ledger[existingLedgerIdx].submitted_by = 'Cancellation Admin';
+      ledger[existingLedgerIdx].source = 'reported_sponsorship_audit';
       spon.ledger_entry_id = ledger[existingLedgerIdx].id;
       ledgerChanged = true;
     } else {
-      const newEntryId = `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const newEntryId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const newEntry = {
         id: newEntryId,
-        manifest_key: spon.manifest_key,
-        date: spon.date,
+        manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+        date: normalizeDateToYMD(spon.date) || spon.date,
         service: spon.service || 'Service',
-        passenger_name: spon.passenger_name,
+        passenger_name: sanitizePassengerDisplayName(spon.passenger_name),
         stop: spon.stop || '',
-        structure: spon.structure || '',
-        vehicle_name: spon.vehicle_name,
+        structure: normalizeStructureCode(spon.structure),
+        vehicle_name: spon.vehicle_name || '—',
         submitted_by: 'Cancellation Admin',
-        rep_name: spon.rep_name,
+        rep_name: spon.rep_name || '',
         license_plate: '',
         sponsored: true,
         sponsor_note: noteText,
@@ -1326,7 +1358,8 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
       ledgerChanged = true;
     } else {
       const beforeLen = ledger.length;
-      ledger = ledger.filter((e) => !(e.manifest_key === spon.manifest_key && e.passenger_name.toLowerCase() === spon.passenger_name.toLowerCase() && Boolean(e.sponsored)));
+      const cleanSponName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
+      ledger = ledger.filter((e) => !(e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanSponName && Boolean(e.sponsored)));
       if (ledger.length !== beforeLen) ledgerChanged = true;
     }
   }
@@ -1394,7 +1427,7 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
   const now = new Date().toISOString();
 
   for (const item of items) {
-    const { sponsorshipId, status } = item || {};
+    const { sponsorshipId, status, sponsorship: incomingSpon } = item || {};
     if (!sponsorshipId || !status) continue;
 
     let sponIndex = audits.findIndex((a) => a.id === sponsorshipId);
@@ -1408,6 +1441,28 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
       });
     }
 
+    if (sponIndex < 0 && incomingSpon) {
+      const newAudit: AuditItem = {
+        id: incomingSpon.id || sponsorshipId,
+        manifest_key: incomingSpon.manifest_key || '',
+        date: incomingSpon.date || '',
+        service: incomingSpon.service || 'Service',
+        passenger_id: incomingSpon.passenger_id || '',
+        passenger_name: incomingSpon.passenger_name || '',
+        structure: incomingSpon.structure || '',
+        stop: incomingSpon.stop || '',
+        vehicle_name: incomingSpon.vehicle_name || '',
+        rep_name: incomingSpon.rep_name || '',
+        sponsor_note: incomingSpon.sponsor_note || '',
+        status: status,
+        status_updated_at: now,
+        ledger_entry_id: incomingSpon.ledger_entry_id || null,
+        submitted_at: incomingSpon.submitted_at || now,
+      };
+      audits.push(newAudit);
+      sponIndex = audits.length - 1;
+    }
+
     if (sponIndex < 0) continue;
     const spon = audits[sponIndex];
     spon.status = status;
@@ -1419,10 +1474,11 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
         ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
         : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
       const batchAuditDebt = getFareForDate(spon.date);
+      const cleanSponName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
 
       const existingLedgerIdx = ledger.findIndex((e) =>
         (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
-        (e.manifest_key === spon.manifest_key && e.passenger_name.toLowerCase() === spon.passenger_name.toLowerCase() && Boolean(e.sponsored))
+        (e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanSponName && Boolean(e.sponsored))
       );
 
       if (existingLedgerIdx >= 0) {
@@ -1430,22 +1486,24 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
         ledger[existingLedgerIdx].sponsor_note = noteText;
         ledger[existingLedgerIdx].sponsored = true;
         ledger[existingLedgerIdx].structure_debt = batchAuditDebt;
+        ledger[existingLedgerIdx].structure = normalizeStructureCode(spon.structure);
         ledger[existingLedgerIdx].submitted_by = 'Cancellation Admin';
+        ledger[existingLedgerIdx].source = 'reported_sponsorship_audit';
         spon.ledger_entry_id = ledger[existingLedgerIdx].id;
         ledgerChanged = true;
       } else {
-        const newEntryId = `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const newEntryId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         ledger.unshift({
           id: newEntryId,
-          manifest_key: spon.manifest_key,
-          date: spon.date,
+          manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+          date: normalizeDateToYMD(spon.date) || spon.date,
           service: spon.service || 'Service',
-          passenger_name: spon.passenger_name,
+          passenger_name: sanitizePassengerDisplayName(spon.passenger_name),
           stop: spon.stop || '',
-          structure: spon.structure || '',
-          vehicle_name: spon.vehicle_name,
+          structure: normalizeStructureCode(spon.structure),
+          vehicle_name: spon.vehicle_name || '—',
           submitted_by: 'Cancellation Admin',
-          rep_name: spon.rep_name,
+          rep_name: spon.rep_name || '',
           license_plate: '',
           sponsored: true,
           sponsor_note: noteText,
@@ -1464,7 +1522,8 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
         ledgerChanged = true;
       } else {
         const beforeLen = ledger.length;
-        ledger = ledger.filter((e) => !(e.manifest_key === spon.manifest_key && e.passenger_name.toLowerCase() === spon.passenger_name.toLowerCase() && Boolean(e.sponsored)));
+        const cleanSponName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
+        ledger = ledger.filter((e) => !(e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanSponName && Boolean(e.sponsored)));
         if (ledger.length !== beforeLen) ledgerChanged = true;
       }
     }
@@ -1493,9 +1552,10 @@ app.get('/api/ledger', (req, res) => {
   // Filter out zero-debt items, parse numeric debt, and sanitize boilerplate notes
   const activeLedger = ledger
     .filter((entry) => {
-      const rawVal = (entry.structure_debt !== undefined && entry.structure_debt !== null && Number(entry.structure_debt) > 0)
-        ? entry.structure_debt
-        : (entry.fee || entry.structure_debt);
+      let rawVal = entry.structure_debt;
+      if (rawVal === undefined || rawVal === null || rawVal === '') {
+        rawVal = entry.fee;
+      }
       const debt = parseDebtAmount(rawVal, (entry.date as string) || (entry.manifest_key as string));
       return debt > 0;
     })
@@ -1509,10 +1569,12 @@ app.get('/api/ledger', (req, res) => {
       const isSpon = Boolean(entry.sponsored) || isUnaccOrUnpaid;
       let cleanGn = origGn;
       let cleanSn = origSn;
-      const rawVal = (entry.structure_debt !== undefined && entry.structure_debt !== null && Number(entry.structure_debt) > 0)
-        ? entry.structure_debt
-        : (entry.fee || entry.structure_debt);
-      const parsedDebt = parseDebtAmount(rawVal, (entry.date as string) || (entry.manifest_key as string));
+      let rawVal = entry.structure_debt;
+      if (rawVal === undefined || rawVal === null || rawVal === '') {
+        rawVal = entry.fee;
+      }
+      const dateStr = normalizeDateToYMD(entry.date as string) || (entry.manifest_key ? String(entry.manifest_key).split('_')[0] : (entry.date as string) || '');
+      const parsedDebt = parseDebtAmount(rawVal, dateStr);
 
       // If entry is not sponsored, clean out vehicle summaries mentioning other people's sponsorships
       if (!isSpon) {
@@ -1530,13 +1592,11 @@ app.get('/api/ledger', (req, res) => {
         }
       }
 
-      const dateStr = (entry.date as string) || (entry.manifest_key ? String(entry.manifest_key).split('_')[0] : '');
-
-      if (cleanGn !== origGn || cleanSn !== origSn || entry.structure_debt !== parsedDebt || entry.sponsored !== isSpon || !entry.date) {
+      if (cleanGn !== origGn || cleanSn !== origSn || entry.structure_debt !== parsedDebt || entry.sponsored !== isSpon || entry.date !== dateStr) {
         dirty = true;
         return {
           ...entry,
-          date: entry.date || dateStr,
+          date: dateStr,
           sponsored: isSpon,
           structure_debt: parsedDebt,
           general_notes: cleanGn,
@@ -1545,7 +1605,7 @@ app.get('/api/ledger', (req, res) => {
       }
       return {
         ...entry,
-        date: entry.date || dateStr,
+        date: dateStr,
         structure_debt: parsedDebt,
       };
     });
@@ -1564,15 +1624,16 @@ app.get('/api/ledger', (req, res) => {
         cleanedGn = '';
       }
       const cleanedSn = isSpon ? (cleanSponsorshipNote(origSn) || origSn || 'Unaccounted Sponsorship') : '';
-      const dateStr = (e.date as string) || (e.manifest_key ? String(e.manifest_key).split('_')[0] : '');
-      const rawVal = (e.structure_debt !== undefined && e.structure_debt !== null && Number(e.structure_debt) > 0)
-        ? e.structure_debt
-        : (e.fee || e.structure_debt);
+      const dateStr = normalizeDateToYMD(e.date as string) || (e.manifest_key ? String(e.manifest_key).split('_')[0] : (e.date as string) || '');
+      let rawVal = e.structure_debt;
+      if (rawVal === undefined || rawVal === null || rawVal === '') {
+        rawVal = e.fee;
+      }
       const parsedDebt = parseDebtAmount(rawVal, dateStr);
 
       return {
         ...e,
-        date: e.date || dateStr,
+        date: dateStr,
         structure_debt: parsedDebt,
         sponsored: isSpon,
         general_notes: cleanedGn,
@@ -1641,7 +1702,11 @@ app.post('/api/ledger/manual', (req, res) => {
     license_plate: entry.license_plate || '',
     sponsored: isSponsored,
     sponsor_note: isSponsored ? noteText : '',
-    structure_debt: typeof entry.structure_debt === 'number' ? entry.structure_debt : getFareForDate(entry.date),
+    structure_debt: typeof entry.structure_debt === 'number'
+      ? entry.structure_debt
+      : (entry.structure_debt !== undefined && entry.structure_debt !== null && entry.structure_debt !== ''
+          ? Number(entry.structure_debt) || getFareForDate(entry.date)
+          : getFareForDate(entry.date)),
     general_notes: noteText,
     submitted_at: entry.submitted_at || new Date().toISOString(),
   };

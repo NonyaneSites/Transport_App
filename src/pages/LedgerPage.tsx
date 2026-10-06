@@ -402,7 +402,7 @@ export function LedgerPage() {
           const scoreA = scoreMap.get(a.key) ?? 0;
           const scoreB = scoreMap.get(b.key) ?? 0;
           if (scoreB !== scoreA) return scoreB - scoreA;
-          return b.amount - a.amount;
+          return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
         });
 
       return {
@@ -671,6 +671,8 @@ export function LedgerPage() {
           notes: finalNotes,
           instances: [],
         });
+        const removedSet = new Set(editTarget.entryIds);
+        setEntries((prev) => prev.filter((e) => !removedSet.has(e.id)));
       } else {
         await updateDebtorWithInstances(editTarget.entryIds, {
           name: editName.trim(),
@@ -775,7 +777,7 @@ export function LedgerPage() {
           : (finalNotes || 'Did not pay');
       }
 
-      await addManualLedgerEntry({
+      const createdEntry = await addManualLedgerEntry({
         firstName: addFirstName,
         surname: addSurname,
         structure: targetStructure,
@@ -786,6 +788,10 @@ export function LedgerPage() {
         isSponsored: isSpon,
         debtType: addDebtType,
       });
+
+      if (createdEntry) {
+        setEntries((prev) => [createdEntry, ...prev.filter((e) => e.id !== createdEntry.id)]);
+      }
 
       const refreshed = await listLedgerEntries();
       setEntries(refreshed);
@@ -865,7 +871,7 @@ export function LedgerPage() {
         overrideStatus ||
         stagedIndications[id] ||
         (currentItem && currentItem.status !== 'pending' ? currentItem.status : 'actually_sponsored');
-      return { sponsorshipId: id, status: chosenStatus };
+      return { sponsorshipId: id, status: chosenStatus, sponsorship: currentItem };
     });
 
     const statusMap = new Map(items.map((i) => [i.sponsorshipId, i.status]));
@@ -880,7 +886,79 @@ export function LedgerPage() {
       )
     );
 
-    // 2. Clear selections for confirmed items
+    // 2. Immediately add confirmed unaccounted sponsorships to actual cancellation list (entries)
+    setEntries((prevEntries) => {
+      let nextEntries = [...prevEntries];
+      for (const item of items) {
+        const spon = item.sponsorship || sponsorships.find((s) => s.id === item.sponsorshipId);
+        if (!spon) continue;
+
+        if (item.status === 'unaccounted_sponsorship' || item.status === 'unpaid_sponsorship') {
+          const rawNote = spon.sponsor_note ? cleanSponsorshipNote(spon.sponsor_note) : '';
+          const noteText = item.status === 'unaccounted_sponsorship'
+            ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
+            : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
+          const effectiveFee = getFareForDate(spon.date);
+          const cleanName = sanitizePassengerDisplayName(spon.passenger_name) || spon.passenger_name.trim();
+          const normStructure = normalizeStructureCode(spon.structure);
+
+          const existingIdx = nextEntries.findIndex((e) =>
+            (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
+            (e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanName.toLowerCase() && Boolean(e.sponsored))
+          );
+
+          if (existingIdx >= 0) {
+            nextEntries[existingIdx] = {
+              ...nextEntries[existingIdx],
+              structure_debt: effectiveFee,
+              sponsored: true,
+              sponsor_note: noteText,
+              general_notes: noteText,
+              structure: normStructure,
+              submitted_by: 'Cancellation Admin',
+              source: 'reported_sponsorship_audit',
+            };
+          } else {
+            const newEntryId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+            nextEntries.unshift({
+              id: newEntryId,
+              manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+              date: normalizeDateToYMD(spon.date) || spon.date,
+              service: spon.service || 'Service',
+              passenger_name: cleanName,
+              stop: spon.stop || '',
+              structure: normStructure,
+              vehicle_name: spon.vehicle_name || '—',
+              submitted_by: 'Cancellation Admin',
+              rep_name: spon.rep_name || '',
+              license_plate: '',
+              sponsored: true,
+              sponsor_note: noteText,
+              structure_debt: effectiveFee,
+              general_notes: noteText,
+              source: 'reported_sponsorship_audit',
+              submitted_at: now,
+            });
+          }
+        } else if (item.status === 'actually_sponsored') {
+          // If marked actually sponsored, remove any existing sponsorship debt from cancellation list
+          nextEntries = nextEntries.filter((e) => {
+            if (spon.ledger_entry_id && e.id === spon.ledger_entry_id) return false;
+            if (
+              e.manifest_key === spon.manifest_key &&
+              sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === sanitizePassengerDisplayName(spon.passenger_name).toLowerCase() &&
+              Boolean(e.sponsored)
+            ) {
+              return false;
+            }
+            return true;
+          });
+        }
+      }
+      return nextEntries;
+    });
+
+    // 3. Clear selections for confirmed items
     setSelectedSponIds((prev) => {
       const next = new Set(prev);
       idsToConfirm!.forEach((id) => next.delete(id));
@@ -892,13 +970,13 @@ export function LedgerPage() {
       return next;
     });
 
-    // 3. User notification
+    // 4. User notification
     const actuallyCount = items.filter((i) => i.status === 'actually_sponsored').length;
     const debtCount = items.filter((i) => i.status === 'unaccounted_sponsorship' || i.status === 'unpaid_sponsorship').length;
     const statusText =
       debtCount > 0
-        ? `Confirmed ${count} sponsorships (${actuallyCount} actually sponsored, ${debtCount} added to ledger debt). Cleared from pending queue.`
-        : `Confirmed ${count} sponsorships as Actually Sponsored. Cleared from pending queue.`;
+        ? `Confirmed ${count} sponsorship${count === 1 ? '' : 's'} (${actuallyCount > 0 ? `${actuallyCount} actually sponsored, ` : ''}${debtCount} added to actual cancellation list as unaccounted sponsorship${debtCount === 1 ? '' : 's'}). Cleared from pending queue.`
+        : `Confirmed ${count} sponsorship${count === 1 ? '' : 's'} as Actually Sponsored. Cleared from pending queue.`;
 
     setSponsorshipNotice({
       id: 'batch_confirm',
@@ -907,7 +985,7 @@ export function LedgerPage() {
     });
     setTimeout(() => setSponsorshipNotice(null), 6000);
 
-    // 4. Server call and sync
+    // 5. Server call and sync
     try {
       const res = await verifyBatchSponsorships(items);
       if (res.success) {
