@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import type { Manifest, Vehicle, Passenger } from './types';
-import { getFareForDate } from './types';
+import { getPassengerFare } from './types';
 import { sortVehiclesNatural } from './sort';
 import { shortDate, parseManifestKey, prettyDate } from './dates';
 
@@ -142,14 +142,16 @@ export function extractVehicleStats(
     ? (Number(draftCash.base) || 0) + (Number(draftCash.external) || 0) + (Number(draftCash.pastCancellations) || 0)
     : undefined;
 
-  const standardFare = getFareForDate(dateStr);
-  const unpaidCount = vehicle?.draftState?.unpaidIds?.length ?? rawRiders.filter((r) => r.didNotPay).length;
+  const payingPresentRiders = presentRiders.filter(
+    (r) => !sponsoredRiders.some((s) => s.id === r.id) && !r.didNotPay
+  );
+  const computedFareTotal = payingPresentRiders.reduce((acc, r) => acc + getPassengerFare(r, dateStr), 0);
   const fareCollected =
     actualCashTotal !== undefined
       ? actualCashTotal
       : (vehicle?.type || 'Taxi') === 'Bus'
       ? 0
-      : Math.max(0, presentRiders.length - sponsoredRiders.length - unpaidCount) * standardFare;
+      : computedFareTotal;
 
   return {
     vehicleId: vehicle?.id || '',

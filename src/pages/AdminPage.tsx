@@ -6,6 +6,7 @@ import { Footer } from '@/components/Footer';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { ExcelUpload } from '@/components/ExcelUpload';
 import { VehicleAllocation } from '@/components/VehicleAllocation';
+import { ThursdayRehearsalSetup } from '@/components/ThursdayRehearsalSetup';
 import { TransferSponsorshipModal } from '@/components/TransferSponsorshipModal';
 import { useManifest } from '@/lib/useManifest';
 import { listAllManifests, loadManifest } from '@/lib/manifest';
@@ -226,19 +227,21 @@ export function AdminPage() {
           </div>
         </div>
 
-        <div className="grid gap-5 lg:grid-cols-2">
+        <div className={`grid gap-5 ${service === 'Rehearsal' ? 'grid-cols-1' : 'lg:grid-cols-2'}`}>
           <ServiceDateSelector
             date={date}
             service={service}
             onDateChange={setDate}
             onServiceChange={setService}
           />
-          <ExcelUpload
-            date={date}
-            service={service}
-            onImport={handleImport}
-            existingCount={manifest?.signups?.length ?? 0}
-          />
+          {service !== 'Rehearsal' && (
+            <ExcelUpload
+              date={date}
+              service={service}
+              onImport={handleImport}
+              existingCount={manifest?.signups?.length ?? 0}
+            />
+          )}
         </div>
 
         {/* Session banner */}
@@ -287,6 +290,15 @@ export function AdminPage() {
           <div className="mt-8 flex flex-col items-center gap-3 py-16">
             <Loader2 className="h-8 w-8 animate-spin text-crimson-400" />
             <p className="text-sm text-muted">Loading manifest from cloud...</p>
+          </div>
+        ) : service === 'Rehearsal' ? (
+          <div className="mt-5">
+            <ThursdayRehearsalSetup
+              date={date}
+              onDateChange={setDate}
+              manifest={manifest}
+              onSaveManifest={save}
+            />
           </div>
         ) : (
           <div className="mt-5 space-y-5">

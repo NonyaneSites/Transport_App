@@ -1,6 +1,6 @@
 import { Calendar, Clock } from 'lucide-react';
-import { SERVICE_TYPES, type ServiceType } from '@/lib/types';
-import { prettyDate, parseDate } from '@/lib/dates';
+import { SERVICE_TYPES, isDreamWeekDate, type ServiceType } from '@/lib/types';
+import { prettyDate } from '@/lib/dates';
 
 interface Props {
   date: string;
@@ -10,7 +10,7 @@ interface Props {
 }
 
 export function ServiceDateSelector({ date, service, onDateChange, onServiceChange }: Props) {
-  const isDreamWeekDay = Boolean(date) && /^\d{4}-\d{2}-\d{2}$/.test(date) && parseDate(date).getDay() !== 0;
+  const isDreamWeekDay = isDreamWeekDate(date);
   return (
     <div className="card">
       <div className="mb-4 flex items-center gap-2">
@@ -61,7 +61,9 @@ export function ServiceDateSelector({ date, service, onDateChange, onServiceChan
             </select>
           </div>
           <p className="mt-1.5 text-xs text-muted">
-            {service === 'AM_Ushers'
+            {service === 'Rehearsal'
+              ? 'Thursday evening rehearsal taxi transport'
+              : service === 'AM_Ushers'
               ? 'Ushers Early Service transport'
               : service === 'AM_Serving'
               ? 'AM Serving ministries transport'

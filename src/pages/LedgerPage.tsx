@@ -10,7 +10,7 @@ import { connectSyncEvents } from '@/lib/serverApi';
 import {
   listLedgerEntries, deleteLedgerEntry, downloadLedgerExcel,
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
-  recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch, parseDebtAmount,
+  recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch, parseDebtAmount, serviceCodeForEntry,
   updateDebtorWithInstances, normalizeDateToYMD, normalizeStructureCode, structureSortComparator,
   listReportedSponsorships, verifyBatchSponsorships, groupSponsorshipsByStructure, sanitizePassengerDisplayName,
   cleanSponsorshipNote, cleanPersonalAbsenteeNote, cleanAndDeduplicateSponsorships,
@@ -152,6 +152,7 @@ export function LedgerPage() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [structureFilter, setStructureFilter] = useState('');
+  const [serviceFilter, setServiceFilter] = useState('');
   const [openStructures, setOpenStructures] = useState<Set<string>>(new Set());
 
   // Partial Payment Modal State
@@ -312,11 +313,17 @@ export function LedgerPage() {
 
   const filtered = useMemo(() => {
     const q = search.trim();
-    if (!q && !structureFilter) return entries;
+    if (!q && !structureFilter && !serviceFilter) return entries;
 
     return entries.filter((e) => {
       const struct = normalizeStructureCode(e.structure);
       if (structureFilter && struct !== structureFilter) return false;
+      if (serviceFilter) {
+        const code = serviceCodeForEntry(e);
+        if (serviceFilter === 'Rehe' && code !== 'Rehe') return false;
+        if (serviceFilter === 'AM' && !code.includes('AM')) return false;
+        if (serviceFilter === 'PM' && !code.includes('PM')) return false;
+      }
       if (!q) return true;
       const { matched } = evaluateLedgerSearch(
         {
@@ -331,9 +338,9 @@ export function LedgerPage() {
       );
       return matched;
     });
-  }, [entries, search, structureFilter]);
+  }, [entries, search, structureFilter, serviceFilter]);
 
-  const isFiltered = Boolean(search.trim() || structureFilter);
+  const isFiltered = Boolean(search.trim() || structureFilter || serviceFilter);
 
   // All debtor groups across all entries (unfiltered)
   const allGroups = useMemo(() => aggregateLedgerEntries(entries), [entries]);
@@ -1491,7 +1498,7 @@ export function LedgerPage() {
                     </button>
                   )}
                 </div>
-                <div className="relative sm:w-56">
+                <div className="relative sm:w-48">
                   <Filter className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
                   <select
                     value={structureFilter}
@@ -1502,6 +1509,19 @@ export function LedgerPage() {
                     {structures.map((s) => (
                       <option key={s} value={s} className="bg-card-2">{s}</option>
                     ))}
+                  </select>
+                </div>
+                <div className="relative sm:w-44">
+                  <Clock className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+                  <select
+                    value={serviceFilter}
+                    onChange={(e) => setServiceFilter(e.target.value)}
+                    className="input-field pl-10 text-xs sm:text-sm py-2"
+                  >
+                    <option value="" className="bg-card-2">All Services</option>
+                    <option value="AM" className="bg-card-2">Sunday AM</option>
+                    <option value="PM" className="bg-card-2">Sunday PM</option>
+                    <option value="Rehe" className="bg-card-2">Rehearsal (Rehe)</option>
                   </select>
                 </div>
               </div>
@@ -1657,19 +1677,26 @@ export function LedgerPage() {
 
                                   {/* Date & Service pills */}
                                   <div className="flex flex-wrap gap-1.5">
-                                    {row.instances.map((ins, idx) => (
-                                      <button
-                                        key={idx}
-                                        type="button"
-                                        onClick={() => openEditModal(row)}
-                                        className="inline-flex items-center gap-1.5 rounded-md bg-card-2 px-2 py-1 text-xs text-ink font-mono border border-line/60 active:border-crimson-400/60 transition-all text-left"
-                                        title={`Click to edit date, service, or amount for ${ins.formatted}`}
-                                      >
-                                        <span>{ins.formatted}</span>
-                                        <span className="text-[10px] text-crimson-400 font-sans font-semibold">R{ins.amount}</span>
-                                        <Pencil className="h-2.5 w-2.5 text-muted" />
-                                      </button>
-                                    ))}
+                                    {row.instances.map((ins, idx) => {
+                                      const isRehe = ins.serviceCode === 'Rehe' || ins.formatted.includes('(Rehe)');
+                                      return (
+                                        <button
+                                          key={idx}
+                                          type="button"
+                                          onClick={() => openEditModal(row)}
+                                          className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-mono border active:border-crimson-400/60 transition-all text-left ${
+                                            isRehe
+                                              ? 'bg-indigo-500/15 text-indigo-200 border-indigo-500/40 font-semibold'
+                                              : 'bg-card-2 text-ink border-line/60'
+                                          }`}
+                                          title={`Click to edit date, service, or amount for ${ins.formatted}`}
+                                        >
+                                          <span>{ins.formatted}</span>
+                                          <span className="text-[10px] text-crimson-400 font-sans font-semibold">R{ins.amount}</span>
+                                          <Pencil className="h-2.5 w-2.5 text-muted" />
+                                        </button>
+                                      );
+                                    })}
                                   </div>
 
                                   {/* Action Buttons: Thumb-friendly 40px touch targets */}
@@ -1718,19 +1745,26 @@ export function LedgerPage() {
                                       </td>
                                       <td className="px-3.5 py-2.5 text-muted align-top">
                                         <div className="flex flex-wrap gap-1.5 max-w-xs">
-                                          {row.instances.map((ins, idx) => (
-                                            <button
-                                              key={idx}
-                                              type="button"
-                                              onClick={() => openEditModal(row)}
-                                              className="group/pill inline-flex items-center gap-1 rounded bg-card-2/80 px-2 py-0.5 text-xs text-ink font-mono border border-line/60 hover:border-crimson-400/60 hover:bg-card transition-all cursor-pointer text-left"
-                                              title={`Click to edit date, service, or amount for ${ins.formatted}`}
-                                            >
-                                              <span>{ins.formatted}</span>
-                                              <span className="text-[10px] text-crimson-400 font-sans font-semibold">R{ins.amount}</span>
-                                              <Pencil className="h-2.5 w-2.5 text-muted/50 opacity-0 group-hover/pill:opacity-100 transition-opacity ml-0.5" />
-                                            </button>
-                                          ))}
+                                          {row.instances.map((ins, idx) => {
+                                            const isRehe = ins.serviceCode === 'Rehe' || ins.formatted.includes('(Rehe)');
+                                            return (
+                                              <button
+                                                key={idx}
+                                                type="button"
+                                                onClick={() => openEditModal(row)}
+                                                className={`group/pill inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-mono border hover:border-crimson-400/60 hover:bg-card transition-all cursor-pointer text-left ${
+                                                  isRehe
+                                                    ? 'bg-indigo-500/15 text-indigo-200 border-indigo-500/40 font-semibold'
+                                                    : 'bg-card-2/80 text-ink border-line/60'
+                                                }`}
+                                                title={`Click to edit date, service, or amount for ${ins.formatted}`}
+                                              >
+                                                <span>{ins.formatted}</span>
+                                                <span className="text-[10px] text-crimson-400 font-sans font-semibold">R{ins.amount}</span>
+                                                <Pencil className="h-2.5 w-2.5 text-muted/50 opacity-0 group-hover/pill:opacity-100 transition-opacity ml-0.5" />
+                                              </button>
+                                            );
+                                          })}
                                         </div>
                                       </td>
                                       <td className="px-3.5 py-2.5 align-top">
@@ -2837,6 +2871,7 @@ export function LedgerPage() {
                         >
                           <option value="PM">PM (Evening Service)</option>
                           <option value="AM">AM (Morning Service)</option>
+                          <option value="Rehe">Rehe (Thursday Rehearsal)</option>
                           <option value="LM">LM (Leaders Meeting)</option>
                           <option value="WMP">WMP (Worship/Music/Prayer)</option>
                           <option value="EF">EF (Easter Friday)</option>
@@ -2865,13 +2900,21 @@ export function LedgerPage() {
                             className="input-field w-full pl-7 font-mono font-bold text-sm py-2"
                           />
                         </div>
-                        <div className="mt-1 flex gap-1.5">
+                        <div className="mt-1 flex flex-wrap gap-1.5">
                           <button
                             type="button"
                             onClick={() => setAddAmount('40')}
                             className="text-[10px] text-muted hover:text-ink underline"
                           >
                             R40 (Standard)
+                          </button>
+                          <span className="text-[10px] text-muted">·</span>
+                          <button
+                            type="button"
+                            onClick={() => setAddAmount('70')}
+                            className="text-[10px] text-muted hover:text-ink underline"
+                          >
+                            R70 (Rehearsal Both)
                           </button>
                           <span className="text-[10px] text-muted">·</span>
                           <button

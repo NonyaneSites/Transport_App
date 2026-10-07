@@ -1,5 +1,6 @@
 import { jsPDF } from 'jspdf';
 import autoTable, { type RowInput } from 'jspdf-autotable';
+import type { Passenger, Vehicle } from './types';
 import {
   type LedgerEntry,
   BANK_DETAILS,
@@ -430,4 +431,118 @@ export function downloadCancellationDebtPdf(
   });
 
   doc.save(fileName);
+}
+
+/**
+ * Generates and downloads a clean, printable PDF of the Thursday Rehearsal Taxi Manifest.
+ */
+export function downloadRehearsalManifestPdf(manifest: {
+  date: string;
+  vehicles: Vehicle[];
+  signups: Passenger[];
+}): void {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pMap = new Map(manifest.signups.map((p) => [p.id, p]));
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const leftMargin = 12;
+  const rightMargin = 12;
+
+  // Header
+  doc.setFontSize(14);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(185, 28, 28);
+  doc.text('CRC TRANSPORT MINISTRY — REHEARSAL TAXI MANIFEST', leftMargin, 16);
+
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(71, 85, 105);
+  doc.text(`Date: ${manifest.date} · Total Taxis: ${manifest.vehicles.length} · Total Riders: ${manifest.signups.length}`, leftMargin, 22);
+
+  doc.setDrawColor(203, 213, 225);
+  doc.setLineWidth(0.3);
+  doc.line(leftMargin, 25, pageWidth - rightMargin, 25);
+
+  let startY = 28;
+
+  manifest.vehicles.forEach((vehicle) => {
+    const riders = (vehicle.riders || []).map((id) => pMap.get(id)).filter(Boolean) as Passenger[];
+    const rows: RowInput[] = [];
+
+    // Group riders by stop in ordered sequence
+    const stopGroups = new Map<string, Passenger[]>();
+    riders.forEach((r) => {
+      const s = r.stop || 'Unassigned';
+      const arr = stopGroups.get(s) || [];
+      arr.push(r);
+      stopGroups.set(s, arr);
+    });
+
+    const stopsInOrder: string[] = [];
+    if (vehicle.orderedStops) {
+      vehicle.orderedStops.forEach((s) => {
+        if (!stopsInOrder.includes(s)) stopsInOrder.push(s);
+      });
+    }
+    stopGroups.forEach((_, s) => {
+      if (!stopsInOrder.includes(s)) stopsInOrder.push(s);
+    });
+
+    stopsInOrder.forEach((stopName) => {
+      const stopRiders = stopGroups.get(stopName) || [];
+      if (stopRiders.length === 0) return;
+      stopRiders.sort((a, b) => naturalCompare(a.fullName, b.fullName));
+
+      const time = vehicle.stopTimes?.[stopName] ? ` (${vehicle.stopTimes[stopName]})` : '';
+      stopRiders.forEach((r, idx) => {
+        let legsLabel = 'Going & Return (Both)';
+        if (r.legs === 'going') legsLabel = 'Going Only';
+        if (r.legs === 'return') legsLabel = 'Return Only';
+        rows.push([
+          idx === 0 ? `${stopName}${time}` : '',
+          `${idx + 1}. ${r.fullName}`,
+          r.structure || '—',
+          legsLabel,
+        ]);
+      });
+    });
+
+    if (startY > 240) {
+      doc.addPage();
+      startY = 16;
+    }
+
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(15, 23, 42);
+    doc.text(`🚖 ${vehicle.name.toUpperCase()} (${riders.length} riders / cap ${vehicle.capacity || 15})`, leftMargin, startY);
+    startY += 3;
+
+    autoTable(doc, {
+      startY,
+      head: [['Stop & Time', 'Passenger Name', 'Structure', 'Legs']],
+      body: rows,
+      theme: 'grid',
+      headStyles: {
+        fillColor: [30, 41, 59],
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 8,
+      },
+      bodyStyles: {
+        fontSize: 8,
+        textColor: [15, 23, 42],
+      },
+      columnStyles: {
+        0: { cellWidth: 45, fontStyle: 'bold' },
+        1: { cellWidth: 65 },
+        2: { cellWidth: 35 },
+        3: { cellWidth: 40 },
+      },
+      margin: { left: leftMargin, right: rightMargin },
+    });
+
+    startY = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
+  });
+
+  doc.save(`rehearsal_manifest_${manifest.date}.pdf`);
 }

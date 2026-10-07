@@ -403,14 +403,25 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
   }
 
   // Insert new absentees: regular cancellations in debt ledger (not auto-sent to sponsorship section)
+  const isReheKey = (serviceLabel || '').toLowerCase().includes('rehe') || (key || '').toLowerCase().includes('rehe');
+  const normalizedSvcLabel = isReheKey ? 'Rehe' : (serviceLabel || 'Service');
+  const isDW = isDreamWeekDate(parsedDate || key);
   const effectiveDebt = getFareForDate(parsedDate || key);
+
   if (Array.isArray(absentees) && absentees.length > 0) {
     for (const a of absentees) {
+      const aLegs = (a as { legs?: 'both' | 'going' | 'return' }).legs;
+      let absenteeDebt = effectiveDebt;
+      if (!isDW) {
+        if (aLegs === 'both') absenteeDebt = 70;
+        else if (aLegs === 'going' || aLegs === 'return') absenteeDebt = 40;
+        else if (isReheKey) absenteeDebt = 70;
+      }
       ledger.push({
         id: `ledger_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         manifest_key: key,
         date: parsedDate || key,
-        service: serviceLabel || 'Service',
+        service: normalizedSvcLabel,
         passenger_name: a.fullName,
         stop: a.stop || '',
         structure: a.structure || '',
@@ -420,9 +431,10 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
         license_plate: (licensePlate || '').trim(),
         sponsored: false,
         sponsor_note: '',
-        structure_debt: effectiveDebt,
+        structure_debt: absenteeDebt,
         general_notes: cleanPersonalAbsenteeNote((a as { notes?: string }).notes || ''),
         submitted_at: nowIso,
+        legs: aLegs || (isReheKey ? 'both' : undefined),
       });
     }
   }
@@ -915,16 +927,16 @@ function normalizeStructureCode(raw: string | null | undefined): string {
   return trimmed;
 }
 
-// DreamWeek weekday vs Sunday pricing helper
+// DreamWeek date bounds: ONLY Tue 29 Sep 2026 to Fri 2 Oct 2026 inclusive (R45 per trip)
+const DREAMWEEK_START = '2026-09-29';
+const DREAMWEEK_END = '2026-10-02';
+
 function isDreamWeekDate(dateStr?: string | null): boolean {
   if (!dateStr || typeof dateStr !== 'string') return false;
-  const parts = dateStr.trim().split('-');
-  if (parts.length !== 3) return false;
-  const [y, m, d] = parts.map(Number);
-  if (!y || !m || !d) return false;
-  const dt = new Date(y, m - 1, d);
-  if (isNaN(dt.getTime())) return false;
-  return dt.getDay() !== 0; // 0 = Sunday
+  const match = dateStr.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return false;
+  const normalized = `${match[1]}-${match[2]}-${match[3]}`;
+  return normalized >= DREAMWEEK_START && normalized <= DREAMWEEK_END;
 }
 
 function getFareForDate(dateStr?: string | null): number {
@@ -2172,7 +2184,7 @@ app.patch('/api/ledger/:id', (req, res) => {
     atomicWriteJson(LEDGER_FILE, ledger);
 
     // Sync sponsorship audit
-    let audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
+    const audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
     const sponIdx = audits.findIndex((a) => String(a.ledger_entry_id) === id);
     if (sponIdx !== -1) {
       if (wasRemoved) {
@@ -2236,7 +2248,7 @@ app.post('/api/ledger/update-debtor', (req, res) => {
     ledger = ledger.filter((e) => !existingSet.has(String(e.id)));
 
     // Also update any linked sponsorships so they do not resurrect
-    let audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
+    const audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
     let auditChanged = false;
     for (let i = 0; i < audits.length; i++) {
       if (existingSet.has(String(audits[i].ledger_entry_id || ''))) {
@@ -2305,7 +2317,7 @@ app.post('/api/ledger/update-debtor', (req, res) => {
     ledger = ledger.filter((e) => !existingSet.has(String(e.id)) || updatedIds.has(String(e.id)));
 
     // Synchronize linked sponsorships if debt was edited or type changed
-    let audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
+    const audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
     let auditChanged = false;
     for (let i = 0; i < audits.length; i++) {
       if (existingSet.has(String(audits[i].ledger_entry_id || ''))) {

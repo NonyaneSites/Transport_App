@@ -257,3 +257,6 @@ export function downloadTextFile(filename: string, content: string) {
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+
+export { formatRehearsalWhatsAppManifest, formatSingleTaxiRehearsalWhatsApp } from './rehearsal';
+

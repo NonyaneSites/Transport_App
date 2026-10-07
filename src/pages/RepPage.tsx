@@ -37,6 +37,7 @@ import {
   withdrawSingleSponsorshipClaim,
   cleanSponsorshipNote,
   parseDebtAmount,
+  normalizeDateToYMD,
   type LedgerEntry,
 } from '@/lib/ledger';
 import { supabase, MANIFESTS_TABLE } from '@/lib/supabase';

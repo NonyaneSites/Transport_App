@@ -409,6 +409,7 @@ export async function updateDebtorOnServer(payload: {
     name: string;
     structure: string;
     isSponsored?: boolean;
+    debtType?: string;
     notes?: string;
     instances: Array<{ id?: string; date: string; service: string; amount: number }>;
   };

@@ -1,8 +1,8 @@
 import { useRef, useState } from 'react';
 import { Upload, CheckCircle2, AlertTriangle, Loader2, EyeOff, RefreshCw, Calendar } from 'lucide-react';
 import { parseWorkbookAsync, type ParseResult } from '@/lib/parser';
-import type { Passenger, ServiceType } from '@/lib/types';
-import { prettyDate, shortDate, parseDate } from '@/lib/dates';
+import { isDreamWeekDate, type Passenger, type ServiceType } from '@/lib/types';
+import { prettyDate, shortDate } from '@/lib/dates';
 
 interface Props {
   date: string;
@@ -20,7 +20,7 @@ export function ExcelUpload({ date, service, onImport, existingCount }: Props) {
   const [fileName, setFileName] = useState<string | null>(null);
   const [cachedWorkbook, setCachedWorkbook] = useState<{ name: string; buffer: ArrayBuffer } | null>(null);
 
-  const isDreamWeekDay = Boolean(date) && /^\d{4}-\d{2}-\d{2}$/.test(date) && parseDate(date).getDay() !== 0;
+  const isDreamWeekDay = isDreamWeekDate(date);
 
   async function runParseWithBuffer(buf: ArrayBuffer, name: string) {
     setParsing(true);

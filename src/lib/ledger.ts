@@ -17,18 +17,35 @@ import {
 } from './serverApi';
 import type { ReportedSponsorship, SponsorshipStatus } from './serverApi';
 import type { Passenger, Vehicle } from './types';
-import { CANCELLATION_FEE, getFareForDate } from './types';
+import {
+  CANCELLATION_FEE,
+  getFareForDate,
+  isDreamWeekDate,
+  DREAMWEEK_START,
+  DREAMWEEK_END,
+  DREAMWEEK_FARE,
+  getPassengerFare,
+} from './types';
 import { naturalCompare } from './sort';
 import { shortDate } from './dates';
 
 export type { ReportedSponsorship, SponsorshipStatus };
+export { isDreamWeekDate, DREAMWEEK_START, DREAMWEEK_END, DREAMWEEK_FARE, getPassengerFare };
 
 /**
  * Safely parses a debt amount from numbers, numeric strings, or formatted currency strings ("R40", "R45", "40", "45", "40.00").
  * Returns 0 if explicitly 0. Defaults to the date's standard fee (R45 for DreamWeek weekdays, R40 for Sunday/default) if null, undefined, empty, or unparseable.
  */
-export function parseDebtAmount(val: unknown, dateStr?: string | null): number {
-  const fallback = dateStr ? getFareForDate(dateStr) : CANCELLATION_FEE;
+export function parseDebtAmount(
+  val: unknown,
+  dateStr?: string | null,
+  serviceStr?: string | null,
+  legs?: string | null
+): number {
+  let fallback = dateStr ? getFareForDate(dateStr) : CANCELLATION_FEE;
+  if (serviceStr && (serviceStr.toLowerCase().includes('rehe') || serviceStr.toLowerCase().includes('rehearsal'))) {
+    fallback = isDreamWeekDate(dateStr) ? DREAMWEEK_FARE : (legs === 'going' || legs === 'return' ? 40 : 70);
+  }
   if (val === undefined || val === null || val === '') return fallback;
   if (typeof val === 'number') {
     if (isNaN(val)) return fallback;
@@ -264,6 +281,7 @@ export interface LedgerEntry {
   structure_debt: number;
   general_notes: string;
   source?: string;
+  legs?: 'both' | 'going' | 'return';
 }
 
 export interface AbsenteeInput extends Passenger {
@@ -272,10 +290,10 @@ export interface AbsenteeInput extends Passenger {
 }
 
 /**
- * Extracts a normalized service code (e.g. AM, PM, LM, WMP, EF, AD, FW, etc.)
+ * Extracts a normalized service code (e.g. AM, PM, LM, WMP, EF, AD, FW, Rehe, etc.)
  * from a service string or embedded event description.
  * Preserves special church event codes like LM (Leaders Meeting), WMP (Worship/Music/Prayer),
- * EF (Easter Friday), AD (Ascension Day), FW (Fast & Worship).
+ * EF (Easter Friday), AD (Ascension Day), FW (Fast & Worship), Rehe (Thursday Rehearsal).
  */
 export function extractServiceCode(serviceStr: string): string {
   if (!serviceStr) return '';
@@ -293,6 +311,7 @@ export function extractServiceCode(serviceStr: string): string {
 
   // Exact known codes
   const upper = clean.toUpperCase();
+  if (upper === 'REHE' || upper === 'REHEARSAL' || upper.startsWith('REHE_') || upper.startsWith('REHE ') || upper.startsWith('REHE-') || upper.startsWith('REHE/')) return 'Rehe';
   if (upper === 'AM' || upper.startsWith('AM_') || upper.startsWith('AM ') || upper.startsWith('AM-') || upper.startsWith('AM/')) return 'AM';
   if (upper === 'PM' || upper.startsWith('PM_') || upper.startsWith('PM ') || upper.startsWith('PM-') || upper.startsWith('PM/')) return 'PM';
   if (upper === 'LM' || upper.startsWith('LM_') || upper.startsWith('LM ') || upper.startsWith('LM-') || upper.startsWith('LM/')) return 'LM';
@@ -303,6 +322,7 @@ export function extractServiceCode(serviceStr: string): string {
 
   // Keyword searches
   const lower = clean.toLowerCase();
+  if (lower.includes('rehears') || lower === 'rehe') return 'Rehe';
   if (lower.includes('leader')) return 'LM';
   if ((lower.includes('worship') && lower.includes('prayer')) || lower.includes('wmp')) return 'WMP';
   if (lower.includes('easter') || lower.includes('good friday') || lower === 'ef') return 'EF';
@@ -317,26 +337,10 @@ export function extractServiceCode(serviceStr: string): string {
 }
 
 /**
- * Returns true if a 'YYYY-MM-DD' date string falls on any day other than
- * Sunday. Used to identify DreamWeek (Tue–Fri) conference-day cancellations
- * so they can be labelled distinctly from ordinary Sunday cancellations.
- */
-export function isDreamWeekDate(dateStr?: string | null): boolean {
-  if (!dateStr || typeof dateStr !== 'string') return false;
-  const parts = dateStr.trim().split('-');
-  if (parts.length !== 3) return false;
-  const [y, m, d] = parts.map(Number);
-  if (!y || !m || !d) return false;
-  const dt = new Date(y, m - 1, d);
-  if (isNaN(dt.getTime())) return false;
-  return dt.getDay() !== 0; // 0 = Sunday
-}
-
-/**
  * Resolves the display service code for a ledger entry/instance, prefixing
  * plain 'AM'/'PM' codes with 'DW ' (-> 'DW AM' / 'DW PM') whenever the
- * entry's date falls on a DreamWeek conference day (Tue–Fri, i.e. not a
- * Sunday). Named church-event codes (LM, WMP, EF, AD, FW, etc.) are left
+ * entry's date falls on a DreamWeek conference day (29 Sep – 2 Oct 2026).
+ * Named church-event codes (LM, WMP, EF, AD, FW, Rehe, etc.) are left
  * untouched since they are already self-describing regardless of weekday.
  */
 export function serviceCodeForEntry(e: { service?: string | null; date?: string | null }): string {
@@ -577,12 +581,14 @@ export async function insertAbsentees(
     if (delError) throw delError;
   }
 
-  const effectiveFare = getFareForDate(date);
-  const rows = absentees.map((p) => {
+  const isReheService = (serviceLabel || '').toLowerCase().includes('rehe');
+  const normalizedService = isReheService ? 'Rehe' : serviceLabel;
+  const rows: Array<Record<string, unknown>> = absentees.map((p) => {
+    const passengerDebt = getPassengerFare(p, date);
     return {
       manifest_key: manifestKey,
       date,
-      service: serviceLabel,
+      service: normalizedService,
       passenger_name: p.fullName,
       stop: p.stop,
       structure: p.structure || '',
@@ -592,17 +598,19 @@ export async function insertAbsentees(
       license_plate: licensePlate,
       sponsored: false, // Absentees are regular cancellations, never auto-sent to sponsorship section!
       sponsor_note: '',
-      structure_debt: effectiveFare,
+      structure_debt: passengerDebt,
       general_notes: cleanPersonalAbsenteeNote((p as { notes?: string }).notes || ''),
+      legs: p.legs || (isReheService ? 'both' : undefined),
     };
   });
 
   if (unpaidRiders && unpaidRiders.length > 0) {
     for (const u of unpaidRiders) {
+      const uFare = getPassengerFare(u as unknown as Passenger, date);
       rows.push({
         manifest_key: manifestKey,
         date,
-        service: serviceLabel,
+        service: normalizedService,
         passenger_name: sanitizePassengerDisplayName(u.fullName),
         stop: u.stop || '',
         structure: normalizeStructureCode(u.structure),
@@ -613,9 +621,10 @@ export async function insertAbsentees(
         sponsored: true,
         debt_type: 'unpaid_sponsorship',
         sponsor_note: u.unpaidNote ? `Did not pay: ${u.unpaidNote}` : 'Did not pay',
-        structure_debt: effectiveFare,
+        structure_debt: uFare,
         general_notes: `Did not pay${u.unpaidNote ? `: ${u.unpaidNote}` : ''}`,
         source: 'reported_sponsorship_audit',
+        legs: (u as { legs?: 'both' | 'going' | 'return' }).legs || (isReheService ? 'both' : undefined),
       });
     }
   }
@@ -770,17 +779,17 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
   // ensure debts are parsed into numbers, and exclude any entries whose debt has been reduced to zero or settled
   return entries
     .filter((e) => {
-      let rawVal = e.structure_debt;
-      if (rawVal === undefined || rawVal === null || rawVal === '') {
-        rawVal = (e as Record<string, unknown>).fee;
+      let rawVal: unknown = e.structure_debt;
+      if (rawVal === undefined || rawVal === null || (typeof rawVal === 'string' && rawVal === '')) {
+        rawVal = ((e as unknown) as Record<string, unknown>).fee;
       }
       const d = parseDebtAmount(rawVal, e.date || e.manifest_key);
       return d > 0;
     })
     .map((e) => {
-      let rawVal = e.structure_debt;
-      if (rawVal === undefined || rawVal === null || rawVal === '') {
-        rawVal = (e as Record<string, unknown>).fee;
+      let rawVal: unknown = e.structure_debt;
+      if (rawVal === undefined || rawVal === null || (typeof rawVal === 'string' && rawVal === '')) {
+        rawVal = ((e as unknown) as Record<string, unknown>).fee;
       }
       const isSpon = isEntrySponsorshipOrUnpaid(e);
       const parsedDate = e.date || (e.manifest_key ? String(e.manifest_key).split('_')[0] : '');
@@ -1797,7 +1806,7 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
       // Collect distinct service codes
       const serviceCodesSet = new Set<string>();
       const instances: AggregatedLedgerInstance[] = sorted
-        .filter((e) => parseDebtAmount(e.structure_debt, e.date) > 0)
+        .filter((e) => parseDebtAmount(e.structure_debt, e.date, e.service, (e as { legs?: string }).legs) > 0)
         .map((e) => {
           const code = serviceCodeForEntry(e);
           serviceCodesSet.add(code);
@@ -1810,7 +1819,7 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
               dStr = `${parts[2].slice(-2)}/${parts[1]}/${parts[0].slice(2)}`;
             }
           }
-          const instDebt = parseDebtAmount(e.structure_debt, e.date);
+          const instDebt = parseDebtAmount(e.structure_debt, e.date, e.service, (e as { legs?: string }).legs);
 
           return {
             id: e.id,
@@ -2443,7 +2452,11 @@ export async function recordSingleSponsorshipClaim(claim: {
   try {
     const { error } = await supabase.from(SPONSORSHIPS_TABLE).upsert([record], { onConflict: 'id' });
     if (error) {
-      await supabase.from('reported_sponsorships').upsert([record], { onConflict: 'id' }).catch(() => {});
+      try {
+        await supabase.from('reported_sponsorships').upsert([record], { onConflict: 'id' });
+      } catch {
+        /* ignore fallback error */
+      }
     }
   } catch (err) {
     console.debug('[Ledger] Supabase single sponsorship claim note:', err);
@@ -2927,7 +2940,7 @@ export async function verifyBatchSponsorships(
   }
 
   // 2. Fetch current sponsorships from all available sources
-  let currentAudits = await listReportedSponsorships();
+  const currentAudits = await listReportedSponsorships();
 
   // 3. Fetch current ledger entries to synchronize debts
   let currentLedger = await listLedgerEntries();
@@ -3103,7 +3116,7 @@ function updateLocalSponsorshipCache(updated: ReportedSponsorship) {
   try {
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_SPONSORSHIPS_KEY) : null;
     if (raw) {
-      let list = JSON.parse(raw) as ReportedSponsorship[];
+      const list = JSON.parse(raw) as ReportedSponsorship[];
       const idx = list.findIndex((a) => a.id === updated.id);
       if (idx >= 0) {
         list[idx] = updated;
@@ -3239,7 +3252,7 @@ export async function recordReportedSponsorshipPayment(
   }
 
   // 2. Local fallback
-  let currentAudits = await listReportedSponsorships();
+  const currentAudits = await listReportedSponsorships();
   const sponIndex = currentAudits.findIndex((a) => a.id === sponsorshipId);
   if (sponIndex === -1) return { success: false };
 
@@ -3301,7 +3314,7 @@ export async function updateReportedSponsorship(
   }
 
   // 2. Local fallback
-  let currentAudits = await listReportedSponsorships();
+  const currentAudits = await listReportedSponsorships();
   const idx = currentAudits.findIndex((a) => a.id === sponsorshipId);
   if (idx === -1) return { success: false };
 

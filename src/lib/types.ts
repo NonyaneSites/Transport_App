@@ -23,6 +23,7 @@ export interface Passenger {
   walkIn?: boolean;
   createdBy?: string;
   createdClientId?: string;
+  legs?: 'both' | 'going' | 'return';
 }
 
 /**
@@ -317,7 +318,8 @@ export type ServiceType =
   | 'AM_Ushers'
   | 'AM_Normal'
   | 'PM_Serving'
-  | 'PM_Normal';
+  | 'PM_Normal'
+  | 'Rehearsal';
 
 export const SERVICE_TYPES: { value: ServiceType; label: string; period: 'AM' | 'PM'; mode: 'Serving' | 'Normal' | 'Ushers' }[] = [
   { value: 'AM_Serving', label: 'AM Service — Serving Only', period: 'AM', mode: 'Serving' },
@@ -325,34 +327,57 @@ export const SERVICE_TYPES: { value: ServiceType; label: string; period: 'AM' | 
   { value: 'AM_Normal', label: 'AM Service — Normal Only', period: 'AM', mode: 'Normal' },
   { value: 'PM_Serving', label: 'PM Service — Serving Only', period: 'PM', mode: 'Serving' },
   { value: 'PM_Normal', label: 'PM Service — Normal Only', period: 'PM', mode: 'Normal' },
+  { value: 'Rehearsal', label: 'Thursday Rehearsal Transport', period: 'PM', mode: 'Normal' },
 ];
 
 export const RESET_PASSWORD = 'CRC2026!';
 export const CANCELLATION_FEE = 40;
 export const DREAMWEEK_FARE = 45;
 
+/** DreamWeek date bounds: ONLY Tue 29 Sep 2026 to Fri 2 Oct 2026 inclusive (R45 per trip) */
+export const DREAMWEEK_START = '2026-09-29';
+export const DREAMWEEK_END = '2026-10-02';
+
 /**
- * Returns true if a 'YYYY-MM-DD' date string falls on a weekday (Monday–Saturday, or non-Sunday).
- * DreamWeek conference sessions occur on weekdays (Tue–Fri).
+ * Returns true if a 'YYYY-MM-DD' date string falls on DreamWeek:
+ * ONLY Tue 29 Sep 2026 to Fri 2 Oct 2026 inclusive.
  */
 export function isDreamWeekDate(dateStr?: string | null): boolean {
   if (!dateStr || typeof dateStr !== 'string') return false;
-  const parts = dateStr.trim().split('-');
-  if (parts.length !== 3) return false;
-  const [y, m, d] = parts.map(Number);
-  if (!y || !m || !d) return false;
-  const dt = new Date(y, m - 1, d);
-  if (isNaN(dt.getTime())) return false;
-  return dt.getDay() !== 0; // 0 = Sunday
+  const match = dateStr.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return false;
+  const normalized = `${match[1]}-${match[2]}-${match[3]}`;
+  return normalized >= DREAMWEEK_START && normalized <= DREAMWEEK_END;
 }
 
 /**
  * Returns the appropriate fare for a given date.
- * For DreamWeek specifically (weekdays, i.e. non-Sunday), the price is R45.
- * For standard Sunday services, the price is R40.
+ * For DreamWeek specifically (29 Sep – 2 Oct 2026), the price is R45.
+ * For standard Sunday services and other dates, the price is R40.
  */
 export function getFareForDate(dateStr?: string | null): number {
   return isDreamWeekDate(dateStr) ? DREAMWEEK_FARE : CANCELLATION_FEE;
+}
+
+/**
+ * Returns the fare for a passenger, respecting Rehearsal legs (R40 going/return, R70 both)
+ * and DreamWeek priority (DreamWeek rules win and fare is R45).
+ */
+export function getPassengerFare(
+  p?: { legs?: 'both' | 'going' | 'return' | string | null; service?: string | null } | null,
+  dateStr?: string | null
+): number {
+  if (isDreamWeekDate(dateStr)) {
+    return DREAMWEEK_FARE;
+  }
+  const isRehe = Boolean(
+    p?.service && (p.service.toLowerCase().includes('rehe') || p.service.toLowerCase().includes('rehearsal'))
+  );
+  if (isRehe || (p && p.legs)) {
+    if (p?.legs === 'going' || p?.legs === 'return') return 40;
+    return 70;
+  }
+  return getFareForDate(dateStr);
 }
 
 export const MIN_TAXI_THRESHOLD = 15;
