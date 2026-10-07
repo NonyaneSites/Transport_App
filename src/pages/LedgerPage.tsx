@@ -14,6 +14,7 @@ import {
   updateDebtorWithInstances, normalizeDateToYMD, normalizeStructureCode, structureSortComparator,
   listReportedSponsorships, verifyBatchSponsorships, groupSponsorshipsByStructure, sanitizePassengerDisplayName,
   cleanSponsorshipNote, cleanPersonalAbsenteeNote, cleanAndDeduplicateSponsorships,
+  deleteReportedSponsorship, batchDeleteReportedSponsorships, recordReportedSponsorshipPayment, updateReportedSponsorship,
   type DebtorInstanceUpdateItem,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
   type ReportedSponsorship, type SponsorshipStatus,
@@ -209,6 +210,29 @@ export function LedgerPage() {
   const [isBatchConfirming, setIsBatchConfirming] = useState(false);
   const [showSupabaseSetupModal, setShowSupabaseSetupModal] = useState(false);
   const [copiedSql, setCopiedSql] = useState(false);
+
+  // Reported Sponsorship Payment State
+  const [paySponTarget, setPaySponTarget] = useState<ReportedSponsorship | null>(null);
+  const [paySponAmount, setPaySponAmount] = useState('');
+  const [paySponNotes, setPaySponNotes] = useState('');
+  const [payingSpon, setPayingSpon] = useState(false);
+  const [paySponError, setPaySponError] = useState<string | null>(null);
+
+  // Reported Sponsorship Edit State
+  const [editSponTarget, setEditSponTarget] = useState<ReportedSponsorship | null>(null);
+  const [editSponName, setEditSponName] = useState('');
+  const [editSponStructure, setEditSponStructure] = useState('');
+  const [editSponDate, setEditSponDate] = useState('');
+  const [editSponService, setEditSponService] = useState('PM');
+  const [editSponStop, setEditSponStop] = useState('');
+  const [editSponVehicle, setEditSponVehicle] = useState('');
+  const [editSponRep, setEditSponRep] = useState('');
+  const [editSponNote, setEditSponNote] = useState('');
+  const [editSponStatus, setEditSponStatus] = useState<SponsorshipStatus>('pending');
+  const [editSponDebtAmount, setEditSponDebtAmount] = useState('40');
+  const [savingSponEdit, setSavingSponEdit] = useState(false);
+  const [editSponError, setEditSponError] = useState<string | null>(null);
+  const [editSponSuccess, setEditSponSuccess] = useState<string | null>(null);
 
   // Historical Cancellation Import
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -686,6 +710,8 @@ export function LedgerPage() {
 
       const refreshed = await listLedgerEntries();
       setEntries(refreshed);
+      const refSpons = await listReportedSponsorships();
+      setSponsorships(refSpons);
       setEditSuccessMessage('Debtor dates, structure, and amount updated successfully.');
       setTimeout(() => {
         closeEditModal();
@@ -699,10 +725,6 @@ export function LedgerPage() {
 
   async function handleDeleteEntireDebtor() {
     if (!editTarget) return;
-    const confirmDelete = window.confirm(
-      `Are you sure you want to completely remove ${editTarget.name} (R${editTarget.amount}) from the ledger?`
-    );
-    if (!confirmDelete) return;
 
     setDeletingDebtor(true);
     setEditError(null);
@@ -710,6 +732,8 @@ export function LedgerPage() {
       await Promise.all(editTarget.entryIds.map((id) => deleteLedgerEntry(id)));
       const idSet = new Set(editTarget.entryIds);
       setEntries((prev) => prev.filter((e) => !idSet.has(e.id)));
+      const refSpons = await listReportedSponsorships();
+      setSponsorships(refSpons);
       closeEditModal();
     } catch (e) {
       setEditError(e instanceof Error ? e.message : String(e));
@@ -920,6 +944,7 @@ export function LedgerPage() {
             };
           } else {
             const newEntryId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+            spon.ledger_entry_id = newEntryId;
             nextEntries.unshift({
               id: newEntryId,
               manifest_key: spon.manifest_key || `manual-${Date.now()}`,
@@ -1022,11 +1047,187 @@ export function LedgerPage() {
       await recordPartialPayment(paymentTarget.entryIds, amountNum);
       const refreshed = await listLedgerEntries();
       setEntries(refreshed);
+      const refSpons = await listReportedSponsorships();
+      setSponsorships(refSpons);
       closePaymentModal();
     } catch (e) {
       setPaymentError(e instanceof Error ? e.message : String(e));
     } finally {
       setPaying(false);
+    }
+  }
+
+  // Delete a reported sponsorship (and remove corresponding debt from ledger)
+  async function handleDeleteSpon(s: ReportedSponsorship) {
+    const cleanName = sanitizePassengerDisplayName(s.passenger_name);
+
+    setSponsorshipUpdatingId(s.id);
+    try {
+      await deleteReportedSponsorship(s.id);
+      setSponsorships((prev) => prev.filter((item) => item.id !== s.id));
+      setSelectedSponIds((prev) => {
+        const next = new Set(prev);
+        next.delete(s.id);
+        return next;
+      });
+      const refreshed = await listLedgerEntries();
+      setEntries(refreshed);
+      setSponsorshipNotice({
+        id: s.id,
+        text: `Reported sponsorship for ${cleanName} removed.`,
+        type: 'success',
+      });
+      setTimeout(() => setSponsorshipNotice(null), 3000);
+    } catch (err) {
+      console.error('Failed to delete sponsorship:', err);
+      setSponsorshipNotice({
+        id: s.id,
+        text: `Failed to remove sponsorship: ${err instanceof Error ? err.message : String(err)}`,
+        type: 'warn',
+      });
+    } finally {
+      setSponsorshipUpdatingId(null);
+    }
+  }
+
+  // Batch delete selected reported sponsorships
+  async function handleBatchDeleteSpons() {
+    if (selectedSponIds.size === 0) return;
+    const count = selectedSponIds.size;
+
+    setIsBatchConfirming(true);
+    try {
+      const idsToDelete = Array.from(selectedSponIds);
+      await batchDeleteReportedSponsorships(idsToDelete);
+      const delSet = new Set(idsToDelete);
+      setSponsorships((prev) => prev.filter((item) => !delSet.has(item.id)));
+      setSelectedSponIds(new Set());
+      const refreshed = await listLedgerEntries();
+      setEntries(refreshed);
+      setSponsorshipNotice({
+        id: 'batch_del',
+        text: `Removed ${count} reported sponsorship(s) and cleared related ledger debts.`,
+        type: 'success',
+      });
+      setTimeout(() => setSponsorshipNotice(null), 3500);
+    } catch (err) {
+      console.error('Failed to batch delete sponsorships:', err);
+    } finally {
+      setIsBatchConfirming(false);
+    }
+  }
+
+  // Open Payment modal for reported sponsorship
+  function handleOpenPaySpon(s: ReportedSponsorship) {
+    setPaySponTarget(s);
+    setPaySponAmount(String(getFareForDate(s.date)));
+    setPaySponNotes('');
+    setPaySponError(null);
+  }
+
+  function handleClosePaySpon() {
+    setPaySponTarget(null);
+    setPaySponAmount('');
+    setPaySponNotes('');
+    setPaySponError(null);
+  }
+
+  async function handleConfirmPaySpon() {
+    if (!paySponTarget) return;
+    const amt = Number(paySponAmount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      setPaySponError('Please enter a valid positive payment amount.');
+      return;
+    }
+
+    setPayingSpon(true);
+    setPaySponError(null);
+    try {
+      await recordReportedSponsorshipPayment(paySponTarget.id, amt, paySponNotes);
+      const refSpons = await listReportedSponsorships();
+      setSponsorships(refSpons);
+      const refreshed = await listLedgerEntries();
+      setEntries(refreshed);
+      const cleanName = sanitizePassengerDisplayName(paySponTarget.passenger_name);
+      setSponsorshipNotice({
+        id: paySponTarget.id,
+        text: `Payment of R${amt} recorded for ${cleanName}. Updated in ledger.`,
+        type: 'success',
+      });
+      setTimeout(() => setSponsorshipNotice(null), 3500);
+      handleClosePaySpon();
+    } catch (err) {
+      setPaySponError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPayingSpon(false);
+    }
+  }
+
+  // Open Edit modal for reported sponsorship
+  function handleOpenEditSpon(s: ReportedSponsorship) {
+    setEditSponTarget(s);
+    setEditSponName(s.passenger_name);
+    setEditSponStructure(normalizeStructureCode(s.structure));
+    setEditSponDate(normalizeDateToYMD(s.date) || s.date);
+    setEditSponService(s.service || 'PM');
+    setEditSponStop(s.stop || '');
+    setEditSponVehicle(s.vehicle_name || '');
+    setEditSponRep(s.rep_name || '');
+    setEditSponNote(s.sponsor_note || '');
+    setEditSponStatus(s.status);
+    setEditSponDebtAmount(String(getFareForDate(s.date)));
+    setEditSponError(null);
+    setEditSponSuccess(null);
+  }
+
+  function handleCloseEditSpon() {
+    setEditSponTarget(null);
+    setEditSponError(null);
+    setEditSponSuccess(null);
+  }
+
+  async function handleSaveEditSpon(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    if (!editSponTarget) return;
+    if (!editSponName.trim()) {
+      setEditSponError('Passenger name cannot be empty.');
+      return;
+    }
+    const targetStructure = normalizeStructureCode(editSponStructure);
+    if (!targetStructure) {
+      setEditSponError('Structure cannot be empty.');
+      return;
+    }
+
+    setSavingSponEdit(true);
+    setEditSponError(null);
+    try {
+      const debtAmt = Number(editSponDebtAmount);
+      await updateReportedSponsorship(editSponTarget.id, {
+        passenger_name: editSponName.trim(),
+        structure: targetStructure,
+        date: editSponDate,
+        service: editSponService,
+        stop: editSponStop.trim(),
+        vehicle_name: editSponVehicle.trim(),
+        rep_name: editSponRep.trim(),
+        sponsor_note: editSponNote.trim(),
+        status: editSponStatus,
+        debtAmount: Number.isFinite(debtAmt) && debtAmt > 0 ? debtAmt : undefined,
+      });
+
+      const refSpons = await listReportedSponsorships();
+      setSponsorships(refSpons);
+      const refreshed = await listLedgerEntries();
+      setEntries(refreshed);
+      setEditSponSuccess('Reported sponsorship updated successfully.');
+      setTimeout(() => {
+        handleCloseEditSpon();
+      }, 500);
+    } catch (err) {
+      setEditSponError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingSponEdit(false);
     }
   }
 
@@ -2014,6 +2215,17 @@ export function LedgerPage() {
                         <XCircle className="h-3.5 w-3.5" />
                         <span>Unpaid (Add Debt)</span>
                       </button>
+
+                      <button
+                        type="button"
+                        disabled={isBatchConfirming}
+                        onClick={handleBatchDeleteSpons}
+                        className="rounded-lg bg-crimson-900/30 hover:bg-crimson-900/50 text-crimson-300 border border-crimson-500/40 font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                        title="Remove selected reported sponsorships and clear associated debt from ledger"
+                      >
+                        <Trash2 className="h-3.5 w-3.5 text-crimson-400" />
+                        <span>Delete Selected ({selectedSponIds.size})</span>
+                      </button>
                     </>
                   ) : (
                     <button
@@ -2330,6 +2542,40 @@ export function LedgerPage() {
                                         <span>Awaiting check</span>
                                       </div>
                                     )}
+                                  </div>
+
+                                  {/* Direct Actions: Record Payment, Edit, Remove */}
+                                  <div className="flex items-center gap-1.5 self-start sm:self-center shrink-0">
+                                    <button
+                                      type="button"
+                                      disabled={isUpdating}
+                                      onClick={() => handleOpenPaySpon(s)}
+                                      className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-500/15 px-2.5 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25 active:bg-emerald-500/30 transition-colors disabled:opacity-50"
+                                      title={`Record a payment from or on behalf of ${cleanName}`}
+                                    >
+                                      <Banknote className="h-3.5 w-3.5" />
+                                      <span>Pay</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={isUpdating}
+                                      onClick={() => handleOpenEditSpon(s)}
+                                      className="inline-flex items-center gap-1 rounded-lg border border-line bg-card px-2.5 py-1.5 text-xs font-medium text-ink hover:bg-card-2 active:bg-card-2 transition-colors disabled:opacity-50"
+                                      title={`Edit details, notes, or classification for ${cleanName}`}
+                                    >
+                                      <Pencil className="h-3.5 w-3.5 text-muted" />
+                                      <span>Edit</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={isUpdating}
+                                      onClick={() => handleDeleteSpon(s)}
+                                      className="inline-flex items-center gap-1 rounded-lg border border-crimson-500/30 bg-crimson-500/10 px-2.5 py-1.5 text-xs font-medium text-crimson-300 hover:bg-crimson-500/20 active:bg-crimson-500/25 transition-colors disabled:opacity-50"
+                                      title={`Remove reported sponsorship for ${cleanName} and clear from ledger`}
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                      <span>Remove</span>
+                                    </button>
                                   </div>
                                 </div>
                               </div>
@@ -3310,6 +3556,385 @@ export function LedgerPage() {
                   Done
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Record Payment for Reported Sponsorship Modal */}
+        {paySponTarget && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 sm:p-4 animate-fade-in backdrop-blur-sm">
+            <div className="w-full max-w-md max-h-[92vh] overflow-y-auto rounded-2xl border border-line bg-card p-4 sm:p-6 shadow-2xl">
+              <div className="flex items-center justify-between border-b border-line pb-3">
+                <div className="flex items-center gap-2">
+                  <div className="rounded-lg bg-emerald-500/15 p-2 text-emerald-400 shrink-0">
+                    <Banknote className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-display text-base sm:text-lg font-bold text-ink">Record Payment</h3>
+                    <p className="text-xs text-muted">Settle sponsorship debt or record payment</p>
+                  </div>
+                </div>
+                <button
+                  onClick={handleClosePaySpon}
+                  disabled={payingSpon}
+                  className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink active:bg-card-2"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="mt-3.5 space-y-3.5 sm:space-y-4">
+                <div className="rounded-xl border border-line/60 bg-card-2/60 p-3 sm:p-3.5">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-muted">Passenger:</span>
+                    <span className="font-bold text-ink">{sanitizePassengerDisplayName(paySponTarget.passenger_name)}</span>
+                  </div>
+                  <div className="mt-1 flex items-center justify-between text-sm">
+                    <span className="text-muted">Structure:</span>
+                    <span className="font-medium text-ink">{normalizeStructureCode(paySponTarget.structure)}</span>
+                  </div>
+                  <div className="mt-1 flex items-center justify-between text-sm">
+                    <span className="text-muted">Service & Date:</span>
+                    <span className="font-mono text-ink text-xs">{paySponTarget.date} ({paySponTarget.service || 'Service'})</span>
+                  </div>
+                  <div className="mt-1 flex items-center justify-between text-sm">
+                    <span className="text-muted">Current Fee / Debt:</span>
+                    <span className="font-display text-base font-bold text-emerald-400">R{getFareForDate(paySponTarget.date)}</span>
+                  </div>
+                  {paySponTarget.vehicle_name && (
+                    <div className="mt-1.5 text-xs text-muted">
+                      Vehicle: <span className="text-ink font-medium">{paySponTarget.vehicle_name}</span> · Rep: <span className="text-ink font-medium">{paySponTarget.rep_name || 'Transport Rep'}</span>
+                    </div>
+                  )}
+                  {paySponTarget.sponsor_note && (
+                    <div className="mt-2 text-xs text-amber-300/90 rounded bg-amber-500/10 p-1.5 border border-amber-500/20">
+                      <strong>Sponsor Note:</strong> {paySponTarget.sponsor_note}
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1.5">
+                    Amount Paid (R)
+                  </label>
+                  <div className="relative">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 font-bold text-muted">R</span>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min="1"
+                      step="10"
+                      value={paySponAmount}
+                      onChange={(e) => setPaySponAmount(e.target.value)}
+                      placeholder="e.g. 40"
+                      className="input-field pl-8 font-mono text-lg font-bold text-ink py-2"
+                      autoFocus
+                    />
+                  </div>
+                  {/* Quick preset chips */}
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setPaySponAmount('20')}
+                      className="rounded-md bg-card-2 px-2.5 py-1 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60 active:bg-card"
+                    >
+                      R20
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPaySponAmount('40')}
+                      className="rounded-md bg-card-2 px-2.5 py-1 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60 active:bg-card"
+                    >
+                      R40
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPaySponAmount('45')}
+                      className="rounded-md bg-card-2 px-2.5 py-1 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60 active:bg-card"
+                    >
+                      R45
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPaySponAmount(String(getFareForDate(paySponTarget.date)))}
+                      className="rounded-md bg-emerald-500/15 px-2.5 py-1 text-xs text-emerald-300 hover:bg-emerald-500/25 border border-emerald-500/30 font-semibold active:bg-emerald-500/30"
+                    >
+                      Full Fee (R{getFareForDate(paySponTarget.date)})
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                    Payment Note / Details <span className="text-muted font-normal text-[11px]">(Optional)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={paySponNotes}
+                    onChange={(e) => setPaySponNotes(e.target.value)}
+                    placeholder="e.g. Cash handed to Rep John, Paid via EFT"
+                    className="input-field w-full text-xs py-2"
+                  />
+                </div>
+
+                {paySponError && (
+                  <div className="flex items-center gap-2 rounded-lg border border-crimson-500/30 bg-crimson-900/20 p-2.5 text-xs text-crimson-300">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    <span>{paySponError}</span>
+                  </div>
+                )}
+
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2 pt-2 border-t border-line">
+                  <button
+                    type="button"
+                    onClick={handleClosePaySpon}
+                    disabled={payingSpon}
+                    className="btn-ghost text-xs py-2.5 sm:py-2 order-2 sm:order-1"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmPaySpon}
+                    disabled={payingSpon || !paySponAmount}
+                    className="btn-success flex items-center justify-center gap-2 text-xs py-2.5 sm:py-2 order-1 sm:order-2 font-semibold shadow-md"
+                  >
+                    {payingSpon ? <Loader2 className="h-4 w-4 animate-spin" /> : <Banknote className="h-4 w-4" />}
+                    <span>Confirm Payment of R{paySponAmount || 0}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Edit Reported Sponsorship Modal */}
+        {editSponTarget && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 sm:p-4 animate-fade-in backdrop-blur-sm">
+            <div className="w-full max-w-lg max-h-[92vh] overflow-y-auto rounded-2xl border border-line bg-card p-4 sm:p-6 shadow-2xl">
+              <div className="flex items-center justify-between border-b border-line pb-3">
+                <div className="flex items-center gap-2">
+                  <div className="rounded-lg bg-amber-500/15 p-2 text-amber-400 shrink-0">
+                    <Pencil className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-display text-base sm:text-lg font-bold text-ink">Edit Reported Sponsorship</h3>
+                    <p className="text-xs text-muted">Update details, classification, or debt amount</p>
+                  </div>
+                </div>
+                <button
+                  onClick={handleCloseEditSpon}
+                  disabled={savingSponEdit}
+                  className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink active:bg-card-2"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveEditSpon} className="mt-3.5 space-y-3.5 sm:space-y-4">
+                {/* Passenger Name & Structure */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                      Passenger Name <span className="text-crimson-400">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={editSponName}
+                      onChange={(e) => setEditSponName(e.target.value)}
+                      placeholder="e.g. Amo Lekota"
+                      className="input-field w-full text-sm py-2"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                      Structure <span className="text-crimson-400">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={editSponStructure}
+                      onChange={(e) => setEditSponStructure(e.target.value)}
+                      placeholder="e.g. S1, S2, FTV 20"
+                      className="input-field w-full text-sm py-2"
+                    />
+                  </div>
+                </div>
+
+                {/* Date & Service */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                      Date
+                    </label>
+                    <input
+                      type="date"
+                      value={editSponDate}
+                      onChange={(e) => {
+                        setEditSponDate(e.target.value);
+                        setEditSponDebtAmount(String(getFareForDate(e.target.value)));
+                      }}
+                      className="input-field w-full text-sm py-2 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                      Service
+                    </label>
+                    <select
+                      value={editSponService}
+                      onChange={(e) => setEditSponService(e.target.value)}
+                      className="input-field w-full text-sm py-2"
+                    >
+                      <option value="PM">PM Service</option>
+                      <option value="AM">AM Service</option>
+                      <option value="LM">LM Service</option>
+                      <option value="WMP">WMP Service</option>
+                      <option value="EF">EF Service</option>
+                      <option value="AD">AD Service</option>
+                      <option value="FW">FW Service</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Vehicle & Rep */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                      Vehicle / Taxi Name
+                    </label>
+                    <input
+                      type="text"
+                      value={editSponVehicle}
+                      onChange={(e) => setEditSponVehicle(e.target.value)}
+                      placeholder="e.g. Taxi 1"
+                      className="input-field w-full text-xs py-2"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                      Reported by (Rep Name)
+                    </label>
+                    <input
+                      type="text"
+                      value={editSponRep}
+                      onChange={(e) => setEditSponRep(e.target.value)}
+                      placeholder="e.g. Rep Name"
+                      className="input-field w-full text-xs py-2"
+                    />
+                  </div>
+                </div>
+
+                {/* Status Dropdown */}
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                    Audit Status / Action <span className="text-crimson-400">*</span>
+                  </label>
+                  <select
+                    value={editSponStatus}
+                    onChange={(e) => setEditSponStatus(e.target.value as SponsorshipStatus)}
+                    className="input-field w-full text-xs sm:text-sm py-2"
+                  >
+                    <option value="pending" className="bg-card text-ink">
+                      ⏳ Pending Verification
+                    </option>
+                    <option value="actually_sponsored" className="bg-card text-emerald-400 font-semibold">
+                      ✓ Actually Sponsored (No Action / No Debt)
+                    </option>
+                    <option value="unaccounted_sponsorship" className="bg-card text-amber-400 font-semibold">
+                      ⚠️ Unaccounted Sponsorship (Add to Cancellation Debt)
+                    </option>
+                    <option value="unpaid_sponsorship" className="bg-card text-crimson-400 font-semibold">
+                      ❌ Unpaid Sponsorship (Add to Cancellation Debt)
+                    </option>
+                  </select>
+                </div>
+
+                {/* Debt Amount (if unaccounted or unpaid) */}
+                {(editSponStatus === 'unaccounted_sponsorship' || editSponStatus === 'unpaid_sponsorship') && (
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-amber-300 mb-1">
+                      Debt Amount Owing (R)
+                    </label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-muted">R</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="5"
+                        value={editSponDebtAmount}
+                        onChange={(e) => setEditSponDebtAmount(e.target.value)}
+                        className="input-field pl-7 font-mono font-bold w-full text-sm py-2"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Sponsor Note */}
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                    Sponsor Note / Reason
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={editSponNote}
+                    onChange={(e) => setEditSponNote(e.target.value)}
+                    placeholder="e.g. Said sponsored by Cell Leader, Did not pay"
+                    className="input-field w-full text-xs py-2"
+                  />
+                </div>
+
+                {editSponError && (
+                  <div className="flex items-center gap-2 rounded-lg border border-crimson-500/30 bg-crimson-900/20 p-2.5 text-xs text-crimson-300">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    <span>{editSponError}</span>
+                  </div>
+                )}
+
+                {editSponSuccess && (
+                  <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-900/20 p-2.5 text-xs text-emerald-300">
+                    <CheckCircle2 className="h-4 w-4 shrink-0" />
+                    <span>{editSponSuccess}</span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between gap-2 pt-3 border-t border-line">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (editSponTarget) {
+                        const target = editSponTarget;
+                        handleCloseEditSpon();
+                        handleDeleteSpon(target);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1 rounded-lg border border-crimson-500/30 bg-crimson-500/10 px-3 py-2 text-xs font-semibold text-crimson-300 hover:bg-crimson-500/20 transition-colors"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    <span>Delete</span>
+                  </button>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleCloseEditSpon}
+                      disabled={savingSponEdit}
+                      className="btn-ghost text-xs py-2 px-3"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={savingSponEdit}
+                      className="btn-primary flex items-center justify-center gap-1.5 text-xs py-2 px-4 font-semibold"
+                    >
+                      {savingSponEdit ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                      <span>Save Changes</span>
+                    </button>
+                  </div>
+                </div>
+              </form>
             </div>
           </div>
         )}

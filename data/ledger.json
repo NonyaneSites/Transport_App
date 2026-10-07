@@ -1,24 +1,5 @@
 [
   {
-    "id": "ledger_sp_1791316226383_25jnh",
-    "manifest_key": "2026-10-04_PM_Normal",
-    "date": "2026-10-04",
-    "service": "PM",
-    "passenger_name": "Test Passenger Unaccounted",
-    "stop": "Test Stop",
-    "structure": "S1",
-    "vehicle_name": "Test Vehicle",
-    "submitted_by": "Cancellation Admin",
-    "rep_name": "Test Rep",
-    "license_plate": "",
-    "sponsored": true,
-    "sponsor_note": "Unaccounted Sponsorship: Test note",
-    "structure_debt": 40,
-    "general_notes": "Unaccounted Sponsorship: Test note",
-    "source": "reported_sponsorship_audit",
-    "submitted_at": "2026-10-06T19:50:26.380Z"
-  },
-  {
     "id": "ca21206a-2896-4c1b-b794-5ef36a713a4e",
     "passenger_name": "Prince Metiso",
     "structure": "S5",

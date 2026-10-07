@@ -1613,6 +1613,250 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
   res.json({ success: true, updatedCount, ledgerUpdated: ledgerChanged });
 });
 
+// Delete a reported sponsorship and remove any corresponding debt entry
+app.delete('/api/ledger/sponsorships/:id', (req, res) => {
+  const id = req.params.id;
+  let audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
+  const spon = audits.find((a) => a.id === id);
+  if (!spon) {
+    res.status(404).json({ error: 'Sponsorship record not found' });
+    return;
+  }
+
+  audits = audits.filter((a) => a.id !== id);
+  atomicWriteJson(SPONSORSHIPS_FILE, audits);
+
+  // Remove any associated debt entry from ledger
+  let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+  const beforeLen = ledger.length;
+  const cleanName = sanitizePassengerDisplayName(String(spon.passenger_name || '')).toLowerCase();
+
+  ledger = ledger.filter((e) => {
+    if (spon.ledger_entry_id && e.id === spon.ledger_entry_id) return false;
+    if (e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(String(e.passenger_name || '')).toLowerCase() === cleanName && Boolean(e.sponsored)) {
+      return false;
+    }
+    return true;
+  });
+
+  let ledgerChanged = false;
+  if (ledger.length !== beforeLen) {
+    ledgerChanged = true;
+    atomicWriteJson(LEDGER_FILE, ledger);
+    broadcastSse('ledger_updated', { timestamp: Date.now() });
+  }
+
+  broadcastSse('sponsorships_updated', { timestamp: Date.now() });
+  res.json({ success: true, removedId: id, ledgerChanged });
+});
+
+// Batch delete reported sponsorships
+app.post('/api/ledger/sponsorships/batch-delete', (req, res) => {
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) {
+    res.status(400).json({ error: 'ids array is required' });
+    return;
+  }
+  const idSet = new Set(ids.map(String));
+  let audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
+  const toDelete = audits.filter((a) => idSet.has(String(a.id)));
+  audits = audits.filter((a) => !idSet.has(String(a.id)));
+  atomicWriteJson(SPONSORSHIPS_FILE, audits);
+
+  let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+  const beforeLen = ledger.length;
+  for (const spon of toDelete) {
+    const cleanName = sanitizePassengerDisplayName(String(spon.passenger_name || '')).toLowerCase();
+    ledger = ledger.filter((e) => {
+      if (spon.ledger_entry_id && e.id === spon.ledger_entry_id) return false;
+      if (e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(String(e.passenger_name || '')).toLowerCase() === cleanName && Boolean(e.sponsored)) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  let ledgerChanged = false;
+  if (ledger.length !== beforeLen) {
+    ledgerChanged = true;
+    atomicWriteJson(LEDGER_FILE, ledger);
+    broadcastSse('ledger_updated', { timestamp: Date.now() });
+  }
+
+  broadcastSse('sponsorships_updated', { timestamp: Date.now() });
+  res.json({ success: true, count: toDelete.length, ledgerChanged });
+});
+
+// Record payment for a reported sponsorship
+app.post('/api/ledger/sponsorships/:id/pay', (req, res) => {
+  const id = req.params.id;
+  const { amount, notes } = req.body || {};
+  const payAmt = Number(amount);
+  if (!Number.isFinite(payAmt) || payAmt <= 0) {
+    res.status(400).json({ error: 'A valid positive payment amount is required' });
+    return;
+  }
+
+  const audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
+  const sponIndex = audits.findIndex((a) => a.id === id);
+  if (sponIndex === -1) {
+    res.status(404).json({ error: 'Sponsorship record not found' });
+    return;
+  }
+
+  const spon = audits[sponIndex];
+  const dateStr = String(spon.date || '');
+  const totalDebt = getFareForDate(dateStr);
+  const now = new Date().toISOString();
+  const payNote = notes ? String(notes).trim() : `Paid R${payAmt} on ${now.slice(0, 10)}`;
+
+  const ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+  let ledgerChanged = false;
+  const cleanName = sanitizePassengerDisplayName(String(spon.passenger_name || '')).toLowerCase();
+
+  const entryIdx = ledger.findIndex((e) =>
+    (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
+    (e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(String(e.passenger_name || '')).toLowerCase() === cleanName && Boolean(e.sponsored))
+  );
+
+  if (payAmt >= totalDebt || entryIdx === -1) {
+    // Fully settled / paid
+    spon.status = 'actually_sponsored';
+    spon.status_updated_at = now;
+    spon.sponsor_note = spon.sponsor_note ? `${spon.sponsor_note} (Settled: ${payNote})` : `Settled: ${payNote}`;
+    spon.ledger_entry_id = null;
+
+    if (entryIdx >= 0) {
+      ledger.splice(entryIdx, 1);
+      ledgerChanged = true;
+    }
+  } else {
+    // Partial payment
+    const remainingDebt = totalDebt - payAmt;
+    spon.sponsor_note = spon.sponsor_note ? `${spon.sponsor_note} (Partially paid R${payAmt}, owing R${remainingDebt})` : `Partially paid R${payAmt}, owing R${remainingDebt}`;
+    spon.status_updated_at = now;
+
+    if (entryIdx >= 0) {
+      ledger[entryIdx].structure_debt = remainingDebt;
+      ledger[entryIdx].general_notes = `${ledger[entryIdx].general_notes || ''} (Paid R${payAmt})`;
+      ledgerChanged = true;
+    }
+  }
+
+  audits[sponIndex] = spon;
+  atomicWriteJson(SPONSORSHIPS_FILE, audits);
+
+  if (ledgerChanged) {
+    atomicWriteJson(LEDGER_FILE, ledger);
+    broadcastSse('ledger_updated', { timestamp: Date.now() });
+  }
+
+  broadcastSse('sponsorships_updated', { timestamp: Date.now() });
+  res.json({ success: true, sponsorship: spon, ledgerChanged });
+});
+
+// Update / Edit a reported sponsorship
+app.patch('/api/ledger/sponsorships/:id', (req, res) => {
+  const id = req.params.id;
+  const updates = req.body || {};
+
+  const audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
+  const sponIndex = audits.findIndex((a) => a.id === id);
+  if (sponIndex === -1) {
+    res.status(404).json({ error: 'Sponsorship record not found' });
+    return;
+  }
+
+  const spon = audits[sponIndex];
+  const origCleanName = sanitizePassengerDisplayName(String(spon.passenger_name || '')).toLowerCase();
+
+  if (updates.passenger_name !== undefined) spon.passenger_name = sanitizePassengerDisplayName(String(updates.passenger_name));
+  if (updates.structure !== undefined) spon.structure = normalizeStructureCode(String(updates.structure));
+  if (updates.date !== undefined) spon.date = normalizeDateToYMD(String(updates.date)) || String(updates.date);
+  if (updates.service !== undefined) spon.service = String(updates.service);
+  if (updates.stop !== undefined) spon.stop = String(updates.stop);
+  if (updates.vehicle_name !== undefined) spon.vehicle_name = String(updates.vehicle_name);
+  if (updates.rep_name !== undefined) spon.rep_name = String(updates.rep_name);
+  if (updates.sponsor_note !== undefined) spon.sponsor_note = cleanSponsorshipNote(String(updates.sponsor_note));
+  if (updates.status !== undefined) {
+    spon.status = updates.status;
+    spon.status_updated_at = new Date().toISOString();
+  }
+
+  const ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+  let ledgerChanged = false;
+
+  const entryIdx = ledger.findIndex((e) =>
+    (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
+    (e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(String(e.passenger_name || '')).toLowerCase() === origCleanName && Boolean(e.sponsored))
+  );
+
+  const customDebt = updates.debtAmount !== undefined && Number(updates.debtAmount) > 0
+    ? Number(updates.debtAmount)
+    : getFareForDate(String(spon.date));
+
+  if (spon.status === 'unaccounted_sponsorship' || spon.status === 'unpaid_sponsorship') {
+    const rawNote = spon.sponsor_note ? cleanSponsorshipNote(spon.sponsor_note) : '';
+    const noteText = spon.status === 'unaccounted_sponsorship'
+      ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
+      : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
+
+    if (entryIdx >= 0) {
+      ledger[entryIdx].passenger_name = spon.passenger_name;
+      ledger[entryIdx].structure = spon.structure;
+      ledger[entryIdx].date = spon.date;
+      ledger[entryIdx].service = spon.service;
+      ledger[entryIdx].stop = spon.stop || '';
+      ledger[entryIdx].structure_debt = customDebt;
+      ledger[entryIdx].sponsor_note = noteText;
+      ledger[entryIdx].general_notes = noteText;
+      ledger[entryIdx].sponsored = true;
+      spon.ledger_entry_id = ledger[entryIdx].id;
+      ledgerChanged = true;
+    } else {
+      const newEntryId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      ledger.unshift({
+        id: newEntryId,
+        manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+        date: spon.date,
+        service: spon.service,
+        passenger_name: spon.passenger_name,
+        stop: spon.stop || '',
+        structure: spon.structure,
+        vehicle_name: spon.vehicle_name || '—',
+        submitted_by: 'Cancellation Admin',
+        rep_name: spon.rep_name || '',
+        license_plate: '',
+        sponsored: true,
+        sponsor_note: noteText,
+        structure_debt: customDebt,
+        general_notes: noteText,
+        source: 'reported_sponsorship_audit',
+        submitted_at: new Date().toISOString(),
+      });
+      spon.ledger_entry_id = newEntryId;
+      ledgerChanged = true;
+    }
+  } else if (spon.status === 'actually_sponsored' || spon.status === 'pending') {
+    if (entryIdx >= 0) {
+      ledger.splice(entryIdx, 1);
+      spon.ledger_entry_id = null;
+      ledgerChanged = true;
+    }
+  }
+
+  audits[sponIndex] = spon;
+  atomicWriteJson(SPONSORSHIPS_FILE, audits);
+
+  if (ledgerChanged) {
+    atomicWriteJson(LEDGER_FILE, ledger);
+    broadcastSse('ledger_updated', { timestamp: Date.now() });
+  }
+
+  broadcastSse('sponsorships_updated', { timestamp: Date.now() });
+  res.json({ success: true, sponsorship: spon, ledgerChanged });
+});
+
 // List all ledger entries
 app.get('/api/ledger', (req, res) => {
   let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
@@ -1778,11 +2022,39 @@ app.post('/api/ledger/settle', (req, res) => {
     return;
   }
 
-  const idSet = new Set(ids);
-  let ledger = readJsonFile<Array<{ id: string }>>(LEDGER_FILE, []);
+  const idSet = new Set(ids.map(String));
+  let ledger = readJsonFile<Array<{ id: string; passenger_name?: string; manifest_key?: string }>>(LEDGER_FILE, []);
   const beforeCount = ledger.length;
+  const settledEntries = ledger.filter((entry) => idSet.has(entry.id));
   ledger = ledger.filter((entry) => !idSet.has(entry.id));
   atomicWriteJson(LEDGER_FILE, ledger);
+
+  // Synchronize with sponsorship audits so settled sponsorships do not resurrect
+  const audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
+  let auditChanged = false;
+  for (const item of settledEntries) {
+    const cleanName = sanitizePassengerDisplayName(item.passenger_name || '').toLowerCase();
+    for (let i = 0; i < audits.length; i++) {
+      const a = audits[i];
+      if (
+        idSet.has(String(a.ledger_entry_id || '')) ||
+        (item.manifest_key && a.manifest_key === item.manifest_key && sanitizePassengerDisplayName(String(a.passenger_name || '')).toLowerCase() === cleanName)
+      ) {
+        audits[i] = {
+          ...a,
+          status: 'actually_sponsored',
+          status_updated_at: new Date().toISOString(),
+          ledger_entry_id: null,
+          sponsor_note: a.sponsor_note ? `${a.sponsor_note} (Settled from ledger)` : 'Settled from ledger',
+        };
+        auditChanged = true;
+      }
+    }
+  }
+  if (auditChanged) {
+    atomicWriteJson(SPONSORSHIPS_FILE, audits);
+    broadcastSse('sponsorships_updated', { timestamp: Date.now() });
+  }
 
   broadcastSse('ledger_updated', { timestamp: Date.now() });
   res.json({ success: true, count: beforeCount - ledger.length });
@@ -1846,10 +2118,36 @@ app.post('/api/ledger/manual', (req, res) => {
 // Delete specific ledger entry
 app.delete('/api/ledger/:id', (req, res) => {
   const id = req.params.id;
-  let ledger = readJsonFile<Array<{ id: string }>>(LEDGER_FILE, []);
+  let ledger = readJsonFile<Array<{ id: string; passenger_name?: string; manifest_key?: string }>>(LEDGER_FILE, []);
   const before = ledger.length;
+  const deletedItem = ledger.find((e) => e.id === id);
   ledger = ledger.filter((e) => e.id !== id);
   atomicWriteJson(LEDGER_FILE, ledger);
+
+  // Synchronize with sponsorship audits so it does not resurrect
+  let audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
+  let auditChanged = false;
+  const cleanName = deletedItem ? sanitizePassengerDisplayName(deletedItem.passenger_name || '').toLowerCase() : '';
+  audits = audits.map((a) => {
+    if (
+      String(a.ledger_entry_id) === id ||
+      (deletedItem && a.manifest_key === deletedItem.manifest_key && sanitizePassengerDisplayName(String(a.passenger_name || '')).toLowerCase() === cleanName)
+    ) {
+      auditChanged = true;
+      return {
+        ...a,
+        status: 'actually_sponsored',
+        status_updated_at: new Date().toISOString(),
+        ledger_entry_id: null,
+        sponsor_note: a.sponsor_note ? `${a.sponsor_note} (Settled / Removed from ledger)` : 'Settled / Removed from ledger',
+      };
+    }
+    return a;
+  });
+  if (auditChanged) {
+    atomicWriteJson(SPONSORSHIPS_FILE, audits);
+    broadcastSse('sponsorships_updated', { timestamp: Date.now() });
+  }
 
   broadcastSse('ledger_updated', { timestamp: Date.now() });
   res.json({ success: true, removed: before - ledger.length });
@@ -1862,7 +2160,8 @@ app.patch('/api/ledger/:id', (req, res) => {
   let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
   const idx = ledger.findIndex((e) => e.id === id);
   if (idx !== -1) {
-    if (updates.structure_debt !== undefined && Number(updates.structure_debt) <= 0) {
+    const wasRemoved = updates.structure_debt !== undefined && Number(updates.structure_debt) <= 0;
+    if (wasRemoved) {
       ledger = ledger.filter((e) => e.id !== id);
     } else {
       ledger[idx] = { ...ledger[idx], ...updates };
@@ -1871,6 +2170,24 @@ app.patch('/api/ledger/:id', (req, res) => {
       }
     }
     atomicWriteJson(LEDGER_FILE, ledger);
+
+    // Sync sponsorship audit
+    let audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
+    const sponIdx = audits.findIndex((a) => String(a.ledger_entry_id) === id);
+    if (sponIdx !== -1) {
+      if (wasRemoved) {
+        audits[sponIdx].status = 'actually_sponsored';
+        audits[sponIdx].status_updated_at = new Date().toISOString();
+        audits[sponIdx].ledger_entry_id = null;
+        audits[sponIdx].sponsor_note = `${audits[sponIdx].sponsor_note || ''} (Paid in full)`.trim();
+      } else {
+        if (updates.passenger_name) audits[sponIdx].passenger_name = sanitizePassengerDisplayName(String(updates.passenger_name));
+        if (updates.structure) audits[sponIdx].structure = normalizeStructureCode(String(updates.structure));
+      }
+      atomicWriteJson(SPONSORSHIPS_FILE, audits);
+      broadcastSse('sponsorships_updated', { timestamp: Date.now() });
+    }
+
     broadcastSse('ledger_updated', { timestamp: Date.now() });
     res.json({ success: true, entry: ledger[idx] });
   } else {
@@ -1887,7 +2204,7 @@ app.post('/api/ledger/update-debtor', (req, res) => {
   }
 
   let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
-  const existingSet = new Set(existingEntryIds);
+  const existingSet = new Set(existingEntryIds.map(String));
 
   const cleanName = updates?.name ? String(updates.name).trim() : '';
   const rawStruct = updates?.structure ? String(updates.structure).trim() : 'No Structure';
@@ -1916,9 +2233,26 @@ app.post('/api/ledger/update-debtor', (req, res) => {
 
   if (activeInstances.length === 0) {
     // Settle/remove all entries for this debtor when debt is reduced to zero
-    ledger = ledger.filter((e) => !existingSet.has(e.id));
+    ledger = ledger.filter((e) => !existingSet.has(String(e.id)));
+
+    // Also update any linked sponsorships so they do not resurrect
+    let audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
+    let auditChanged = false;
+    for (let i = 0; i < audits.length; i++) {
+      if (existingSet.has(String(audits[i].ledger_entry_id || ''))) {
+        audits[i].status = 'actually_sponsored';
+        audits[i].status_updated_at = new Date().toISOString();
+        audits[i].ledger_entry_id = null;
+        audits[i].sponsor_note = `${audits[i].sponsor_note || ''} (Settled / Debt removed)`.trim();
+        auditChanged = true;
+      }
+    }
+    if (auditChanged) {
+      atomicWriteJson(SPONSORSHIPS_FILE, audits);
+      broadcastSse('sponsorships_updated', { timestamp: Date.now() });
+    }
   } else {
-    const template = ledger.find((e) => existingSet.has(e.id)) || {};
+    const template = ledger.find((e) => existingSet.has(String(e.id))) || {};
     const updatedIds = new Set<string>();
 
     for (const inst of activeInstances) {
@@ -1926,9 +2260,9 @@ app.post('/api/ledger/update-debtor', (req, res) => {
       const validDate = inst.date ? String(inst.date).trim() : '';
       const validService = inst.service ? String(inst.service).trim() : 'PM';
 
-      if (inst.id && existingSet.has(inst.id)) {
-        updatedIds.add(inst.id);
-        const idx = ledger.findIndex((e) => e.id === inst.id);
+      if (inst.id && existingSet.has(String(inst.id))) {
+        updatedIds.add(String(inst.id));
+        const idx = ledger.findIndex((e) => String(e.id) === String(inst.id));
         if (idx !== -1) {
           ledger[idx] = {
             ...ledger[idx],
@@ -1968,7 +2302,34 @@ app.post('/api/ledger/update-debtor', (req, res) => {
     }
 
     // Remove any entries that were reduced to zero or omitted
-    ledger = ledger.filter((e) => !existingSet.has(e.id) || updatedIds.has(e.id));
+    ledger = ledger.filter((e) => !existingSet.has(String(e.id)) || updatedIds.has(String(e.id)));
+
+    // Synchronize linked sponsorships if debt was edited or type changed
+    let audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
+    let auditChanged = false;
+    for (let i = 0; i < audits.length; i++) {
+      if (existingSet.has(String(audits[i].ledger_entry_id || ''))) {
+        if (!isSponsored) {
+          // Changed to cancellation (not sponsored)
+          audits[i].status = 'actually_sponsored';
+          audits[i].status_updated_at = new Date().toISOString();
+          audits[i].ledger_entry_id = null;
+          audits[i].sponsor_note = `${audits[i].sponsor_note || ''} (Converted to regular cancellation)`.trim();
+          auditChanged = true;
+        } else {
+          if (cleanName) audits[i].passenger_name = cleanName;
+          if (rawStruct) audits[i].structure = rawStruct;
+          audits[i].sponsor_note = noteText;
+          audits[i].status = debtType;
+          audits[i].status_updated_at = new Date().toISOString();
+          auditChanged = true;
+        }
+      }
+    }
+    if (auditChanged) {
+      atomicWriteJson(SPONSORSHIPS_FILE, audits);
+      broadcastSse('sponsorships_updated', { timestamp: Date.now() });
+    }
   }
 
   atomicWriteJson(LEDGER_FILE, ledger);

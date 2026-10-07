@@ -10,6 +10,10 @@ import {
   listReportedSponsorshipsFromServer,
   verifyBatchSponsorshipsOnServer,
   recordReportedSponsorshipsOnServer,
+  deleteSponsorshipOnServer,
+  batchDeleteSponsorshipsOnServer,
+  recordSponsorshipPaymentOnServer,
+  updateSponsorshipOnServer,
 } from './serverApi';
 import type { ReportedSponsorship, SponsorshipStatus } from './serverApi';
 import type { Passenger, Vehicle } from './types';
@@ -813,6 +817,36 @@ export async function deleteLedgerEntry(id: string): Promise<void> {
   } catch {
     // local fallback
   }
+
+  // Synchronize local sponsorship audit storage so it never resurrects
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_SPONSORSHIPS_KEY) : null;
+    if (raw) {
+      let audits = JSON.parse(raw) as ReportedSponsorship[];
+      let changed = false;
+      audits = audits.map((a) => {
+        if (a.ledger_entry_id === id) {
+          changed = true;
+          return {
+            ...a,
+            status: 'actually_sponsored' as const,
+            status_updated_at: new Date().toISOString(),
+            ledger_entry_id: null,
+            sponsor_note: a.sponsor_note ? `${a.sponsor_note} (Settled / Removed from ledger)` : 'Settled / Removed from ledger',
+          };
+        }
+        return a;
+      });
+      if (changed) {
+        localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(audits));
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: audits }));
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 /**
@@ -832,6 +866,37 @@ export async function settleLedgerEntries(ids: string[]): Promise<void> {
     await supabase.from(LEDGER_TABLE).delete().in('id', ids);
   } catch {
     // local fallback
+  }
+
+  // Synchronize local sponsorship audit storage
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_SPONSORSHIPS_KEY) : null;
+    if (raw) {
+      const idSet = new Set(ids);
+      let audits = JSON.parse(raw) as ReportedSponsorship[];
+      let changed = false;
+      audits = audits.map((a) => {
+        if (idSet.has(a.ledger_entry_id || '')) {
+          changed = true;
+          return {
+            ...a,
+            status: 'actually_sponsored' as const,
+            status_updated_at: new Date().toISOString(),
+            ledger_entry_id: null,
+            sponsor_note: a.sponsor_note ? `${a.sponsor_note} (Settled from ledger)` : 'Settled from ledger',
+          };
+        }
+        return a;
+      });
+      if (changed) {
+        localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(audits));
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: audits }));
+        }
+      }
+    }
+  } catch {
+    /* ignore */
   }
 }
 
@@ -2861,37 +2926,11 @@ export async function verifyBatchSponsorships(
     console.warn('[Ledger] verifyBatchSponsorshipsOnServer note:', err);
   }
 
-  // 2. Fetch current sponsorships from Supabase
-  let currentAudits: ReportedSponsorship[] = [];
-  try {
-    const { data } = await supabase.from(SPONSORSHIPS_TABLE).select('*');
-    if (Array.isArray(data) && data.length > 0) {
-      currentAudits = data as ReportedSponsorship[];
-    }
-  } catch (err) {
-    console.warn('[Ledger] Supabase fetch for batch verify note:', err);
-  }
+  // 2. Fetch current sponsorships from all available sources
+  let currentAudits = await listReportedSponsorships();
 
-  // Fallback to localStorage if Supabase query was empty
-  if (currentAudits.length === 0) {
-    try {
-      const raw = localStorage.getItem(LOCAL_SPONSORSHIPS_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) currentAudits = parsed;
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-
-  // 3. Fetch current ledger entries from Supabase to synchronize debts
-  let currentLedger: LedgerEntry[] = [];
-  try {
-    currentLedger = await fetchAllLedgerFromSupabase();
-  } catch (err) {
-    console.warn('[Ledger] Supabase ledger fetch for batch verify note:', err);
-  }
+  // 3. Fetch current ledger entries to synchronize debts
+  let currentLedger = await listLedgerEntries();
 
   // 4. Process each sponsorship item
   for (const item of items) {
@@ -3058,4 +3097,280 @@ export async function verifyBatchSponsorships(
   }
 
   return { success: true, updatedCount, ledgerUpdated: ledgerChanged };
+}
+
+function updateLocalSponsorshipCache(updated: ReportedSponsorship) {
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_SPONSORSHIPS_KEY) : null;
+    if (raw) {
+      let list = JSON.parse(raw) as ReportedSponsorship[];
+      const idx = list.findIndex((a) => a.id === updated.id);
+      if (idx >= 0) {
+        list[idx] = updated;
+      } else {
+        list.unshift(updated);
+      }
+      localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(list));
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Deletes a reported sponsorship and cleans up any linked debt entry in the ledger.
+ */
+export async function deleteReportedSponsorship(sponsorshipId: string): Promise<void> {
+  // 1. Central Server
+  try {
+    await deleteSponsorshipOnServer(sponsorshipId);
+  } catch (err) {
+    console.debug('[Ledger] Server delete sponsorship note:', err);
+  }
+
+  // 2. Supabase
+  try {
+    await supabase.from(SPONSORSHIPS_TABLE).delete().eq('id', sponsorshipId);
+  } catch {
+    /* ignore */
+  }
+
+  // 3. LocalStorage & cache sync
+  const allAudits = await listReportedSponsorships();
+  const spon = allAudits.find((a) => a.id === sponsorshipId);
+  const remaining = allAudits.filter((a) => a.id !== sponsorshipId);
+  try {
+    localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(remaining));
+  } catch {
+    /* ignore */
+  }
+
+  // 4. Remove linked ledger debt if any
+  if (spon?.ledger_entry_id) {
+    await deleteLedgerEntry(spon.ledger_entry_id);
+  } else if (spon) {
+    const cleanName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
+    const all = await listLedgerEntries();
+    const match = all.find(
+      (e) => (e.manifest_key === spon.manifest_key || e.date === spon.date) &&
+        sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanName &&
+        Boolean(e.sponsored)
+    );
+    if (match) {
+      await deleteLedgerEntry(match.id);
+    }
+  }
+
+  // 5. Broadcast updates
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: remaining }));
+    window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
+  }
+}
+
+/**
+ * Batch deletes reported sponsorships and removes any linked ledger debts.
+ */
+export async function batchDeleteReportedSponsorships(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const idSet = new Set(ids);
+
+  try {
+    await batchDeleteSponsorshipsOnServer(ids);
+  } catch (err) {
+    console.debug('[Ledger] Server batch delete sponsorships note:', err);
+  }
+
+  try {
+    await supabase.from(SPONSORSHIPS_TABLE).delete().in('id', ids);
+  } catch {
+    /* ignore */
+  }
+
+  const allAudits = await listReportedSponsorships();
+  const toDelete = allAudits.filter((a) => idSet.has(a.id));
+  const remaining = allAudits.filter((a) => !idSet.has(a.id));
+  try {
+    localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(remaining));
+  } catch {
+    /* ignore */
+  }
+
+  const allLedger = await listLedgerEntries();
+  for (const spon of toDelete) {
+    if (spon.ledger_entry_id) {
+      await deleteLedgerEntry(spon.ledger_entry_id);
+    } else {
+      const cleanName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
+      const match = allLedger.find(
+        (e) => (e.manifest_key === spon.manifest_key || e.date === spon.date) &&
+          sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanName &&
+          Boolean(e.sponsored)
+      );
+      if (match) {
+        await deleteLedgerEntry(match.id);
+      }
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: remaining }));
+    window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
+  }
+}
+
+/**
+ * Records payment for a reported sponsorship. Updates sponsorship status and settles/deducts ledger debt.
+ */
+export async function recordReportedSponsorshipPayment(
+  sponsorshipId: string,
+  amount: number,
+  notes?: string
+): Promise<{ success: boolean; sponsorship?: ReportedSponsorship }> {
+  // 1. Central Server
+  try {
+    const res = await recordSponsorshipPaymentOnServer(sponsorshipId, amount, notes);
+    if (res.success && res.sponsorship) {
+      updateLocalSponsorshipCache(res.sponsorship);
+      return res;
+    }
+  } catch (err) {
+    console.debug('[Ledger] Server record sponsorship payment note:', err);
+  }
+
+  // 2. Local fallback
+  let currentAudits = await listReportedSponsorships();
+  const sponIndex = currentAudits.findIndex((a) => a.id === sponsorshipId);
+  if (sponIndex === -1) return { success: false };
+
+  const spon = currentAudits[sponIndex];
+  const totalDebt = getFareForDate(spon.date);
+  const now = new Date().toISOString();
+  const payNote = notes ? notes.trim() : `Paid R${amount} on ${now.slice(0, 10)}`;
+
+  if (amount >= totalDebt) {
+    spon.status = 'actually_sponsored';
+    spon.status_updated_at = now;
+    spon.sponsor_note = spon.sponsor_note ? `${spon.sponsor_note} (Settled: ${payNote})` : `Settled: ${payNote}`;
+    if (spon.ledger_entry_id) {
+      await deleteLedgerEntry(spon.ledger_entry_id);
+      spon.ledger_entry_id = null;
+    }
+  } else {
+    const remaining = totalDebt - amount;
+    spon.sponsor_note = spon.sponsor_note ? `${spon.sponsor_note} (Partially paid R${amount}, owing R${remaining})` : `Partially paid R${amount}, owing R${remaining}`;
+    spon.status_updated_at = now;
+    if (spon.ledger_entry_id) {
+      await updateLedgerEntry(spon.ledger_entry_id, { structure_debt: remaining });
+    }
+  }
+
+  currentAudits[sponIndex] = spon;
+  updateLocalSponsorshipCache(spon);
+
+  try {
+    await supabase.from(SPONSORSHIPS_TABLE).upsert([spon]);
+  } catch {
+    /* ignore */
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: currentAudits }));
+    window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
+  }
+
+  return { success: true, sponsorship: spon };
+}
+
+/**
+ * Updates / Edits a reported sponsorship and synchronizes any linked debt entry in the ledger.
+ */
+export async function updateReportedSponsorship(
+  sponsorshipId: string,
+  updates: Partial<ReportedSponsorship> & { debtAmount?: number }
+): Promise<{ success: boolean; sponsorship?: ReportedSponsorship }> {
+  // 1. Central Server
+  try {
+    const res = await updateSponsorshipOnServer(sponsorshipId, updates);
+    if (res.success && res.sponsorship) {
+      updateLocalSponsorshipCache(res.sponsorship);
+      return res;
+    }
+  } catch (err) {
+    console.debug('[Ledger] Server update sponsorship note:', err);
+  }
+
+  // 2. Local fallback
+  let currentAudits = await listReportedSponsorships();
+  const idx = currentAudits.findIndex((a) => a.id === sponsorshipId);
+  if (idx === -1) return { success: false };
+
+  const spon = { ...currentAudits[idx], ...updates };
+  currentAudits[idx] = spon;
+  updateLocalSponsorshipCache(spon);
+
+  const isDebt = spon.status === 'unaccounted_sponsorship' || spon.status === 'unpaid_sponsorship';
+  const customDebt = updates.debtAmount !== undefined && Number(updates.debtAmount) > 0 ? Number(updates.debtAmount) : getFareForDate(spon.date);
+
+  if (isDebt) {
+    const rawNote = spon.sponsor_note ? cleanSponsorshipNote(spon.sponsor_note) : '';
+    const noteText = spon.status === 'unaccounted_sponsorship'
+      ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
+      : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
+
+    if (spon.ledger_entry_id) {
+      await updateLedgerEntry(spon.ledger_entry_id, {
+        passenger_name: spon.passenger_name,
+        structure: spon.structure,
+        date: spon.date,
+        service: spon.service,
+        stop: spon.stop || '',
+        structure_debt: customDebt,
+        sponsor_note: noteText,
+        general_notes: noteText,
+        sponsored: true,
+      });
+    } else {
+      const newEntryId = `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      spon.ledger_entry_id = newEntryId;
+      await supabase.from(LEDGER_TABLE).insert([{
+        id: newEntryId,
+        manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+        date: spon.date,
+        service: spon.service,
+        passenger_name: spon.passenger_name,
+        stop: spon.stop || '',
+        structure: spon.structure,
+        vehicle_name: spon.vehicle_name || '—',
+        submitted_by: 'Cancellation Admin',
+        rep_name: spon.rep_name || '',
+        license_plate: '',
+        sponsored: true,
+        sponsor_note: noteText,
+        structure_debt: customDebt,
+        general_notes: noteText,
+        source: 'reported_sponsorship_audit',
+        submitted_at: new Date().toISOString(),
+      }]);
+    }
+  } else {
+    // Actually sponsored or pending -> remove any debt entry
+    if (spon.ledger_entry_id) {
+      await deleteLedgerEntry(spon.ledger_entry_id);
+      spon.ledger_entry_id = null;
+    }
+  }
+
+  try {
+    await supabase.from(SPONSORSHIPS_TABLE).upsert([spon]);
+  } catch {
+    /* ignore */
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: currentAudits }));
+    window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
+  }
+
+  return { success: true, sponsorship: spon };
 }

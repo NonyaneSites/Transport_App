@@ -557,6 +557,95 @@ export async function recordReportedSponsorshipsOnServer(
   }
 }
 
+// Delete reported sponsorship from server
+export async function deleteSponsorshipOnServer(
+  sponsorshipId: string
+): Promise<{ success: boolean; ledgerChanged?: boolean }> {
+  if (!isServerOnline()) return { success: false };
+  try {
+    const res = await fetch(`/api/ledger/sponsorships/${encodeURIComponent(sponsorshipId)}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok || !isJsonResponse(res)) {
+      return { success: false };
+    }
+    markServerOnline();
+    return (await res.json()) as { success: boolean; ledgerChanged?: boolean };
+  } catch (err) {
+    console.warn('[ServerAPI] deleteSponsorship error:', err);
+    return { success: false };
+  }
+}
+
+// Batch delete reported sponsorships from server
+export async function batchDeleteSponsorshipsOnServer(
+  ids: string[]
+): Promise<{ success: boolean; count: number; ledgerChanged?: boolean }> {
+  if (!isServerOnline() || ids.length === 0) return { success: false, count: 0 };
+  try {
+    const res = await fetch('/api/ledger/sponsorships/batch-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    if (!res.ok || !isJsonResponse(res)) {
+      return { success: false, count: 0 };
+    }
+    markServerOnline();
+    return (await res.json()) as { success: boolean; count: number; ledgerChanged?: boolean };
+  } catch (err) {
+    console.warn('[ServerAPI] batchDeleteSponsorships error:', err);
+    return { success: false, count: 0 };
+  }
+}
+
+// Record payment for reported sponsorship on server
+export async function recordSponsorshipPaymentOnServer(
+  sponsorshipId: string,
+  amount: number,
+  notes?: string
+): Promise<{ success: boolean; sponsorship?: ReportedSponsorship; ledgerChanged?: boolean }> {
+  if (!isServerOnline()) return { success: false };
+  try {
+    const res = await fetch(`/api/ledger/sponsorships/${encodeURIComponent(sponsorshipId)}/pay`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount, notes }),
+    });
+    if (!res.ok || !isJsonResponse(res)) {
+      return { success: false };
+    }
+    markServerOnline();
+    return (await res.json()) as { success: boolean; sponsorship?: ReportedSponsorship; ledgerChanged?: boolean };
+  } catch (err) {
+    console.warn('[ServerAPI] recordSponsorshipPayment error:', err);
+    return { success: false };
+  }
+}
+
+// Update / edit reported sponsorship on server
+export async function updateSponsorshipOnServer(
+  sponsorshipId: string,
+  updates: Partial<ReportedSponsorship> & { debtAmount?: number }
+): Promise<{ success: boolean; sponsorship?: ReportedSponsorship; ledgerChanged?: boolean }> {
+  if (!isServerOnline()) return { success: false };
+  try {
+    const res = await fetch(`/api/ledger/sponsorships/${encodeURIComponent(sponsorshipId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    if (!res.ok || !isJsonResponse(res)) {
+      return { success: false };
+    }
+    markServerOnline();
+    return (await res.json()) as { success: boolean; sponsorship?: ReportedSponsorship; ledgerChanged?: boolean };
+  } catch (err) {
+    console.warn('[ServerAPI] updateSponsorship error:', err);
+    return { success: false };
+  }
+}
+
 // Broadcast lightweight live action to central server for instant cross-device delivery (localhost dev only)
 export async function broadcastLiveActionToServer(action: LiveSyncAction): Promise<void> {
   if (!isServerOnline()) return;
