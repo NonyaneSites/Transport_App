@@ -2,6 +2,7 @@ import type { Passenger, Vehicle } from './types';
 import { normalizePassengerText } from './importer';
 import { naturalCompare } from './sort';
 import { isDreamWeekDate, DREAMWEEK_FARE } from './types';
+import { supabase } from './supabase';
 
 export type RehearsalLegs = 'both' | 'going' | 'return';
 
@@ -293,8 +294,12 @@ const STOP_ALIAS_MAP: Record<string, string> = {
   'focus1': 'Focus 1',
 };
 
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
- * Normalizes a stop name against known canonical stops and aliases.
+ * Normalizes a stop name against known canonical stops and aliases using whole-word/exact matching.
  * Unknown stops are trimmed and preserved with isUnknown: true.
  */
 export function normalizeRehearsalStop(rawStop?: string | null): { stop: string; isUnknown: boolean } {
@@ -318,9 +323,11 @@ export function normalizeRehearsalStop(rawStop?: string | null): { stop: string;
     return { stop: canonicalMatch, isUnknown: false };
   }
 
-  // 3. Substring match for known variants
-  for (const [alias, canonical] of Object.entries(STOP_ALIAS_MAP)) {
-    if (lower.includes(alias)) {
+  // 3. Whole-word / exact boundary match for known variants (sorted descending by length)
+  const sortedAliases = Object.entries(STOP_ALIAS_MAP).sort((a, b) => b[0].length - a[0].length);
+  for (const [alias, canonical] of sortedAliases) {
+    const pattern = new RegExp(`(^|\\b|\\W)${escapeRegex(alias)}(\\b|\\W|$)`, 'i');
+    if (pattern.test(lower)) {
       return { stop: canonical, isUnknown: false };
     }
   }
@@ -499,6 +506,22 @@ export function parseTimestampMs(val: unknown, fallbackIndex: number): number {
  * for a chosen rehearsal date, deduplicating with latest timestamp, evaluating transport answers,
  * and normalizing stops.
  */
+/**
+ * Generates a deterministic passenger ID based on date and normalized name (no Math.random()).
+ */
+export function createDeterministicRehearsalPassengerId(dateStr: string, fullName: string): string {
+  const normDate = (dateStr || '').replace(/[^0-9]/g, '') || 'date';
+  const normName = normalizePassengerText(fullName).toLowerCase().replace(/[^a-z0-9]/g, '_').slice(0, 24);
+  let hash = 0;
+  const input = `${normDate}_${normName}`;
+  for (let i = 0; i < input.length; i++) {
+    hash = ((hash << 5) - hash) + input.charCodeAt(i);
+    hash |= 0;
+  }
+  const hex = Math.abs(hash).toString(36);
+  return `rehe_${normDate}_${normName || 'rider'}_${hex}`;
+}
+
 export function parseRehearsalSheet(
   rawRows: Array<Record<string, unknown>>,
   targetDate: string
@@ -618,7 +641,7 @@ export function parseRehearsalSheet(
     const fare = evaluation.fare;
 
     const passenger: Passenger = {
-      id: `rehe_${normTarget}_${i + 1}_${Math.random().toString(36).slice(2, 7)}`,
+      id: createDeterministicRehearsalPassengerId(normTarget, row.name),
       fullName: row.name,
       stop: normalizedStop,
       structure: row.structure || 'No Structure',
@@ -789,13 +812,82 @@ export interface TaxiStopTemplate {
 }
 
 const TEMPLATE_KEY = 'crc_thursday_rehearsal_template';
+export const REHEARSAL_TEMPLATES_TABLE = 'rehearsal_templates';
 
-export function saveRehearsalTemplate(templates: TaxiStopTemplate[]): void {
+export async function saveRehearsalTemplate(templates: TaxiStopTemplate[]): Promise<void> {
+  // 1. Local storage instant cache
   try {
     localStorage.setItem(TEMPLATE_KEY, JSON.stringify(templates));
   } catch (err) {
-    console.warn('Failed to save rehearsal template:', err);
+    console.warn('Failed to cache rehearsal template in localStorage:', err);
   }
+
+  // 2. Central Server API (persists in data/rehearsal_template.json)
+  try {
+    await fetch('/api/rehearsal-template', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template: templates }),
+    });
+  } catch (err) {
+    console.debug('Failed to save rehearsal template to server:', err);
+  }
+
+  // 3. Supabase table
+  try {
+    await supabase.from(REHEARSAL_TEMPLATES_TABLE).upsert({
+      id: 'current',
+      templates,
+      updated_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.debug('Failed to save rehearsal template to Supabase:', err);
+  }
+}
+
+/**
+ * Loads rehearsal template across devices from Server / Supabase, falling back to local storage.
+ */
+export async function fetchRehearsalTemplate(): Promise<TaxiStopTemplate[] | null> {
+  // 1. Try server API
+  try {
+    const res = await fetch('/api/rehearsal-template');
+    if (res.ok) {
+      const data = await res.json();
+      if (data && Array.isArray(data.template) && data.template.length > 0) {
+        try {
+          localStorage.setItem(TEMPLATE_KEY, JSON.stringify(data.template));
+        } catch {
+          /* ignore */
+        }
+        return data.template as TaxiStopTemplate[];
+      }
+    }
+  } catch {
+    /* fallback */
+  }
+
+  // 2. Try Supabase
+  try {
+    const { data, error } = await supabase
+      .from(REHEARSAL_TEMPLATES_TABLE)
+      .select('templates')
+      .eq('id', 'current')
+      .maybeSingle();
+    if (!error && data && Array.isArray(data.templates) && data.templates.length > 0) {
+      try {
+        localStorage.setItem(TEMPLATE_KEY, JSON.stringify(data.templates));
+      } catch {
+        /* ignore */
+      }
+      return data.templates as TaxiStopTemplate[];
+    }
+  } catch {
+    /* fallback */
+  }
+
+  // 3. Local storage fallback
+  return loadRehearsalTemplate();
 }
 
 export function loadRehearsalTemplate(): TaxiStopTemplate[] | null {

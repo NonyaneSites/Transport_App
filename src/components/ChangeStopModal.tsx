@@ -8,7 +8,8 @@ interface ChangeStopModalProps {
   onClose: () => void;
   passenger: Passenger | null;
   existingStops?: string[];
-  onConfirm: (passengerId: string, newStop: string) => void;
+  isRehearsal?: boolean;
+  onConfirm: (passengerId: string, newStop: string, newLegs?: 'both' | 'going' | 'return') => void;
 }
 
 export function ChangeStopModal({
@@ -16,11 +17,13 @@ export function ChangeStopModal({
   onClose,
   passenger,
   existingStops = [],
+  isRehearsal,
   onConfirm,
 }: ChangeStopModalProps) {
   const [selectedStop, setSelectedStop] = useState('');
   const [customStop, setCustomStop] = useState('');
   const [useCustom, setUseCustom] = useState(false);
+  const [selectedLegs, setSelectedLegs] = useState<'both' | 'going' | 'return'>('both');
 
   // Combine unique stops from canonical sequence and existing manifest
   const combinedStops = useMemo(() => {
@@ -58,6 +61,7 @@ export function ChangeStopModal({
       setSelectedStop(passenger.stop || combinedStops[0] || 'DFC bus stop');
       setCustomStop('');
       setUseCustom(false);
+      setSelectedLegs(passenger.legs || 'both');
     }
   }, [isOpen, passenger, combinedStops]);
 
@@ -66,7 +70,7 @@ export function ChangeStopModal({
   const handleSave = () => {
     const finalStop = (useCustom ? customStop : selectedStop).trim();
     if (!finalStop) return;
-    onConfirm(passenger.id, finalStop);
+    onConfirm(passenger.id, finalStop, isRehearsal ? selectedLegs : passenger.legs);
     onClose();
   };
 
@@ -150,6 +154,50 @@ export function ChangeStopModal({
               >
                 ← Back to standard stops list
               </button>
+            </div>
+          )}
+
+          {/* Rehearsal Legs Selection */}
+          {isRehearsal && (
+            <div className="pt-2 border-t border-line/60">
+              <label className="mb-1 block font-semibold text-muted uppercase text-[10px] tracking-wide">
+                Rehearsal Transport Legs / Fare
+              </label>
+              <div className="grid grid-cols-3 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setSelectedLegs('both')}
+                  className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
+                    selectedLegs === 'both'
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 ring-1 ring-emerald-500/40'
+                      : 'bg-card-2 text-muted border-line hover:text-ink'
+                  }`}
+                >
+                  Both (R70)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedLegs('going')}
+                  className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
+                    selectedLegs === 'going'
+                      ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-1 ring-sky-500/40'
+                      : 'bg-card-2 text-muted border-line hover:text-ink'
+                  }`}
+                >
+                  Going (R40)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedLegs('return')}
+                  className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
+                    selectedLegs === 'return'
+                      ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-1 ring-sky-500/40'
+                      : 'bg-card-2 text-muted border-line hover:text-ink'
+                  }`}
+                >
+                  Return (R40)
+                </button>
+              </div>
             </div>
           )}
         </div>

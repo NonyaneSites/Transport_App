@@ -1,16 +1,20 @@
-import { MapPin, Users } from 'lucide-react';
-import type { Passenger } from '@/lib/types';
+import { MapPin, Users, Wallet } from 'lucide-react';
+import type { Passenger, ServiceType } from '@/lib/types';
+import { getPassengerFare } from '@/lib/types';
 import { naturalCompare } from '@/lib/sort';
 import { passengersByStop, unassignedPassengers } from '@/lib/manifest';
 
 interface Props {
   passengers: Passenger[];
+  date?: string;
+  service?: ServiceType;
 }
 
-export function StopGrid({ passengers }: Props) {
+export function StopGrid({ passengers, date, service }: Props) {
   const byStop = passengersByStop(passengers);
   const stops = Object.keys(byStop).sort((a, b) => byStop[b].length - byStop[a].length || naturalCompare(a, b));
   const unassigned = unassignedPassengers({ date: '', signups: passengers, vehicles: [] }).length;
+  const isRehearsal = service === 'Rehearsal' || passengers.some((p) => Boolean(p.legs));
 
   if (stops.length === 0) {
     return (
@@ -51,14 +55,38 @@ export function StopGrid({ passengers }: Props) {
                 <MapPin className="h-4 w-4 text-crimson-400" />
                 <span className="text-sm font-semibold text-ink">{stop}</span>
               </div>
-              <span className="font-display text-2xl font-bold text-crimson-400">{byStop[stop].length}</span>
+              <div className="text-right">
+                <span className="font-display text-2xl font-bold text-crimson-400">{byStop[stop].length}</span>
+                {isRehearsal && (
+                  <div className="flex items-center justify-end gap-1 font-mono text-xs font-bold text-emerald-400">
+                    <Wallet className="h-3 w-3 text-emerald-400" />
+                    <span>R{byStop[stop].reduce((sum, p) => sum + getPassengerFare(p, date), 0)}</span>
+                  </div>
+                )}
+              </div>
             </div>
             <div className="mt-2 flex flex-wrap gap-1">
-              {byStop[stop].slice(0, 4).map((p) => (
-                <span key={p.id} className="rounded-md bg-bg/60 px-1.5 py-0.5 text-[10px] text-muted">
-                  {p.fullName.split(' ')[0]}
-                </span>
-              ))}
+              {byStop[stop].slice(0, 4).map((p) => {
+                const fare = getPassengerFare(p, date);
+                return (
+                  <span
+                    key={p.id}
+                    className="inline-flex items-center gap-1 rounded-md bg-bg/60 px-1.5 py-0.5 text-[10px] text-muted border border-line/40"
+                  >
+                    <span>{p.fullName.split(' ')[0]}</span>
+                    {p.legs && p.legs !== 'both' && (
+                      <span className="font-bold text-sky-400 text-[9px]">
+                        ({p.legs === 'going' ? 'Going' : 'Return'})
+                      </span>
+                    )}
+                    {(isRehearsal || p.legs) && (
+                      <span className="font-mono font-bold text-emerald-400 text-[9px]">
+                        R{fare}
+                      </span>
+                    )}
+                  </span>
+                );
+              })}
               {byStop[stop].length > 4 && (
                 <span className="rounded-md bg-bg/60 px-1.5 py-0.5 text-[10px] text-muted">
                   +{byStop[stop].length - 4} more

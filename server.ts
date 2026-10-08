@@ -12,12 +12,14 @@ const DATA_DIR = path.join(process.cwd(), 'data');
 const MANIFESTS_DIR = path.join(DATA_DIR, 'manifests');
 const LEDGER_FILE = path.join(DATA_DIR, 'ledger.json');
 const SPONSORSHIPS_FILE = path.join(DATA_DIR, 'sponsorship_audits.json');
+const REHEARSAL_TEMPLATE_FILE = path.join(DATA_DIR, 'rehearsal_template.json');
 
 // Ensure directories exist
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(MANIFESTS_DIR)) fs.mkdirSync(MANIFESTS_DIR, { recursive: true });
 if (!fs.existsSync(LEDGER_FILE)) fs.writeFileSync(LEDGER_FILE, JSON.stringify([]), 'utf-8');
 if (!fs.existsSync(SPONSORSHIPS_FILE)) fs.writeFileSync(SPONSORSHIPS_FILE, JSON.stringify([]), 'utf-8');
+if (!fs.existsSync(REHEARSAL_TEMPLATE_FILE)) fs.writeFileSync(REHEARSAL_TEMPLATE_FILE, JSON.stringify([]), 'utf-8');
 
 // Atomic write helper
 function atomicWriteJson(filePath: string, data: unknown): void {
@@ -127,6 +129,34 @@ app.get('/api/manifests/:key', (req, res) => {
     return;
   }
   res.json(manifest);
+});
+
+// Get Thursday rehearsal stop-time template
+app.get('/api/rehearsal-template', (_req, res) => {
+  try {
+    const template = readJsonFile<unknown>(REHEARSAL_TEMPLATE_FILE, []);
+    res.json({ template });
+  } catch (err) {
+    console.error('[Server] Failed to read rehearsal template:', err);
+    res.status(500).json({ error: 'Failed to read template' });
+  }
+});
+
+// Save Thursday rehearsal stop-time template
+app.post('/api/rehearsal-template', (req, res) => {
+  try {
+    const template = req.body?.template !== undefined ? req.body.template : req.body;
+    if (!template) {
+      res.status(400).json({ error: 'Template body is required' });
+      return;
+    }
+    atomicWriteJson(REHEARSAL_TEMPLATE_FILE, template);
+    broadcastSse('rehearsal_template_updated', { template, timestamp: Date.now() });
+    res.json({ success: true, template });
+  } catch (err) {
+    console.error('[Server] Failed to save rehearsal template:', err);
+    res.status(500).json({ error: 'Failed to save template' });
+  }
 });
 
 // Save/Upsert specific manifest
@@ -461,6 +491,13 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
   if (effectiveUnpaid.length > 0) {
     for (const u of effectiveUnpaid) {
       const cleanName = sanitizePassengerDisplayName(u.fullName);
+      const uLegs = (u as { legs?: 'both' | 'going' | 'return' }).legs;
+      let unpaidDebt = effectiveDebt;
+      if (!isDW) {
+        if (uLegs === 'both') unpaidDebt = 70;
+        else if (uLegs === 'going' || uLegs === 'return') unpaidDebt = 40;
+        else if (isReheKey) unpaidDebt = 70;
+      }
       if (!ledger.some((e) => e.manifest_key === key && sanitizePassengerDisplayName(e.passenger_name as string).toLowerCase() === cleanName.toLowerCase())) {
         ledger.push({
           id: `ledger_unpaid_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -477,10 +514,11 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
           sponsored: true,
           debt_type: 'unpaid_sponsorship',
           sponsor_note: u.unpaidNote ? `Did not pay: ${u.unpaidNote}` : 'Did not pay',
-          structure_debt: effectiveDebt,
+          structure_debt: unpaidDebt,
           general_notes: `Did not pay${u.unpaidNote ? `: ${u.unpaidNote}` : ''}`,
           source: 'reported_sponsorship_audit',
           submitted_at: nowIso,
+          legs: uLegs || (isReheKey ? 'both' : undefined),
         });
       }
     }

@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { HeartHandshake, X, Search, Trash2, Plus, Check, Loader2, AlertCircle } from 'lucide-react';
 import type { Passenger, Vehicle, ExternalSponsee, ServiceType } from '@/lib/types';
-import { SERVICE_TYPES, getFareForDate } from '@/lib/types';
+import { SERVICE_TYPES, getFareForDate, getPassengerFare } from '@/lib/types';
 import { loadManifest, vehicleRiders } from '@/lib/manifest';
 import { manifestKey, shortDate } from '@/lib/dates';
 
@@ -250,6 +250,10 @@ export function CrossTaxiSponsorshipModal({
       setSelectedSponsees((prev) => prev.filter((_, idx) => idx !== existingIndex));
     } else {
       // Add
+      const candidateFare =
+        candidate.serviceValue === 'Rehearsal' || currentService === 'Rehearsal' || candidate.passenger.legs
+          ? getPassengerFare(candidate.passenger, currentDate)
+          : effectiveFare;
       const newItem: SelectedSponseeItem = {
         id: candidateId,
         fullName: candidate.passenger.fullName,
@@ -259,7 +263,7 @@ export function CrossTaxiSponsorshipModal({
         serviceLabel: candidate.serviceLabel,
         structure: candidate.passenger.structure,
         stop: candidate.passenger.stop,
-        amount: effectiveFare,
+        amount: candidateFare,
       };
       setSelectedSponsees((prev) => [...prev, newItem]);
     }
