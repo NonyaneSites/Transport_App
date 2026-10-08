@@ -57,6 +57,7 @@ import {
   formatSingleTaxiRehearsalWhatsApp,
   formatRehearsalWhatsAppManifest,
   createDeterministicRehearsalPassengerId,
+  allowedLegsUpgrades,
 } from '@/lib/rehearsal';
 import {
   transferPassengerAcrossServices,
@@ -1224,7 +1225,7 @@ export function RepPage() {
     let resolvedTargetVehId = data.targetVehicleId;
     let resolvedTaxiName = data.taxiName;
 
-    let matchedSignup = manifest.signups.find(
+    const matchedSignup = manifest.signups.find(
       (s) => s.fullName.trim().toLowerCase() === data.sponseeName.trim().toLowerCase()
     );
 
@@ -2337,13 +2338,45 @@ export function RepPage() {
   async function handleChangeStopConfirm(passengerId: string, newStop: string, newLegs?: 'both' | 'going' | 'return') {
     if (!manifest) return;
     const pIdStr = String(passengerId);
+    const existingP = manifest.signups.find((p) => String(p.id) === pIdStr);
+    if (!existingP) return;
+
+    let effectiveLegs = existingP.legs;
+    let upgraded = false;
+    const oldLegs = existingP.legs || 'both';
+
+    if (isRehearsal && newLegs) {
+      const allowed = allowedLegsUpgrades(existingP.legs);
+      if (allowed.includes(newLegs)) {
+        if (newLegs !== existingP.legs && (existingP.legs === 'going' || existingP.legs === 'return') && newLegs === 'both') {
+          upgraded = true;
+          effectiveLegs = newLegs;
+        } else if (newLegs === existingP.legs) {
+          effectiveLegs = newLegs;
+        }
+      } else {
+        // Reject/ignore downgrade even if called directly
+        effectiveLegs = existingP.legs;
+      }
+    } else if (!isRehearsal) {
+      effectiveLegs = newLegs ?? existingP.legs;
+    }
+
+    const upgradeNote = upgraded ? `Upgraded ${oldLegs} -> both by ${repName.trim() || 'rep'}` : '';
+    const updatedNotes = upgradeNote
+      ? existingP.notes
+        ? `${existingP.notes}; ${upgradeNote}`
+        : upgradeNote
+      : existingP.notes;
+
     const updatedSignups = manifest.signups.map((p) => {
       if (String(p.id) === pIdStr) {
         return {
           ...p,
           stop: newStop,
-          legs: newLegs ?? p.legs,
+          legs: effectiveLegs,
           service: isRehearsal ? 'Rehearsal' : p.service,
+          notes: updatedNotes,
         };
       }
       return p;
@@ -2355,7 +2388,7 @@ export function RepPage() {
     };
     manifestRef.current = nextManifest;
     await save(nextManifest);
-    setBatchActionMsg(`✓ Updated stop for passenger to ${newStop}`);
+    setBatchActionMsg(`✓ Updated stop${upgraded ? ' & upgraded legs to Going & Return' : ''} for ${existingP.fullName}`);
     setTimeout(() => setBatchActionMsg(null), 4000);
   }
 
@@ -2368,7 +2401,30 @@ export function RepPage() {
   ) {
     if (!manifest) return;
     const pIdStr = String(passenger.id);
-    const updatedLegs = newLegs ?? passenger.legs;
+    let updatedLegs = passenger.legs;
+    let upgraded = false;
+    const oldLegs = passenger.legs || 'both';
+
+    if (isRehearsal && newLegs) {
+      const allowed = allowedLegsUpgrades(passenger.legs);
+      if (allowed.includes(newLegs)) {
+        if (newLegs !== passenger.legs && (passenger.legs === 'going' || passenger.legs === 'return') && newLegs === 'both') {
+          upgraded = true;
+          updatedLegs = newLegs;
+        } else if (newLegs === passenger.legs) {
+          updatedLegs = newLegs;
+        }
+      } else {
+        // Reject/ignore downgrade even if called directly
+        updatedLegs = passenger.legs;
+      }
+    } else if (!isRehearsal) {
+      updatedLegs = newLegs ?? passenger.legs;
+    }
+
+    const upgradeNote = upgraded ? `Upgraded ${oldLegs} -> both by ${repName.trim() || 'rep'}` : '';
+    const noteParts = [transferNote, upgradeNote].filter(Boolean);
+    const addedNote = noteParts.join('; ');
 
     // 1. Update signups
     const targetAssigned = targetVehicleId === 'unassigned' ? null : targetVehicleId;
@@ -2380,7 +2436,7 @@ export function RepPage() {
           present: targetVehicleId !== 'unassigned' && markPresent,
           legs: updatedLegs,
           service: isRehearsal ? 'Rehearsal' : p.service,
-          notes: transferNote ? `${p.notes ? `${p.notes}; ` : ''}${transferNote}` : p.notes,
+          notes: addedNote ? `${p.notes ? `${p.notes}; ` : ''}${addedNote}` : p.notes,
         };
       }
       return p;
@@ -2449,7 +2505,21 @@ export function RepPage() {
     setTransferring(true);
     try {
       if (isRehearsal) {
-        transferPrompt.passenger.legs = transferPromptLegs;
+        const curLegs = transferPrompt.passenger.legs;
+        const allowed = allowedLegsUpgrades(curLegs);
+        let finalLegs = curLegs;
+        if (allowed.includes(transferPromptLegs)) {
+          if (transferPromptLegs !== curLegs && (curLegs === 'going' || curLegs === 'return') && transferPromptLegs === 'both') {
+            const upNote = `Upgraded ${curLegs} -> both by ${repName.trim() || 'rep'}`;
+            transferPrompt.passenger.notes = transferPrompt.passenger.notes
+              ? `${transferPrompt.passenger.notes}; ${upNote}`
+              : upNote;
+            finalLegs = 'both';
+          } else {
+            finalLegs = transferPromptLegs;
+          }
+        }
+        transferPrompt.passenger.legs = finalLegs;
         transferPrompt.passenger.service = 'Rehearsal';
       }
       if (transferPrompt.isCrossService) {
@@ -4180,48 +4250,60 @@ export function RepPage() {
                   </p>
                 )}
 
-                {isRehearsal && (
-                  <div className="mt-3 pt-2 border-t border-line/60">
-                    <label className="mb-1 block font-semibold text-muted uppercase text-[10px] tracking-wide">
-                      Rehearsal Transport Legs / Fare
-                    </label>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => setTransferPromptLegs('both')}
-                        className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
-                          transferPromptLegs === 'both'
-                            ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 ring-1 ring-emerald-500/40'
-                            : 'bg-card-2 text-muted border-line hover:text-ink'
-                        }`}
-                      >
-                        Both (R70)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setTransferPromptLegs('going')}
-                        className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
-                          transferPromptLegs === 'going'
-                            ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-1 ring-sky-500/40'
-                            : 'bg-card-2 text-muted border-line hover:text-ink'
-                        }`}
-                      >
-                        Going (R40)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setTransferPromptLegs('return')}
-                        className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
-                          transferPromptLegs === 'return'
-                            ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-1 ring-sky-500/40'
-                            : 'bg-card-2 text-muted border-line hover:text-ink'
-                        }`}
-                      >
-                        Return (R40)
-                      </button>
+                {isRehearsal && (() => {
+                  const allowed = allowedLegsUpgrades(transferPrompt.passenger.legs);
+                  return (
+                    <div className="mt-3 pt-2 border-t border-line/60">
+                      <label className="mb-1 block font-semibold text-muted uppercase text-[10px] tracking-wide">
+                        Rehearsal Transport Legs / Fare
+                      </label>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setTransferPromptLegs('both')}
+                          className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
+                            transferPromptLegs === 'both'
+                              ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 ring-1 ring-emerald-500/40'
+                              : 'bg-card-2 text-muted border-line hover:text-ink'
+                          }`}
+                        >
+                          Both (R70)
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!allowed.includes('going')}
+                          onClick={() => setTransferPromptLegs('going')}
+                          className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
+                            !allowed.includes('going')
+                              ? 'opacity-40 cursor-not-allowed bg-card-2/40 text-muted/60 border-line/40'
+                              : transferPromptLegs === 'going'
+                              ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-1 ring-sky-500/40'
+                              : 'bg-card-2 text-muted border-line hover:text-ink'
+                          }`}
+                        >
+                          Going (R40)
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!allowed.includes('return')}
+                          onClick={() => setTransferPromptLegs('return')}
+                          className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
+                            !allowed.includes('return')
+                              ? 'opacity-40 cursor-not-allowed bg-card-2/40 text-muted/60 border-line/40'
+                              : transferPromptLegs === 'return'
+                              ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-1 ring-sky-500/40'
+                              : 'bg-card-2 text-muted border-line hover:text-ink'
+                          }`}
+                        >
+                          Return (R40)
+                        </button>
+                      </div>
+                      <p className="mt-1.5 text-[10px] text-amber-300/90 font-medium">
+                        Legs can only be upgraded to Going & Return
+                      </p>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
             </div>
 
@@ -5206,6 +5288,7 @@ function CashCalculatorCard({
 function StopGroupedChecklist({
   riders, vehicleType, fare = 40, orderedStops, stopRedirects, presentIds, absentIds, absentPaidIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
   riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemoveRider, externalSponsorLocks,
+  onOpenChangeStop, onOpenTransfer, isRehearsal,
 }: {
   riders: Passenger[];
   vehicleType: 'Bus' | 'Taxi';
@@ -5230,6 +5313,10 @@ function StopGroupedChecklist({
   onRemoveRider?: (id: string) => void;
   canRemoveRider?: (passenger: Passenger) => boolean;
   externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean }>;
+  onOpenChangeStop?: (p: Passenger) => void;
+  onOpenTransfer?: (p: Passenger) => void;
+  isRehearsal?: boolean;
+  date?: string;
 }) {
   const byStop = useMemo(() => {
     const groups: Record<string, Passenger[]> = {};
@@ -5381,6 +5468,9 @@ function StopGroupedChecklist({
                       onRemoveRider={onRemoveRider}
                       canRemove={canRemoveRider ? canRemoveRider(p) : false}
                       externalLock={externalSponsorLocks?.get(String(p.id)) || externalSponsorLocks?.get(`name:${p.fullName.trim().toLowerCase()}`)}
+                      onOpenChangeStop={onOpenChangeStop}
+                      onOpenTransfer={onOpenTransfer}
+                      isRehearsal={isRehearsal}
                     />
                   );
                 })}
@@ -5396,6 +5486,7 @@ function StopGroupedChecklist({
 function AlphabeticalChecklist({
   riders, vehicleType, stopRedirects, presentIds, absentIds, absentPaidIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
   riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemoveRider, externalSponsorLocks,
+  onOpenChangeStop, onOpenTransfer, isRehearsal,
 }: {
   riders: Passenger[];
   vehicleType?: 'Bus' | 'Taxi';
@@ -5418,6 +5509,10 @@ function AlphabeticalChecklist({
   onRemoveRider?: (id: string) => void;
   canRemoveRider?: (passenger: Passenger) => boolean;
   externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean }>;
+  onOpenChangeStop?: (p: Passenger) => void;
+  onOpenTransfer?: (p: Passenger) => void;
+  isRehearsal?: boolean;
+  date?: string;
 }) {
   const sorted = useMemo(() => {
     return [...riders].sort((a, b) => naturalCompare(a.fullName, b.fullName));
@@ -5468,6 +5563,9 @@ function AlphabeticalChecklist({
             onRemoveRider={onRemoveRider}
             canRemove={canRemoveRider ? canRemoveRider(p) : false}
             externalLock={externalSponsorLocks?.get(String(p.id)) || externalSponsorLocks?.get(`name:${p.fullName.trim().toLowerCase()}`)}
+            onOpenChangeStop={onOpenChangeStop}
+            onOpenTransfer={onOpenTransfer}
+            isRehearsal={isRehearsal}
           />
         );
       })}
@@ -5478,6 +5576,7 @@ function AlphabeticalChecklist({
 const PassengerRow = React.memo(function PassengerRow({
   passenger, isPresent, isAbsent, isAbsentPaid, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, isSponsored, isUnpaid, noteText, redirectedFrom, disabled,
   outstandingDebts, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemove, externalLock,
+  onOpenChangeStop, onOpenTransfer, isRehearsal,
 }: {
   passenger: Passenger;
   isPresent: boolean;
@@ -5500,6 +5599,9 @@ const PassengerRow = React.memo(function PassengerRow({
   onRemoveRider?: (id: string) => void;
   canRemove?: boolean;
   externalLock?: { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean };
+  onOpenChangeStop?: (p: Passenger) => void;
+  onOpenTransfer?: (p: Passenger) => void;
+  isRehearsal?: boolean;
 }) {
   const isMissingSponsorInfo = isSponsored && !noteText.trim();
   const [showNote, setShowNote] = useState(isSponsored || isUnpaid || !!noteText);
@@ -5791,6 +5893,32 @@ const PassengerRow = React.memo(function PassengerRow({
           >
             <StickyNote className="h-3 w-3" />
             {isMissingSponsorInfo ? 'Sponsor Info (Required)' : isNoteVisible ? 'Hide Note' : 'Note'}
+          </button>
+        )}
+
+        {/* Change Stop / Legs Button */}
+        {onOpenChangeStop && !disabled && (
+          <button
+            type="button"
+            onClick={() => onOpenChangeStop(passenger)}
+            className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium bg-card-2/60 text-muted border border-line hover:text-ink hover:border-line-bright transition-all active:scale-95"
+            title={isRehearsal ? 'Change pickup stop or rehearsal legs' : 'Change pickup stop'}
+          >
+            <MapPin className="h-3 w-3 text-crimson-400" />
+            <span>Change stop / legs</span>
+          </button>
+        )}
+
+        {/* Transfer Button */}
+        {onOpenTransfer && !disabled && (
+          <button
+            type="button"
+            onClick={() => onOpenTransfer(passenger)}
+            className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium bg-card-2/60 text-muted border border-line hover:text-ink hover:border-line-bright transition-all active:scale-95"
+            title="Transfer passenger to another vehicle"
+          >
+            <ArrowRightLeft className="h-3 w-3 text-amber-400" />
+            <span>Transfer</span>
           </button>
         )}
 

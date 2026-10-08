@@ -6,6 +6,28 @@ import { supabase } from './supabase';
 
 export type RehearsalLegs = 'both' | 'going' | 'return';
 
+/**
+ * Shared helper for rehearsal legs upgrade-only rule:
+ * - going -> both (allowed, fare R40 -> R70)
+ * - return -> both (allowed, fare R40 -> R70)
+ * - going <-> return: NOT allowed
+ * - both -> going / return: NOT allowed
+ *
+ * Returns [current] plus 'both' if current is going/return;
+ * returns only ['both'] if current is both (or undefined/other).
+ */
+export function allowedLegsUpgrades(
+  current?: RehearsalLegs | string | null
+): Array<'both' | 'going' | 'return'> {
+  if (current === 'going') {
+    return ['going', 'both'];
+  }
+  if (current === 'return') {
+    return ['return', 'both'];
+  }
+  return ['both'];
+}
+
 export type RehearsalStatus =
   | 'included'
   | 'intercession_excluded'
@@ -629,7 +651,7 @@ export function parseRehearsalSheet(
   let legsReturnCount = 0;
   let expectedTotalFare = 0;
 
-  deduplicatedRows.forEach((row, i) => {
+  deduplicatedRows.forEach((row) => {
     const { stop: normalizedStop, isUnknown: isUnknownStop } = normalizeRehearsalStop(row.rawStop);
     if (isUnknownStop && normalizedStop !== 'Unspecified') {
       unknownStopsSet.add(normalizedStop);

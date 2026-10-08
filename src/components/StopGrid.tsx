@@ -8,9 +8,10 @@ interface Props {
   passengers: Passenger[];
   date?: string;
   service?: ServiceType;
+  onOpenChangeStop?: (p: Passenger) => void;
 }
 
-export function StopGrid({ passengers, date, service }: Props) {
+export function StopGrid({ passengers, date, service, onOpenChangeStop }: Props) {
   const byStop = passengersByStop(passengers);
   const stops = Object.keys(byStop).sort((a, b) => byStop[b].length - byStop[a].length || naturalCompare(a, b));
   const unassigned = unassignedPassengers({ date: '', signups: passengers, vehicles: [] }).length;
@@ -71,7 +72,8 @@ export function StopGrid({ passengers, date, service }: Props) {
                 return (
                   <span
                     key={p.id}
-                    className="inline-flex items-center gap-1 rounded-md bg-bg/60 px-1.5 py-0.5 text-[10px] text-muted border border-line/40"
+                    onClick={onOpenChangeStop ? () => onOpenChangeStop(p) : undefined}
+                    className={`inline-flex items-center gap-1 rounded-md bg-bg/60 px-1.5 py-0.5 text-[10px] text-muted border border-line/40 ${onOpenChangeStop ? 'cursor-pointer hover:border-crimson-400 hover:text-ink transition-colors' : ''}`}
                   >
                     <span>{p.fullName.split(' ')[0]}</span>
                     {p.legs && p.legs !== 'both' && (

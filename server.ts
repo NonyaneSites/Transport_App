@@ -14,6 +14,12 @@ const LEDGER_FILE = path.join(DATA_DIR, 'ledger.json');
 const SPONSORSHIPS_FILE = path.join(DATA_DIR, 'sponsorship_audits.json');
 const REHEARSAL_TEMPLATE_FILE = path.join(DATA_DIR, 'rehearsal_template.json');
 
+function allowedLegsUpgrades(current?: string | null): Array<'both' | 'going' | 'return'> {
+  if (current === 'going') return ['going', 'both'];
+  if (current === 'return') return ['return', 'both'];
+  return ['both'];
+}
+
 // Ensure directories exist
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(MANIFESTS_DIR)) fs.mkdirSync(MANIFESTS_DIR, { recursive: true });
@@ -233,10 +239,42 @@ app.post('/api/manifests/:key', (req, res) => {
     }
   }
 
+  const isAdminRequest = Boolean(
+    req.body?.isAdmin ||
+    req.body?.admin ||
+    req.body?.role === 'admin' ||
+    req.headers['x-admin'] ||
+    (req.headers.referer && req.headers.referer.includes('/admin'))
+  );
+
+  let mergedSignups = Array.isArray(manifest.signups) ? manifest.signups : (existingManifest.signups || []);
+  if (!isAdminRequest && Array.isArray(manifest.signups) && Array.isArray(existingManifest.signups) && existingManifest.signups.length > 0) {
+    const existMap = new Map<string, { legs?: 'both' | 'going' | 'return' }>();
+    for (const s of existingManifest.signups as Array<{ id: string; fullName?: string; legs?: 'both' | 'going' | 'return' }>) {
+      if (s?.id) existMap.set(String(s.id), s);
+      if (s?.fullName) existMap.set(`name:${s.fullName.trim().toLowerCase()}`, s);
+    }
+
+    mergedSignups = manifest.signups.map((incS: { id: string; fullName?: string; legs?: 'both' | 'going' | 'return' }) => {
+      const existS = existMap.get(String(incS.id)) || (incS.fullName ? existMap.get(`name:${incS.fullName.trim().toLowerCase()}`) : undefined);
+      if (existS?.legs && incS.legs && incS.legs !== existS.legs) {
+        const allowed = allowedLegsUpgrades(existS.legs);
+        if (!allowed.includes(incS.legs)) {
+          // Reject downgrade from non-admin client
+          return {
+            ...incS,
+            legs: existS.legs,
+          };
+        }
+      }
+      return incS;
+    });
+  }
+
   const toSave = {
     ...manifest,
     date: key,
-    signups: Array.isArray(manifest.signups) ? manifest.signups : (existingManifest.signups || []),
+    signups: mergedSignups,
     vehicles: mergedVehicles,
     updated_at: nowIso,
   };
@@ -395,7 +433,24 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
 
   // 2. Update signups attendance if provided
   if (Array.isArray(updatedSignups) && updatedSignups.length > 0) {
-    manifest.signups = updatedSignups;
+    const existMap = new Map<string, { legs?: 'both' | 'going' | 'return' }>();
+    for (const s of (manifest.signups || []) as Array<{ id: string; fullName?: string; legs?: 'both' | 'going' | 'return' }>) {
+      if (s?.id) existMap.set(String(s.id), s);
+      if (s?.fullName) existMap.set(`name:${s.fullName.trim().toLowerCase()}`, s);
+    }
+    manifest.signups = updatedSignups.map((incS: { id: string; fullName?: string; legs?: 'both' | 'going' | 'return' }) => {
+      const existS = existMap.get(String(incS.id)) || (incS.fullName ? existMap.get(`name:${incS.fullName.trim().toLowerCase()}`) : undefined);
+      if (existS?.legs && incS.legs && incS.legs !== existS.legs) {
+        const allowed = allowedLegsUpgrades(existS.legs);
+        if (!allowed.includes(incS.legs)) {
+          return {
+            ...incS,
+            legs: existS.legs,
+          };
+        }
+      }
+      return incS;
+    });
   }
 
   manifest.updated_at = nowIso;
@@ -440,7 +495,16 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
 
   if (Array.isArray(absentees) && absentees.length > 0) {
     for (const a of absentees) {
-      const aLegs = (a as { legs?: 'both' | 'going' | 'return' }).legs;
+      let aLegs = (a as { id?: string; fullName?: string; legs?: 'both' | 'going' | 'return' }).legs;
+      const existS = (manifest.signups as Array<{ id: string; fullName?: string; legs?: 'both' | 'going' | 'return' }> || []).find(
+        (s) => (a.id && String(s.id) === String(a.id)) || (s.fullName && a.fullName && s.fullName.trim().toLowerCase() === a.fullName.trim().toLowerCase())
+      );
+      if (existS?.legs && aLegs && aLegs !== existS.legs) {
+        const allowed = allowedLegsUpgrades(existS.legs);
+        if (!allowed.includes(aLegs)) {
+          aLegs = existS.legs;
+        }
+      }
       let absenteeDebt = effectiveDebt;
       if (!isDW) {
         if (aLegs === 'both') absenteeDebt = 70;

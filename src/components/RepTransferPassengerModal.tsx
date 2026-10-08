@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ArrowRightLeft, Check, Loader2, X, AlertCircle, Users, Car, Bus } from 'lucide-react';
 import type { Passenger, Vehicle } from '@/lib/types';
 import { hubDisplayName } from '@/lib/types';
+import { allowedLegsUpgrades } from '@/lib/rehearsal';
 
 interface RepTransferPassengerModalProps {
   isOpen: boolean;
@@ -270,48 +271,60 @@ export function RepTransferPassengerModal({
           )}
 
           {/* Rehearsal Legs Selection */}
-          {isRehearsal && (
-            <div className="pt-2 border-t border-line/60">
-              <label className="mb-1 block text-[11px] font-semibold text-muted uppercase tracking-wide">
-                Rehearsal Transport Legs / Fare
-              </label>
-              <div className="grid grid-cols-3 gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => setSelectedLegs('both')}
-                  className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
-                    selectedLegs === 'both'
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 ring-1 ring-emerald-500/40'
-                      : 'bg-card-2 text-muted border-line hover:text-ink'
-                  }`}
-                >
-                  Both (R70)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSelectedLegs('going')}
-                  className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
-                    selectedLegs === 'going'
-                      ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-1 ring-sky-500/40'
-                      : 'bg-card-2 text-muted border-line hover:text-ink'
-                  }`}
-                >
-                  Going (R40)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSelectedLegs('return')}
-                  className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
-                    selectedLegs === 'return'
-                      ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-1 ring-sky-500/40'
-                      : 'bg-card-2 text-muted border-line hover:text-ink'
-                  }`}
-                >
-                  Return (R40)
-                </button>
+          {isRehearsal && (() => {
+            const allowedLegs = allowedLegsUpgrades(passenger.legs);
+            return (
+              <div className="pt-2 border-t border-line/60">
+                <label className="mb-1 block text-[11px] font-semibold text-muted uppercase tracking-wide">
+                  Rehearsal Transport Legs / Fare
+                </label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedLegs('both')}
+                    className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
+                      selectedLegs === 'both'
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 ring-1 ring-emerald-500/40'
+                        : 'bg-card-2 text-muted border-line hover:text-ink'
+                    }`}
+                  >
+                    Both (R70)
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!allowedLegs.includes('going')}
+                    onClick={() => setSelectedLegs('going')}
+                    className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
+                      !allowedLegs.includes('going')
+                        ? 'opacity-40 cursor-not-allowed bg-card-2/40 text-muted/60 border-line/40'
+                        : selectedLegs === 'going'
+                        ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-1 ring-sky-500/40'
+                        : 'bg-card-2 text-muted border-line hover:text-ink'
+                    }`}
+                  >
+                    Going (R40)
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!allowedLegs.includes('return')}
+                    onClick={() => setSelectedLegs('return')}
+                    className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
+                      !allowedLegs.includes('return')
+                        ? 'opacity-40 cursor-not-allowed bg-card-2/40 text-muted/60 border-line/40'
+                        : selectedLegs === 'return'
+                        ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-1 ring-sky-500/40'
+                        : 'bg-card-2 text-muted border-line hover:text-ink'
+                    }`}
+                  >
+                    Return (R40)
+                  </button>
+                </div>
+                <p className="mt-1.5 text-[10px] text-amber-300/90 font-medium">
+                  Legs can only be upgraded to Going & Return
+                </p>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Transfer Note (Optional) */}
           <div className="space-y-1">

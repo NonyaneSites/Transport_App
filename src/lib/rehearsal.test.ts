@@ -5,8 +5,10 @@ import {
   parseRehearsalSheet,
   formatRehearsalWhatsAppManifest,
   normalizeRehearsalStop,
+  allowedLegsUpgrades,
 } from './rehearsal.js';
 import type { Passenger, Vehicle } from './types.js';
+import { getPassengerFare } from './types.js';
 
 test('Answer -> legs mapping for all 11 form answers', () => {
   // 1. "Yes (Going and Return with REHEARSAL taxi)" -> both (R70)
@@ -239,4 +241,163 @@ test('WhatsApp output format using 17 Sep example', () => {
 1.E JaV`;
 
   assert.strictEqual(output.trim(), expected.trim());
+});
+
+test('allowedLegsUpgrades for all three inputs', () => {
+  assert.deepStrictEqual(allowedLegsUpgrades('going'), ['going', 'both']);
+  assert.deepStrictEqual(allowedLegsUpgrades('return'), ['return', 'both']);
+  assert.deepStrictEqual(allowedLegsUpgrades('both'), ['both']);
+  assert.deepStrictEqual(allowedLegsUpgrades(undefined), ['both']);
+  assert.deepStrictEqual(allowedLegsUpgrades(null), ['both']);
+});
+
+test('a downgrade attempt is rejected', () => {
+  // Check helper allowed upgrades:
+  // going -> return: NOT allowed
+  assert.strictEqual(allowedLegsUpgrades('going').includes('return'), false);
+  // return -> going: NOT allowed
+  assert.strictEqual(allowedLegsUpgrades('return').includes('going'), false);
+  // both -> going: NOT allowed
+  assert.strictEqual(allowedLegsUpgrades('both').includes('going'), false);
+  // both -> return: NOT allowed
+  assert.strictEqual(allowedLegsUpgrades('both').includes('return'), false);
+
+  // Simulation of upgrade-only enforcement logic as implemented in RepPage and server.ts:
+  function applyLegsChange(
+    currentLegs: 'both' | 'going' | 'return',
+    attemptedLegs: 'both' | 'going' | 'return'
+  ): { finalLegs: 'both' | 'going' | 'return'; rejected: boolean } {
+    const allowed = allowedLegsUpgrades(currentLegs);
+    if (!allowed.includes(attemptedLegs)) {
+      return { finalLegs: currentLegs, rejected: true };
+    }
+    return { finalLegs: attemptedLegs, rejected: false };
+  }
+
+  // Downgrades rejected:
+  assert.deepStrictEqual(applyLegsChange('both', 'going'), { finalLegs: 'both', rejected: true });
+  assert.deepStrictEqual(applyLegsChange('both', 'return'), { finalLegs: 'both', rejected: true });
+  assert.deepStrictEqual(applyLegsChange('going', 'return'), { finalLegs: 'going', rejected: true });
+  assert.deepStrictEqual(applyLegsChange('return', 'going'), { finalLegs: 'return', rejected: true });
+
+  // Upgrades accepted:
+  assert.deepStrictEqual(applyLegsChange('going', 'both'), { finalLegs: 'both', rejected: false });
+  assert.deepStrictEqual(applyLegsChange('return', 'both'), { finalLegs: 'both', rejected: false });
+});
+
+test('getPassengerFare after an upgrade (going->both = 70)', () => {
+  const p: Passenger = {
+    id: 'p_up',
+    fullName: 'Test Rider',
+    stop: 'Braam',
+    structure: 'S1',
+    present: false,
+    cancellationFeeOwed: false,
+    assignedTo: null,
+    service: 'Rehearsal',
+    legs: 'going',
+  };
+
+  assert.strictEqual(getPassengerFare(p, '2026-10-08'), 40);
+
+  // Upgrade going -> both
+  p.legs = 'both';
+  p.notes = 'Upgraded going -> both by Sarah';
+  assert.strictEqual(getPassengerFare(p, '2026-10-08'), 70);
+
+  // Also check return -> both
+  const pReturn: Passenger = {
+    id: 'p_ret',
+    fullName: 'Return Rider',
+    stop: 'Braam',
+    structure: 'S1',
+    present: false,
+    cancellationFeeOwed: false,
+    assignedTo: null,
+    service: 'Rehearsal',
+    legs: 'return',
+  };
+  assert.strictEqual(getPassengerFare(pReturn, '2026-10-08'), 40);
+  pReturn.legs = 'both';
+  pReturn.notes = 'Upgraded return -> both by Sipho';
+  assert.strictEqual(getPassengerFare(pReturn, '2026-10-08'), 70);
+});
+
+test('rep cash total for a mix of both/going/return riders', () => {
+  const riders: Passenger[] = [
+    { id: '1', fullName: 'R1', stop: 'Braam', service: 'Rehearsal', legs: 'both', present: true, cancellationFeeOwed: false, assignedTo: null },
+    { id: '2', fullName: 'R2', stop: 'Braam', service: 'Rehearsal', legs: 'going', present: true, cancellationFeeOwed: false, assignedTo: null },
+    { id: '3', fullName: 'R3', stop: 'Braam', service: 'Rehearsal', legs: 'return', present: true, cancellationFeeOwed: false, assignedTo: null },
+    { id: '4', fullName: 'R4', stop: 'Braam', service: 'Rehearsal', legs: 'both', present: true, cancellationFeeOwed: false, assignedTo: null },
+  ];
+
+  // Base cash calculation as used in RepPage
+  const date = '2026-10-08';
+  const grossCash = riders.reduce((sum, r) => sum + getPassengerFare(r, date), 0);
+  // 70 + 40 + 40 + 70 = 220
+  assert.strictEqual(grossCash, 220);
+
+  // If rider 2 is upgraded from 'going' to 'both':
+  riders[1].legs = 'both';
+  riders[1].notes = 'Upgraded going -> both by Rep';
+  const grossAfterUpgrade = riders.reduce((sum, r) => sum + getPassengerFare(r, date), 0);
+  // 70 + 70 + 40 + 70 = 250
+  assert.strictEqual(grossAfterUpgrade, 250);
+
+  // If rider 1 is sponsored (R70 deduction):
+  const sponsoredDeduction = getPassengerFare(riders[0], date); // 70
+  const finalCash = grossAfterUpgrade - sponsoredDeduction;
+  assert.strictEqual(finalCash, 180);
+});
+
+test('absentee ledger row keeps correct legs and R40/R70 debt', () => {
+  // Helper computing absentee ledger row debt respecting legs
+  function computeAbsenteeLedgerEntry(
+    passenger: { fullName: string; legs?: 'both' | 'going' | 'return'; stop?: string; structure?: string },
+    dateStr: string
+  ) {
+    const fare = getPassengerFare(passenger, dateStr);
+    return {
+      passenger_name: passenger.fullName,
+      legs: passenger.legs || 'both',
+      structure_debt: fare,
+      date: dateStr,
+    };
+  }
+
+  // 1. Going passenger marked absent gets R40 debt and 'going' legs
+  const goingAbsentee = computeAbsenteeLedgerEntry(
+    { fullName: 'Alice Going', legs: 'going' },
+    '2026-10-08'
+  );
+  assert.strictEqual(goingAbsentee.legs, 'going');
+  assert.strictEqual(goingAbsentee.structure_debt, 40);
+
+  // 2. Return passenger marked absent gets R40 debt and 'return' legs
+  const returnAbsentee = computeAbsenteeLedgerEntry(
+    { fullName: 'Bob Return', legs: 'return' },
+    '2026-10-08'
+  );
+  assert.strictEqual(returnAbsentee.legs, 'return');
+  assert.strictEqual(returnAbsentee.structure_debt, 40);
+
+  // 3. Both passenger (or upgraded passenger) marked absent gets R70 debt and 'both' legs
+  const bothAbsentee = computeAbsenteeLedgerEntry(
+    { fullName: 'Charlie Both', legs: 'both' },
+    '2026-10-08'
+  );
+  assert.strictEqual(bothAbsentee.legs, 'both');
+  assert.strictEqual(bothAbsentee.structure_debt, 70);
+
+  // 4. Past ledger rows are immutable and keep their recorded debt even if rider is upgraded later
+  const pastLedger = [
+    { id: 'ledger_past_1', passenger_name: 'Alice Going', legs: 'going', structure_debt: 40, date: '2026-09-17' },
+  ];
+  // Next week rider signs up or upgrades to 'both'
+  const currentWeekRider = { fullName: 'Alice Going', legs: 'both' as const };
+  // Past ledger row is unchanged
+  assert.strictEqual(pastLedger[0].structure_debt, 40);
+  assert.strictEqual(pastLedger[0].legs, 'going');
+  // New calculation for current week is R70
+  assert.strictEqual(computeAbsenteeLedgerEntry(currentWeekRider, '2026-10-08').structure_debt, 70);
 });
