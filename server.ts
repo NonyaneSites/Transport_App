@@ -688,6 +688,8 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
     });
 
     if (existingIdx >= 0) {
+      const existingStatus = audits[existingIdx].status;
+      const keepStatus = existingStatus && existingStatus !== 'pending' ? existingStatus : 'pending';
       audits[existingIdx] = {
         ...audits[existingIdx],
         passenger_id: sp.id || audits[existingIdx].passenger_id,
@@ -699,6 +701,9 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
         sponsor_note: cleanSponsorshipNote(sp.sponsorNote) || audits[existingIdx].sponsor_note,
         date: parsedDate || key,
         service: serviceLabel || 'Service',
+        status: keepStatus,
+        status_updated_at: existingStatus !== 'pending' ? audits[existingIdx].status_updated_at : undefined,
+        ledger_entry_id: audits[existingIdx].ledger_entry_id,
       };
     } else {
       audits.push({
@@ -899,14 +904,21 @@ app.post('/api/sync/live-action', (req, res) => {
 // Helper to convert any flexible date into YYYY-MM-DD
 function normalizeDateToYMD(dateStr?: string | null): string {
   if (!dateStr) return '';
-  const trimmed = String(dateStr).trim();
-  const ymdMatch = trimmed.match(/\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b/);
+  const trimmed = String(dateStr).replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  // Match YYYY-MM-DD even if followed by _ or T or space or end of string
+  const ymdMatch = trimmed.match(/(?:^|[^\d])(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?=[^\d]|$)/);
   if (ymdMatch) {
     return `${ymdMatch[1]}-${ymdMatch[2].padStart(2, '0')}-${ymdMatch[3].padStart(2, '0')}`;
   }
-  const dmyMatch = trimmed.match(/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b/);
+  // Match DD-MM-YYYY or MM-DD-YYYY
+  const dmyMatch = trimmed.match(/(?:^|[^\d])(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?=[^\d]|$)/);
   if (dmyMatch) {
     return `${dmyMatch[3]}-${dmyMatch[2].padStart(2, '0')}-${dmyMatch[1].padStart(2, '0')}`;
+  }
+  const part = trimmed.split('_')[0].split('T')[0];
+  const partMatch = part.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+  if (partMatch) {
+    return `${partMatch[1]}-${partMatch[2].padStart(2, '0')}-${partMatch[3].padStart(2, '0')}`;
   }
   try {
     const d = new Date(trimmed);
@@ -921,13 +933,13 @@ function normalizeDateToYMD(dateStr?: string | null): string {
   } catch {
     /* ignore */
   }
-  return trimmed.split('_')[0];
+  return part;
 }
 
 // Helper to clean slug/synthetic names like "Passenger bonolo-ngejane-dfc-bus-stop" into "Bonolo Ngejane"
 function sanitizePassengerDisplayName(rawName: string): string {
   if (!rawName) return '';
-  let name = rawName.trim();
+  let name = String(rawName).replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
 
   if (/^passenger\s+/i.test(name)) {
     name = name.replace(/^passenger\s+/i, '').trim();
@@ -958,6 +970,7 @@ function sanitizePassengerDisplayName(rawName: string): string {
 
   // Strip trailing stop notes like " - DFC Bus Stop"
   name = name.replace(/\s*-\s*(?:dfc|amic|sunnyside|kingsway|bunting|midrand|soweto|barnato|park).*$/i, '').trim();
+  name = name.replace(/^[-\s\d.:#*•]+/, '').replace(/[-\s.:#*•]+$/, '').trim();
   name = name.replace(/\s+/g, ' ').trim();
 
   return name;
@@ -1062,27 +1075,132 @@ function parseDebtAmount(val: unknown, dateStr?: string | null): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+interface ServerAuditItem {
+  id: string;
+  manifest_key: string;
+  date: string;
+  service: string;
+  passenger_id?: string;
+  passenger_name: string;
+  structure: string;
+  stop?: string;
+  vehicle_name: string;
+  rep_name: string;
+  sponsor_note: string;
+  status: 'pending' | 'actually_sponsored' | 'unpaid_sponsorship' | 'unaccounted_sponsorship';
+  status_updated_at?: string;
+  ledger_entry_id?: string | null;
+  submitted_at: string;
+}
+
+/**
+ * Bidirectional reconciliation helper:
+ * Guarantees that any sponsorship recorded or indicated in the ledger
+ * is automatically reflected in sponsorship_audits with its confirmed status,
+ * ensuring already indicated sponsorships never reset to pending.
+ */
+function syncSponsorshipAuditsWithLedger(
+  audits: ServerAuditItem[],
+  ledger: Array<Record<string, unknown>>
+): { audits: ServerAuditItem[]; changed: boolean } {
+  let changed = false;
+  const auditMap = new Map<string, ServerAuditItem>();
+
+  for (const a of audits) {
+    if (a.id) auditMap.set(String(a.id), a);
+    const date = normalizeDateToYMD(a.date || a.manifest_key);
+    const norm = sanitizePassengerDisplayName(a.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (date && norm) {
+      auditMap.set(`${date}::${norm}`, a);
+    }
+    if (a.ledger_entry_id) {
+      auditMap.set(`ledger::${String(a.ledger_entry_id)}`, a);
+    }
+  }
+
+  for (const entry of ledger) {
+    const origGn = typeof entry.general_notes === 'string' ? entry.general_notes : '';
+    const origSn = typeof entry.sponsor_note === 'string' ? entry.sponsor_note : '';
+    const dt = String(entry.debt_type || entry.debtType || '').toLowerCase();
+    const isActually = /actually\s*sponsored/i.test(origGn) || /actually\s*sponsored/i.test(origSn) || dt.includes('actually');
+    const isUnpaid = /did not pay|unpaid/i.test(origGn) || /did not pay|unpaid/i.test(origSn) || dt.includes('unpaid');
+    const isUnaccounted = /unaccounted/i.test(origGn) || /unaccounted/i.test(origSn) || dt.includes('unaccounted');
+    const isSponsored = Boolean(entry.sponsored) || isUnpaid || isUnaccounted || isActually || /sponsor/i.test(origGn) || /sponsor/i.test(origSn) || dt.includes('sponsorship');
+
+    if (!isSponsored) continue;
+
+    const cleanName = sanitizePassengerDisplayName(String(entry.passenger_name || ''));
+    if (!cleanName) continue;
+    const date = normalizeDateToYMD(String(entry.date || entry.manifest_key || ''));
+    const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const auditId = `sp_${date}_${normName}`;
+    const targetStatus: ServerAuditItem['status'] = isActually
+      ? 'actually_sponsored'
+      : (isUnpaid ? 'unpaid_sponsorship' : 'unaccounted_sponsorship');
+    const noteText = isActually
+      ? (origSn || origGn || 'Actually Sponsored')
+      : isUnpaid
+      ? (origSn && !origSn.toLowerCase().includes('did not pay') ? `Did not pay: ${origSn}` : (origSn || origGn || 'Did not pay'))
+      : (origSn && !origSn.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${origSn}` : (origSn || origGn || 'Unaccounted Sponsorship'));
+
+    const existing = auditMap.get(`ledger::${String(entry.id)}`) || auditMap.get(auditId) || auditMap.get(`${date}::${normName}`);
+
+    if (existing) {
+      if (existing.status === 'pending') {
+        existing.status = targetStatus;
+        existing.status_updated_at = existing.status_updated_at || String(entry.submitted_at || new Date().toISOString());
+        existing.ledger_entry_id = String(entry.id);
+        changed = true;
+      }
+      if (!existing.ledger_entry_id) {
+        existing.ledger_entry_id = String(entry.id);
+        changed = true;
+      }
+    } else {
+      const newAudit: ServerAuditItem = {
+        id: auditId,
+        manifest_key: String(entry.manifest_key || ''),
+        date: date,
+        service: String(entry.service || 'Service'),
+        passenger_name: cleanName,
+        structure: normalizeStructureCode(String(entry.structure || '')),
+        stop: String(entry.stop || ''),
+        vehicle_name: String(entry.vehicle_name || 'Vehicle'),
+        rep_name: String(entry.rep_name || entry.submitted_by || 'Rep'),
+        sponsor_note: cleanSponsorshipNote(noteText) || noteText,
+        status: targetStatus,
+        status_updated_at: String(entry.submitted_at || new Date().toISOString()),
+        ledger_entry_id: String(entry.id),
+        submitted_at: String(entry.submitted_at || new Date().toISOString()),
+      };
+      audits.push(newAudit);
+      auditMap.set(auditId, newAudit);
+      auditMap.set(`${date}::${normName}`, newAudit);
+      auditMap.set(`ledger::${String(entry.id)}`, newAudit);
+      changed = true;
+    }
+  }
+
+  return { audits, changed };
+}
+
+// Initial sync on server module execution
+try {
+  const startupLedger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+  const startupAudits = readJsonFile<ServerAuditItem[]>(SPONSORSHIPS_FILE, []);
+  const initialSync = syncSponsorshipAuditsWithLedger(startupAudits, startupLedger);
+  if (initialSync.changed) {
+    atomicWriteJson(SPONSORSHIPS_FILE, initialSync.audits);
+  }
+} catch (err) {
+  console.warn('[Server] Initial sponsorship sync note:', err);
+}
+
 // Record reported sponsorships from attendance check-in or transfers
 app.post('/api/ledger/sponsorships', (req, res) => {
   const { sponsorships } = req.body || {};
   if (Array.isArray(sponsorships) && sponsorships.length > 0) {
-    const audits = readJsonFile<Array<{
-      id: string;
-      manifest_key: string;
-      date: string;
-      service: string;
-      passenger_id?: string;
-      passenger_name: string;
-      structure: string;
-      stop?: string;
-      vehicle_name: string;
-      rep_name: string;
-      sponsor_note: string;
-      status: 'pending' | 'actually_sponsored' | 'unpaid_sponsorship' | 'unaccounted_sponsorship';
-      status_updated_at?: string;
-      ledger_entry_id?: string;
-      submitted_at: string;
-    }>>(SPONSORSHIPS_FILE, []);
+    const audits = readJsonFile<ServerAuditItem[]>(SPONSORSHIPS_FILE, []);
 
     for (const sp of sponsorships) {
       const rawName = sp.passenger_name || sp.fullName;
@@ -1103,6 +1221,8 @@ app.post('/api/ledger/sponsorships', (req, res) => {
       });
 
       if (existingIdx >= 0) {
+        const existingStatus = audits[existingIdx].status;
+        const keepStatus = existingStatus && existingStatus !== 'pending' ? existingStatus : (sp.status || 'pending');
         audits[existingIdx] = {
           ...audits[existingIdx],
           passenger_name: cleanName,
@@ -1111,6 +1231,9 @@ app.post('/api/ledger/sponsorships', (req, res) => {
           vehicle_name: sp.vehicle_name || audits[existingIdx].vehicle_name,
           rep_name: sp.rep_name || audits[existingIdx].rep_name,
           sponsor_note: cleanNote || audits[existingIdx].sponsor_note,
+          status: keepStatus,
+          status_updated_at: existingStatus !== 'pending' ? audits[existingIdx].status_updated_at : sp.status_updated_at,
+          ledger_entry_id: audits[existingIdx].ledger_entry_id || sp.ledger_entry_id,
         };
       } else {
         audits.push({
@@ -1139,29 +1262,17 @@ app.post('/api/ledger/sponsorships', (req, res) => {
 
 // List reported sponsorships for cancellation admin audit
 app.get('/api/ledger/sponsorships', (req, res) => {
-  let audits = readJsonFile<Array<{
-    id: string;
-    manifest_key: string;
-    date: string;
-    service: string;
-    passenger_id?: string;
-    passenger_name: string;
-    structure: string;
-    stop?: string;
-    vehicle_name: string;
-    rep_name: string;
-    sponsor_note: string;
-    status: 'pending' | 'actually_sponsored' | 'unpaid_sponsorship' | 'unaccounted_sponsorship';
-    status_updated_at?: string;
-    ledger_entry_id?: string;
-    submitted_at: string;
-  }>>(SPONSORSHIPS_FILE, []);
+  let audits = readJsonFile<ServerAuditItem[]>(SPONSORSHIPS_FILE, []);
+  const ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+
+  // Sync audits with ledger so confirmed indicated debt is never missing or reset
+  const syncResult = syncSponsorshipAuditsWithLedger(audits, ledger);
+  audits = syncResult.audits;
 
   // Auto-scan manifests to find any sponsored passengers
   // so all existing historical and in-progress sponsorship data is instantly visible
   try {
     const files = fs.readdirSync(MANIFESTS_DIR).filter((f) => f.endsWith('.json'));
-    let addedCount = 0;
     for (const file of files) {
       const key = file.replace(/\.json$/, '');
       const m = readJsonFile<{
@@ -1217,7 +1328,6 @@ app.get('/api/ledger/sponsorships', (req, res) => {
                 status: 'pending',
                 submitted_at: new Date().toISOString(),
               });
-              addedCount++;
             }
           }
         }
@@ -1260,7 +1370,6 @@ app.get('/api/ledger/sponsorships', (req, res) => {
               status: 'pending',
               submitted_at: new Date().toISOString(),
             });
-            addedCount++;
           }
         }
       }
@@ -1299,13 +1408,9 @@ app.get('/api/ledger/sponsorships', (req, res) => {
               status: 'pending',
               submitted_at: new Date().toISOString(),
             });
-            addedCount++;
           }
         }
       }
-    }
-    if (addedCount > 0) {
-      atomicWriteJson(SPONSORSHIPS_FILE, audits);
     }
   } catch (err) {
     console.warn('[Server] Manifest scan for sponsorships note:', err);
@@ -1335,6 +1440,12 @@ app.get('/api/ledger/sponsorships', (req, res) => {
     const cleanedSponsorNote = cleanSponsorshipNote(a.sponsor_note);
 
     if (existingIdx >= 0) {
+      // PRESERVE confirmed status: if either record was indicated (not pending), the indicated status wins!
+      const existingStatus = deduped[existingIdx].status;
+      const resolvedStatus = (existingStatus && existingStatus !== 'pending')
+        ? existingStatus
+        : (a.status && a.status !== 'pending' ? a.status : 'pending');
+
       deduped[existingIdx] = {
         ...deduped[existingIdx],
         passenger_name: cleanName,
@@ -1343,7 +1454,9 @@ app.get('/api/ledger/sponsorships', (req, res) => {
         vehicle_name: deduped[existingIdx].vehicle_name || a.vehicle_name,
         rep_name: deduped[existingIdx].rep_name || a.rep_name,
         sponsor_note: cleanSponsorshipNote(deduped[existingIdx].sponsor_note) || cleanedSponsorNote,
-        status: deduped[existingIdx].status !== 'pending' ? deduped[existingIdx].status : a.status,
+        status: resolvedStatus,
+        status_updated_at: (existingStatus !== 'pending' ? deduped[existingIdx].status_updated_at : a.status_updated_at) || deduped[existingIdx].status_updated_at || a.status_updated_at,
+        ledger_entry_id: deduped[existingIdx].ledger_entry_id || a.ledger_entry_id,
       };
     } else {
       deduped.push({

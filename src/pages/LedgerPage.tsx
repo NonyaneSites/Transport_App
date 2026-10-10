@@ -287,7 +287,16 @@ export function LedgerPage() {
       async () => {
         if (mounted) {
           const sponRefreshed = await listReportedSponsorships();
-          setSponsorships(sponRefreshed);
+          setSponsorships((prev) => {
+            const merged = sponRefreshed.map((fresh) => {
+              const prevItem = prev.find((p) => p.id === fresh.id);
+              if (prevItem && prevItem.status !== 'pending' && fresh.status === 'pending') {
+                return { ...fresh, status: prevItem.status, status_updated_at: prevItem.status_updated_at };
+              }
+              return fresh;
+            });
+            return cleanAndDeduplicateSponsorships(merged);
+          });
         }
       }
     );
@@ -1025,7 +1034,19 @@ export function LedgerPage() {
           listReportedSponsorships(),
           listLedgerEntries(),
         ]);
-        setSponsorships(updatedSpon);
+        setSponsorships((prev) => {
+          const merged = updatedSpon.map((fresh) => {
+            if (statusMap.has(fresh.id)) {
+              return { ...fresh, status: statusMap.get(fresh.id)!, status_updated_at: now };
+            }
+            const prevItem = prev.find((p) => p.id === fresh.id);
+            if (prevItem && prevItem.status !== 'pending' && fresh.status === 'pending') {
+              return { ...fresh, status: prevItem.status, status_updated_at: prevItem.status_updated_at };
+            }
+            return fresh;
+          });
+          return cleanAndDeduplicateSponsorships(merged);
+        });
         setEntries(updatedLedger);
       }
     } catch (err) {

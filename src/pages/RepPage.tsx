@@ -565,6 +565,7 @@ export function RepPage() {
     const repMatch = matchRiderToOfficialRep({ fullName: repName });
 
     const match = manifest.vehicles.find((v) => {
+      if (v.type === 'Bus') return false;
       const vRep = (v.repName ?? '').trim().toLowerCase();
       if (vRep) {
         if (vRep === q) return true;
@@ -2731,7 +2732,7 @@ export function RepPage() {
               submittedAt: new Date().toISOString(),
               submittedBy: repName.trim(),
               licensePlate: licensePlate.trim(),
-              repName: repName.trim(),
+              repName: selectedVehicle.type === 'Bus' ? undefined : repName.trim(),
               coReps: coReps.map((c) => c.trim()).filter(Boolean),
               generalNotes: fullGeneralNotes,
               draftState: finalizedDraft,
@@ -3193,7 +3194,7 @@ export function RepPage() {
                 </div>
                 {selectedVehicle && (
                   <span className="text-xs font-semibold text-crimson-400">
-                    {selectedVehicle.name} ({selectedVehicle.type})
+                    {selectedVehicle.type === 'Bus' ? selectedVehicle.name : `${selectedVehicle.name} (${selectedVehicle.type})`}
                   </span>
                 )}
               </div>
@@ -3211,6 +3212,13 @@ export function RepPage() {
                   <option value="" className="bg-card-2">Choose your vehicle…</option>
                   {sortVehiclesNatural(manifest.vehicles).map((v) => {
                     const vRiders = vehicleRiders(manifest, v);
+                    if (v.type === 'Bus') {
+                      return (
+                        <option key={v.id} value={v.id} className="bg-card-2">
+                          {v.name}{v.submitted ? ' ✓ submitted' : ''}
+                        </option>
+                      );
+                    }
                     return (
                       <option key={v.id} value={v.id} className="bg-card-2">
                         {v.name} — Assigned Rep: {v.repName || 'Unassigned'} ({v.type}) — {vRiders.length} passengers
@@ -3241,7 +3249,7 @@ export function RepPage() {
                   <div>
                     <div className="mb-1.5 flex items-center justify-between">
                       <label className="block text-xs font-semibold uppercase tracking-wide text-muted">
-                        Your Name (Rep / Driver) <span className="text-crimson-400">*</span>
+                        {selectedVehicle.type === 'Bus' ? 'Your Name (Rep Submitting Bus Stats)' : 'Your Name (Rep / Driver)'} <span className="text-crimson-400">*</span>
                       </label>
                       {repStructure && (
                         <span className="badge bg-crimson-500/15 text-crimson-300 text-[10px]">
@@ -3257,11 +3265,11 @@ export function RepPage() {
                         isUserDirtyRef.current = true;
                         setRepName(e.target.value);
                       }}
-                      placeholder="Enter rep name for this vehicle…"
+                      placeholder={selectedVehicle.type === 'Bus' ? 'Enter your name to submit bus stats…' : 'Enter rep name for this vehicle…'}
                       className="input-field mb-1.5"
                     />
 
-                    {detectedOfficialRep && !repName && (
+                    {selectedVehicle.type !== 'Bus' && detectedOfficialRep && !repName && (
                       <div className="mb-2 flex items-center justify-between gap-2 rounded-lg border border-crimson-500/30 bg-crimson-500/10 px-2.5 py-1.5 text-xs">
                         <span className="flex items-center gap-1.5 text-crimson-300">
                           <Sparkles className="h-3.5 w-3.5 text-crimson-400" />

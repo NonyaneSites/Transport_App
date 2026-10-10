@@ -35,7 +35,7 @@ export function EditVehicleModal({ vehicle, onSave, onClose, onDelete }: EditVeh
       driverName: driverName.trim() || undefined,
       driverPhone: driverPhone.trim() || undefined,
       capacity: !isNaN(parsedCap) && parsedCap > 0 ? parsedCap : (type === 'Taxi' ? 15 : 60),
-      repName: repName.trim() || undefined,
+      repName: type === 'Bus' ? undefined : (repName.trim() || undefined),
       generalNotes: generalNotes.trim() || undefined,
     };
 
@@ -157,13 +157,19 @@ export function EditVehicleModal({ vehicle, onSave, onClose, onDelete }: EditVeh
               <label className="block text-xs font-semibold uppercase tracking-wider text-muted mb-1.5">
                 Transport Rep
               </label>
-              <input
-                type="text"
-                value={repName}
-                onChange={(e) => setRepName(e.target.value)}
-                placeholder="Rep full name"
-                className="input-field w-full"
-              />
+              {type === 'Bus' ? (
+                <div className="rounded-xl border border-line bg-card-2 p-2.5 text-[11px] text-muted">
+                  Buses do not use a specific assigned rep. Reps on board are counted automatically.
+                </div>
+              ) : (
+                <input
+                  type="text"
+                  value={repName}
+                  onChange={(e) => setRepName(e.target.value)}
+                  placeholder="Rep full name"
+                  className="input-field w-full"
+                />
+              )}
             </div>
           </div>
 

@@ -100,6 +100,13 @@ export function AdminAttendanceNotesSection({
     return map;
   }, [manifest.signups]);
 
+  const getVehicleDisplayRep = (v: { type?: string; repName?: string; submittedBy?: string }): string => {
+    if (v.type === 'Bus') {
+      return v.submittedBy ? `Submitted by ${v.submittedBy}` : 'Bus Rep';
+    }
+    return v.repName || v.submittedBy || '—';
+  };
+
   // Aggregate Sponsored Riders across all submitted vehicles
   const sponsoredList = useMemo<SponsoredRiderItem[]>(() => {
     const list: SponsoredRiderItem[] = [];
@@ -112,7 +119,7 @@ export function AdminAttendanceNotesSection({
       const draft = v.draftState;
       const sIds = new Set<string>((draft?.sponsoredIds || []).map(String));
       const notesMap = draft?.notes || {};
-      const repName = v.repName || v.submittedBy || '—';
+      const repName = getVehicleDisplayRep(v);
 
       for (const riderId of v.riders || []) {
         const p = passengerMap.get(String(riderId)) || passengerMap.get(riderId);
@@ -147,7 +154,7 @@ export function AdminAttendanceNotesSection({
       const draft = v.draftState;
       const uIds = new Set<string>((draft?.unpaidIds || []).map(String));
       const notesMap = draft?.notes || {};
-      const repName = v.repName || v.submittedBy || '—';
+      const repName = getVehicleDisplayRep(v);
 
       for (const riderId of v.riders || []) {
         const p = passengerMap.get(String(riderId)) || passengerMap.get(riderId);
@@ -191,7 +198,7 @@ export function AdminAttendanceNotesSection({
       if (!v.submitted && !v.draftState?.submitted) continue;
 
       const ext = v.draftState?.externalSponsees || [];
-      const repName = v.repName || v.submittedBy || '—';
+      const repName = getVehicleDisplayRep(v);
       for (const item of ext) {
         const cleanName = item.sponseeName.trim();
         if (!cleanName) continue;
@@ -224,7 +231,7 @@ export function AdminAttendanceNotesSection({
       const aIds = new Set<string>(draft?.absentIds || []);
       const pIds = new Set<string>(draft?.presentIds || []);
       const notesMap = draft?.notes || {};
-      const repName = v.repName || v.submittedBy || '—';
+      const repName = getVehicleDisplayRep(v);
 
       for (const riderId of v.riders || []) {
         const p = passengerMap.get(riderId);
@@ -256,7 +263,7 @@ export function AdminAttendanceNotesSection({
 
       const draft = v.draftState;
       const notesMap = draft?.notes || {};
-      const repName = v.repName || v.submittedBy || '—';
+      const repName = getVehicleDisplayRep(v);
 
       for (const riderId of v.riders || []) {
         const p = passengerMap.get(riderId);
@@ -288,7 +295,7 @@ export function AdminAttendanceNotesSection({
       if (note) {
         list.push({
           vehicle: v,
-          repName: v.repName || v.submittedBy || '—',
+          repName: getVehicleDisplayRep(v),
           note,
           submittedAt: v.submittedAt,
         });
@@ -313,7 +320,7 @@ export function AdminAttendanceNotesSection({
       if (!v.submitted) continue;
 
       const items = v.draftState?.manualCancellations || [];
-      const repName = v.repName || v.submittedBy || '—';
+      const repName = getVehicleDisplayRep(v);
       for (const m of items) {
         if (m.passengerName.trim()) {
           list.push({
@@ -1238,7 +1245,7 @@ export function AdminAttendanceNotesSection({
 
                       const sponsoredCount = riders.filter((r) => r.sponsored || sIds.has(String(r.id))).length;
                       const unpaidCount = riders.filter((r) => r.didNotPay || uIds.has(String(r.id))).length;
-                      const repName = v.repName || v.submittedBy || '—';
+                      const repName = getVehicleDisplayRep(v);
                       const notesCount = (draft?.notes ? Object.keys(draft.notes).length : 0) + (v.generalNotes ? 1 : 0);
 
                       return (

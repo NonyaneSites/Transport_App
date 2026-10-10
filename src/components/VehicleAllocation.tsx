@@ -541,7 +541,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
           driverName: updates.driverName !== undefined ? (updates.driverName.trim() || undefined) : v.driverName,
           driverPhone: updates.driverPhone !== undefined ? (updates.driverPhone.trim() || undefined) : v.driverPhone,
           capacity: updates.capacity !== undefined ? updates.capacity : v.capacity,
-          repName: updates.repName !== undefined ? (updates.repName.trim() || undefined) : v.repName,
+          repName: (updates.type || v.type) === 'Bus' ? undefined : (updates.repName !== undefined ? (updates.repName.trim() || undefined) : v.repName),
           generalNotes: updates.generalNotes !== undefined ? (updates.generalNotes.trim() || undefined) : v.generalNotes,
         };
         return nextVeh;
@@ -593,7 +593,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
           riders: nextRiders,
           orderedStops: nextOrderedStops,
           // If no rep is set, or if vehicle is a taxi and a rep is on board, auto-allocate them!
-          repName: v.repName || autoRep || undefined,
+          repName: v.type === 'Bus' ? undefined : (v.repName || autoRep || undefined),
         };
       });
 
@@ -677,7 +677,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
           riders: nextRiders,
           orderedStops: nextOrderedStops,
           draftState: cleanedDraft,
-          repName: repStillOnBoard ? v.repName : (detectedRep || undefined),
+          repName: v.type === 'Bus' ? undefined : (repStillOnBoard ? v.repName : (detectedRep || undefined)),
         };
       });
 
@@ -720,7 +720,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   function setRepName(vehicleId: string, repName: string) {
     mutateAndSave((prev) => {
       const updatedVehicles = prev.vehicles.map((v) =>
-        v.id === vehicleId ? { ...v, repName: repName.trim() || undefined } : v
+        v.id === vehicleId ? { ...v, repName: v.type === 'Bus' ? undefined : (repName.trim() || undefined) } : v
       );
       return { ...prev, vehicles: updatedVehicles };
     });
@@ -869,7 +869,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
               riders: nextRiders,
               orderedStops: nextOrderedStops,
               draftState: cleanedDraft,
-              repName: repStillOnBoard ? v.repName : (detected || undefined),
+              repName: v.type === 'Bus' ? undefined : (repStillOnBoard ? v.repName : (detected || undefined)),
             };
           }
           return v;
@@ -903,7 +903,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
             riders: nextRiders,
             orderedStops: nextOrderedStops,
             draftState: cleanedDraft,
-            repName: repStillOnBoard ? v.repName : (detected || undefined),
+            repName: v.type === 'Bus' ? undefined : (repStillOnBoard ? v.repName : (detected || undefined)),
           };
         }
 
@@ -919,7 +919,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
             ...v,
             riders: nextRiders,
             orderedStops: nextOrderedStops,
-            repName: v.repName || autoRep || undefined,
+            repName: v.type === 'Bus' ? undefined : (v.repName || autoRep || undefined),
           };
         }
 
@@ -1044,6 +1044,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   }
 
   function handleWhatsAppRep(vehicle: Vehicle) {
+    if (vehicle.type === 'Bus') return;
     if (!vehicle.repName?.trim()) {
       setWhatsAppNotice({ type: 'error', text: `Assign a transport rep to ${vehicle.name} before sending its passenger list.` });
       return;
@@ -1930,6 +1931,11 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
             const selectedPassengerIsActiveRep = selectedPassenger && fromVeh ? isPassengerRepOfVehicle(selectedPassenger, fromVeh.repName) : false;
 
             const getVehicleRepLabel = (v: Vehicle) => {
+              if (v.type === 'Bus') {
+                const r = riderPassengers(v);
+                const count = detectAllVehicleReps(r).length;
+                return `· ${count} Rep${count !== 1 ? 's' : ''}`;
+              }
               const r = riderPassengers(v);
               const detected = detectVehicleRep(r);
               const effective = v.repName || detected;
@@ -2053,7 +2059,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                         <span>
                           <strong>{selectedPassenger.fullName}</strong> is an <strong>Official Rep ({selectedPassengerOfficial?.structure || selectedPassenger.structure})</strong>.
                         </span>
-                        {toVeh && !toVeh.repName && !detectVehicleRep(riderPassengers(toVeh)) && (
+                        {toVeh && toVeh.type === 'Taxi' && !toVeh.repName && !detectVehicleRep(riderPassengers(toVeh)) && (
                           <span className="rounded bg-success/20 px-1.5 py-0.5 text-success-light font-bold text-[11px]">
                             ✓ Will provide rep coverage to {toVeh.name}!
                           </span>
@@ -2166,7 +2172,12 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                         {vehicle.submitted && (
                           <span className="badge bg-success/15 text-success-light text-[10px]">Submitted</span>
                         )}
-                        {allDetectedReps.length > 1 ? (
+                        {vehicle.type === 'Bus' ? (
+                          <span className="badge bg-amber-500/15 text-amber-300 text-[10px] flex items-center gap-1 border border-amber-500/30">
+                            <Sparkles className="h-3 w-3 text-amber-400" />
+                            {allDetectedReps.length} Rep{allDetectedReps.length !== 1 ? 's' : ''} on board
+                          </span>
+                        ) : allDetectedReps.length > 1 ? (
                           <span className="badge bg-amber-500/15 text-amber-300 text-[10px] flex items-center gap-1 border border-amber-500/30">
                             <Sparkles className="h-3 w-3 text-amber-400" />
                             {allDetectedReps.length} Reps on board {vehicle.repName ? `· Active: ${vehicle.repName}` : '(Choose 1)'}
@@ -2225,10 +2236,15 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                         <span>{vehicle.type} ({capacity} seats)</span>
                         <span>·</span>
                         <span>{riders.length} passenger{riders.length !== 1 ? 's' : ''}</span>
-                        {vehicle.repName ? (
+                        {vehicle.type === 'Taxi' && vehicle.repName ? (
                           <>
                             <span>·</span>
                             <span>Rep: {vehicle.repName}{repStruct ? ` (${repStruct})` : ''}</span>
+                          </>
+                        ) : vehicle.type === 'Bus' && vehicle.submittedBy ? (
+                          <>
+                            <span>·</span>
+                            <span>Submitted by: {vehicle.submittedBy}</span>
                           </>
                         ) : null}
                         {vehicle.licensePlate ? (
@@ -2247,7 +2263,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                     </div>
                   </button>
                   <div className="flex items-center gap-2">
-                    {riders.length > 0 && (
+                    {vehicle.type === 'Taxi' && riders.length > 0 && (
                       <button
                         type="button"
                         onClick={() => handleWhatsAppRep(vehicle)}
@@ -2387,61 +2403,88 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                     )}
 
                     {/* Rep assignment & Smart Auto-Allocation */}
-                    <div className="mb-4 space-y-2">
-                      <div className="flex items-center gap-2">
-                        <UserCog className="h-4 w-4 text-muted" />
-                        <label className="text-[10px] font-semibold uppercase tracking-wide text-muted">Transport Rep</label>
-                        <DebouncedInput
-                          value={vehicle.repName ?? ''}
-                          onChange={(val) => setRepName(vehicle.id, val)}
-                          placeholder="Type rep name or select below"
-                          className="input-field flex-1 py-1.5 text-xs"
-                        />
-                      </div>
-
-                      {/* Compact inline rep picker when reps are detected */}
-                      {allDetectedReps.length > 1 ? (
-                        <div className="flex items-center gap-1.5 flex-wrap rounded-lg border border-amber-500/20 bg-amber-500/5 px-2.5 py-1.5 text-xs">
-                          <span className="text-[11px] font-semibold text-amber-300 flex items-center gap-1">
-                            <Sparkles className="h-3 w-3 text-amber-400" />
-                            {allDetectedReps.length} Reps:
-                          </span>
-                          {allDetectedReps.map(({ rep, rider }) => {
-                            const isSelected = isPassengerRepOfVehicle(rider, vehicle.repName);
-                            return (
-                              <button
-                                key={rep.fullName}
-                                type="button"
-                                onClick={() => setRepName(vehicle.id, isSelected ? '' : rep.fullName)}
-                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
-                                  isSelected
-                                    ? 'bg-crimson-600 text-white font-bold shadow-sm'
-                                    : 'bg-card border border-line text-ink hover:border-amber-400/50'
-                                }`}
-                                title={isSelected ? 'Active rep (click to unassign)' : `Assign ${rep.fullName} (${rep.structure})`}
+                    {vehicle.type === 'Bus' ? (
+                      <div className="mb-4 rounded-xl border border-line/70 bg-card/70 p-3">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="flex items-center gap-2 text-xs font-semibold text-ink">
+                            <Users2 className="h-4 w-4 text-amber-400" />
+                            <span>Reps on board: <strong className="text-amber-300">{allDetectedReps.length}</strong></span>
+                          </div>
+                          <span className="text-[11px] text-muted">Buses do not use a single assigned rep</span>
+                        </div>
+                        {allDetectedReps.length > 0 ? (
+                          <div className="mt-2.5 flex flex-wrap gap-1.5">
+                            {allDetectedReps.map(({ rep, rider }) => (
+                              <span
+                                key={rider.id || rep.fullName}
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-200"
                               >
-                                <span>{isSelected ? '★' : '☆'}</span>
                                 <span>{rep.fullName}</span>
-                                <span className="font-mono text-[10px] opacity-75">({rep.structure})</span>
-                              </button>
-                            );
-                          })}
+                                <span className="font-mono text-[10px] text-amber-400/80">({rep.structure})</span>
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="mt-1.5 text-xs text-muted">No official structure reps detected on this bus.</p>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="mb-4 space-y-2">
+                        <div className="flex items-center gap-2">
+                          <UserCog className="h-4 w-4 text-muted" />
+                          <label className="text-[10px] font-semibold uppercase tracking-wide text-muted">Transport Rep</label>
+                          <DebouncedInput
+                            value={vehicle.repName ?? ''}
+                            onChange={(val) => setRepName(vehicle.id, val)}
+                            placeholder="Type rep name or select below"
+                            className="input-field flex-1 py-1.5 text-xs"
+                          />
                         </div>
-                      ) : allDetectedReps.length === 1 && vehicle.repName !== allDetectedReps[0].rep.fullName ? (
-                        <div className="flex items-center justify-between gap-2 rounded-lg border border-crimson-500/20 bg-crimson-500/5 px-2.5 py-1 text-xs">
-                          <span className="text-[11px] text-crimson-300">
-                            Rep on board: <strong className="text-ink">{allDetectedReps[0].rep.fullName}</strong> ({allDetectedReps[0].rep.structure})
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => setRepName(vehicle.id, allDetectedReps[0].rep.fullName)}
-                            className="btn-crimson py-0.5 px-2 text-[10px] whitespace-nowrap"
-                          >
-                            Set
-                          </button>
-                        </div>
-                      ) : null}
-                    </div>
+
+                        {/* Compact inline rep picker when reps are detected */}
+                        {allDetectedReps.length > 1 ? (
+                          <div className="flex items-center gap-1.5 flex-wrap rounded-lg border border-amber-500/20 bg-amber-500/5 px-2.5 py-1.5 text-xs">
+                            <span className="text-[11px] font-semibold text-amber-300 flex items-center gap-1">
+                              <Sparkles className="h-3 w-3 text-amber-400" />
+                              {allDetectedReps.length} Reps:
+                            </span>
+                            {allDetectedReps.map(({ rep, rider }) => {
+                              const isSelected = isPassengerRepOfVehicle(rider, vehicle.repName);
+                              return (
+                                <button
+                                  key={rep.fullName}
+                                  type="button"
+                                  onClick={() => setRepName(vehicle.id, isSelected ? '' : rep.fullName)}
+                                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
+                                    isSelected
+                                      ? 'bg-crimson-600 text-white font-bold shadow-sm'
+                                      : 'bg-card border border-line text-ink hover:border-amber-400/50'
+                                  }`}
+                                  title={isSelected ? 'Active rep (click to unassign)' : `Assign ${rep.fullName} (${rep.structure})`}
+                                >
+                                  <span>{isSelected ? '★' : '☆'}</span>
+                                  <span>{rep.fullName}</span>
+                                  <span className="font-mono text-[10px] opacity-75">({rep.structure})</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ) : allDetectedReps.length === 1 && vehicle.repName !== allDetectedReps[0].rep.fullName ? (
+                          <div className="flex items-center justify-between gap-2 rounded-lg border border-crimson-500/20 bg-crimson-500/5 px-2.5 py-1 text-xs">
+                            <span className="text-[11px] text-crimson-300">
+                              Rep on board: <strong className="text-ink">{allDetectedReps[0].rep.fullName}</strong> ({allDetectedReps[0].rep.structure})
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setRepName(vehicle.id, allDetectedReps[0].rep.fullName)}
+                              className="btn-crimson py-0.5 px-2 text-[10px] whitespace-nowrap"
+                            >
+                              Set
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
 
                     {/* Redirect / general note */}
                     <div className="mb-3 flex items-center gap-2">
