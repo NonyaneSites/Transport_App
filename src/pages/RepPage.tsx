@@ -469,6 +469,8 @@ export function RepPage() {
       fromVehicleId: string;
       externalSponseeId: string;
       canRemove: boolean;
+      note?: string;
+      fullNoteText: string;
     }>();
     if (!manifest) return map;
 
@@ -476,13 +478,21 @@ export function RepPage() {
       const extList = (v.draftState?.externalSponsees || []) as ExternalSponsee[];
       for (const ext of extList) {
         const canRemove = v.id === selectedVehicleId;
+        const payer = ext.payerName || 'Another Rider';
+        const fromVeh = ext.fromVehicleName || v.name;
+        const fullNoteText = ext.note
+          ? `Paid by ${payer} in ${fromVeh} (${ext.note})`
+          : `Paid by ${payer} in ${fromVeh}`;
+
         const info = {
-          payerName: ext.payerName || 'Another Rider',
+          payerName: payer,
           payerId: ext.payerId,
-          fromVehicleName: ext.fromVehicleName || v.name,
+          fromVehicleName: fromVeh,
           fromVehicleId: ext.fromVehicleId || v.id,
           externalSponseeId: ext.id,
           canRemove,
+          note: ext.note,
+          fullNoteText,
         };
 
         if (ext.sponseeId) {
@@ -901,7 +911,7 @@ export function RepPage() {
         unpaidIds: fresher.unpaidIds !== undefined ? fresher.unpaidIds.map(String) : (older.unpaidIds || []).map(String),
         absentPaidIds: fresher.absentPaidIds !== undefined ? fresher.absentPaidIds.map(String) : (older.absentPaidIds || []).map(String),
         notes: { ...(cloudDraft.notes || {}), ...(localDraft.notes || {}) },
-        repName: localDraft.repName || cloudDraft.repName || vehicle.repName || '',
+        repName: localDraft.repName || cloudDraft.repName || vehicle.repName || (vehicle.type === 'Bus' ? vehicle.submittedBy || '' : ''),
         licensePlate: localDraft.licensePlate || cloudDraft.licensePlate || vehicle.licensePlate || '',
         generalNotes: localDraft.generalNotes || cloudDraft.generalNotes || vehicle.generalNotes || '',
         coReps: Array.from(new Set([...(cloudDraft.coReps || []), ...(localDraft.coReps || [])])),
@@ -961,7 +971,7 @@ export function RepPage() {
       setExternalSponsees([]);
       setCollectedCancellationIds(new Set());
       setManualCancellations([]);
-      setRepName(vehicle.repName || '');
+      setRepName(vehicle.repName || (vehicle.type === 'Bus' ? vehicle.submittedBy || '' : ''));
       setLicensePlate(vehicle.licensePlate || '');
       lastAppliedDraftAtRef.current = null;
     }
@@ -1275,7 +1285,10 @@ export function RepPage() {
     // Auto-sponsor the person in the target vehicle!
     const targetVehId = resolvedTargetVehId;
     const sponseeId = resolvedSponseeId;
-    const sponsorLabel = data.payerName ? `Sponsored by ${data.payerName}` : 'Sponsored';
+    const sponsorLabel = data.note
+      ? `Paid by ${data.payerName || 'Another Passenger'} in ${selectedVehicle.name} (${data.note})`
+      : `Paid by ${data.payerName || 'Another Passenger'} in ${selectedVehicle.name}`;
+    const payerNote = `Paying for ${data.sponseeName} in ${resolvedTaxiName}${data.note ? ` (${data.note})` : ''}`;
 
     // If target vehicle is in another service on this date, update that service's manifest and vehicle draft
     const isDifferentService = Boolean(data.targetService && data.targetService !== service);
@@ -1346,6 +1359,15 @@ export function RepPage() {
       setSponsoredIds((prev) => new Set(prev).add(String(sponseeId)));
       setNotes((prev) => ({ ...prev, [String(sponseeId)]: sponsorLabel }));
     }
+    if (data.payerId) {
+      setNotes((prev) => {
+        const prevPayer = prev[String(data.payerId)];
+        return {
+          ...prev,
+          [String(data.payerId)]: prevPayer ? `${prevPayer}; ${payerNote}` : payerNote,
+        };
+      });
+    }
 
     const updatedVehicles = manifest.vehicles.map((v) => {
       if (v.id === selectedVehicle.id) {
@@ -1353,9 +1375,14 @@ export function RepPage() {
         const nextSpon = isSelfTarget && sponseeId && !curSpon.includes(String(sponseeId))
           ? [...curSpon, String(sponseeId)]
           : curSpon;
-        const nextNotes = isSelfTarget && sponseeId
-          ? { ...(v.draftState?.notes || {}), [String(sponseeId)]: sponsorLabel }
-          : (v.draftState?.notes || {});
+        const nextNotes = { ...(v.draftState?.notes || {}) };
+        if (isSelfTarget && sponseeId) {
+          nextNotes[String(sponseeId)] = sponsorLabel;
+        }
+        if (data.payerId) {
+          const prevPayer = nextNotes[String(data.payerId)];
+          nextNotes[String(data.payerId)] = prevPayer ? `${prevPayer}; ${payerNote}` : payerNote;
+        }
 
         return {
           ...v,
@@ -2621,7 +2648,7 @@ export function RepPage() {
         : '';
       const cashNote = `Cash collected: R${totalCash} (base R${baseCash}${presentUnpaidCount > 0 ? ` [${presentUnpaidCount} unpaid deducted -R${unpaidDeduction}]` : ''}${absentPaidCash > 0 ? ` + absent paid R${absentPaidCash}` : ''}${externalCash > 0 ? ` + external R${externalCash}` : ''}${pastCancellationCash > 0 ? ` + past cancellations R${pastCancellationCash}` : ''}). `;
       const sponseeNote = externalSponsees.length > 0
-        ? `External sponsees: ${externalSponsees.map((s) => `${s.sponseeName || 'Unnamed'} in ${s.taxiName || 'another vehicle'} (R${s.amount})`).join('; ')}. `
+        ? `Cross-taxi sponsorships: ${externalSponsees.map((s) => `${s.payerName || 'Passenger'} paid for ${s.sponseeName || 'Unnamed'} in ${s.taxiName || 'another vehicle'} (R${s.amount}${s.note ? ` - note: ${s.note}` : ''})`).join('; ')}. `
         : '';
       const settledNames = pastCancellations
         .filter((e) => collectedCancellationIds.has(e.id))
@@ -2706,7 +2733,11 @@ export function RepPage() {
         fullName: s.sponseeName,
         structure: '',
         stop: '',
-        sponsorNote: cleanSponsorshipNote(s.note || `Sponsored by ${s.payerName || 'Rider'}`),
+        sponsorNote: cleanSponsorshipNote(
+          s.note
+            ? `Paid by ${s.payerName || 'Rider'} in ${selectedVehicle.name} (${s.note})`
+            : `Paid by ${s.payerName || 'Rider'} in ${selectedVehicle.name}`
+        ),
       }));
 
       const sponsoredRiders = [...localSponsoredRiders, ...externalSponsoredRiders];
@@ -4164,6 +4195,7 @@ export function RepPage() {
                   notes={notes}
                   vehicleName={selectedVehicle.name}
                   repName={repName}
+                  vehicleType={selectedVehicle.type}
                   isSubmitted={isSubmitted}
                 />
               </>
@@ -4508,7 +4540,7 @@ function CashCalculatorCard({
   thisVehicleRiders?: Passenger[];
   otherVehiclesWithRiders?: { vehicle: Vehicle; riders: Passenger[] }[];
   selectedVehicleName?: string;
-  externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean }>;
+  externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean; note?: string; fullNoteText: string }>;
   pastCancellations: LedgerEntry[];
   loadingPastCancellations: boolean;
   collectedCancellationIds: Set<string>;
@@ -5320,7 +5352,7 @@ function StopGroupedChecklist({
   onToggleCancellation?: (id: string) => void;
   onRemoveRider?: (id: string) => void;
   canRemoveRider?: (passenger: Passenger) => boolean;
-  externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean }>;
+  externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean; note?: string; fullNoteText: string }>;
   onOpenChangeStop?: (p: Passenger) => void;
   onOpenTransfer?: (p: Passenger) => void;
   isRehearsal?: boolean;
@@ -5446,6 +5478,7 @@ function StopGroupedChecklist({
                 {stopRiders.map((p) => {
                   const origStop = hubDisplayName(vehicleType, p.stop);
                   const isRedirected = origStop !== stop;
+                  const lock = externalSponsorLocks?.get(String(p.id)) || externalSponsorLocks?.get(`name:${p.fullName.trim().toLowerCase()}`);
                   return (
                     <PassengerRow
                       key={p.id}
@@ -5463,11 +5496,10 @@ function StopGroupedChecklist({
                         sponsoredIds.has(p.id) ||
                         sponsoredIds.has(String(p.id)) ||
                         Boolean(p.sponsored) ||
-                        Boolean(externalSponsorLocks?.has(String(p.id))) ||
-                        Boolean(externalSponsorLocks?.has(`name:${p.fullName.trim().toLowerCase()}`))
+                        Boolean(lock)
                       }
                       isUnpaid={unpaidIds.has(p.id) || unpaidIds.has(String(p.id))}
-                      noteText={notes[p.id] ?? notes[String(p.id)] ?? p.sponsorNote ?? p.unpaidNote ?? ''}
+                      noteText={notes[p.id] ?? notes[String(p.id)] ?? p.sponsorNote ?? lock?.fullNoteText ?? p.unpaidNote ?? ''}
                       redirectedFrom={isRedirected ? origStop : undefined}
                       disabled={disabled}
                       outstandingDebts={riderDebtsMap?.[p.id] || riderDebtsMap?.[String(p.id)]}
@@ -5475,7 +5507,7 @@ function StopGroupedChecklist({
                       onToggleCancellation={onToggleCancellation}
                       onRemoveRider={onRemoveRider}
                       canRemove={canRemoveRider ? canRemoveRider(p) : false}
-                      externalLock={externalSponsorLocks?.get(String(p.id)) || externalSponsorLocks?.get(`name:${p.fullName.trim().toLowerCase()}`)}
+                      externalLock={lock}
                       onOpenChangeStop={onOpenChangeStop}
                       onOpenTransfer={onOpenTransfer}
                       isRehearsal={isRehearsal}
@@ -5516,7 +5548,7 @@ function AlphabeticalChecklist({
   onToggleCancellation?: (id: string) => void;
   onRemoveRider?: (id: string) => void;
   canRemoveRider?: (passenger: Passenger) => boolean;
-  externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean }>;
+  externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean; note?: string; fullNoteText: string }>;
   onOpenChangeStop?: (p: Passenger) => void;
   onOpenTransfer?: (p: Passenger) => void;
   isRehearsal?: boolean;
@@ -5541,6 +5573,7 @@ function AlphabeticalChecklist({
         const origStop = hubDisplayName(vType, p.stop);
         const effStop = getEffectiveStop({ type: vType, stopRedirects }, p.stop);
         const isRedirected = origStop !== effStop;
+        const lock = externalSponsorLocks?.get(String(p.id)) || externalSponsorLocks?.get(`name:${p.fullName.trim().toLowerCase()}`);
         return (
           <PassengerRow
             key={p.id}
@@ -5558,11 +5591,10 @@ function AlphabeticalChecklist({
               sponsoredIds.has(p.id) ||
               sponsoredIds.has(String(p.id)) ||
               Boolean(p.sponsored) ||
-              Boolean(externalSponsorLocks?.has(String(p.id))) ||
-              Boolean(externalSponsorLocks?.has(`name:${p.fullName.trim().toLowerCase()}`))
+              Boolean(lock)
             }
             isUnpaid={unpaidIds.has(p.id) || unpaidIds.has(String(p.id))}
-            noteText={notes[p.id] ?? notes[String(p.id)] ?? p.sponsorNote ?? p.unpaidNote ?? ''}
+            noteText={notes[p.id] ?? notes[String(p.id)] ?? p.sponsorNote ?? lock?.fullNoteText ?? p.unpaidNote ?? ''}
             redirectedFrom={isRedirected ? origStop : undefined}
             disabled={disabled}
             outstandingDebts={riderDebtsMap?.[p.id] || riderDebtsMap?.[String(p.id)]}
@@ -5570,7 +5602,7 @@ function AlphabeticalChecklist({
             onToggleCancellation={onToggleCancellation}
             onRemoveRider={onRemoveRider}
             canRemove={canRemoveRider ? canRemoveRider(p) : false}
-            externalLock={externalSponsorLocks?.get(String(p.id)) || externalSponsorLocks?.get(`name:${p.fullName.trim().toLowerCase()}`)}
+            externalLock={lock}
             onOpenChangeStop={onOpenChangeStop}
             onOpenTransfer={onOpenTransfer}
             isRehearsal={isRehearsal}
@@ -5606,7 +5638,7 @@ const PassengerRow = React.memo(function PassengerRow({
   onToggleCancellation?: (id: string) => void;
   onRemoveRider?: (id: string) => void;
   canRemove?: boolean;
-  externalLock?: { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean };
+  externalLock?: { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean; note?: string; fullNoteText: string };
   onOpenChangeStop?: (p: Passenger) => void;
   onOpenTransfer?: (p: Passenger) => void;
   isRehearsal?: boolean;
@@ -5766,6 +5798,9 @@ const PassengerRow = React.memo(function PassengerRow({
             <span className="truncate">
               Paid in <span className="font-bold text-amber-300">{externalLock.fromVehicleName}</span> by{' '}
               <span className="font-semibold text-ink">{externalLock.payerName}</span>
+              {externalLock.note && (
+                <span className="text-amber-100 font-normal"> · Note: "{externalLock.note}"</span>
+              )}
             </span>
           </div>
           {!externalLock.canRemove ? (

@@ -216,6 +216,14 @@ export function cleanSponsorshipNote(note?: string | null): string {
   if (/^(?:(?:from|in)\s+)?(?:taxi|vehicle|bus)\s*\d+$/i.test(trimmed)) return '';
   if (/^vehicle:\s*.*$/i.test(trimmed)) return '';
 
+  // If this note describes a cross-taxi sponsorship or specific payment note, preserve it in full!
+  const isCrossOrPayerNote = /(?:paid by|paying for|sponsored by|cross-taxi|sponsee)/i.test(trimmed);
+  if (isCrossOrPayerNote) {
+    // Clean only accidental full general notes boilerplate
+    trimmed = trimmed.replace(/(?:co-reps|cash collected|past cancellations):?[^;.]*(?:[;.]|$)/gi, '').trim();
+    return trimmed;
+  }
+
   // Strip vehicle mentions like "(Taxi 1)", "(from Taxi 2)", "(in Vehicle 3)", "(Bus 4)"
   trimmed = trimmed.replace(/\s*\((?:(?:from|in)\s+)?(?:taxi|vehicle|bus)(?:\s*\d+)?(?:\s*-[^)]*)?\)/gi, '').trim();
 

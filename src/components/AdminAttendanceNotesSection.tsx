@@ -102,7 +102,7 @@ export function AdminAttendanceNotesSection({
 
   const getVehicleDisplayRep = (v: { type?: string; repName?: string; submittedBy?: string }): string => {
     if (v.type === 'Bus') {
-      return v.submittedBy ? `Submitted by ${v.submittedBy}` : 'Bus Rep';
+      return v.submittedBy ? `Submitted by ${v.submittedBy}` : 'Bus';
     }
     return v.repName || v.submittedBy || '—';
   };
@@ -412,7 +412,10 @@ export function AdminAttendanceNotesSection({
       sponsoredList.forEach((s, idx) => {
         const noteStr = s.sponsorNote ? ` (Note: ${s.sponsorNote})` : ' (No sponsor note specified)';
         const structStr = s.passenger.structure ? ` [${s.passenger.structure}]` : '';
-        lines.push(`${idx + 1}. ${s.passenger.fullName}${structStr} - ${s.vehicle.name} | Rep: ${s.repName}${noteStr}`);
+        const repInfo = s.vehicle.type === 'Bus'
+          ? (s.vehicle.submittedBy ? `Submitted by: ${s.vehicle.submittedBy}` : 'Bus')
+          : `Rep: ${s.repName}`;
+        lines.push(`${idx + 1}. ${s.passenger.fullName}${structStr} - ${s.vehicle.name} | ${repInfo}${noteStr}`);
       });
     }
 
@@ -436,7 +439,10 @@ export function AdminAttendanceNotesSection({
       const structStr = u.passenger.structure ? ` [${u.passenger.structure}]` : '';
       const stopStr = u.passenger.stop ? ` - ${u.passenger.stop}` : '';
       const noteStr = u.unpaidNote ? ` (Note: ${u.unpaidNote})` : '';
-      lines.push(`${idx + 1}. ${u.passenger.fullName}${structStr}${stopStr} - ${u.vehicle.name} | Rep: ${u.repName}${noteStr}`);
+      const repInfo = u.vehicle.type === 'Bus'
+        ? (u.vehicle.submittedBy ? `Submitted by: ${u.vehicle.submittedBy}` : 'Bus')
+        : `Rep: ${u.repName}`;
+      lines.push(`${idx + 1}. ${u.passenger.fullName}${structStr}${stopStr} - ${u.vehicle.name} | ${repInfo}${noteStr}`);
     });
     return lines.join('\n');
   }
@@ -450,7 +456,10 @@ export function AdminAttendanceNotesSection({
       const structStr = a.passenger.structure ? ` [${a.passenger.structure}]` : '';
       const stopStr = a.passenger.stop ? ` - ${a.passenger.stop}` : '';
       const noteStr = a.note ? ` (Note: ${a.note})` : '';
-      lines.push(`${idx + 1}. ${a.passenger.fullName}${structStr}${stopStr} - ${a.vehicle.name} | Rep: ${a.repName}${noteStr}`);
+      const repInfo = a.vehicle.type === 'Bus'
+        ? (a.vehicle.submittedBy ? `Submitted by: ${a.vehicle.submittedBy}` : 'Bus')
+        : `Rep: ${a.repName}`;
+      lines.push(`${idx + 1}. ${a.passenger.fullName}${structStr}${stopStr} - ${a.vehicle.name} | ${repInfo}${noteStr}`);
     });
     return lines.join('\n');
   }
@@ -462,7 +471,10 @@ export function AdminAttendanceNotesSection({
     if (vehicleGeneralNotesList.length > 0) {
       lines.push('--- Vehicle General Notes ---');
       vehicleGeneralNotesList.forEach((v, idx) => {
-        lines.push(`${idx + 1}. ${v.vehicle.name} (Rep: ${v.repName}):`);
+        const repInfo = v.vehicle.type === 'Bus'
+          ? (v.vehicle.submittedBy ? `Submitted by: ${v.vehicle.submittedBy}` : 'Bus')
+          : `Rep: ${v.repName}`;
+        lines.push(`${idx + 1}. ${v.vehicle.name} (${repInfo}):`);
         lines.push(`   "${v.note}"`);
       });
       lines.push('');
@@ -816,7 +828,11 @@ export function AdminAttendanceNotesSection({
                                       {v.type === 'Bus' ? '🚌' : '🚕'} {v.name}
                                     </span>
                                     <span>·</span>
-                                    <span>Rep: <strong className="text-ink">{repName}</strong></span>
+                                    {v.type === 'Bus' ? (
+                                      v.submittedBy ? <span>Submitted by: <strong className="text-ink">{v.submittedBy}</strong></span> : <span className="text-muted font-medium">Bus</span>
+                                    ) : (
+                                      <span>Rep: <strong className="text-ink">{repName}</strong></span>
+                                    )}
                                   </div>
                                 </div>
 
@@ -963,7 +979,11 @@ export function AdminAttendanceNotesSection({
                                   {v.type === 'Bus' ? '🚌' : '🚕'} {v.name}
                                 </span>
                                 <span>·</span>
-                                <span>Rep: <strong className="text-ink">{repName}</strong></span>
+                                {v.type === 'Bus' ? (
+                                  v.submittedBy ? <span>Submitted by: <strong className="text-ink">{v.submittedBy}</strong></span> : <span className="text-muted font-medium">Bus</span>
+                                ) : (
+                                  <span>Rep: <strong className="text-ink">{repName}</strong></span>
+                                )}
                               </div>
                             </div>
 
@@ -1057,7 +1077,11 @@ export function AdminAttendanceNotesSection({
                                   {v.type === 'Bus' ? '🚌' : '🚕'} {v.name}
                                 </span>
                                 <span>·</span>
-                                <span>Rep: <strong className="text-ink">{repName}</strong></span>
+                                {v.type === 'Bus' ? (
+                                  v.submittedBy ? <span>Submitted by: <strong className="text-ink">{v.submittedBy}</strong></span> : <span className="text-muted font-medium">Bus</span>
+                                ) : (
+                                  <span>Rep: <strong className="text-ink">{repName}</strong></span>
+                                )}
                               </div>
                             </div>
 
@@ -1119,7 +1143,11 @@ export function AdminAttendanceNotesSection({
                                 {v.type === 'Bus' ? '🚌' : '🚕'} {v.name}
                               </span>
                               <span className="text-[11px] text-muted">
-                                Rep: <strong className="text-sky-300">{repName}</strong>
+                                {v.type === 'Bus' ? (
+                                  v.submittedBy ? <>Submitted by: <strong className="text-sky-300">{v.submittedBy}</strong></> : <span className="text-muted">Bus</span>
+                                ) : (
+                                  <>Rep: <strong className="text-sky-300">{repName}</strong></>
+                                )}
                               </span>
                             </div>
 
@@ -1157,7 +1185,7 @@ export function AdminAttendanceNotesSection({
                               <span className="font-mono text-[10px] text-muted">{p.structure || '—'}</span>
                             </div>
                             <div className="text-[11px] text-muted mt-0.5">
-                              {v.name} · Rep: {repName}
+                              {v.name} {v.type === 'Bus' ? (v.submittedBy ? `· Submitted by: ${v.submittedBy}` : '') : `· Rep: ${repName}`}
                             </div>
                             <div className="mt-2 rounded bg-card-2 px-2.5 py-1.5 text-xs text-sky-200 border border-sky-500/20">
                               <span className="font-semibold text-sky-400">Note: </span>
@@ -1254,7 +1282,9 @@ export function AdminAttendanceNotesSection({
                             {v.type === 'Bus' ? '🚌' : '🚕'} {v.name}
                           </td>
                           <td className="px-3 py-2.5 text-muted font-medium whitespace-nowrap">
-                            {repName}
+                            {v.type === 'Bus' ? (
+                              v.submittedBy ? <span className="text-ink">Submitted: {v.submittedBy}</span> : <span className="text-muted italic">Bus</span>
+                            ) : repName}
                           </td>
                           <td className="px-3 py-2.5 text-center whitespace-nowrap">
                             {v.submitted ? (

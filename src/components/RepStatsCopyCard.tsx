@@ -15,6 +15,7 @@ interface RepStatsCopyCardProps {
   notes?: Record<string, string>;
   vehicleName: string;
   repName: string;
+  vehicleType?: 'Bus' | 'Taxi';
   isSubmitted?: boolean;
 }
 
@@ -69,6 +70,7 @@ export function RepStatsCopyCard({
   notes = {},
   vehicleName,
   repName,
+  vehicleType,
   isSubmitted = false,
 }: RepStatsCopyCardProps) {
   const [copiedSection, setCopiedSection] = useState<string | null>(null);
@@ -130,7 +132,9 @@ export function RepStatsCopyCard({
       const base = formatPassengerStat(p);
       if (isSponsored) {
         const sNote = (notes[p.id] || p.sponsorNote || '').trim();
-        return sNote ? `${base} (paid by ${sNote})` : base;
+        if (!sNote) return base;
+        const formattedNote = /^paid\s+by\b/i.test(sNote) ? sNote : `paid by ${sNote}`;
+        return `${base} (${formattedNote})`;
       }
       return base;
     });
@@ -148,7 +152,9 @@ export function RepStatsCopyCard({
   const allStatsTemplate = useMemo(() => {
     const lines: string[] = [];
     lines.push(`*${vehicleName.toUpperCase()} — TRANSPORT STATS*`);
-    if (repName.trim()) lines.push(`Rep: ${repName.trim()}`);
+    if (repName.trim()) {
+      lines.push(vehicleType === 'Bus' ? `Submitted by: ${repName.trim()}` : `Rep: ${repName.trim()}`);
+    }
     lines.push('');
 
     lines.push('*List of present members and visitors:*');
@@ -177,7 +183,7 @@ export function RepStatsCopyCard({
     }
 
     return lines.join('\n');
-  }, [vehicleName, repName, presentText, ftvText, sponsoredText, unpaidText, absenteeText, absentPaidText, absentPaidPassengers.length]);
+  }, [vehicleName, repName, vehicleType, presentText, ftvText, sponsoredText, unpaidText, absenteeText, absentPaidText, absentPaidPassengers.length]);
 
   function toggleManualFtv(passengerId: string) {
     setManualFtvIds((prev) => {
