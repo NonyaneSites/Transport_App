@@ -1057,12 +1057,14 @@ export function RepPage() {
 
   const sponsoredRidersMissingInfo = useMemo(() => {
     return riders.filter((r) => {
-      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id));
+      const sId = String(r.id);
+      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(sId);
       if (!isSpon) return false;
-      const note = (notes[r.id] ?? notes[String(r.id)] ?? r.sponsorNote ?? '').trim();
+      const lock = externalSponsorLocks.get(sId) || externalSponsorLocks.get(`name:${r.fullName.trim().toLowerCase()}`);
+      const note = (notes[r.id] ?? notes[sId] ?? lock?.fullNoteText ?? r.sponsorNote ?? '').trim();
       return note.length === 0;
     });
-  }, [riders, sponsoredIds, notes]);
+  }, [riders, sponsoredIds, notes, externalSponsorLocks]);
 
   const sponsoredMissingNotes = sponsoredRidersMissingInfo.length > 0;
 
@@ -1076,20 +1078,24 @@ export function RepPage() {
   // Cash calculations: accurately reflect sponsored AND unpaid passengers (people who didn't pay fare)
   const presentSponsoredCount = useMemo(() => {
     return riders.filter((r) => {
-      const isPres = presentIds.has(r.id) || presentIds.has(String(r.id));
-      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id));
+      const sId = String(r.id);
+      const isPres = presentIds.has(r.id) || presentIds.has(sId);
+      const lock = externalSponsorLocks.get(sId) || externalSponsorLocks.get(`name:${r.fullName.trim().toLowerCase()}`);
+      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(sId) || Boolean(r.sponsored) || Boolean(lock);
       return isPres && isSpon;
     }).length;
-  }, [riders, presentIds, sponsoredIds]);
+  }, [riders, presentIds, sponsoredIds, externalSponsorLocks]);
 
   const presentUnpaidCount = useMemo(() => {
     return riders.filter((r) => {
-      const isPres = presentIds.has(r.id) || presentIds.has(String(r.id));
-      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id));
-      const isUnp = unpaidIds.has(r.id) || unpaidIds.has(String(r.id));
+      const sId = String(r.id);
+      const isPres = presentIds.has(r.id) || presentIds.has(sId);
+      const lock = externalSponsorLocks.get(sId) || externalSponsorLocks.get(`name:${r.fullName.trim().toLowerCase()}`);
+      const isSpon = sponsoredIds.has(r.id) || sponsoredIds.has(sId) || Boolean(r.sponsored) || Boolean(lock);
+      const isUnp = unpaidIds.has(r.id) || unpaidIds.has(sId);
       return isPres && !isSpon && isUnp;
     }).length;
-  }, [riders, presentIds, sponsoredIds, unpaidIds]);
+  }, [riders, presentIds, sponsoredIds, unpaidIds, externalSponsorLocks]);
 
   const grossPresentCash = useMemo(() => {
     if (!isRehearsal) return presentCount * FARE;
@@ -2660,18 +2666,49 @@ export function RepPage() {
       const settledNote = allSettledInfo.length > 0
         ? `Past cancellations collected in cash: ${allSettledInfo.join(', ')}. `
         : '';
-      const sponsoredRidersList = riders.filter((r) => sponsoredIds.has(r.id));
+      const getRiderLock = (r: Passenger) =>
+        externalSponsorLocks.get(String(r.id)) ||
+        externalSponsorLocks.get(`name:${r.fullName.trim().toLowerCase()}`);
+
+      const isRiderSponsored = (r: Passenger) =>
+        sponsoredIds.has(r.id) ||
+        sponsoredIds.has(String(r.id)) ||
+        Boolean(r.sponsored) ||
+        Boolean(getRiderLock(r));
+
+      const getRiderSponsorNote = (r: Passenger) => {
+        const lock = getRiderLock(r);
+        return (notes[r.id] ?? notes[String(r.id)] ?? lock?.fullNoteText ?? r.sponsorNote ?? '').trim();
+      };
+
+      const sponsoredRidersList = riders.filter(isRiderSponsored);
       const sponsorshipNote = sponsoredRidersList.length > 0
-        ? `Sponsorships: ${sponsoredRidersList.map((r) => `${r.fullName}${r.structure ? ` (${r.structure})` : ''} - paid by: ${(notes[r.id] ?? r.sponsorNote ?? '').trim() || 'unspecified'}`).join('; ')}. `
+        ? `Sponsorships: ${sponsoredRidersList.map((r) => `${r.fullName}${r.structure ? ` (${r.structure})` : ''} - paid by: ${getRiderSponsorNote(r) || 'unspecified'}`).join('; ')}. `
         : '';
+
+      const allSponsoredIdsSet = new Set<string>([
+        ...Array.from(sponsoredIds).map(String),
+        ...riders.filter(isRiderSponsored).map((r) => String(r.id)),
+      ]);
+
+      const finalizedNotes: Record<string, string> = { ...notes };
+      riders.forEach((r) => {
+        if (isRiderSponsored(r)) {
+          const sNote = getRiderSponsorNote(r);
+          if (sNote) {
+            finalizedNotes[String(r.id)] = sNote;
+            if (r.id) finalizedNotes[r.id] = sNote;
+          }
+        }
+      });
 
       const finalizedDraft: VehicleDraftState = {
         presentIds: Array.from(presentIds),
         absentIds: Array.from(new Set([...absentIds, ...absentees.map((a) => a.id)])),
         absentPaidIds: Array.from(absentPaidIds),
-        sponsoredIds: Array.from(sponsoredIds),
+        sponsoredIds: Array.from(allSponsoredIdsSet),
         unpaidIds: Array.from(unpaidIds),
-        notes,
+        notes: finalizedNotes,
         repName: repName.trim(),
         coReps: coReps.map((c) => c.trim()).filter(Boolean),
         licensePlate: licensePlate.trim(),
@@ -2688,11 +2725,12 @@ export function RepPage() {
 
       const updatedSignups = manifest.signups.map((p) => {
         const sId = String(p.id);
+        const lock = externalSponsorLocks.get(sId) || externalSponsorLocks.get(`name:${p.fullName.trim().toLowerCase()}`);
         const isPres = presentIds.has(p.id) || presentIds.has(sId);
         const isAbs = absentIds.has(p.id) || absentIds.has(sId) || (thisVehicleRiderIdSet.has(sId) && !isPres);
-        const isSpon = sponsoredIds.has(p.id) || sponsoredIds.has(sId);
+        const isSpon = allSponsoredIdsSet.has(p.id) || allSponsoredIdsSet.has(sId) || Boolean(p.sponsored) || Boolean(lock);
         const isUnpd = unpaidIds.has(p.id) || unpaidIds.has(sId);
-        const pNote = (notes[p.id] ?? notes[sId] ?? p.sponsorNote ?? '').trim();
+        const pNote = (finalizedNotes[p.id] ?? finalizedNotes[sId] ?? lock?.fullNoteText ?? p.sponsorNote ?? '').trim();
 
         if (isPres) {
           return {
@@ -2719,13 +2757,13 @@ export function RepPage() {
       const fullGeneralNotes = `${coRepNote}${cashNote}${absentPaidNote}${sponseeNote}${settledNote}${sponsorshipNote}${generalNotes.trim()}`.trim();
 
       const localSponsoredRiders = riders
-        .filter((r) => sponsoredIds.has(r.id) || sponsoredIds.has(String(r.id)))
+        .filter(isRiderSponsored)
         .map((r) => ({
           id: String(r.id),
           fullName: r.fullName,
           structure: r.structure || '',
           stop: r.stop || '',
-          sponsorNote: cleanSponsorshipNote(notes[r.id] ?? notes[String(r.id)] ?? r.sponsorNote ?? ''),
+          sponsorNote: cleanSponsorshipNote(getRiderSponsorNote(r)),
         }));
 
       const externalSponsoredRiders = externalSponsees.map((s) => ({

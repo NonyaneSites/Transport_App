@@ -187,6 +187,8 @@ export function AdminAttendanceNotesSection({
       sourceRepName: string;
       targetTaxiName?: string;
       amount: number;
+      payerName?: string;
+      note?: string;
     }[] = [];
 
     // Deduplicate against names already present in sponsoredList to prevent double appearance
@@ -212,6 +214,8 @@ export function AdminAttendanceNotesSection({
             sourceRepName: repName,
             targetTaxiName: item.taxiName || undefined,
             amount: item.amount || 20,
+            payerName: item.payerName || undefined,
+            note: item.note || undefined,
           });
         }
       }
@@ -424,7 +428,9 @@ export function AdminAttendanceNotesSection({
       lines.push('--- Cross-Vehicle Sponsees (Paid in Cash) ---');
       externalSponseesList.forEach((ext, idx) => {
         const target = ext.targetTaxiName ? ` in ${ext.targetTaxiName}` : '';
-        lines.push(`${idx + 1}. ${ext.sponseeName}${target} - R${ext.amount} paid in ${ext.sourceTaxiName} (Rep: ${ext.sourceRepName})`);
+        const payerStr = ext.payerName ? ` by ${ext.payerName}` : '';
+        const noteStr = ext.note ? ` (Note: ${ext.note})` : '';
+        lines.push(`${idx + 1}. ${ext.sponseeName}${target} - R${ext.amount} paid${payerStr} in ${ext.sourceTaxiName} (Rep: ${ext.sourceRepName})${noteStr}`);
       });
     }
     return lines.join('\n');
@@ -905,9 +911,17 @@ export function AdminAttendanceNotesSection({
                                 R{ext.amount} Paid
                               </span>
                             </div>
-                            <div className="mt-1 text-[11px] text-muted">
-                              {ext.targetTaxiName ? `Riding in: ${ext.targetTaxiName} · ` : ''}
-                              Paid in: <strong className="text-sky-300">{ext.sourceTaxiName}</strong> (Rep: {ext.sourceRepName})
+                            <div className="mt-1 text-[11px] text-muted space-y-0.5">
+                              <div>
+                                {ext.targetTaxiName ? `Riding in: ${ext.targetTaxiName} · ` : ''}
+                                {ext.payerName ? <span>Paid by: <strong className="text-ink">{ext.payerName}</strong> in </span> : 'Paid in: '}
+                                <strong className="text-sky-300">{ext.sourceTaxiName}</strong> (Rep: {ext.sourceRepName})
+                              </div>
+                              {ext.note && (
+                                <div className="text-[11px] text-amber-200">
+                                  Note: {ext.note}
+                                </div>
+                              )}
                             </div>
                           </div>
                         ))}
