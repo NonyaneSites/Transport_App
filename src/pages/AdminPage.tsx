@@ -23,8 +23,8 @@ const TransferSponsorshipModal = lazy(() =>
 const VehicleAllocation = lazy(() =>
   import('@/components/VehicleAllocation').then((m) => ({ default: m.VehicleAllocation }))
 );
-const ThursdayRehearsalSetup = lazy(() =>
-  import('@/components/ThursdayRehearsalSetup').then((m) => ({ default: m.ThursdayRehearsalSetup }))
+const ThursdayRehearsalUpload = lazy(() =>
+  import('@/components/ThursdayRehearsalUpload').then((m) => ({ default: m.ThursdayRehearsalUpload }))
 );
 const AdminAttendanceNotesSection = lazy(() =>
   import('@/components/AdminAttendanceNotesSection').then((m) => ({ default: m.AdminAttendanceNotesSection }))
@@ -170,6 +170,7 @@ export function AdminPage() {
             category: incoming.category || existing.category,
             ministry: incoming.ministry || existing.ministry,
             memberType: incoming.memberType || existing.memberType,
+            legs: incoming.legs || existing.legs,
           };
         }
       } else {
@@ -238,14 +239,22 @@ export function AdminPage() {
           </div>
         </div>
 
-        <div className={`grid gap-5 ${service === 'Rehearsal' ? 'grid-cols-1' : 'lg:grid-cols-2'}`}>
+        <div className="grid gap-5 lg:grid-cols-2">
           <ServiceDateSelector
             date={date}
             service={service}
             onDateChange={setDate}
             onServiceChange={setService}
           />
-          {service !== 'Rehearsal' && (
+          {service === 'Rehearsal' ? (
+            <Suspense fallback={<div className="card h-48 animate-pulse bg-card-2" />}>
+              <ThursdayRehearsalUpload
+                date={date}
+                onImport={handleImport}
+                existingCount={manifest?.signups?.length ?? 0}
+              />
+            </Suspense>
+          ) : (
             <ExcelUpload
               date={date}
               service={service}
@@ -301,24 +310,6 @@ export function AdminPage() {
           <div className="mt-8 flex flex-col items-center gap-3 py-16">
             <Loader2 className="h-8 w-8 animate-spin text-crimson-400" />
             <p className="text-sm text-muted">Loading manifest from cloud...</p>
-          </div>
-        ) : service === 'Rehearsal' ? (
-          <div className="mt-5">
-            <Suspense
-              fallback={
-                <div className="flex flex-col items-center justify-center py-16 text-muted">
-                  <Loader2 className="h-7 w-7 animate-spin text-crimson-400 mb-2" />
-                  <p className="text-xs">Loading Rehearsal Setup...</p>
-                </div>
-              }
-            >
-              <ThursdayRehearsalSetup
-                date={date}
-                onDateChange={setDate}
-                manifest={manifest}
-                onSaveManifest={save}
-              />
-            </Suspense>
           </div>
         ) : (
           <div className="mt-5 space-y-5">
