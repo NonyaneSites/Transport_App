@@ -4,7 +4,7 @@ import {
   Smartphone, ChevronDown, ChevronRight, MapPin, Send,
   HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus, Search, Banknote,
   Sparkles, ArrowDownAZ, RotateCcw, Check, AlertCircle, Calendar, Pencil, UserMinus,
-  Lock, ArrowRightLeft, Phone, ArrowUpRight,
+  Lock, ArrowRightLeft, ArrowUpRight,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { Header } from '@/components/Header';
@@ -5681,17 +5681,7 @@ const PassengerRow = React.memo(function PassengerRow({
                 )}
               </span>
             )}
-            {passenger.phone && passenger.phone.trim() && (
-              <a
-                href={`tel:${passenger.phone.replace(/[^0-9+]/g, '')}`}
-                className="inline-flex items-center gap-1 rounded-md bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 hover:text-emerald-200 border border-emerald-500/40 px-2 py-0.5 text-[11px] font-semibold transition-all active:scale-95 shrink-0"
-                title={`Call ${passenger.fullName}: ${passenger.phone}`}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <Phone className="h-3 w-3 text-emerald-400" />
-                <span>Call ({passenger.phone})</span>
-              </a>
-            )}
+
             {(() => {
               const statusBadge = getPassengerStatusBadge(passenger);
               return statusBadge ? (
