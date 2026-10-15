@@ -10,12 +10,13 @@ export const VEHICLES_TABLE = 'transport_vehicles';
 export const SPONSORSHIPS_TABLE = 'sponsorship_audits';
 export const PROFILES_TABLE = 'profiles';
 
-const isConfigured = Boolean(
+export const isConfigured = Boolean(
   supabaseUrl &&
   supabaseAnonKey &&
   supabaseUrl.startsWith('http') &&
   !supabaseUrl.includes('placeholder')
 );
+export const isSupabaseConfigured = isConfigured;
 
 type TableRow = Record<string, unknown>;
 
@@ -425,14 +426,72 @@ export function createMockClient() {
     },
   };
 }
+function createUnconfiguredProdClient() {
+  const prodError = {
+    message: 'Database not connected – changes are NOT being saved. Contact the administrator.',
+  };
+  console.error('[Supabase] CRITICAL: Supabase environment variables are missing in production. Changes will NOT be saved to the database.');
+
+  const queryBuilder = (tableName: string) => {
+    const builder: Record<string, unknown> = {
+      tableName,
+      select: () => builder,
+      eq: () => builder,
+      in: () => builder,
+      order: () => builder,
+      limit: () => builder,
+      range: () => builder,
+      ilike: () => builder,
+      insert: () => builder,
+      upsert: () => builder,
+      update: () => builder,
+      delete: () => builder,
+      maybeSingle: async () => ({ data: null, error: prodError }),
+      single: async () => ({ data: null, error: prodError }),
+      then: (onfulfilled?: ((val: unknown) => unknown) | null, onrejected?: ((reason: unknown) => unknown) | null) => {
+        return Promise.resolve({ data: null, error: prodError }).then(onfulfilled, onrejected);
+      },
+    };
+    return builder;
+  };
+
+  return {
+    auth: {
+      getSession: async () => ({ data: { session: null }, error: prodError }),
+      onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
+      signInWithPassword: async () => ({ data: { user: null }, error: prodError }),
+      signUp: async () => ({ data: { user: null }, error: prodError }),
+      signOut: async () => ({ error: null }),
+    },
+    from(tableName: string) {
+      return queryBuilder(tableName);
+    },
+    channel: (channelName: string) => ({
+      name: channelName,
+      on: function() { return this; },
+      subscribe: (cb?: (status: string) => void) => {
+        if (cb) setTimeout(() => cb('CHANNEL_ERROR'), 10);
+        return { unsubscribe: () => {} };
+      },
+      unsubscribe: () => {},
+      send: async () => 'error',
+      httpSend: async () => ({ success: false }),
+      track: async () => 'error',
+      untrack: async () => 'error',
+    }),
+    removeChannel: () => {},
+  };
+}
+
 function createResilientSupabaseClient() {
   if (!isConfigured) {
+    if (import.meta.env.PROD) {
+      return createUnconfiguredProdClient() as unknown as ReturnType<typeof createClient>;
+    }
     return createMockClient() as unknown as ReturnType<typeof createClient>;
   }
 
   const realClient = createClient(supabaseUrl!, supabaseAnonKey!, {
-    // Keep auth enabled, just turn off autoRefreshToken if you want, 
-    // or leave it as default.
     auth: { persistSession: true }, 
     realtime: { params: { eventsPerSecond: 10 } },
   });
@@ -441,13 +500,16 @@ function createResilientSupabaseClient() {
 
   return {
     ...realClient,
-    auth: realClient.auth, // <--- EXPLICITLY BIND AUTH HERE
+    auth: realClient.auth,
     from(tableName: string) {
       const realBuilder = realClient.from(tableName);
+      if (import.meta.env.PROD) {
+        return realBuilder;
+      }
       const fallbackBuilder = mockClient.from(tableName);
 
       // Wrap with a proxy that executes on real Supabase, but seamlessly
-      // falls back to mockStorage on network fetch failures.
+      // falls back to mockStorage on network fetch failures (DEV only).
       const proxy = new Proxy(realBuilder, {
         get(target, prop, receiver) {
           const original = Reflect.get(target, prop, receiver);

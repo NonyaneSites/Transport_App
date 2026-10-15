@@ -1,5 +1,6 @@
 import { Link, useLocation } from 'react-router-dom';
 import { BookOpen, ShieldCheck, Smartphone } from 'lucide-react';
+import { useConnection } from '@/lib/useConnection';
 
 interface HeaderProps {
   current?: 'admin' | 'ledger' | 'rep';
@@ -7,6 +8,7 @@ interface HeaderProps {
 
 export function Header({ current }: HeaderProps = {}) {
   const location = useLocation();
+  const connectionState = useConnection();
 
   const isLedger = current === 'ledger' || location.pathname === '/ledger';
   const isRep = current === 'rep' || location.pathname === '/rep';
@@ -14,9 +16,11 @@ export function Header({ current }: HeaderProps = {}) {
   const brandContent = (
     <div className="flex items-center gap-2.5 select-none">
       <img 
-        src="/crc-logo.png" 
+        src="/crc-logo-96.webp" 
         alt="CRC Logo" 
-        className="h-8 w-auto object-contain" 
+        className="h-8 w-8 object-contain" 
+        width="32"
+        height="32"
       />
       <div>
         <div className="flex items-center gap-1.5">
@@ -43,8 +47,28 @@ export function Header({ current }: HeaderProps = {}) {
           </Link>
         )}
 
-        {/* Portal Badges & Restricted Cross-Page Navigation */}
+        {/* Portal Badges & Connection Indicator */}
         <div className="flex items-center gap-2">
+          {/* Supabase Reachability Dot */}
+          <div
+            className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-card-2/60 border border-line text-xs select-none"
+            title={
+              connectionState === 'online'
+                ? 'Database Connected (Supabase reachable)'
+                : 'Database Offline / Unreachable'
+            }
+          >
+            <span
+              className={`h-2 w-2 rounded-full transition-colors ${
+                connectionState === 'online'
+                  ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.7)]'
+                  : 'bg-crimson-500 shadow-[0_0_8px_rgba(239,68,68,0.7)] animate-pulse'
+              }`}
+            />
+            <span className="text-[10px] font-medium text-muted hidden sm:inline">
+              {connectionState === 'online' ? 'Connected' : 'Offline'}
+            </span>
+          </div>
           {isRep ? (
             /* Rep Portal: Isolated, strictly NO links to Ledger or Admin */
             <div className="flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold border bg-emerald-500/15 text-emerald-300 border-emerald-500/30">

@@ -4,7 +4,7 @@ import {
   Smartphone, ChevronDown, ChevronRight, MapPin, Send,
   HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus, Search, Banknote,
   Sparkles, ArrowDownAZ, RotateCcw, Check, AlertCircle, Calendar, Pencil, UserMinus,
-  Lock, ArrowRightLeft, Copy,
+  Lock, ArrowRightLeft, Phone, ArrowUpRight,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { Header } from '@/components/Header';
@@ -48,16 +48,14 @@ import { isServerOnline, submitVehicleToServer, reopenVehicleOnServer } from '@/
 import { extractVehicleStats } from '@/lib/statsExport';
 import { syncVehicleStatsToGoogleSheet, sheetDateLabel } from '@/lib/googleSheetsSync';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
-import { RepStatsCopyCard } from '@/components/RepStatsCopyCard';
-import { CancellationSearchModal } from '@/components/CancellationSearchModal';
-import { CrossTaxiSponsorshipModal } from '@/components/CrossTaxiSponsorshipModal';
 import { ChangeStopModal } from '@/components/ChangeStopModal';
-import { RepTransferPassengerModal } from '@/components/RepTransferPassengerModal';
+
+const RepStatsCopyCard = React.lazy(() => import('@/components/RepStatsCopyCard').then((m) => ({ default: m.RepStatsCopyCard })));
+const CancellationSearchModal = React.lazy(() => import('@/components/CancellationSearchModal').then((m) => ({ default: m.CancellationSearchModal })));
+const CrossTaxiSponsorshipModal = React.lazy(() => import('@/components/CrossTaxiSponsorshipModal').then((m) => ({ default: m.CrossTaxiSponsorshipModal })));
+const RepTransferPassengerModal = React.lazy(() => import('@/components/RepTransferPassengerModal').then((m) => ({ default: m.RepTransferPassengerModal })));
 import {
-  formatSingleTaxiRehearsalWhatsApp,
-  formatRehearsalWhatsAppManifest,
   createDeterministicRehearsalPassengerId,
-  allowedLegsUpgrades,
 } from '@/lib/rehearsal';
 import {
   transferPassengerAcrossServices,
@@ -304,18 +302,11 @@ export function RepPage() {
   const initializedKeyRef = useRef<string>('');
   const prevVehicleSubmittedRef = useRef<boolean | undefined>(undefined);
 
-  // Periodic presence heartbeat: keeps co-reps aware of each other
+  // Periodic presence heartbeat: keeps co-reps aware of each other (slow 60s interval, pauses when hidden)
   useEffect(() => {
     if (!selectedVehicleId) return;
-    broadcastLiveAction({
-      type: 'presence_heartbeat',
-      vehicleId: selectedVehicleId,
-      repName: repName.trim() || 'Co-rep',
-      clientId: clientIdRef.current,
-      timestamp: Date.now(),
-    });
 
-    const interval = setInterval(() => {
+    const sendHeartbeat = () => {
       if (typeof document !== 'undefined' && document.hidden) return;
       broadcastLiveAction({
         type: 'presence_heartbeat',
@@ -324,9 +315,28 @@ export function RepPage() {
         clientId: clientIdRef.current,
         timestamp: Date.now(),
       });
-    }, 15000);
+    };
 
-    return () => clearInterval(interval);
+    sendHeartbeat();
+
+    const interval = setInterval(sendHeartbeat, 60000);
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && !document.hidden) {
+        sendHeartbeat();
+      }
+    };
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
+    return () => {
+      clearInterval(interval);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+    };
   }, [selectedVehicleId, repName, broadcastLiveAction]);
 
   const manifestRef = useRef(manifest);
@@ -393,13 +403,10 @@ export function RepPage() {
   const { date: parsedDate, service: parsedServiceLabel } = parseManifestKey(key);
 
   const [walkInLegs, setWalkInLegs] = useState<'both' | 'going' | 'return'>('both');
-  const [transferPromptLegs, setTransferPromptLegs] = useState<'both' | 'going' | 'return'>('both');
   const [changeStopModalOpen, setChangeStopModalOpen] = useState(false);
   const [changeStopPassenger, setChangeStopPassenger] = useState<Passenger | null>(null);
   const [transferModalOpen, setTransferModalOpen] = useState(false);
   const [transferModalPassenger, setTransferModalPassenger] = useState<Passenger | null>(null);
-  const [copiedWhatsAppSingle, setCopiedWhatsAppSingle] = useState(false);
-  const [copiedWhatsAppAll, setCopiedWhatsAppAll] = useState(false);
 
   const selectedVehicle = useMemo(
     () => manifest?.vehicles.find((v) => v.id === selectedVehicleId) ?? null,
@@ -410,6 +417,19 @@ export function RepPage() {
     () => (selectedVehicle ? vehicleRiders(manifest, selectedVehicle) : []),
     [manifest, selectedVehicle]
   );
+
+  const rehearsalTripCounts = useMemo(() => {
+    if (!isRehearsal) return { fullTrip: 0, going: 0, returnTrip: 0 };
+    let fullTrip = 0;
+    let going = 0;
+    let returnTrip = 0;
+    for (const r of riders) {
+      if (r.legs === 'going') going++;
+      else if (r.legs === 'return') returnTrip++;
+      else fullTrip++;
+    }
+    return { fullTrip, going, returnTrip };
+  }, [isRehearsal, riders]);
 
   // All known signups and riders across the manifest for search and transfer detection
   const allKnownPassengers: Passenger[] = useMemo(() => {
@@ -579,7 +599,7 @@ export function RepPage() {
       const vRep = (v.repName ?? '').trim().toLowerCase();
       if (vRep) {
         if (vRep === q) return true;
-        if (repMatch && (vRep === repMatch.fullName.toLowerCase() || repMatch.aliases.some((a) => a.toLowerCase() === vRep))) {
+        if (repMatch && (vRep === repMatch.fullName.toLowerCase() || repMatch.aliases.some((a: string) => a.toLowerCase() === vRep))) {
           return true;
         }
       }
@@ -1677,8 +1697,8 @@ export function RepPage() {
         // storage unavailable
       }
 
-      // Synchronous beacon flush ensures zero loss on refresh or browser exit (only when local Express server is active)
-      if (isServerOnline() && typeof navigator !== 'undefined' && navigator.sendBeacon) {
+      // Synchronous beacon flush ensures zero loss on refresh or browser exit (only when local Express server is active in DEV)
+      if (!import.meta.env.PROD && isServerOnline() && typeof navigator !== 'undefined' && navigator.sendBeacon) {
         try {
           const payload = JSON.stringify({
             vehicleId: selectedVehicleId,
@@ -2132,6 +2152,11 @@ export function RepPage() {
     if (existing && !overrideCrossTransfer) {
       const fromVehicle = findVehicleForPassenger(existing);
       if (fromVehicle && fromVehicle.id !== selectedVehicle.id) {
+        if (isRehearsal) {
+          setBatchActionMsg(`Cannot transfer ${existing.fullName}: transfers between vehicles are not allowed for Thursday rehearsal.`);
+          setTimeout(() => setBatchActionMsg(null), 5000);
+          return;
+        }
         // Automatically transfer: removed from original vehicle and added to this one!
         await assignWalkIn(existing, fromVehicle.id);
         setWalkInFirstName('');
@@ -2360,56 +2385,35 @@ export function RepPage() {
   }
 
   function handleOpenChangeStop(p: Passenger) {
+    if (isRehearsal) return; // Reps cannot change pickup stop on Thursday rehearsal
     setChangeStopPassenger(p);
     setChangeStopModalOpen(true);
   }
 
   function handleOpenTransfer(p: Passenger) {
+    if (isRehearsal) return; // Reps cannot transfer passengers on Thursday rehearsal
     setTransferModalPassenger(p);
     setTransferModalOpen(true);
   }
 
-  async function handleChangeStopConfirm(passengerId: string, newStop: string, newLegs?: 'both' | 'going' | 'return') {
-    if (!manifest) return;
-    const pIdStr = String(passengerId);
-    const existingP = manifest.signups.find((p) => String(p.id) === pIdStr);
-    if (!existingP) return;
-
-    let effectiveLegs = existingP.legs;
-    let upgraded = false;
-    const oldLegs = existingP.legs || 'both';
-
-    if (isRehearsal && newLegs) {
-      const allowed = allowedLegsUpgrades(existingP.legs);
-      if (allowed.includes(newLegs)) {
-        if (newLegs !== existingP.legs && (existingP.legs === 'going' || existingP.legs === 'return') && newLegs === 'both') {
-          upgraded = true;
-          effectiveLegs = newLegs;
-        } else if (newLegs === existingP.legs) {
-          effectiveLegs = newLegs;
-        }
-      } else {
-        // Reject/ignore downgrade even if called directly
-        effectiveLegs = existingP.legs;
-      }
-    } else if (!isRehearsal) {
-      effectiveLegs = newLegs ?? existingP.legs;
-    }
-
-    const upgradeNote = upgraded ? `Upgraded ${oldLegs} -> both by ${repName.trim() || 'rep'}` : '';
+  async function handleUpgradeToFullTrip(passenger: Passenger) {
+    if (!manifest || !isRehearsal) return;
+    if (passenger.legs !== 'going' && passenger.legs !== 'return') return;
+    const pIdStr = String(passenger.id);
+    const oldLegs = passenger.legs;
+    const upgradeNote = `Upgraded ${oldLegs} -> both (Full Trip) by ${repName.trim() || 'rep'}`;
     const updatedNotes = upgradeNote
-      ? existingP.notes
-        ? `${existingP.notes}; ${upgradeNote}`
+      ? passenger.notes
+        ? `${passenger.notes}; ${upgradeNote}`
         : upgradeNote
-      : existingP.notes;
+      : passenger.notes;
 
     const updatedSignups = manifest.signups.map((p) => {
       if (String(p.id) === pIdStr) {
         return {
           ...p,
-          stop: newStop,
-          legs: effectiveLegs,
-          service: isRehearsal ? 'Rehearsal' : p.service,
+          legs: 'both' as const,
+          service: 'Rehearsal',
           notes: updatedNotes,
         };
       }
@@ -2422,7 +2426,33 @@ export function RepPage() {
     };
     manifestRef.current = nextManifest;
     await save(nextManifest);
-    setBatchActionMsg(`✓ Updated stop${upgraded ? ' & upgraded legs to Going & Return' : ''} for ${existingP.fullName}`);
+    setBatchActionMsg(`✓ Upgraded ${passenger.fullName} to Full Trip (Going & Return)`);
+    setTimeout(() => setBatchActionMsg(null), 4000);
+  }
+
+  async function handleChangeStopConfirm(passengerId: string, newStop: string) {
+    if (!manifest || isRehearsal) return;
+    const pIdStr = String(passengerId);
+    const existingP = manifest.signups.find((p) => String(p.id) === pIdStr);
+    if (!existingP) return;
+
+    const updatedSignups = manifest.signups.map((p) => {
+      if (String(p.id) === pIdStr) {
+        return {
+          ...p,
+          stop: newStop,
+        };
+      }
+      return p;
+    });
+
+    const nextManifest: Manifest = {
+      ...manifest,
+      signups: updatedSignups,
+    };
+    manifestRef.current = nextManifest;
+    await save(nextManifest);
+    setBatchActionMsg(`✓ Updated stop for ${existingP.fullName}`);
     setTimeout(() => setBatchActionMsg(null), 4000);
   }
 
@@ -2430,35 +2460,10 @@ export function RepPage() {
     passenger: Passenger,
     targetVehicleId: string,
     markPresent: boolean,
-    transferNote?: string,
-    newLegs?: 'both' | 'going' | 'return'
+    transferNote?: string
   ) {
-    if (!manifest) return;
+    if (!manifest || isRehearsal) return;
     const pIdStr = String(passenger.id);
-    let updatedLegs = passenger.legs;
-    let upgraded = false;
-    const oldLegs = passenger.legs || 'both';
-
-    if (isRehearsal && newLegs) {
-      const allowed = allowedLegsUpgrades(passenger.legs);
-      if (allowed.includes(newLegs)) {
-        if (newLegs !== passenger.legs && (passenger.legs === 'going' || passenger.legs === 'return') && newLegs === 'both') {
-          upgraded = true;
-          updatedLegs = newLegs;
-        } else if (newLegs === passenger.legs) {
-          updatedLegs = newLegs;
-        }
-      } else {
-        // Reject/ignore downgrade even if called directly
-        updatedLegs = passenger.legs;
-      }
-    } else if (!isRehearsal) {
-      updatedLegs = newLegs ?? passenger.legs;
-    }
-
-    const upgradeNote = upgraded ? `Upgraded ${oldLegs} -> both by ${repName.trim() || 'rep'}` : '';
-    const noteParts = [transferNote, upgradeNote].filter(Boolean);
-    const addedNote = noteParts.join('; ');
 
     // 1. Update signups
     const targetAssigned = targetVehicleId === 'unassigned' ? null : targetVehicleId;
@@ -2468,9 +2473,7 @@ export function RepPage() {
           ...p,
           assignedTo: targetAssigned,
           present: targetVehicleId !== 'unassigned' && markPresent,
-          legs: updatedLegs,
-          service: isRehearsal ? 'Rehearsal' : p.service,
-          notes: addedNote ? `${p.notes ? `${p.notes}; ` : ''}${addedNote}` : p.notes,
+          notes: transferNote ? `${p.notes ? `${p.notes}; ` : ''}${transferNote}` : p.notes,
         };
       }
       return p;
@@ -2518,44 +2521,10 @@ export function RepPage() {
     setTimeout(() => setBatchActionMsg(null), 4000);
   }
 
-  function handleCopySingleTaxiWhatsApp() {
-    if (!selectedVehicle || !manifest) return;
-    const text = formatSingleTaxiRehearsalWhatsApp(selectedVehicle, manifest.signups);
-    navigator.clipboard.writeText(text);
-    setCopiedWhatsAppSingle(true);
-    setTimeout(() => setCopiedWhatsAppSingle(false), 3000);
-  }
-
-  function handleCopyAllTaxisWhatsApp() {
-    if (!manifest) return;
-    const text = formatRehearsalWhatsAppManifest(manifest.vehicles, manifest.signups);
-    navigator.clipboard.writeText(text);
-    setCopiedWhatsAppAll(true);
-    setTimeout(() => setCopiedWhatsAppAll(false), 3000);
-  }
-
   async function confirmTransfer() {
-    if (!transferPrompt || transferring || !selectedVehicle) return;
+    if (!transferPrompt || transferring || !selectedVehicle || isRehearsal) return;
     setTransferring(true);
     try {
-      if (isRehearsal) {
-        const curLegs = transferPrompt.passenger.legs;
-        const allowed = allowedLegsUpgrades(curLegs);
-        let finalLegs = curLegs;
-        if (allowed.includes(transferPromptLegs)) {
-          if (transferPromptLegs !== curLegs && (curLegs === 'going' || curLegs === 'return') && transferPromptLegs === 'both') {
-            const upNote = `Upgraded ${curLegs} -> both by ${repName.trim() || 'rep'}`;
-            transferPrompt.passenger.notes = transferPrompt.passenger.notes
-              ? `${transferPrompt.passenger.notes}; ${upNote}`
-              : upNote;
-            finalLegs = 'both';
-          } else {
-            finalLegs = transferPromptLegs;
-          }
-        }
-        transferPrompt.passenger.legs = finalLegs;
-        transferPrompt.passenger.service = 'Rehearsal';
-      }
       if (transferPrompt.isCrossService) {
         const res = await transferPassengerAcrossServices({
           date,
@@ -3298,7 +3267,7 @@ export function RepPage() {
                 </select>
               </div>
 
-              {!selectedVehicleId ? (
+              {!selectedVehicle ? (
                 <div className="space-y-2 border-t border-line/60 pt-3">
                   <p className="text-xs text-muted">
                     Or find your vehicle by typing your name:
@@ -3630,12 +3599,26 @@ export function RepPage() {
 
                             {/* Real-time Transfer Detection Banner */}
                             {detectedTransfer && detectedTransfer.vehicle && !detectedTransfer.isSameVehicle && (
-                              <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-200 animate-fade-in flex items-start gap-1.5">
-                                <ArrowRightLeft className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+                              <div className={`rounded-lg border p-2 text-xs animate-fade-in flex items-start gap-1.5 ${
+                                isRehearsal
+                                  ? 'border-crimson-500/40 bg-crimson-500/10 text-crimson-200'
+                                  : 'border-amber-500/40 bg-amber-500/10 text-amber-200'
+                              }`}>
+                                <ArrowRightLeft className={`h-4 w-4 shrink-0 mt-0.5 ${isRehearsal ? 'text-crimson-400' : 'text-amber-400'}`} />
                                 <div className="leading-snug">
-                                  <span className="font-semibold text-amber-300">Existing Passenger Found in {detectedTransfer.vehicle.name}:</span>{' '}
+                                  <span className={`font-semibold ${isRehearsal ? 'text-crimson-300' : 'text-amber-300'}`}>
+                                    Existing Passenger Found in {detectedTransfer.vehicle.name}:
+                                  </span>{' '}
                                   {detectedTransfer.passenger.fullName} {detectedTransfer.passenger.structure ? `(${detectedTransfer.passenger.structure})` : ''}.{' '}
-                                  Adding will automatically remove them from <strong>{detectedTransfer.vehicle.name}</strong> and reassign to <strong>{selectedVehicle.name}</strong>.
+                                  {isRehearsal ? (
+                                    <span className="font-bold text-crimson-300">
+                                      Transfers between vehicles are not allowed for Thursday rehearsal.
+                                    </span>
+                                  ) : (
+                                    <span>
+                                      Adding will automatically remove them from <strong>{detectedTransfer.vehicle.name}</strong> and reassign to <strong>{selectedVehicle.name}</strong>.
+                                    </span>
+                                  )}
                                 </div>
                               </div>
                             )}
@@ -3661,9 +3644,15 @@ export function RepPage() {
                               <button
                                 type="button"
                                 onClick={() => handleAddWalkIn()}
-                                disabled={(!walkInFirstName.trim() && !walkInSurname.trim()) || isCheckingCrossService}
+                                disabled={
+                                  (!walkInFirstName.trim() && !walkInSurname.trim()) ||
+                                  isCheckingCrossService ||
+                                  Boolean(isRehearsal && detectedTransfer && detectedTransfer.vehicle && !detectedTransfer.isSameVehicle)
+                                }
                                 className={`flex-1 py-2 px-3 text-xs font-bold whitespace-nowrap shadow-sm disabled:opacity-40 flex items-center justify-center gap-1.5 rounded-lg transition-all ${
-                                  detectedTransfer && detectedTransfer.vehicle && !detectedTransfer.isSameVehicle
+                                  isRehearsal && detectedTransfer && detectedTransfer.vehicle && !detectedTransfer.isSameVehicle
+                                    ? 'bg-crimson-800 text-muted cursor-not-allowed'
+                                    : detectedTransfer && detectedTransfer.vehicle && !detectedTransfer.isSameVehicle
                                     ? 'bg-amber-600 hover:bg-amber-500 text-white'
                                     : detectedTransfer && !detectedTransfer.vehicle
                                     ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
@@ -3675,6 +3664,8 @@ export function RepPage() {
                                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                     <span>Checking cross-service…</span>
                                   </>
+                                ) : isRehearsal && detectedTransfer && detectedTransfer.vehicle && !detectedTransfer.isSameVehicle ? (
+                                  <span>Transfer Not Allowed</span>
                                 ) : detectedTransfer && detectedTransfer.vehicle && !detectedTransfer.isSameVehicle ? (
                                   <>
                                     <ArrowRightLeft className="h-3.5 w-3.5" />
@@ -3778,67 +3769,7 @@ export function RepPage() {
                   </div>
                 )}
 
-                {/* Rehearsal WhatsApp Export Card */}
-                {isRehearsal && selectedVehicle && (
-                  <div className="card border-emerald-500/40 bg-card p-3 flex flex-wrap items-center justify-between gap-2.5 shadow-xs">
-                    <div className="flex items-center gap-2">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                        <Smartphone className="h-4 w-4" />
-                      </div>
-                      <div>
-                        <h4 className="text-xs font-bold text-ink flex items-center gap-1.5">
-                          <span>Rehearsal WhatsApp Export</span>
-                          <span className="rounded bg-emerald-500/20 px-1.5 py-0.2 text-[10px] font-mono text-emerald-300 border border-emerald-500/30">
-                            Rehearsal
-                          </span>
-                        </h4>
-                        <p className="text-[11px] text-muted">
-                          Pickup schedule with stop order, times & leg fares (R40/R70)
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={handleCopySingleTaxiWhatsApp}
-                        className="rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-1.5 px-3 text-xs flex items-center gap-1.5 shadow-xs transition-all active:scale-95"
-                        title="Copy this taxi roster for WhatsApp"
-                      >
-                        {copiedWhatsAppSingle ? (
-                          <>
-                            <Check className="h-3.5 w-3.5" />
-                            <span>Copied {selectedVehicle.name}!</span>
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="h-3.5 w-3.5" />
-                            <span>Copy {selectedVehicle.name}</span>
-                          </>
-                        )}
-                      </button>
-                      {manifest && manifest.vehicles && manifest.vehicles.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={handleCopyAllTaxisWhatsApp}
-                          className="rounded-lg border border-line bg-card-2 hover:bg-card-2/80 text-ink font-semibold py-1.5 px-3 text-xs flex items-center gap-1.5 transition-all active:scale-95"
-                          title="Copy full Thursday rehearsal manifest with all taxis"
-                        >
-                          {copiedWhatsAppAll ? (
-                            <>
-                              <Check className="h-3.5 w-3.5 text-emerald-400" />
-                              <span>Copied All {manifest.vehicles.length} Taxis!</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="h-3.5 w-3.5" />
-                              <span>Copy All Taxis</span>
-                            </>
-                          )}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
+
 
                 {/* PASSENGER SEARCH & ATTENDANCE CHECK TOOLBAR */}
                 <div className="card space-y-3">
@@ -3978,6 +3909,23 @@ export function RepPage() {
                       </button>
                     </div>
                   )}
+                  {isRehearsal && (
+                    <div className="flex flex-wrap items-center gap-2 rounded-xl bg-card-2 p-2.5 border border-line text-xs">
+                      <span className="text-[11px] font-bold text-muted uppercase tracking-wider">Thursday Trips:</span>
+                      <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500/15 px-2 py-0.5 text-xs font-bold text-emerald-300 border border-emerald-500/30">
+                        <span>⇄ Full Trip:</span>
+                        <span className="font-mono">{rehearsalTripCounts.fullTrip}</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/15 px-2 py-0.5 text-xs font-bold text-amber-300 border border-amber-500/30">
+                        <span>➔ Just Going:</span>
+                        <span className="font-mono">{rehearsalTripCounts.going}</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1 rounded-md bg-sky-500/15 px-2 py-0.5 text-xs font-bold text-sky-300 border border-sky-500/30">
+                        <span>↩ Just Return:</span>
+                        <span className="font-mono">{rehearsalTripCounts.returnTrip}</span>
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {/* PASSENGER CHECKLIST (GROUPED BY STOP OR ALPHABETICAL LIST) */}
@@ -4006,8 +3954,9 @@ export function RepPage() {
                     onRemoveRider={handleRemoveRiderFromVehicle}
                     canRemoveRider={canRemoveRider}
                     externalSponsorLocks={externalSponsorLocks}
-                    onOpenChangeStop={handleOpenChangeStop}
-                    onOpenTransfer={handleOpenTransfer}
+                    onOpenChangeStop={isRehearsal ? undefined : handleOpenChangeStop}
+                    onOpenTransfer={isRehearsal ? undefined : handleOpenTransfer}
+                    onUpgradeToFullTrip={isRehearsal ? handleUpgradeToFullTrip : undefined}
                     isRehearsal={isRehearsal}
                     date={date}
                   />
@@ -4034,8 +3983,9 @@ export function RepPage() {
                     onRemoveRider={handleRemoveRiderFromVehicle}
                     canRemoveRider={canRemoveRider}
                     externalSponsorLocks={externalSponsorLocks}
-                    onOpenChangeStop={handleOpenChangeStop}
-                    onOpenTransfer={handleOpenTransfer}
+                    onOpenChangeStop={isRehearsal ? undefined : handleOpenChangeStop}
+                    onOpenTransfer={isRehearsal ? undefined : handleOpenTransfer}
+                    onUpgradeToFullTrip={isRehearsal ? handleUpgradeToFullTrip : undefined}
                     isRehearsal={isRehearsal}
                     date={date}
                   />
@@ -4328,60 +4278,7 @@ export function RepPage() {
                   </p>
                 )}
 
-                {isRehearsal && (() => {
-                  const allowed = allowedLegsUpgrades(transferPrompt.passenger.legs);
-                  return (
-                    <div className="mt-3 pt-2 border-t border-line/60">
-                      <label className="mb-1 block font-semibold text-muted uppercase text-[10px] tracking-wide">
-                        Rehearsal Transport Legs / Fare
-                      </label>
-                      <div className="grid grid-cols-3 gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => setTransferPromptLegs('both')}
-                          className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
-                            transferPromptLegs === 'both'
-                              ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 ring-1 ring-emerald-500/40'
-                              : 'bg-card-2 text-muted border-line hover:text-ink'
-                          }`}
-                        >
-                          Both (R70)
-                        </button>
-                        <button
-                          type="button"
-                          disabled={!allowed.includes('going')}
-                          onClick={() => setTransferPromptLegs('going')}
-                          className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
-                            !allowed.includes('going')
-                              ? 'opacity-40 cursor-not-allowed bg-card-2/40 text-muted/60 border-line/40'
-                              : transferPromptLegs === 'going'
-                              ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-1 ring-sky-500/40'
-                              : 'bg-card-2 text-muted border-line hover:text-ink'
-                          }`}
-                        >
-                          Going (R40)
-                        </button>
-                        <button
-                          type="button"
-                          disabled={!allowed.includes('return')}
-                          onClick={() => setTransferPromptLegs('return')}
-                          className={`py-1.5 px-2 rounded-lg text-xs font-semibold border transition-all ${
-                            !allowed.includes('return')
-                              ? 'opacity-40 cursor-not-allowed bg-card-2/40 text-muted/60 border-line/40'
-                              : transferPromptLegs === 'return'
-                              ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-1 ring-sky-500/40'
-                              : 'bg-card-2 text-muted border-line hover:text-ink'
-                          }`}
-                        >
-                          Return (R40)
-                        </button>
-                      </div>
-                      <p className="mt-1.5 text-[10px] text-amber-300/90 font-medium">
-                        Legs can only be upgraded to Going & Return
-                      </p>
-                    </div>
-                  );
-                })()}
+
               </div>
             </div>
 
@@ -4462,32 +4359,34 @@ export function RepPage() {
         />
       )}
 
-      {/* Change Stop Modal */}
-      <ChangeStopModal
-        isOpen={changeStopModalOpen}
-        onClose={() => {
-          setChangeStopModalOpen(false);
-          setChangeStopPassenger(null);
-        }}
-        passenger={changeStopPassenger}
-        existingStops={selectedVehicle?.orderedStops || []}
-        isRehearsal={isRehearsal}
-        onConfirm={handleChangeStopConfirm}
-      />
+      {/* Change Pickup Stop Modal (Only for normal/Sunday transport) */}
+      {!isRehearsal && (
+        <ChangeStopModal
+          isOpen={changeStopModalOpen}
+          onClose={() => {
+            setChangeStopModalOpen(false);
+            setChangeStopPassenger(null);
+          }}
+          passenger={changeStopPassenger}
+          existingStops={selectedVehicle?.orderedStops || []}
+          onConfirm={handleChangeStopConfirm}
+        />
+      )}
 
-      {/* Transfer Passenger Modal */}
-      <RepTransferPassengerModal
-        isOpen={transferModalOpen}
-        onClose={() => {
-          setTransferModalOpen(false);
-          setTransferModalPassenger(null);
-        }}
-        passenger={transferModalPassenger}
-        currentVehicle={selectedVehicle}
-        allVehicles={manifest?.vehicles || []}
-        isRehearsal={isRehearsal}
-        onTransfer={handleRepTransferConfirm}
-      />
+      {/* Transfer Passenger Modal (Only for normal/Sunday transport) */}
+      {!isRehearsal && (
+        <RepTransferPassengerModal
+          isOpen={transferModalOpen}
+          onClose={() => {
+            setTransferModalOpen(false);
+            setTransferModalPassenger(null);
+          }}
+          passenger={transferModalPassenger}
+          currentVehicle={selectedVehicle}
+          allVehicles={manifest?.vehicles || []}
+          onTransfer={handleRepTransferConfirm}
+        />
+      )}
     </div>
   );
 }
@@ -5366,7 +5265,7 @@ function CashCalculatorCard({
 function StopGroupedChecklist({
   riders, vehicleType, fare = 40, orderedStops, stopRedirects, presentIds, absentIds, absentPaidIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
   riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemoveRider, externalSponsorLocks,
-  onOpenChangeStop, onOpenTransfer, isRehearsal,
+  onOpenChangeStop, onOpenTransfer, onUpgradeToFullTrip, isRehearsal,
 }: {
   riders: Passenger[];
   vehicleType: 'Bus' | 'Taxi';
@@ -5393,6 +5292,7 @@ function StopGroupedChecklist({
   externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean; note?: string; fullNoteText: string }>;
   onOpenChangeStop?: (p: Passenger) => void;
   onOpenTransfer?: (p: Passenger) => void;
+  onUpgradeToFullTrip?: (p: Passenger) => void;
   isRehearsal?: boolean;
   date?: string;
 }) {
@@ -5548,6 +5448,7 @@ function StopGroupedChecklist({
                       externalLock={lock}
                       onOpenChangeStop={onOpenChangeStop}
                       onOpenTransfer={onOpenTransfer}
+                      onUpgradeToFullTrip={onUpgradeToFullTrip}
                       isRehearsal={isRehearsal}
                     />
                   );
@@ -5564,7 +5465,7 @@ function StopGroupedChecklist({
 function AlphabeticalChecklist({
   riders, vehicleType, stopRedirects, presentIds, absentIds, absentPaidIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
   riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemoveRider, externalSponsorLocks,
-  onOpenChangeStop, onOpenTransfer, isRehearsal,
+  onOpenChangeStop, onOpenTransfer, onUpgradeToFullTrip, isRehearsal,
 }: {
   riders: Passenger[];
   vehicleType?: 'Bus' | 'Taxi';
@@ -5589,6 +5490,7 @@ function AlphabeticalChecklist({
   externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean; note?: string; fullNoteText: string }>;
   onOpenChangeStop?: (p: Passenger) => void;
   onOpenTransfer?: (p: Passenger) => void;
+  onUpgradeToFullTrip?: (p: Passenger) => void;
   isRehearsal?: boolean;
   date?: string;
 }) {
@@ -5643,6 +5545,7 @@ function AlphabeticalChecklist({
             externalLock={lock}
             onOpenChangeStop={onOpenChangeStop}
             onOpenTransfer={onOpenTransfer}
+            onUpgradeToFullTrip={onUpgradeToFullTrip}
             isRehearsal={isRehearsal}
           />
         );
@@ -5654,7 +5557,7 @@ function AlphabeticalChecklist({
 const PassengerRow = React.memo(function PassengerRow({
   passenger, isPresent, isAbsent, isAbsentPaid, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, isSponsored, isUnpaid, noteText, redirectedFrom, disabled,
   outstandingDebts, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemove, externalLock,
-  onOpenChangeStop, onOpenTransfer, isRehearsal,
+  onOpenChangeStop, onOpenTransfer, onUpgradeToFullTrip, isRehearsal,
 }: {
   passenger: Passenger;
   isPresent: boolean;
@@ -5679,6 +5582,7 @@ const PassengerRow = React.memo(function PassengerRow({
   externalLock?: { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean; note?: string; fullNoteText: string };
   onOpenChangeStop?: (p: Passenger) => void;
   onOpenTransfer?: (p: Passenger) => void;
+  onUpgradeToFullTrip?: (p: Passenger) => void;
   isRehearsal?: boolean;
 }) {
   const isMissingSponsorInfo = isSponsored && !noteText.trim();
@@ -5741,6 +5645,52 @@ const PassengerRow = React.memo(function PassengerRow({
               <span className="rounded bg-card-2 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-muted border border-line">
                 {passenger.structure}
               </span>
+            )}
+            {isRehearsal && (
+              <span
+                className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-bold border shadow-xs ${
+                  passenger.legs === 'return'
+                    ? 'bg-sky-500/20 text-sky-200 border-sky-500/50'
+                    : passenger.legs === 'going'
+                    ? 'bg-amber-500/20 text-amber-200 border-amber-500/50'
+                    : 'bg-emerald-500/20 text-emerald-200 border-emerald-500/50'
+                }`}
+                title={
+                  passenger.legs === 'return'
+                    ? 'Registered for Just Return (R40)'
+                    : passenger.legs === 'going'
+                    ? 'Registered for Just Going (R40)'
+                    : 'Registered for Full Trip (Going & Return, R70)'
+                }
+              >
+                {passenger.legs === 'return' ? (
+                  <>
+                    <span className="text-[12px]">↩</span>
+                    <span>Just Return</span>
+                  </>
+                ) : passenger.legs === 'going' ? (
+                  <>
+                    <span className="text-[12px]">➔</span>
+                    <span>Just Going</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-[12px]">⇄</span>
+                    <span>Full Trip</span>
+                  </>
+                )}
+              </span>
+            )}
+            {passenger.phone && passenger.phone.trim() && (
+              <a
+                href={`tel:${passenger.phone.replace(/[^0-9+]/g, '')}`}
+                className="inline-flex items-center gap-1 rounded-md bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 hover:text-emerald-200 border border-emerald-500/40 px-2 py-0.5 text-[11px] font-semibold transition-all active:scale-95 shrink-0"
+                title={`Call ${passenger.fullName}: ${passenger.phone}`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <Phone className="h-3 w-3 text-emerald-400" />
+                <span>Call ({passenger.phone})</span>
+              </a>
             )}
             {(() => {
               const statusBadge = getPassengerStatusBadge(passenger);
@@ -5977,21 +5927,34 @@ const PassengerRow = React.memo(function PassengerRow({
           </button>
         )}
 
-        {/* Change Stop / Legs Button */}
-        {onOpenChangeStop && !disabled && (
+        {/* Upgrade to Full Trip (Exclusive to Thursday Rehearsal) */}
+        {isRehearsal && onUpgradeToFullTrip && !disabled && (passenger.legs === 'going' || passenger.legs === 'return') && (
+          <button
+            type="button"
+            onClick={() => onUpgradeToFullTrip(passenger)}
+            className="flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-bold bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-200 border border-indigo-500/40 hover:border-indigo-400 transition-all active:scale-95 shadow-xs"
+            title={`Upgrade ${passenger.fullName} from ${passenger.legs === 'going' ? 'Just Going' : 'Just Return'} (R40) to Full Trip (R70)`}
+          >
+            <ArrowUpRight className="h-3.5 w-3.5 text-indigo-400" />
+            <span>Upgrade to Full Trip (⇄ R70)</span>
+          </button>
+        )}
+
+        {/* Change Stop Button (Only for normal/Sunday transport, NOT rehearsal) */}
+        {!isRehearsal && onOpenChangeStop && !disabled && (
           <button
             type="button"
             onClick={() => onOpenChangeStop(passenger)}
             className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium bg-card-2/60 text-muted border border-line hover:text-ink hover:border-line-bright transition-all active:scale-95"
-            title={isRehearsal ? 'Change pickup stop or rehearsal legs' : 'Change pickup stop'}
+            title="Change pickup stop"
           >
             <MapPin className="h-3 w-3 text-crimson-400" />
-            <span>Change stop / legs</span>
+            <span>Change stop</span>
           </button>
         )}
 
-        {/* Transfer Button */}
-        {onOpenTransfer && !disabled && (
+        {/* Transfer Button (Only for normal/Sunday transport, NOT rehearsal) */}
+        {!isRehearsal && onOpenTransfer && !disabled && (
           <button
             type="button"
             onClick={() => onOpenTransfer(passenger)}

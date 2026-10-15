@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, lazy } from 'react';
 import {
   Bus, Car, Plus, Trash2, Users, ArrowRight, Undo2, X, UserCog, MoveRight,
   CheckCircle2, ChevronDown, ChevronRight, ChevronUp, MapPin,
@@ -7,7 +7,9 @@ import {
   ArrowRightLeft, UserMinus, RotateCcw
 } from 'lucide-react';
 import { EditVehicleModal } from './EditVehicleModal';
-import { TransferSponsorshipModal } from './TransferSponsorshipModal';
+const TransferSponsorshipModal = lazy(() =>
+  import('./TransferSponsorshipModal').then((m) => ({ default: m.TransferSponsorshipModal }))
+);
 import { ChangeServiceModal } from './ChangeServiceModal';
 import { ChangeStopModal } from './ChangeStopModal';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
@@ -2407,16 +2409,16 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                       <div className="mb-4 rounded-xl border border-line/70 bg-card/70 p-3">
                         <div className="flex items-center justify-between gap-2 flex-wrap">
                           <div className="flex items-center gap-2 text-xs font-semibold text-ink">
-                            <Users2 className="h-4 w-4 text-amber-400" />
+                            <Users className="h-4 w-4 text-amber-400" />
                             <span>Reps on board: <strong className="text-amber-300">{allDetectedReps.length}</strong></span>
                           </div>
                           <span className="text-[11px] text-muted">Buses do not use a single assigned rep</span>
                         </div>
                         {allDetectedReps.length > 0 ? (
                           <div className="mt-2.5 flex flex-wrap gap-1.5">
-                            {allDetectedReps.map(({ rep, rider }) => (
+                            {allDetectedReps.map(({ rep }) => (
                               <span
-                                key={rider.id || rep.fullName}
+                                key={rep.fullName}
                                 className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-200"
                               >
                                 <span>{rep.fullName}</span>

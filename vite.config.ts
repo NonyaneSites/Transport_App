@@ -10,10 +10,6 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
-  optimizeDeps: {
-    exclude: ['lucide-react'],
-    include: ['xlsx'],
-  },
   server: {
     host: '0.0.0.0',
     port: 3000,
@@ -21,5 +17,32 @@ export default defineConfig({
   preview: {
     host: '0.0.0.0',
     port: 3000,
+  },
+  build: {
+    target: 'es2020',
+    sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            // Keep heavy export and canvas libraries in their own on-demand chunks (never in entry or vendor bundle)
+            if (
+              id.includes('xlsx') ||
+              id.includes('jspdf') ||
+              id.includes('html2canvas') ||
+              id.includes('dompurify')
+            ) {
+              return undefined;
+            }
+            // 1. Supabase client vendor chunk
+            if (id.includes('@supabase')) {
+              return 'vendor-supabase';
+            }
+            // 2. Core React & UI vendor chunk
+            return 'vendor-core';
+          }
+        },
+      },
+    },
   },
 });

@@ -9,7 +9,10 @@ import {
   parseWorkbook,
   parseWorkbookAsync,
   NON_SIGNUP_SHEET_PATTERN,
+  setXlsxModule,
 } from './parser';
+
+setXlsxModule(XLSX);
 
 test('extractRowDate() parses unanchored date with trailing label', () => {
   // Requirement 3: Exactly "11 September 2026 - Night Vigil"

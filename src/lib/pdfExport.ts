@@ -1,5 +1,11 @@
-import { jsPDF } from 'jspdf';
-import autoTable, { type RowInput } from 'jspdf-autotable';
+async function loadPdfLibs() {
+  const [{ jsPDF }, { default: autoTable }] = await Promise.all([
+    import('jspdf'),
+    import('jspdf-autotable'),
+  ]);
+  return { jsPDF, autoTable };
+}
+import type { RowInput } from 'jspdf-autotable';
 import type { Passenger, Vehicle } from './types';
 import {
   type LedgerEntry,
@@ -204,10 +210,11 @@ export function compileDebtReport(entries: LedgerEntry[]): StructureDebtSummary[
  * - Col 2 (Missed Dates & Sessions): ~115mm
  * - Col 3 (Amount Owing): ~25mm
  */
-export function downloadCancellationDebtPdf(
+export async function downloadCancellationDebtPdf(
   entries: LedgerEntry[],
   fileName: string = `CRC_Cancellation_Debt_List_${new Date().toISOString().slice(0, 10)}.pdf`
-): void {
+): Promise<void> {
+  const { jsPDF, autoTable } = await loadPdfLibs();
   const doc = new jsPDF({
     orientation: 'portrait',
     unit: 'mm',
@@ -436,11 +443,12 @@ export function downloadCancellationDebtPdf(
 /**
  * Generates and downloads a clean, printable PDF of the Thursday Rehearsal Taxi Manifest.
  */
-export function downloadRehearsalManifestPdf(manifest: {
+export async function downloadRehearsalManifestPdf(manifest: {
   date: string;
   vehicles: Vehicle[];
   signups: Passenger[];
-}): void {
+}): Promise<void> {
+  const { jsPDF, autoTable } = await loadPdfLibs();
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pMap = new Map(manifest.signups.map((p) => [p.id, p]));
   const pageWidth = doc.internal.pageSize.getWidth();

@@ -470,7 +470,7 @@ export function LedgerPage() {
     setImportFileName(file.name);
     try {
       const buf = await file.arrayBuffer();
-      const result = parseHistoricalCancellationWorkbook(buf);
+      const result = await parseHistoricalCancellationWorkbook(buf);
       if (result.rows.length > 0) {
         await importHistoricalCancellations(result.rows);
         const refreshed = await listLedgerEntries();

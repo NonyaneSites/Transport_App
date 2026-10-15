@@ -1,13 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense, lazy } from 'react';
 import { Link } from 'react-router-dom';
 import { Lock, Trash2, Loader2, AlertTriangle, Calendar, Users, Bus, ArrowUpRight, XCircle, FileSpreadsheet, ChevronDown, ChevronRight, History, Download, FileDown, Eye, Table, CheckCircle2, X } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
 import { ExcelUpload } from '@/components/ExcelUpload';
-import { VehicleAllocation } from '@/components/VehicleAllocation';
-import { ThursdayRehearsalSetup } from '@/components/ThursdayRehearsalSetup';
-import { TransferSponsorshipModal } from '@/components/TransferSponsorshipModal';
 import { useManifest } from '@/lib/useManifest';
 import { listAllManifests, loadManifest } from '@/lib/manifest';
 import { listLedgerEntries } from '@/lib/ledger';
@@ -16,8 +13,22 @@ import { SERVICE_TYPES, RESET_PASSWORD, type ServiceType, type Passenger, type M
 import { isSamePassenger, getSubmissionTimestampEpoch } from '@/lib/importer';
 import { generateWhatsAppRouteManifest, generateWhatsAppRepManifest, downloadTextFile } from '@/lib/whatsappManifest';
 import { downloadTaxiStatsExcel, downloadTaxiStatsCSV } from '@/lib/statsExport';
-import { AdminStatsExportModal } from '@/components/AdminStatsExportModal';
-import { AdminAttendanceNotesSection } from '@/components/AdminAttendanceNotesSection';
+
+const AdminStatsExportModal = lazy(() =>
+  import('@/components/AdminStatsExportModal').then((m) => ({ default: m.AdminStatsExportModal }))
+);
+const TransferSponsorshipModal = lazy(() =>
+  import('@/components/TransferSponsorshipModal').then((m) => ({ default: m.TransferSponsorshipModal }))
+);
+const VehicleAllocation = lazy(() =>
+  import('@/components/VehicleAllocation').then((m) => ({ default: m.VehicleAllocation }))
+);
+const ThursdayRehearsalSetup = lazy(() =>
+  import('@/components/ThursdayRehearsalSetup').then((m) => ({ default: m.ThursdayRehearsalSetup }))
+);
+const AdminAttendanceNotesSection = lazy(() =>
+  import('@/components/AdminAttendanceNotesSection').then((m) => ({ default: m.AdminAttendanceNotesSection }))
+);
 
 export function AdminPage() {
   const [date, setDate] = useState(() => {
@@ -293,37 +304,55 @@ export function AdminPage() {
           </div>
         ) : service === 'Rehearsal' ? (
           <div className="mt-5">
-            <ThursdayRehearsalSetup
-              date={date}
-              onDateChange={setDate}
-              manifest={manifest}
-              onSaveManifest={save}
-            />
+            <Suspense
+              fallback={
+                <div className="flex flex-col items-center justify-center py-16 text-muted">
+                  <Loader2 className="h-7 w-7 animate-spin text-crimson-400 mb-2" />
+                  <p className="text-xs">Loading Rehearsal Setup...</p>
+                </div>
+              }
+            >
+              <ThursdayRehearsalSetup
+                date={date}
+                onDateChange={setDate}
+                manifest={manifest}
+                onSaveManifest={save}
+              />
+            </Suspense>
           </div>
         ) : (
           <div className="mt-5 space-y-5">
-            <VehicleAllocation
-              key={key}
-              manifest={
-                manifest && manifest.date === key
-                  ? {
-                      date: manifest.date,
-                      signups: Array.isArray(manifest.signups) ? manifest.signups : [],
-                      vehicles: Array.isArray(manifest.vehicles)
-                        ? manifest.vehicles.map((v) => ({
-                            ...v,
-                            riders: Array.isArray(v.riders) ? v.riders : [],
-                            orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
-                          }))
-                        : [],
-                      created_at: manifest.created_at,
-                      updated_at: manifest.updated_at,
-                    }
-                  : { date: key, signups: [], vehicles: [] }
+            <Suspense
+              fallback={
+                <div className="flex flex-col items-center justify-center py-16 text-muted">
+                  <Loader2 className="h-7 w-7 animate-spin text-crimson-400 mb-2" />
+                  <p className="text-xs">Loading Vehicle Allocations...</p>
+                </div>
               }
-              service={service}
-              onSave={save}
-            />
+            >
+              <VehicleAllocation
+                key={key}
+                manifest={
+                  manifest && manifest.date === key
+                    ? {
+                        date: manifest.date,
+                        signups: Array.isArray(manifest.signups) ? manifest.signups : [],
+                        vehicles: Array.isArray(manifest.vehicles)
+                          ? manifest.vehicles.map((v) => ({
+                              ...v,
+                              riders: Array.isArray(v.riders) ? v.riders : [],
+                              orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
+                            }))
+                          : [],
+                        created_at: manifest.created_at,
+                        updated_at: manifest.updated_at,
+                      }
+                    : { date: key, signups: [], vehicles: [] }
+                }
+                service={service}
+                onSave={save}
+              />
+            </Suspense>
           </div>
         )}
 
@@ -555,19 +584,28 @@ export function AdminPage() {
         {/* Live Attendance, Sponsored & Notes Dispatch Hub (Bottom Drop Box) */}
         {manifest && (
           <div id="admin-attendance-notes-section" className="mt-8">
-            <AdminAttendanceNotesSection
-              manifest={manifest}
-              onLocateVehicle={(vehId) => {
-                const el = document.getElementById(`vehicle-card-${vehId}`);
-                if (el) {
-                  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }
-              }}
-              onTransferSponsorship={(p) => {
-                setTransferModalPassenger(p);
-                setTransferModalOpen(true);
-              }}
-            />
+            <Suspense
+              fallback={
+                <div className="flex flex-col items-center justify-center py-10 text-muted">
+                  <Loader2 className="h-6 w-6 animate-spin text-crimson-400 mb-2" />
+                  <p className="text-xs">Loading Attendance & Notes Hub...</p>
+                </div>
+              }
+            >
+              <AdminAttendanceNotesSection
+                manifest={manifest}
+                onLocateVehicle={(vehId) => {
+                  const el = document.getElementById(`vehicle-card-${vehId}`);
+                  if (el) {
+                    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  }
+                }}
+                onTransferSponsorship={(p) => {
+                  setTransferModalPassenger(p);
+                  setTransferModalOpen(true);
+                }}
+              />
+            </Suspense>
           </div>
         )}
       </main>

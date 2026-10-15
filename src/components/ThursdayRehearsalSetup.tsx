@@ -1,8 +1,7 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
-import * as XLSX from 'xlsx';
+import { useState, useEffect, useRef } from 'react';
 import {
-  Upload, AlertTriangle, CheckCircle2, Copy, Download, Plus, Trash2,
-  Clock, ArrowUp, ArrowDown, FileSpreadsheet, Loader2, Sparkles,
+  Upload, CheckCircle2, Copy, Download, Plus, Trash2,
+  Clock, ArrowUp, ArrowDown, FileSpreadsheet, Loader2,
   ChevronDown, ChevronRight, Check, ShieldAlert, Save, X, Pencil,
 } from 'lucide-react';
 import type { Passenger, Vehicle, Manifest } from '@/lib/types';
@@ -12,7 +11,6 @@ import { naturalCompare } from '@/lib/sort';
 import {
   parseRehearsalSheet,
   formatRehearsalWhatsAppManifest,
-  autoSuggestRehearsalAllocation,
   saveRehearsalTemplate,
   loadRehearsalTemplate,
   CANONICAL_REHEARSAL_STOPS,
@@ -89,7 +87,7 @@ export function ThursdayRehearsalSetup({
     try {
       const buffer = await file.arrayBuffer();
       setRawWorkbookBuffer(buffer);
-      processWorkbook(buffer, date);
+      await processWorkbook(buffer, date);
     } catch (err) {
       console.error('Failed to parse workbook:', err);
     } finally {
@@ -97,7 +95,8 @@ export function ThursdayRehearsalSetup({
     }
   }
 
-  function processWorkbook(buffer: ArrayBuffer, targetDate: string) {
+  async function processWorkbook(buffer: ArrayBuffer, targetDate: string) {
+    const XLSX = await import('xlsx');
     const wb = XLSX.read(buffer, { type: 'array' });
     // Use sheet "Form Responses 2" if present, otherwise first sheet
     let sheetName = wb.SheetNames.find((s) => s.toLowerCase().includes('form responses 2'));
@@ -144,9 +143,26 @@ export function ThursdayRehearsalSetup({
         setVehicles(templatedVehicles);
         setTemplateNotice('Loaded stops and times from saved Thursday template.');
       } else {
-        // Auto-suggest 2 default taxis
-        const suggested = autoSuggestRehearsalAllocation(importedPassengers, 2, 15);
-        setVehicles(suggested);
+        // Initialize default taxis without auto-suggest
+        const uniqueStops = Array.from(new Set(importedPassengers.map((p) => p.stop).filter(Boolean)));
+        setVehicles([
+          {
+            id: 'rehe_taxi_1',
+            name: 'Taxi 1',
+            type: 'Taxi',
+            capacity: 15,
+            riders: importedPassengers.map((p) => p.id),
+            orderedStops: uniqueStops,
+          },
+          {
+            id: 'rehe_taxi_2',
+            name: 'Taxi 2',
+            type: 'Taxi',
+            capacity: 15,
+            riders: [],
+            orderedStops: [],
+          },
+        ]);
       }
     } else {
       // Re-map passengers to existing vehicles by stop
@@ -177,11 +193,6 @@ export function ThursdayRehearsalSetup({
     }
   }
 
-  // Auto suggest
-  function handleAutoSuggest() {
-    const suggested = autoSuggestRehearsalAllocation(passengers, vehicles.length || 2, 15);
-    setVehicles(suggested);
-  }
 
   // Add Taxi
   function handleAddTaxi() {
@@ -409,46 +420,6 @@ export function ThursdayRehearsalSetup({
     setTimeout(() => setCopiedWhatsApp(false), 3000);
   }
 
-  // Live warnings
-  const warnings = useMemo(() => {
-    const list: string[] = [];
-
-    // 1. Vehicle capacity
-    vehicles.forEach((v) => {
-      const cap = v.capacity || 15;
-      if (v.riders.length > cap) {
-        list.push(`${v.name} is over capacity: ${v.riders.length}/${cap} passengers.`);
-      }
-    });
-
-    // 2. Stops without pickup time
-    vehicles.forEach((v) => {
-      (v.orderedStops || []).forEach((s) => {
-        if (!v.stopTimes?.[s] || !v.stopTimes[s].trim()) {
-          list.push(`${s} in ${v.name} does not have a pickup time set.`);
-        }
-      });
-    });
-
-    // 3. Passengers without stop
-    passengers.forEach((p) => {
-      if (!p.stop || p.stop === 'Unspecified') {
-        list.push(`Passenger ${p.fullName} has no stop specified.`);
-      }
-    });
-
-    // 4. Duplicate passengers in manifest
-    const seenNames = new Set<string>();
-    passengers.forEach((p) => {
-      const low = p.fullName.trim().toLowerCase();
-      if (seenNames.has(low)) {
-        list.push(`Potential duplicate passenger: ${p.fullName}.`);
-      }
-      seenNames.add(low);
-    });
-
-    return list;
-  }, [vehicles, passengers]);
 
   return (
     <div className="space-y-6">
@@ -476,7 +447,7 @@ export function ThursdayRehearsalSetup({
               </h2>
             </div>
             <p className="text-xs text-muted mt-0.5">
-              Upload Google Form responses, allocate taxis by stop order, and publish the official rep manifest.
+              Upload Google Form responses, allocate taxis by stop order, and save the official rehearsal manifest.
             </p>
           </div>
 
@@ -658,19 +629,6 @@ export function ThursdayRehearsalSetup({
         </div>
       )}
 
-      {warnings.length > 0 && (
-        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3.5 space-y-1 text-xs text-amber-200">
-          <div className="flex items-center gap-1.5 font-bold text-amber-100">
-            <AlertTriangle className="h-4 w-4 text-amber-400" />
-            <span>Setup Warnings ({warnings.length})</span>
-          </div>
-          <ul className="list-disc list-inside space-y-0.5 text-amber-300/90 pl-1">
-            {warnings.map((w, idx) => (
-              <li key={idx}>{w}</li>
-            ))}
-          </ul>
-        </div>
-      )}
 
       {/* Action Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-card p-3 rounded-xl border border-line">
@@ -682,15 +640,6 @@ export function ThursdayRehearsalSetup({
           >
             <Plus className="h-3.5 w-3.5" />
             <span>Add Taxi</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleAutoSuggest}
-            className="btn-ghost flex items-center gap-1.5 text-xs py-1.5 px-2.5"
-            title="Auto-distribute passengers across taxis by route order"
-          >
-            <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
-            <span>Auto-Suggest</span>
           </button>
           <button
             type="button"
@@ -741,7 +690,7 @@ export function ThursdayRehearsalSetup({
             className="btn-primary flex items-center gap-1.5 text-xs py-1.5 px-4 shadow-sm"
           >
             {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
-            <span>{saveSuccess ? 'Published!' : 'Publish Manifest'}</span>
+            <span>{saveSuccess ? 'Saved!' : 'Save'}</span>
           </button>
         </div>
       </div>

@@ -1,4 +1,3 @@
-import * as XLSX from 'xlsx';
 import { supabase, mockStorage, MANIFESTS_TABLE, SPONSORSHIPS_TABLE } from './supabase';
 import {
   listLedgerFromServer,
@@ -639,13 +638,23 @@ export async function insertAbsentees(
   }
 
   if (rows.length === 0) return;
+  invalidateLedgerCache();
 
   const { error } = await supabase.from(LEDGER_TABLE).insert(rows);
   if (error) throw error;
 }
 
+const LEDGER_SELECT_COLUMNS = 'id, manifest_key, date, service, passenger_name, stop, structure, vehicle_name, submitted_by, submitted_at, sponsored, sponsor_note, license_plate, rep_name, structure_debt, general_notes, source, legs';
+
+let sessionLedgerCache: { data: LedgerEntry[]; timestamp: number } | null = null;
+const LEDGER_CACHE_TTL = 30000;
+
+export function invalidateLedgerCache(): void {
+  sessionLedgerCache = null;
+}
+
 /**
- * Fetches all ledger entries from Supabase using pagination to bypass the default 1000-row limit.
+ * Fetches all ledger entries from Supabase using pagination and required column projection.
  */
 export async function fetchAllLedgerFromSupabase(): Promise<LedgerEntry[]> {
   const allRows: LedgerEntry[] = [];
@@ -655,7 +664,7 @@ export async function fetchAllLedgerFromSupabase(): Promise<LedgerEntry[]> {
   while (true) {
     const { data, error } = await supabase
       .from(LEDGER_TABLE)
-      .select('*')
+      .select(LEDGER_SELECT_COLUMNS)
       .order('submitted_at', { ascending: false })
       .range(from, from + pageSize - 1);
 
@@ -681,6 +690,7 @@ export async function withdrawAbsentees(
   riderNames: string[]
 ): Promise<void> {
   if (riderNames.length === 0) return;
+  invalidateLedgerCache();
   const normalizedNames = new Set(riderNames.map((n) => sanitizePassengerDisplayName(n).toLowerCase()));
 
   try {
@@ -703,10 +713,14 @@ export async function withdrawAbsentees(
   }
 }
 
-export async function listLedgerEntries(): Promise<LedgerEntry[]> {
+export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEntry[]> {
+  if (!forceRefresh && sessionLedgerCache && Date.now() - sessionLedgerCache.timestamp < LEDGER_CACHE_TTL) {
+    return sessionLedgerCache.data;
+  }
+
   const mergedMap = new Map<string, LedgerEntry>();
 
-  // 1. Primary: Central Express Server API
+  // 1. Primary: Central Express Server API (in DEV only)
   try {
     const serverEntries = await listLedgerFromServer();
     if (Array.isArray(serverEntries) && serverEntries.length > 0) {
@@ -786,7 +800,7 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
 
   // Ensure all structures are normalized to canonical codes, passenger names are cleanly formatted,
   // ensure debts are parsed into numbers, and exclude any entries whose debt has been reduced to zero or settled
-  return entries
+  const formattedEntries = entries
     .filter((e) => {
       let rawVal: unknown = e.structure_debt;
       if (rawVal === undefined || rawVal === null || (typeof rawVal === 'string' && rawVal === '')) {
@@ -817,6 +831,9 @@ export async function listLedgerEntries(): Promise<LedgerEntry[]> {
           : '',
       };
     });
+
+  sessionLedgerCache = { data: formattedEntries, timestamp: Date.now() };
+  return formattedEntries;
 }
 
 export async function listLedgerByDate(date: string): Promise<LedgerEntry[]> {
@@ -825,6 +842,7 @@ export async function listLedgerByDate(date: string): Promise<LedgerEntry[]> {
 }
 
 export async function deleteLedgerEntry(id: string): Promise<void> {
+  invalidateLedgerCache();
   try {
     await deleteLedgerOnServer(id);
   } catch (err) {
@@ -875,6 +893,7 @@ export async function deleteLedgerEntry(id: string): Promise<void> {
  */
 export async function settleLedgerEntries(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
+  invalidateLedgerCache();
   try {
     await settleLedgerOnServer(ids);
   } catch (err) {
@@ -919,6 +938,7 @@ export async function settleLedgerEntries(ids: string[]): Promise<void> {
 }
 
 export async function updateLedgerEntry(id: string, updates: Partial<LedgerEntry>): Promise<void> {
+  invalidateLedgerCache();
   // If the debt for this entry is reduced to zero or less, remove the debt entry
   if (updates.structure_debt !== undefined && Number(updates.structure_debt) <= 0) {
     await deleteLedgerEntry(id);
@@ -1030,6 +1050,7 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
     general_notes: noteText,
   };
 
+  invalidateLedgerCache();
   try {
     const serverEntry = await addManualLedgerOnServer(row);
     if (serverEntry) {
@@ -1048,7 +1069,7 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
   const { data, error } = await supabase
     .from(LEDGER_TABLE)
     .insert([row])
-    .select('*')
+    .select(LEDGER_SELECT_COLUMNS)
     .single();
 
   if (error) throw error;
@@ -1077,6 +1098,7 @@ export async function updateDebtorWithInstances(
     instances: DebtorInstanceUpdateItem[];
   }
 ): Promise<void> {
+  invalidateLedgerCache();
   const structCode = normalizeStructureCode(updates.structure);
   const cleanName = updates.name.trim();
   const debtType = updates.debtType || (updates.isSponsored ? 'unaccounted_sponsorship' : 'cancellation');
@@ -1424,8 +1446,12 @@ export function parseFlexibleHistoricalDate(value: unknown): string | null {
   if (value == null || value === '') return null;
   if (value instanceof Date && !isNaN(value.getTime())) return formatYMD(value);
   if (typeof value === 'number') {
-    const parsed = XLSX.SSF?.parse_date_code?.(value);
-    if (parsed) return formatYMD(new Date(parsed.y, parsed.m - 1, parsed.d));
+    if (isNaN(value) || value <= 0) return null;
+    const utcDays = value - 25569;
+    const date = new Date(Math.round(utcDays * 86400 * 1000));
+    if (!isNaN(date.getTime())) {
+      return formatYMD(date);
+    }
     return null;
   }
   
@@ -1460,7 +1486,8 @@ export function parseFlexibleHistoricalDate(value: unknown): string | null {
  * - Automatic handling of section/category rows (e.g. "Unaccounted Sponsorship", "Unpaid Sponsorship", "Did not pay")
  * - Does not discard undated entries; imports them cleanly.
  */
-export function parseHistoricalCancellationWorkbook(buffer: ArrayBuffer): HistoricalImportResult {
+export async function parseHistoricalCancellationWorkbook(buffer: ArrayBuffer): Promise<HistoricalImportResult> {
+  const XLSX = await import('xlsx');
   const wb = XLSX.read(buffer, { type: 'array', cellDates: true });
   const sheet = wb.Sheets[wb.SheetNames[0]];
   const aoa = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: '' }) as unknown[][];
@@ -1931,7 +1958,8 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
  * Accurately formats the Name column with the service type in brackets e.g. "Linathi Mpako (PM)"
  * or "Thembi Qobo (LM)" or "Nonkululeko Dhlamini (WMP)".
  */
-export function downloadLedgerExcel(entries: LedgerEntry[], fileName: string): void {
+export async function downloadLedgerExcel(entries: LedgerEntry[], fileName: string): Promise<void> {
+  const XLSX = await import('xlsx');
   const groups = aggregateLedgerEntries(entries);
   const grandTotal = groups.reduce((sum, g) => sum + g.totalDebt, 0);
 
@@ -2005,11 +2033,12 @@ export function downloadLedgerExcel(entries: LedgerEntry[], fileName: string): v
 }
 
 /** Download session stats: vehicle summary + attendance + absentees + notes */
-export function downloadSessionStatsExcel(
+export async function downloadSessionStatsExcel(
   vehicles: Vehicle[],
   passengerLookup: (id: string) => Passenger | undefined,
   fileName: string
-): void {
+): Promise<void> {
+  const XLSX = await import('xlsx');
   const wb = XLSX.utils.book_new();
 
   // Helper for FTV check
@@ -2574,8 +2603,17 @@ export async function withdrawSingleSponsorshipClaim(
   }
 }
 
+const SPONSORSHIPS_SELECT_COLUMNS = 'id, manifest_key, vehicle_id, vehicle_name, date, service, passenger_name, stop, structure, rep_name, sponsor_note, amount, status, submitted_at, notes, payment_received, payment_method, payment_notes, paid_at, paid_by';
+
+let sessionSponsorshipsCache: { data: ReportedSponsorship[]; timestamp: number } | null = null;
+const SPONSORSHIPS_CACHE_TTL = 30000;
+
+export function invalidateSponsorshipsCache(): void {
+  sessionSponsorshipsCache = null;
+}
+
 /**
- * Fetches all reported sponsorships from Supabase using pagination.
+ * Fetches all reported sponsorships from Supabase using pagination and required column projection.
  */
 export async function fetchAllSponsorshipsFromSupabase(): Promise<ReportedSponsorship[]> {
   const allRows: ReportedSponsorship[] = [];
@@ -2585,7 +2623,7 @@ export async function fetchAllSponsorshipsFromSupabase(): Promise<ReportedSponso
   while (true) {
     const { data, error } = await supabase
       .from(SPONSORSHIPS_TABLE)
-      .select('*')
+      .select(SPONSORSHIPS_SELECT_COLUMNS)
       .order('submitted_at', { ascending: false })
       .range(from, from + pageSize - 1);
 
@@ -2607,10 +2645,14 @@ export async function fetchAllSponsorshipsFromSupabase(): Promise<ReportedSponso
  * Automatically harvests sponsorships from existing submitted manifests/drafts
  * so any sponsorships already submitted immediately appear and get persisted!
  */
-export async function listReportedSponsorships(): Promise<ReportedSponsorship[]> {
+export async function listReportedSponsorships(forceRefresh = false): Promise<ReportedSponsorship[]> {
+  if (!forceRefresh && sessionSponsorshipsCache && Date.now() - sessionSponsorshipsCache.timestamp < SPONSORSHIPS_CACHE_TTL) {
+    return sessionSponsorshipsCache.data;
+  }
+
   let list: ReportedSponsorship[] = [];
 
-  // 1. Primary: Central Express Server API (contains cross-device reported sponsorships)
+  // 1. Primary: Central Express Server API (contains cross-device reported sponsorships in DEV)
   try {
     const serverSponsees = await listReportedSponsorshipsFromServer();
     if (serverSponsees && serverSponsees.length > 0) {
@@ -2660,11 +2702,13 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
   }
   const manifestsTable = (mockStorage.getTable(MANIFESTS_TABLE) as unknown as StoredManifest[]) || [];
 
-  // Also harvest manifests directly from remote Supabase transport_manifests table so all historical signups are loaded
+  // Also harvest manifests directly from remote Supabase transport_manifests table (recent 10 sessions)
   try {
     const { data: remoteManifests } = await supabase
       .from(MANIFESTS_TABLE)
-      .select('date, signups, vehicles');
+      .select('date, signups, vehicles')
+      .order('date', { ascending: false })
+      .limit(10);
     if (Array.isArray(remoteManifests)) {
       for (const rm of remoteManifests) {
         if (!manifestsTable.some((m) => m.date === rm.date)) {
@@ -3033,6 +3077,7 @@ export async function listReportedSponsorships(): Promise<ReportedSponsorship[]>
     /* ignore */
   }
 
+  sessionSponsorshipsCache = { data: list, timestamp: Date.now() };
   return list;
 }
 
@@ -3065,6 +3110,8 @@ export async function verifyBatchSponsorships(
   items: Array<{ sponsorshipId: string; status: SponsorshipStatus; sponsorship?: ReportedSponsorship }>
 ): Promise<{ success: boolean; updatedCount: number; ledgerUpdated?: boolean }> {
   if (!items || items.length === 0) return { success: true, updatedCount: 0 };
+  invalidateSponsorshipsCache();
+  invalidateLedgerCache();
 
   const now = new Date().toISOString();
   let updatedCount = 0;
@@ -3275,6 +3322,7 @@ function updateLocalSponsorshipCache(updated: ReportedSponsorship) {
  * Deletes a reported sponsorship and cleans up any linked debt entry in the ledger.
  */
 export async function deleteReportedSponsorship(sponsorshipId: string): Promise<void> {
+  invalidateSponsorshipsCache();
   // 1. Central Server
   try {
     await deleteSponsorshipOnServer(sponsorshipId);

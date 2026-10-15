@@ -173,6 +173,8 @@ export function useManifest(
   const activeVehicleIdRef = useRef<string | undefined>(activeVehicleId);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const broadcastChannelRef = useRef<BroadcastChannel | null>(null);
+  const pendingRemoteSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingRemoteSaveManifestRef = useRef<Manifest | null>(null);
 
   useEffect(() => {
     manifestRef.current = manifest;
@@ -184,13 +186,14 @@ export function useManifest(
     setActiveCoReps([]);
   }, [activeVehicleId]);
 
-  // Periodically prune stale co-reps (inactive for > 35 seconds)
+  // Periodically prune stale co-reps (inactive for > 120 seconds, checked every 60s, paused when hidden)
   useEffect(() => {
-    const interval = setInterval(() => {
+    const prune = () => {
+      if (typeof document !== 'undefined' && (document.hidden || document.visibilityState === 'hidden')) return;
       const now = Date.now();
       let changed = false;
       activeCoRepsMapRef.current.forEach((val, cId) => {
-        if (now - val.lastSeen > 35000) {
+        if (now - val.lastSeen > 120000) {
           activeCoRepsMapRef.current.delete(cId);
           changed = true;
         }
@@ -198,7 +201,9 @@ export function useManifest(
       if (changed) {
         setActiveCoReps(Array.from(activeCoRepsMapRef.current.values()));
       }
-    }, 5000);
+    };
+
+    const interval = setInterval(prune, 60000);
     return () => clearInterval(interval);
   }, []);
 
@@ -293,6 +298,48 @@ export function useManifest(
       setIsSyncing(false);
     }
   };
+
+  const executeRemotePersist = useCallback(async (targetManifest: Manifest) => {
+    try {
+      await syncVehiclesToDb(targetManifest.date, targetManifest.vehicles).catch((err) => {
+        console.warn('[useManifest] Error saving individual vehicles:', err);
+      });
+
+      const { error: upsertError, data } = await supabase
+        .from(MANIFESTS_TABLE)
+        .upsert(
+          {
+            date: targetManifest.date,
+            signups: targetManifest.signups,
+            vehicles: targetManifest.vehicles,
+          },
+          { onConflict: 'date' }
+        )
+        .select('updated_at')
+        .maybeSingle();
+
+      if (upsertError) {
+        console.warn('[useManifest] Supabase upsert error, syncing to local storage:', upsertError);
+        mockStorage.upsert(MANIFESTS_TABLE, {
+          date: targetManifest.date,
+          signups: targetManifest.signups,
+          vehicles: targetManifest.vehicles,
+          updated_at: new Date().toISOString(),
+        });
+      } else if (data?.updated_at) {
+        lastSavedUpdatedAtRef.current = data.updated_at;
+        lastKnownUpdatedAtRef.current = data.updated_at;
+      }
+    } catch (err) {
+      console.warn('[useManifest] Exception during supabase save, falling back locally:', err);
+      mockStorage.upsert(MANIFESTS_TABLE, {
+        date: targetManifest.date,
+        signups: targetManifest.signups,
+        vehicles: targetManifest.vehicles,
+        updated_at: new Date().toISOString(),
+      });
+    }
+  }, []);
 
   useEffect(() => {
     if (!key) {
@@ -533,9 +580,12 @@ export function useManifest(
     setupChannel();
 
     // 4. Lightweight Background Polling Fallback
-    // Guarantees cross-device sync even when mobile devices throttle websockets or if replication is disabled
+    // Only runs as a slow 60s fallback when Realtime channel is disconnected, paused when tab is hidden
     const pollCheck = async () => {
       if (!key || keyRef.current !== key) return;
+      if (typeof document !== 'undefined' && (document.hidden || document.visibilityState === 'hidden')) return;
+      // Skip poll when Realtime channel is healthy and subscribed
+      if (isChannelSubscribedRef.current) return;
       if (Date.now() - lastLocalSaveTimeRef.current < 5000) return;
       try {
         const { data, error: pollError } = await supabase
@@ -565,9 +615,8 @@ export function useManifest(
     };
 
     const pollInterval = setInterval(() => {
-      if (typeof document !== 'undefined' && document.hidden) return;
       pollCheck();
-    }, 15000);
+    }, 60000);
 
     // 5. Trigger on tab visible, network online, or pageshow (guarded against overwriting local saves):
     const handleResume = async () => {
@@ -641,8 +690,16 @@ export function useManifest(
         supabase.removeChannel(channelRef.current);
         channelRef.current = null;
       }
+      if (pendingRemoteSaveTimerRef.current) {
+        clearTimeout(pendingRemoteSaveTimerRef.current);
+        pendingRemoteSaveTimerRef.current = null;
+        if (pendingRemoteSaveManifestRef.current) {
+          executeRemotePersist(pendingRemoteSaveManifestRef.current).catch(() => {});
+        }
+      }
     };
-  }, [key, handleIncomingLiveAction]);
+  }, [key, handleIncomingLiveAction, executeRemotePersist]);
+
 
   async function save(m: Manifest): Promise<void> {
     const normalized = normalizeManifestData(m) || m;
@@ -665,16 +722,10 @@ export function useManifest(
     setManifest(normalized);
     setLastSyncedAt(Date.now());
 
-    // 2. Fetch the freshest possible copy of the row and reconcile
+    // 2. Reconcile against existing state if external changes arrived without an extra heavy remote GET
     let merged = normalized;
-    try {
-      // Load complete remote manifest including individual vehicles from transport_vehicles
-      const remote = await loadManifest(key).catch(() => null);
-      if (remote && remote.date === key) {
-        merged = reconcileManifestForSave(baseline, normalized, remote);
-      }
-    } catch (err) {
-      console.warn('[useManifest] Could not fetch latest manifest before saving, saving as-is:', err);
+    if (baseline && manifestRef.current && manifestRef.current !== baseline) {
+      merged = reconcileManifestForSave(baseline, normalized, manifestRef.current);
     }
 
     // 3. Broadcast across local browser tabs immediately
@@ -698,47 +749,17 @@ export function useManifest(
     lastLocalSaveTimeRef.current = Date.now();
     setManifest(merged);
 
-    // 6. Persist the reconciled manifest to Supabase (source of truth), with local fallback
-    try {
-      // Also persist each vehicle individually to transport_vehicles for granular control
-      await syncVehiclesToDb(merged.date, merged.vehicles).catch((err) => {
-        console.warn('[useManifest] Error saving individual vehicles:', err);
-      });
-
-      const { error: upsertError, data } = await supabase
-        .from(MANIFESTS_TABLE)
-        .upsert(
-          {
-            date: merged.date,
-            signups: merged.signups,
-            vehicles: merged.vehicles,
-          },
-          { onConflict: 'date' }
-        )
-        .select('updated_at')
-        .maybeSingle();
-
-      if (upsertError) {
-        console.warn('[useManifest] Supabase upsert error, syncing to local storage:', upsertError);
-        mockStorage.upsert(MANIFESTS_TABLE, {
-          date: merged.date,
-          signups: merged.signups,
-          vehicles: merged.vehicles,
-          updated_at: new Date().toISOString(),
-        });
-      } else if (data?.updated_at) {
-        lastSavedUpdatedAtRef.current = data.updated_at;
-        lastKnownUpdatedAtRef.current = data.updated_at;
-      }
-    } catch (err) {
-      console.warn('[useManifest] Exception during supabase save, falling back locally:', err);
-      mockStorage.upsert(MANIFESTS_TABLE, {
-        date: merged.date,
-        signups: merged.signups,
-        vehicles: merged.vehicles,
-        updated_at: new Date().toISOString(),
-      });
+    // 6. Persist the reconciled manifest to Supabase with debounce (600ms) to protect edge requests on rapid saves
+    pendingRemoteSaveManifestRef.current = merged;
+    if (pendingRemoteSaveTimerRef.current) {
+      clearTimeout(pendingRemoteSaveTimerRef.current);
     }
+    pendingRemoteSaveTimerRef.current = setTimeout(() => {
+      pendingRemoteSaveTimerRef.current = null;
+      if (pendingRemoteSaveManifestRef.current) {
+        executeRemotePersist(pendingRemoteSaveManifestRef.current);
+      }
+    }, 600);
   }
 
   async function reset(): Promise<void> {
@@ -796,16 +817,14 @@ export function useManifest(
   ): Promise<void> {
     if (!key) return;
 
-    // 1. Fetch fresh manifest directly from remote server to preserve concurrent edits on OTHER vehicles
-    let remoteManifest: Manifest | null = null;
-    try {
-      remoteManifest = await loadManifest(key).catch(() => null);
-    } catch {
-      remoteManifest = null;
-    }
-
+    // 1. Use the continuously synchronized manifest state (receives Supabase Realtime updates)
+    let remoteManifest = manifestRef.current ?? manifest;
     if (!remoteManifest) {
-      remoteManifest = manifestRef.current ?? manifest;
+      try {
+        remoteManifest = await loadManifest(key).catch(() => null);
+      } catch {
+        remoteManifest = null;
+      }
     }
     if (!remoteManifest) return;
 

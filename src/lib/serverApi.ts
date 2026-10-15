@@ -69,16 +69,20 @@ export interface ManifestSummary {
 
 const PENDING_QUEUE_KEY = 'crc_pending_submissions_queue';
 
-let serverAvailable: boolean | null = true;
+const isProd = Boolean(typeof import.meta !== 'undefined' && import.meta.env?.PROD);
+
+let serverAvailable: boolean | null = isProd ? false : true;
 let healthCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function isServerOnline(): boolean {
   if (typeof window === 'undefined') return false;
-  return serverAvailable !== false;
+  if (import.meta.env.PROD) return false;
+  return serverAvailable === true;
 }
 
 export function markServerOffline(): void {
   serverAvailable = false;
+  if (import.meta.env.PROD) return;
   if (!healthCheckTimer) {
     healthCheckTimer = setTimeout(async () => {
       healthCheckTimer = null;
@@ -100,6 +104,10 @@ export function markServerOffline(): void {
 }
 
 export function markServerOnline(): void {
+  if (import.meta.env.PROD) {
+    serverAvailable = false;
+    return;
+  }
   serverAvailable = true;
 }
 
@@ -180,7 +188,7 @@ export async function flushPendingQueue(): Promise<number> {
   return flushedCount;
 }
 
-if (typeof window !== 'undefined') {
+if (typeof window !== 'undefined' && !isProd) {
   window.addEventListener('online', () => {
     if (getPendingQueue().length > 0) {
       flushPendingQueue().catch(() => {});

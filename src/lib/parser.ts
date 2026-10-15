@@ -1,4 +1,16 @@
-import * as XLSX from 'xlsx';
+type XLSXType = typeof import('xlsx');
+let _cachedXlsx: XLSXType | null = null;
+
+export async function getXlsxModule(): Promise<XLSXType> {
+  if (!_cachedXlsx) {
+    _cachedXlsx = await import('xlsx');
+  }
+  return _cachedXlsx;
+}
+
+export function setXlsxModule(mod: XLSXType): void {
+  _cachedXlsx = mod;
+}
 import type { Passenger, ServiceType } from './types';
 import { MIN_TAXI_THRESHOLD, MIN_AM_NORMAL_THRESHOLD, hubDisplayName } from './types';
 import { sanitizeTransportValue } from './transportSanitization';
@@ -1466,7 +1478,11 @@ function processExtractedCandidates(
  * Filters out computed/dashboard sheets, trims trailing blank rows,
  * parses unanchored date values, and returns ParseResult with skippedSheets.
  */
-export function parseWorkbook(file: ArrayBuffer | Uint8Array | string, opts: ParseOptions): ParseResult {
+export function parseWorkbook(file: ArrayBuffer | Uint8Array | string, opts: ParseOptions, xlsxOverride?: XLSXType): ParseResult {
+  const XLSX = xlsxOverride || _cachedXlsx;
+  if (!XLSX) {
+    throw new Error('XLSX module is not loaded. Please use parseWorkbookAsync or call getXlsxModule() first.');
+  }
   const readType = typeof file === 'string' ? 'string' : 'array';
   const wb = XLSX.read(file, { type: readType, cellDates: true });
   if (!wb.SheetNames || wb.SheetNames.length === 0) {
@@ -1584,6 +1600,7 @@ export async function parseWorkbookAsync(
   opts: ParseOptions,
   onProgress?: ParseProgressCallback
 ): Promise<ParseResult> {
+  const XLSX = await getXlsxModule();
   const readType = typeof file === 'string' ? 'string' : 'array';
   const wb = XLSX.read(file, { type: readType, cellDates: true });
   if (!wb.SheetNames || wb.SheetNames.length === 0) {

@@ -3,6 +3,7 @@ import { normalizePassengerText } from './importer';
 import { naturalCompare } from './sort';
 import { isDreamWeekDate, DREAMWEEK_FARE } from './types';
 import { supabase } from './supabase';
+import { isServerOnline } from './serverApi';
 
 export type RehearsalLegs = 'both' | 'going' | 'return';
 
@@ -844,15 +845,17 @@ export async function saveRehearsalTemplate(templates: TaxiStopTemplate[]): Prom
     console.warn('Failed to cache rehearsal template in localStorage:', err);
   }
 
-  // 2. Central Server API (persists in data/rehearsal_template.json)
-  try {
-    await fetch('/api/rehearsal-template', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ template: templates }),
-    });
-  } catch (err) {
-    console.debug('Failed to save rehearsal template to server:', err);
+  // 2. Central Server API (persists in data/rehearsal_template.json in DEV)
+  if (!import.meta.env.PROD && isServerOnline()) {
+    try {
+      await fetch('/api/rehearsal-template', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ template: templates }),
+      });
+    } catch (err) {
+      console.debug('Failed to save rehearsal template to server:', err);
+    }
   }
 
   // 3. Supabase table
@@ -871,22 +874,24 @@ export async function saveRehearsalTemplate(templates: TaxiStopTemplate[]): Prom
  * Loads rehearsal template across devices from Server / Supabase, falling back to local storage.
  */
 export async function fetchRehearsalTemplate(): Promise<TaxiStopTemplate[] | null> {
-  // 1. Try server API
-  try {
-    const res = await fetch('/api/rehearsal-template');
-    if (res.ok) {
-      const data = await res.json();
-      if (data && Array.isArray(data.template) && data.template.length > 0) {
-        try {
-          localStorage.setItem(TEMPLATE_KEY, JSON.stringify(data.template));
-        } catch {
-          /* ignore */
+  // 1. Try server API in DEV only
+  if (!import.meta.env.PROD && isServerOnline()) {
+    try {
+      const res = await fetch('/api/rehearsal-template');
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.template) && data.template.length > 0) {
+          try {
+            localStorage.setItem(TEMPLATE_KEY, JSON.stringify(data.template));
+          } catch {
+            /* ignore */
+          }
+          return data.template as TaxiStopTemplate[];
         }
-        return data.template as TaxiStopTemplate[];
       }
+    } catch {
+      /* fallback */
     }
-  } catch {
-    /* fallback */
   }
 
   // 2. Try Supabase

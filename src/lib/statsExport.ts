@@ -1,4 +1,3 @@
-import * as XLSX from 'xlsx';
 import type { Manifest, Vehicle, Passenger } from './types';
 import { getPassengerFare } from './types';
 import { sortVehiclesNatural } from './sort';
@@ -197,7 +196,8 @@ export function extractAllVehicleStats(manifest: Manifest): ExtractedVehicleStat
  * 2. Sheet "Detailed Passenger Roster"
  * 3. Sheet "Stats Link Format"
  */
-export function downloadTaxiStatsExcel(manifest: Manifest, customFileName?: string): void {
+export async function downloadTaxiStatsExcel(manifest: Manifest, customFileName?: string): Promise<void> {
+  const XLSX = await import('xlsx');
   const statsList = extractAllVehicleStats(manifest);
   const { date: sessionDate, service: sessionService } = parseManifestKey(manifest.date);
   const wb = XLSX.utils.book_new();

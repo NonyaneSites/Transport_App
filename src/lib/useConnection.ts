@@ -1,30 +1,24 @@
 import { useEffect, useState } from 'react';
-import { supabase } from './supabase';
-import { MANIFESTS_TABLE } from './supabase';
+import { supabase, MANIFESTS_TABLE, isSupabaseConfigured } from './supabase';
 
 export type ConnectionState = 'connecting' | 'online' | 'offline';
 
 export function useConnection(): ConnectionState {
-  const [state, setState] = useState<ConnectionState>(() =>
-    typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'online'
-  );
+  const [state, setState] = useState<ConnectionState>(() => {
+    if (!isSupabaseConfigured) return 'offline';
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return 'offline';
+    return 'online';
+  });
 
   useEffect(() => {
     let mounted = true;
 
-    const handleOnline = () => {
-      if (mounted) setState('online');
-    };
+    if (!isSupabaseConfigured) {
+      setState('offline');
+      return;
+    }
 
-    const handleOffline = () => {
-      if (mounted) setState('offline');
-    };
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    // Perform a single lightweight connection check on mount (head: true transfers 0 bytes payload)
-    (async () => {
+    const checkReachability = async () => {
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
         if (mounted) setState('offline');
         return;
@@ -39,10 +33,31 @@ export function useConnection(): ConnectionState {
       } catch {
         if (mounted) setState('offline');
       }
-    })();
+    };
+
+    const handleOnline = () => {
+      checkReachability();
+    };
+
+    const handleOffline = () => {
+      if (mounted) setState('offline');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    // Perform lightweight check on mount
+    checkReachability();
+
+    // Periodic check (every 60s, tab visible only)
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      checkReachability();
+    }, 60000);
 
     return () => {
       mounted = false;
+      clearInterval(interval);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };

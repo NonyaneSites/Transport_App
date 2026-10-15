@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
 import { Shield, CheckCircle2, XCircle, AlertTriangle, Users, ArrowLeft, RefreshCw, KeyRound, Building, Phone, Mail } from 'lucide-react';
 
-const SECRET_CODE = import.meta.env.VITE_APPROVAL_SECRET || '230825';
+const SECRET_CODE = (import.meta.env.VITE_APPROVAL_SECRET || (import.meta.env.DEV ? '230825' : '')).trim();
 
 export function ApprovalPage() {
   const [accessCode, setAccessCode] = useState('');
@@ -22,6 +22,10 @@ export function ApprovalPage() {
 
   function handleAuth(e) {
     e.preventDefault();
+    if (!SECRET_CODE) {
+      setAuthError('Master access code is not configured. Set VITE_APPROVAL_SECRET in environment variables.');
+      return;
+    }
     if (accessCode.trim() === SECRET_CODE) {
       setIsAuthenticated(true);
       setAuthError(null);
