@@ -1,10 +1,13 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
-  X, UserPlus, Search, Users, MapPin, Check, Plus, AlertCircle
+  X, UserPlus, Search, Users, MapPin, Check, Plus, AlertCircle, Phone
 } from 'lucide-react';
 import type { Passenger, Vehicle, ServiceType } from '@/lib/types';
 import { isDreamWeekDate, DREAMWEEK_FARE } from '@/lib/types';
 import { naturalCompare } from '@/lib/sort';
+
+const CANONICAL_REHEARSAL_STOPS = ['Braam', 'DFC', 'Auckland Park / SABC', 'Soweto', 'West'];
+const CANONICAL_SUNDAY_STOPS = ['Braam', 'DFC', 'Auckland Park', 'Soweto', 'West'];
 
 interface Props {
   isOpen: boolean;
@@ -40,13 +43,16 @@ export function AddPersonToVehicleModal({
   onAssignExisting,
   onAddNewPassenger,
 }: Props) {
+  const isRehearsal = service === 'Rehearsal';
+  const isDW = date ? isDreamWeekDate(date) : false;
+
   const [activeTab, setActiveTab] = useState<'existing' | 'new'>('existing');
   const [targetVehicleId, setTargetVehicleId] = useState<string>(() => {
     return initialVehicleId || vehicles[0]?.id || '';
   });
 
-  // Keep target vehicle in sync when initialVehicleId changes upon opening
-  React.useEffect(() => {
+  // Keep target vehicle in sync when initialVehicleId or vehicles change upon opening
+  useEffect(() => {
     if (initialVehicleId) {
       setTargetVehicleId(initialVehicleId);
     } else if (vehicles.length > 0 && !targetVehicleId) {
@@ -56,12 +62,12 @@ export function AddPersonToVehicleModal({
 
   // Tab 1 search & filter
   const [searchQuery, setSearchQuery] = useState('');
-  const [unassignedOnly, setUnassignedOnly] = useState(true);
+  const [unassignedOnly, setUnassignedOnly] = useState(false);
   const [recentAssignedId, setRecentAssignedId] = useState<string | null>(null);
 
   // Tab 2 new passenger form
   const [newName, setNewName] = useState('');
-  const [newStop, setNewStop] = useState('');
+  const [newStop, setNewStop] = useState(() => (isRehearsal ? 'Braam' : 'Braam'));
   const [newStructure, setNewStructure] = useState('');
   const [newPhone, setNewPhone] = useState('');
   const [newCategory, setNewCategory] = useState<'Normal' | 'Ushers' | 'Choir' | 'Band'>('Normal');
@@ -69,20 +75,19 @@ export function AddPersonToVehicleModal({
   const [newLegs, setNewLegs] = useState<'both' | 'going' | 'return'>('both');
   const [formError, setFormError] = useState<string | null>(null);
 
-  const isRehearsal = service === 'Rehearsal';
-  const isDW = date ? isDreamWeekDate(date) : false;
-
-  // Gather list of existing stops from signups for suggestions
+  // Gather list of existing stops from signups + canonical stops
   const knownStops = useMemo(() => {
     const set = new Set<string>();
+    const canonical = isRehearsal ? CANONICAL_REHEARSAL_STOPS : CANONICAL_SUNDAY_STOPS;
+    canonical.forEach((s) => set.add(s));
     signups.forEach((p) => {
       if (p.stop && p.stop.trim()) set.add(p.stop.trim());
     });
     return Array.from(set).sort(naturalCompare);
-  }, [signups]);
+  }, [signups, isRehearsal]);
 
-  // Set default stop if none selected
-  React.useEffect(() => {
+  // If newStop is empty, default to first known stop
+  useEffect(() => {
     if (!newStop && knownStops.length > 0) {
       setNewStop(knownStops[0]);
     }
@@ -121,7 +126,6 @@ export function AddPersonToVehicleModal({
   if (!isOpen) return null;
 
   function handleAssignExisting(p: Passenger) {
-    if (!targetVehicleId) return;
     onAssignExisting(String(p.id), targetVehicleId);
     setRecentAssignedId(String(p.id));
     setTimeout(() => {
@@ -135,15 +139,16 @@ export function AddPersonToVehicleModal({
       setFormError('Please enter passenger full name');
       return;
     }
-    if (!newStop.trim()) {
-      setFormError('Please enter or select a pickup stop');
+    const stopToSave = (newStop || knownStops[0] || 'Braam').trim();
+    if (!stopToSave) {
+      setFormError('Please select or enter a pickup stop');
       return;
     }
 
     onAddNewPassenger(
       {
         fullName: newName.trim(),
-        stop: newStop.trim(),
+        stop: stopToSave,
         structure: newStructure.trim() || undefined,
         phone: newPhone.trim() || undefined,
         category: newCategory,
@@ -162,7 +167,11 @@ export function AddPersonToVehicleModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 animate-fade-in backdrop-blur-xs">
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 animate-fade-in backdrop-blur-xs"
+    >
       <div className="w-full max-w-xl max-h-[90vh] flex flex-col rounded-2xl border border-line bg-card shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-line px-5 py-4 bg-card-2/60">
@@ -195,9 +204,9 @@ export function AddPersonToVehicleModal({
             <select
               value={targetVehicleId}
               onChange={(e) => setTargetVehicleId(e.target.value)}
-              className="input-field py-1 text-xs font-bold text-ink bg-card min-w-[180px]"
+              className="input-field py-1 text-xs font-bold text-ink bg-card min-w-[200px]"
             >
-              <option value="">Unassigned Pool (No vehicle)</option>
+              <option value="">Unassigned Pool (Waiting list)</option>
               {vehicles.map((v) => (
                 <option key={v.id} value={v.id}>
                   {v.type === 'Bus' ? '🚌' : '🚕'} {v.name} ({v.riders.length}/{v.capacity || (v.type === 'Taxi' ? 15 : 60)})
@@ -205,9 +214,13 @@ export function AddPersonToVehicleModal({
               ))}
             </select>
           </div>
-          {targetVehicle && (
+          {targetVehicle ? (
             <span className="text-xs text-muted">
               Capacity: <strong className="text-ink">{targetVehicle.riders.length}/{targetVehicle.capacity || (targetVehicle.type === 'Taxi' ? 15 : 60)}</strong>
+            </span>
+          ) : (
+            <span className="text-xs text-amber-300 font-medium">
+              Adds to Unassigned Pool
             </span>
           )}
         </div>
@@ -223,7 +236,7 @@ export function AddPersonToVehicleModal({
                 : 'border-transparent text-muted hover:text-ink'
             }`}
           >
-            Choose Existing Passenger ({signups.length})
+            Choose Existing ({signups.length})
           </button>
           <button
             type="button"
@@ -264,7 +277,7 @@ export function AddPersonToVehicleModal({
                     </button>
                   )}
                 </div>
-                <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer select-none">
+                <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer select-none whitespace-nowrap">
                   <input
                     type="checkbox"
                     checked={unassignedOnly}
@@ -286,13 +299,21 @@ export function AddPersonToVehicleModal({
                         ? 'Try adjusting your search query'
                         : unassignedOnly
                         ? 'All registered passengers are currently assigned to vehicles'
-                        : 'No passengers in this manifest'}
+                        : 'No passengers registered yet. Use "+ Create New Person" to add someone.'}
                     </p>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('new')}
+                      className="mt-3 btn-crimson text-xs py-1.5 px-3 inline-flex items-center gap-1.5"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      <span>Create New Person</span>
+                    </button>
                   </div>
                 ) : (
                   filteredSignups.map((p) => {
                     const assignedVeh = passengerVehicleMap.get(String(p.id));
-                    const isAlreadyInTarget = targetVehicleId && assignedVeh?.id === targetVehicleId;
+                    const isAlreadyInTarget = Boolean(targetVehicleId && assignedVeh?.id === targetVehicleId);
                     const isRecentlyAssigned = recentAssignedId === String(p.id);
 
                     return (
@@ -333,7 +354,7 @@ export function AddPersonToVehicleModal({
                               <MapPin className="h-3 w-3 text-crimson-400" />
                               {p.stop}
                             </span>
-                            {p.phone && <span>· {p.phone}</span>}
+                            {p.phone && <span className="flex items-center gap-0.5"><Phone className="h-3 w-3 text-muted" />{p.phone}</span>}
                             <span>·</span>
                             {assignedVeh ? (
                               <span className="text-amber-300 font-medium">
@@ -355,11 +376,14 @@ export function AddPersonToVehicleModal({
                             <button
                               type="button"
                               onClick={() => handleAssignExisting(p)}
-                              disabled={!targetVehicleId}
                               className="btn-crimson py-1 px-3 text-xs flex items-center gap-1 font-semibold"
                             >
                               <Plus className="h-3.5 w-3.5" />
-                              <span>{assignedVeh ? 'Move Here' : 'Add'}</span>
+                              <span>
+                                {targetVehicle
+                                  ? (assignedVeh ? `Move to ${targetVehicle.name}` : `Add to ${targetVehicle.name}`)
+                                  : (assignedVeh ? 'Unassign' : 'Unassigned')}
+                              </span>
                             </button>
                           )}
                         </div>
@@ -386,7 +410,10 @@ export function AddPersonToVehicleModal({
                   <input
                     type="text"
                     value={newName}
-                    onChange={(e) => setNewName(e.target.value)}
+                    onChange={(e) => {
+                      setNewName(e.target.value);
+                      if (formError) setFormError(null);
+                    }}
                     placeholder="e.g. Thato Ndwebi"
                     className="input-field w-full text-xs py-2"
                     required
@@ -402,7 +429,10 @@ export function AddPersonToVehicleModal({
                     type="text"
                     list="known-stops-list"
                     value={newStop}
-                    onChange={(e) => setNewStop(e.target.value)}
+                    onChange={(e) => {
+                      setNewStop(e.target.value);
+                      if (formError) setFormError(null);
+                    }}
                     placeholder="Type or pick stop..."
                     className="input-field w-full text-xs py-2"
                     required
@@ -506,12 +536,11 @@ export function AddPersonToVehicleModal({
                 </button>
                 <button
                   type="submit"
-                  disabled={!newName.trim() || !newStop.trim()}
                   className="btn-crimson py-2 px-4 text-xs font-bold flex items-center gap-1.5"
                 >
                   <UserPlus className="h-4 w-4" />
                   <span>
-                    Add to {targetVehicle ? targetVehicle.name : 'Unassigned'}
+                    Add to {targetVehicle ? targetVehicle.name : 'Unassigned Pool'}
                   </span>
                 </button>
               </div>
@@ -522,3 +551,5 @@ export function AddPersonToVehicleModal({
     </div>
   );
 }
+
+export default AddPersonToVehicleModal;

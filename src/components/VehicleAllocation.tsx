@@ -10,9 +10,7 @@ import { EditVehicleModal } from './EditVehicleModal';
 const TransferSponsorshipModal = lazy(() =>
   import('./TransferSponsorshipModal').then((m) => ({ default: m.TransferSponsorshipModal }))
 );
-const AddPersonToVehicleModal = lazy(() =>
-  import('./AddPersonToVehicleModal').then((m) => ({ default: m.AddPersonToVehicleModal }))
-);
+import { AddPersonToVehicleModal } from './AddPersonToVehicleModal';
 import { ChangeServiceModal } from './ChangeServiceModal';
 import { ChangeStopModal } from './ChangeStopModal';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
@@ -202,6 +200,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   const [addPersonModalOpen, setAddPersonModalOpen] = useState(false);
   const [selectedVehicleForAdd, setSelectedVehicleForAdd] = useState<Vehicle | null>(null);
 
+
   // Adding stop to vehicle route inline state
   const [addingStopVehicleId, setAddingStopVehicleId] = useState<string | null>(null);
   const [newStopInput, setNewStopInput] = useState<string>('');
@@ -343,13 +342,12 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     mutateAndSave((prev) => {
       const p = prev.signups.find((sig) => String(sig.id) === sId);
       if (!p) return prev;
-      const targetVeh = prev.vehicles.find((v) => v.id === vehicleId);
-      if (!targetVeh) return prev;
+      const targetVeh = vehicleId ? prev.vehicles.find((v) => v.id === vehicleId) : null;
 
-      const stopName = p.stop ? hubDisplayName(targetVeh.type, p.stop) : '';
+      const stopName = targetVeh && p.stop ? hubDisplayName(targetVeh.type, p.stop) : '';
 
       const nextSignups = prev.signups.map((sig) =>
-        String(sig.id) === sId ? { ...sig, assignedTo: vehicleId } : sig
+        String(sig.id) === sId ? { ...sig, assignedTo: targetVeh ? vehicleId : null } : sig
       );
 
       const nextVehicles = prev.vehicles.map((v) => {
@@ -357,7 +355,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
         const riders = hadRider ? v.riders.filter((id) => String(id) !== sId) : [...v.riders];
         let orderedStops = v.orderedStops ?? [];
 
-        if (v.id === vehicleId) {
+        if (targetVeh && v.id === vehicleId) {
           if (!riders.some((id) => String(id) === sId)) {
             riders.push(sId);
           }
@@ -373,9 +371,11 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     });
 
     const p = localManifest.signups.find((sig) => String(sig.id) === sId);
-    const targetVeh = localManifest.vehicles.find((v) => v.id === vehicleId);
+    const targetVeh = vehicleId ? localManifest.vehicles.find((v) => v.id === vehicleId) : null;
     setMoveNotification({
-      text: `✓ Added ${p?.fullName || 'passenger'} to ${targetVeh?.name || 'vehicle'}`,
+      text: targetVeh
+        ? `✓ Added ${p?.fullName || 'passenger'} to ${targetVeh.name}`
+        : `✓ Moved ${p?.fullName || 'passenger'} to Unassigned Pool`,
       timestamp: Date.now(),
     });
   }, [localManifest.signups, localManifest.vehicles, mutateAndSave]);
@@ -1406,7 +1406,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
             setSelectedVehicleForAdd(null);
             setAddPersonModalOpen(true);
           }}
-          className="btn-ghost border-line hover:border-crimson-500/50 hover:text-crimson-300 flex items-center gap-1.5"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-crimson-500/40 bg-crimson-500/10 px-3 py-2 text-xs font-semibold text-crimson-300 hover:bg-crimson-500/20 hover:border-crimson-500 transition-colors shadow-xs"
           title="Add someone to a vehicle or to the waiting pool"
         >
           <UserPlus className="h-4 w-4 text-crimson-400" />
@@ -2452,7 +2452,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                       className="inline-flex items-center gap-1 rounded-lg border border-crimson-500/40 bg-crimson-500/10 px-2.5 py-2 text-xs font-semibold text-crimson-300 hover:bg-crimson-500/20 hover:border-crimson-500 transition-colors shadow-xs"
                     >
                       <UserPlus className="h-4 w-4" />
-                      <span className="hidden sm:inline">Add Person</span>
+                      <span>Add Person</span>
                     </button>
                     <button
                       type="button"
@@ -2730,19 +2730,32 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
 
                     {/* Rider list — grouped by stop/hub with Re-orderable Route Sequencing Controls */}
                     {riders.length === 0 && groups.length === 0 ? (
-                      <div className="py-4 text-center">
-                        <p className="text-xs text-muted mb-2">No passengers or route stops assigned to this vehicle yet.</p>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setAddingStopVehicleId(addingStopVehicleId === vehicle.id ? null : vehicle.id);
-                            setNewStopInput('');
-                          }}
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition-all"
-                        >
-                          <Plus className="h-3.5 w-3.5" />
-                          <span>Add First Route Stop</span>
-                        </button>
+                      <div className="py-4 text-center space-y-2.5">
+                        <p className="text-xs text-muted">No passengers or route stops assigned to this vehicle yet.</p>
+                        <div className="flex items-center justify-center gap-2 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedVehicleForAdd(vehicle);
+                              setAddPersonModalOpen(true);
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-crimson-500/40 bg-crimson-500/10 px-3 py-1.5 text-xs font-semibold text-crimson-300 hover:bg-crimson-500/20 hover:border-crimson-500 transition-all shadow-xs"
+                          >
+                            <UserPlus className="h-3.5 w-3.5" />
+                            <span>Add Person to {vehicle.name}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAddingStopVehicleId(addingStopVehicleId === vehicle.id ? null : vehicle.id);
+                              setNewStopInput('');
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition-all"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                            <span>Add First Route Stop</span>
+                          </button>
+                        </div>
                       </div>
                     ) : (
                       <div className="space-y-4">
@@ -3328,22 +3341,20 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
 
       {/* Dedicated Add Person to Vehicle / Manifest Modal */}
       {addPersonModalOpen && (
-        <Suspense fallback={null}>
-          <AddPersonToVehicleModal
-            isOpen={addPersonModalOpen}
-            onClose={() => {
-              setAddPersonModalOpen(false);
-              setSelectedVehicleForAdd(null);
-            }}
-            initialVehicleId={selectedVehicleForAdd?.id}
-            vehicles={localManifest.vehicles}
-            signups={localManifest.signups}
-            service={service}
-            date={parseManifestKey(localManifest.date).date}
-            onAssignExisting={handleAssignExistingToVehicle}
-            onAddNewPassenger={handleAddNewPassenger}
-          />
-        </Suspense>
+        <AddPersonToVehicleModal
+          isOpen={addPersonModalOpen}
+          onClose={() => {
+            setAddPersonModalOpen(false);
+            setSelectedVehicleForAdd(null);
+          }}
+          initialVehicleId={selectedVehicleForAdd?.id}
+          vehicles={localManifest.vehicles}
+          signups={localManifest.signups}
+          service={service}
+          date={parseManifestKey(localManifest.date).date}
+          onAssignExisting={handleAssignExistingToVehicle}
+          onAddNewPassenger={handleAddNewPassenger}
+        />
       )}
     </div>
   );
