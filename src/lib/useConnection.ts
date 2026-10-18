@@ -18,11 +18,14 @@ export function useConnection(): ConnectionState {
       return;
     }
 
+    let isChecking = false;
     const checkReachability = async () => {
+      if (isChecking) return;
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
         if (mounted) setState('offline');
         return;
       }
+      isChecking = true;
       try {
         const { error } = await supabase
           .from(MANIFESTS_TABLE)
@@ -32,6 +35,8 @@ export function useConnection(): ConnectionState {
         }
       } catch {
         if (mounted) setState('offline');
+      } finally {
+        isChecking = false;
       }
     };
 

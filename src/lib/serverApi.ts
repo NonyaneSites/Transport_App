@@ -69,20 +69,16 @@ export interface ManifestSummary {
 
 const PENDING_QUEUE_KEY = 'crc_pending_submissions_queue';
 
-const isProd = Boolean(typeof import.meta !== 'undefined' && import.meta.env?.PROD);
-
-let serverAvailable: boolean | null = isProd ? false : true;
+let serverAvailable: boolean | null = true;
 let healthCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function isServerOnline(): boolean {
   if (typeof window === 'undefined') return false;
-  if (import.meta.env.PROD) return false;
   return serverAvailable === true;
 }
 
 export function markServerOffline(): void {
   serverAvailable = false;
-  if (import.meta.env.PROD) return;
   if (!healthCheckTimer) {
     healthCheckTimer = setTimeout(async () => {
       healthCheckTimer = null;
@@ -104,10 +100,6 @@ export function markServerOffline(): void {
 }
 
 export function markServerOnline(): void {
-  if (import.meta.env.PROD) {
-    serverAvailable = false;
-    return;
-  }
   serverAvailable = true;
 }
 
@@ -147,48 +139,66 @@ function savePendingQueue(queue: PendingQueueItem[]): void {
 }
 
 export function queueOfflineAction(type: PendingQueueItem['type'], key: string, payload: unknown): void {
-  if (!isServerOnline()) return;
   const queue = getPendingQueue();
-  queue.push({
+  // Deduplicate: if an action of the same type and key is already queued, update to newest payload
+  const existingIdx = queue.findIndex((item) => item.type === type && item.key === key);
+  const newItem: PendingQueueItem = {
     id: `queue_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     type,
     key,
     payload,
     timestamp: Date.now(),
-  });
+  };
+
+  if (existingIdx !== -1) {
+    queue[existingIdx] = newItem;
+  } else {
+    queue.push(newItem);
+  }
   savePendingQueue(queue);
 }
 
+let isFlushingQueue = false;
+
 // Flush pending queue when network is restored
 export async function flushPendingQueue(): Promise<number> {
-  const queue = getPendingQueue();
-  if (queue.length === 0 || !isServerOnline()) return 0;
+  if (isFlushingQueue) return 0;
+  if (!isServerOnline()) return 0;
 
-  const remaining: PendingQueueItem[] = [];
-  let flushedCount = 0;
+  isFlushingQueue = true;
+  try {
+    const queue = getPendingQueue();
+    if (queue.length === 0) return 0;
 
-  for (const item of queue) {
-    try {
-      if (item.type === 'submit_vehicle') {
-        await submitVehicleToServer(item.key, item.payload as SubmitVehiclePayload, false);
-        flushedCount++;
-      } else if (item.type === 'save_manifest') {
-        await saveManifestToServer(item.payload as Manifest, false);
-        flushedCount++;
-      } else if (item.type === 'reopen_vehicle') {
-        await reopenVehicleOnServer(item.key, item.payload as ReopenVehiclePayload, false);
-        flushedCount++;
+    const remaining: PendingQueueItem[] = [];
+    let flushedCount = 0;
+
+    for (const item of queue) {
+      try {
+        if (item.type === 'submit_vehicle') {
+          await submitVehicleToServer(item.key, item.payload as SubmitVehiclePayload, false);
+          flushedCount++;
+        } else if (item.type === 'save_manifest') {
+          await saveManifestToServer(item.payload as Manifest, false);
+          flushedCount++;
+        } else if (item.type === 'reopen_vehicle') {
+          await reopenVehicleOnServer(item.key, item.payload as ReopenVehiclePayload, false);
+          flushedCount++;
+        }
+      } catch (err) {
+        console.warn(`[ServerAPI] Failed to flush queue item ${item.id}:`, err);
+        remaining.push(item);
       }
-    } catch {
-      remaining.push(item);
     }
-  }
 
-  savePendingQueue(remaining);
-  return flushedCount;
+    savePendingQueue(remaining);
+    return flushedCount;
+  } finally {
+    isFlushingQueue = false;
+  }
 }
 
-if (typeof window !== 'undefined' && !isProd) {
+if (typeof window !== 'undefined') {
   window.addEventListener('online', () => {
     if (getPendingQueue().length > 0) {
       flushPendingQueue().catch(() => {});

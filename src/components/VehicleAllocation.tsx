@@ -24,6 +24,8 @@ import { detectVehicleRep, detectAllVehicleReps, getRepStructure, isPassengerRep
 import {
   generateWhatsAppRouteManifest,
   generateWhatsAppRepManifest,
+  generateTaxiRepsManifest,
+  generateSimpleTaxiRepsList,
   generateWhatsAppVehicleRepMessage,
   findVehicleRepPassenger,
   normalizeWhatsAppPhone,
@@ -181,7 +183,9 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   const [highlightRep, setHighlightRep] = useState<string | null>(null);
   const [copiedRoute, setCopiedRoute] = useState(false);
   const [copiedRep, setCopiedRep] = useState(false);
-  const [previewManifestType, setPreviewManifestType] = useState<'route' | 'rep' | null>(null);
+  const [copiedTaxiReps, setCopiedTaxiReps] = useState(false);
+  const [taxiRepsFormat, setTaxiRepsFormat] = useState<'formatted' | 'simple'>('formatted');
+  const [previewManifestType, setPreviewManifestType] = useState<'route' | 'rep' | 'taxi_reps' | null>(null);
   const [whatsAppNotice, setWhatsAppNotice] = useState<{ type: 'success' | 'error'; text: string; url?: string } | null>(null);
 
   // Cross-service unaccounted sponsorship transfer state
@@ -386,23 +390,27 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     stop: string;
     structure?: string;
     phone?: string;
-    category?: 'Normal' | 'Ushers' | 'Choir' | 'Band';
+    category?: 'Ushers' | 'Normal' | 'Choir' | 'Band' | 'Serving';
     memberType?: 'FTV' | 'V' | 'M';
     legs?: 'both' | 'going' | 'return';
   }, targetVehicleId?: string) => {
     const newId = `manual_p_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const targetVeh = targetVehicleId ? localManifest.vehicles.find((v) => v.id === targetVehicleId) : null;
+    const normalizedCategory: 'Ushers' | 'Serving' | 'Normal' =
+      passengerData.category === 'Ushers' ? 'Ushers' : passengerData.category === 'Serving' ? 'Serving' : 'Normal';
+
     const newPassenger: Passenger = {
       id: newId,
       fullName: passengerData.fullName.trim(),
       stop: passengerData.stop.trim(),
-      structure: passengerData.structure?.trim() || undefined,
+      structure: passengerData.structure?.trim() || 'No Structure',
       phone: passengerData.phone?.trim() || undefined,
       service: service,
-      category: passengerData.category || 'Normal',
+      category: normalizedCategory,
       memberType: passengerData.memberType || undefined,
       legs: passengerData.legs || (service === 'Rehearsal' ? 'both' : undefined),
       present: false,
+      cancellationFeeOwed: false,
       assignedTo: targetVehicleId || null,
       walkIn: true,
     };
@@ -1146,6 +1154,24 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     downloadTextFile(`whatsapp_rep_manifest_${sessionDate}_${service}.txt`, text);
   }
 
+  async function handleCopyTaxiReps() {
+    const text = taxiRepsFormat === 'simple' && previewManifestType === 'taxi_reps'
+      ? generateSimpleTaxiRepsList(localManifest)
+      : generateTaxiRepsManifest(localManifest, service);
+    await copyTextToClipboard(text);
+    setCopiedTaxiReps(true);
+    setMoveNotification({ text: '✓ Copied Taxi Reps to clipboard (taxis only)', timestamp: Date.now() });
+    setTimeout(() => setCopiedTaxiReps(false), 2000);
+  }
+
+  function handleDownloadTaxiReps() {
+    const text = taxiRepsFormat === 'simple' && previewManifestType === 'taxi_reps'
+      ? generateSimpleTaxiRepsList(localManifest)
+      : generateTaxiRepsManifest(localManifest, service);
+    const { date: sessionDate } = parseManifestKey(localManifest.date);
+    downloadTextFile(`taxi_reps_${sessionDate}_${service}.txt`, text);
+  }
+
   function handleWhatsAppRep(vehicle: Vehicle) {
     if (vehicle.type === 'Bus') return;
     if (!vehicle.repName?.trim()) {
@@ -1187,6 +1213,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   }
 
   const hasAllocatedVehicles = localManifest.vehicles.length > 0 && localManifest.vehicles.some((v) => riderPassengers(v).length > 0);
+  const hasTaxis = localManifest.vehicles.some((v) => v.type === 'Taxi' || (v.type !== 'Bus' && !v.name.toLowerCase().includes('bus')));
 
   return (
     <div className="card">
@@ -1198,69 +1225,106 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
         </div>
 
         {/* Quick manifest export action buttons in header */}
-        {hasAllocatedVehicles && (
+        {(hasAllocatedVehicles || hasTaxis) && (
           <div className="flex items-center gap-2 flex-wrap">
             {/* Route Manifest Button Group */}
-            <div className="inline-flex rounded-lg border border-success/30 bg-success/10 p-0.5 shadow-sm">
-              <button
-                type="button"
-                onClick={handleDownloadRouteManifest}
-                className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold text-success-light hover:bg-success/20 transition-colors"
-                title="Download WhatsApp Route Manifest (.txt)"
-              >
-                <Download className="h-3.5 w-3.5" />
-                <span>Route Manifest (.txt)</span>
-              </button>
-              <div className="w-[1px] bg-success/20 my-1" />
-              <button
-                type="button"
-                onClick={handleCopyRouteManifest}
-                className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-success-light hover:bg-success/20 transition-colors"
-                title="Copy Route Manifest to clipboard"
-              >
-                {copiedRoute ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
-                <span>{copiedRoute ? 'Copied' : 'Copy'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setPreviewManifestType('route')}
-                className="inline-flex items-center gap-1 rounded-md px-1.5 py-1.5 text-xs font-medium text-success-light/80 hover:bg-success/20 transition-colors"
-                title="Preview Route Manifest"
-              >
-                <Eye className="h-3.5 w-3.5" />
-              </button>
-            </div>
+            {hasAllocatedVehicles && (
+              <div className="inline-flex rounded-lg border border-success/30 bg-success/10 p-0.5 shadow-sm">
+                <button
+                  type="button"
+                  onClick={handleDownloadRouteManifest}
+                  className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold text-success-light hover:bg-success/20 transition-colors"
+                  title="Download WhatsApp Route Manifest (.txt)"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  <span>Route Manifest (.txt)</span>
+                </button>
+                <div className="w-[1px] bg-success/20 my-1" />
+                <button
+                  type="button"
+                  onClick={handleCopyRouteManifest}
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-success-light hover:bg-success/20 transition-colors"
+                  title="Copy Route Manifest to clipboard"
+                >
+                  {copiedRoute ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                  <span>{copiedRoute ? 'Copied' : 'Copy'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewManifestType('route')}
+                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-1.5 text-xs font-medium text-success-light/80 hover:bg-success/20 transition-colors"
+                  title="Preview Route Manifest"
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
 
             {/* Rep Manifest Button Group */}
-            <div className="inline-flex rounded-lg border border-amber-500/30 bg-amber-500/10 p-0.5 shadow-sm">
-              <button
-                type="button"
-                onClick={handleDownloadRepManifest}
-                className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition-colors"
-                title="Download WhatsApp Rep Manifest with passenger roster (.txt)"
-              >
-                <FileDown className="h-3.5 w-3.5" />
-                <span>Rep Manifest (.txt)</span>
-              </button>
-              <div className="w-[1px] bg-amber-500/20 my-1" />
-              <button
-                type="button"
-                onClick={handleCopyRepManifest}
-                className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/20 transition-colors"
-                title="Copy Rep Manifest with passenger roster to clipboard"
-              >
-                {copiedRep ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
-                <span>{copiedRep ? 'Copied' : 'Copy'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setPreviewManifestType('rep')}
-                className="inline-flex items-center gap-1 rounded-md px-1.5 py-1.5 text-xs font-medium text-amber-300/80 hover:bg-amber-500/20 transition-colors"
-                title="Preview Rep Manifest"
-              >
-                <Eye className="h-3.5 w-3.5" />
-              </button>
-            </div>
+            {hasAllocatedVehicles && (
+              <div className="inline-flex rounded-lg border border-amber-500/30 bg-amber-500/10 p-0.5 shadow-sm">
+                <button
+                  type="button"
+                  onClick={handleDownloadRepManifest}
+                  className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition-colors"
+                  title="Download WhatsApp Rep Manifest with passenger roster (.txt)"
+                >
+                  <FileDown className="h-3.5 w-3.5" />
+                  <span>Rep Manifest (.txt)</span>
+                </button>
+                <div className="w-[1px] bg-amber-500/20 my-1" />
+                <button
+                  type="button"
+                  onClick={handleCopyRepManifest}
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/20 transition-colors"
+                  title="Copy Rep Manifest with passenger roster to clipboard"
+                >
+                  {copiedRep ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                  <span>{copiedRep ? 'Copied' : 'Copy'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewManifestType('rep')}
+                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-1.5 text-xs font-medium text-amber-300/80 hover:bg-amber-500/20 transition-colors"
+                  title="Preview Rep Manifest"
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* Taxi Reps Button Group — ONLY TAXIS */}
+            {hasTaxis && (
+              <div className="inline-flex rounded-lg border border-sky-500/30 bg-sky-500/10 p-0.5 shadow-sm">
+                <button
+                  type="button"
+                  onClick={handleDownloadTaxiReps}
+                  className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold text-sky-300 hover:bg-sky-500/20 transition-colors"
+                  title="Download Taxi Reps list for Taxis only (.txt)"
+                >
+                  <FileText className="h-3.5 w-3.5" />
+                  <span>Taxi Reps (.txt)</span>
+                </button>
+                <div className="w-[1px] bg-sky-500/20 my-1" />
+                <button
+                  type="button"
+                  onClick={handleCopyTaxiReps}
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-sky-300 hover:bg-sky-500/20 transition-colors"
+                  title="Copy allocated rep of each taxi to clipboard (only taxis)"
+                >
+                  {copiedTaxiReps ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                  <span>{copiedTaxiReps ? 'Copied' : 'Copy'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewManifestType('taxi_reps')}
+                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-1.5 text-xs font-medium text-sky-300/80 hover:bg-sky-500/20 transition-colors"
+                  title="Preview Taxi Reps List (Taxis only)"
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1274,12 +1338,18 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                 <FileText className="h-5 w-5 text-crimson-400" />
                 <div>
                   <h3 className="font-display text-sm font-bold text-ink">
-                    {previewManifestType === 'route' ? 'WhatsApp Route Manifest Preview' : 'WhatsApp Rep Manifest Preview'}
+                    {previewManifestType === 'route'
+                      ? 'WhatsApp Route Manifest Preview'
+                      : previewManifestType === 'rep'
+                      ? 'WhatsApp Rep Manifest Preview'
+                      : 'Allocated Taxi Reps (Only Taxis)'}
                   </h3>
                   <p className="text-[11px] text-muted">
                     {previewManifestType === 'route'
                       ? 'Formatted for transport coordination and driver stop times'
-                      : 'Formatted with numbered passenger roster by stop for vehicle reps'}
+                      : previewManifestType === 'rep'
+                      ? 'Formatted with numbered passenger roster by stop for vehicle reps'
+                      : 'Allocated rep for each taxi with phone & structure details (taxis only)'}
                   </p>
                 </div>
               </div>
@@ -1294,7 +1364,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
 
             <div className="p-5 flex-1 overflow-y-auto">
               <div className="flex items-center justify-between mb-2">
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
                   <button
                     type="button"
                     onClick={() => setPreviewManifestType('route')}
@@ -1317,13 +1387,51 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                   >
                     Rep Manifest (With Riders)
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewManifestType('taxi_reps')}
+                    className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all ${
+                      previewManifestType === 'taxi_reps'
+                        ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                        : 'bg-card-2 text-muted hover:text-ink'
+                    }`}
+                  >
+                    🚕 Taxi Reps (Only Taxis)
+                  </button>
                 </div>
+
+                {previewManifestType === 'taxi_reps' && (
+                  <div className="flex items-center gap-1 bg-card-2 p-0.5 rounded-lg border border-line text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setTaxiRepsFormat('formatted')}
+                      className={`px-2 py-0.5 rounded font-medium transition-all ${
+                        taxiRepsFormat === 'formatted' ? 'bg-sky-500/20 text-sky-300 font-semibold' : 'text-muted hover:text-ink'
+                      }`}
+                    >
+                      WhatsApp
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTaxiRepsFormat('simple')}
+                      className={`px-2 py-0.5 rounded font-medium transition-all ${
+                        taxiRepsFormat === 'simple' ? 'bg-sky-500/20 text-sky-300 font-semibold' : 'text-muted hover:text-ink'
+                      }`}
+                    >
+                      Simple List
+                    </button>
+                  </div>
+                )}
               </div>
 
               <pre className="rounded-xl border border-line bg-black/60 p-4 font-mono text-xs text-ink/90 whitespace-pre-wrap leading-relaxed max-h-[50vh] overflow-y-auto select-all">
                 {previewManifestType === 'route'
                   ? generateWhatsAppRouteManifest(localManifest, service)
-                  : generateWhatsAppRepManifest(localManifest, service)}
+                  : previewManifestType === 'rep'
+                  ? generateWhatsAppRepManifest(localManifest, service)
+                  : taxiRepsFormat === 'simple'
+                  ? generateSimpleTaxiRepsList(localManifest)
+                  : generateTaxiRepsManifest(localManifest, service)}
               </pre>
             </div>
 
@@ -1347,7 +1455,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                     <span>Download .txt</span>
                   </button>
                 </>
-              ) : (
+              ) : previewManifestType === 'rep' ? (
                 <>
                   <button
                     type="button"
@@ -1360,6 +1468,25 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                   <button
                     type="button"
                     onClick={handleDownloadRepManifest}
+                    className="btn-crimson text-xs px-4 py-2 flex items-center gap-1.5"
+                  >
+                    <Download className="h-4 w-4" />
+                    <span>Download .txt</span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleCopyTaxiReps}
+                    className="btn-ghost text-xs px-3 py-2 flex items-center gap-1.5 border-line"
+                  >
+                    {copiedTaxiReps ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+                    <span>{copiedTaxiReps ? 'Copied to Clipboard' : 'Copy Taxi Reps'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadTaxiReps}
                     className="btn-crimson text-xs px-4 py-2 flex items-center gap-1.5"
                   >
                     <Download className="h-4 w-4" />

@@ -59,6 +59,41 @@ function broadcastSse(event: string, data: unknown) {
   }
 }
 
+// Path sanitization helper to strictly prevent directory traversal attacks
+function sanitizeKey(raw: string): string {
+  if (!raw || typeof raw !== 'string') return '';
+  return raw.replace(/[^a-zA-Z0-9_-]/g, '');
+}
+
+function getSafeManifestPath(rawKey: string): string | null {
+  const safe = sanitizeKey(rawKey);
+  if (!safe) return null;
+  const target = path.resolve(MANIFESTS_DIR, `${safe}.json`);
+  if (!target.startsWith(MANIFESTS_DIR)) return null;
+  return target;
+}
+
+// In-memory rate limiting per client IP (DEV protection)
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+function rateLimiter(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const record = rateLimitMap.get(ip) || { count: 0, resetAt: now + 60000 };
+  if (now > record.resetAt) {
+    record.count = 0;
+    record.resetAt = now + 60000;
+  }
+  record.count++;
+  rateLimitMap.set(ip, record);
+  if (record.count > 400) {
+    res.status(429).json({ error: 'Too many requests. Please slow down.' });
+    return;
+  }
+  next();
+}
+
+app.use('/api', rateLimiter);
+
 // ----------------------------------------------------
 // API ROUTES
 // ----------------------------------------------------
@@ -123,15 +158,14 @@ app.get('/api/manifests', (req, res) => {
 
 // Get specific manifest
 app.get('/api/manifests/:key', (req, res) => {
-  const key = req.params.key;
-  const filePath = path.join(MANIFESTS_DIR, `${key}.json`);
-  if (!fs.existsSync(filePath)) {
-    res.status(404).json({ error: 'Manifest not found', date: key });
+  const filePath = getSafeManifestPath(req.params.key);
+  if (!filePath || !fs.existsSync(filePath)) {
+    res.status(404).json({ error: 'Manifest not found', date: req.params.key });
     return;
   }
   const manifest = readJsonFile(filePath, null);
   if (!manifest) {
-    res.status(404).json({ error: 'Manifest not found', date: key });
+    res.status(404).json({ error: 'Manifest not found', date: req.params.key });
     return;
   }
   res.json(manifest);
@@ -167,14 +201,18 @@ app.post('/api/rehearsal-template', (req, res) => {
 
 // Save/Upsert specific manifest
 app.post('/api/manifests/:key', (req, res) => {
-  const key = req.params.key;
+  const filePath = getSafeManifestPath(req.params.key);
+  if (!filePath) {
+    res.status(400).json({ error: 'Invalid manifest key format' });
+    return;
+  }
+  const key = sanitizeKey(req.params.key);
   const manifest = req.body;
   if (!manifest || typeof manifest !== 'object') {
     res.status(400).json({ error: 'Invalid manifest body' });
     return;
   }
 
-  const filePath = path.join(MANIFESTS_DIR, `${key}.json`);
   const nowIso = new Date().toISOString();
 
   // Read existing manifest on disk to guarantee submitted vehicles and their attendance notes are NEVER wiped out by concurrent saves
@@ -305,7 +343,12 @@ function cleanPersonalAbsenteeNote(note?: unknown): string {
 
 // Atomic Vehicle Attendance Submission
 app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
-  const key = req.params.key;
+  const filePath = getSafeManifestPath(req.params.key);
+  if (!filePath) {
+    res.status(400).json({ error: 'Invalid manifest key format' });
+    return;
+  }
+  const key = sanitizeKey(req.params.key);
   const {
     vehicleId,
     repName,
@@ -327,8 +370,6 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
     res.status(400).json({ error: 'vehicleId is required' });
     return;
   }
-
-  const filePath = path.join(MANIFESTS_DIR, `${key}.json`);
   const manifest = readJsonFile<{
     date: string;
     signups: Array<{ id: string; fullName: string; present?: boolean; sponsored?: boolean; didNotPay?: boolean }>;
@@ -741,15 +782,18 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
 
 // Reopen Vehicle Attendance
 app.post('/api/manifests/:key/reopen-vehicle', (req, res) => {
-  const key = req.params.key;
+  const filePath = getSafeManifestPath(req.params.key);
+  if (!filePath) {
+    res.status(400).json({ error: 'Invalid manifest key format' });
+    return;
+  }
+  const key = sanitizeKey(req.params.key);
   const { vehicleId, allRiderNames } = req.body;
 
   if (!vehicleId) {
     res.status(400).json({ error: 'vehicleId is required' });
     return;
   }
-
-  const filePath = path.join(MANIFESTS_DIR, `${key}.json`);
   const manifest = readJsonFile<{
     date: string;
     signups: unknown[];
@@ -826,15 +870,18 @@ app.post('/api/manifests/:key/reopen-vehicle', (req, res) => {
 
 // Vehicle Draft Update
 app.post('/api/manifests/:key/draft', (req, res) => {
-  const key = req.params.key;
+  const filePath = getSafeManifestPath(req.params.key);
+  if (!filePath) {
+    res.status(400).json({ error: 'Invalid manifest key format' });
+    return;
+  }
+  const key = sanitizeKey(req.params.key);
   const { vehicleId, draftState, repName, licensePlate, fullVehicle, manifest: incomingManifest } = req.body;
 
   if (!vehicleId) {
     res.status(400).json({ error: 'vehicleId is required' });
     return;
   }
-
-  const filePath = path.join(MANIFESTS_DIR, `${key}.json`);
   const manifest = readJsonFile<{
     date: string;
     signups: unknown[];
@@ -2156,14 +2203,31 @@ app.get('/api/ledger', (req, res) => {
     }
   }
 
-  // Filter out zero-debt items, parse numeric debt, and sanitize boilerplate notes
+  const actuallySponsoredIds = new Set<string>();
+  const actuallySponsoredKeys = new Set<string>();
+  for (const a of audits) {
+    if (a.status === 'actually_sponsored') {
+      if (a.ledger_entry_id) actuallySponsoredIds.add(String(a.ledger_entry_id));
+      const d = normalizeDateToYMD(a.date) || a.date;
+      actuallySponsoredKeys.add(`${sanitizePassengerDisplayName(a.passenger_name).toLowerCase()}:::${d}`);
+    }
+  }
+
+  // Filter out zero-debt items, settled items, actually-sponsored items, parse numeric debt, and sanitize boilerplate notes
   const activeLedger = ledger
     .filter((entry) => {
+      if (entry.status === 'Paid' || entry.status === 'Settled') return false;
+      if (actuallySponsoredIds.has(String(entry.id))) return false;
+      const dateStr = normalizeDateToYMD(entry.date as string) || (entry.manifest_key ? String(entry.manifest_key).split('_')[0] : (entry.date as string) || '');
+      if (entry.sponsored) {
+        const key = `${sanitizePassengerDisplayName(entry.passenger_name as string).toLowerCase()}:::${dateStr}`;
+        if (actuallySponsoredKeys.has(key)) return false;
+      }
       let rawVal = entry.structure_debt;
       if (rawVal === undefined || rawVal === null || rawVal === '') {
         rawVal = entry.fee;
       }
-      const debt = parseDebtAmount(rawVal, (entry.date as string) || (entry.manifest_key as string));
+      const debt = parseDebtAmount(rawVal, dateStr);
       return debt > 0;
     })
     .map((entry) => {
@@ -2265,7 +2329,18 @@ app.post('/api/ledger/settle', (req, res) => {
   let ledger = readJsonFile<Array<{ id: string; passenger_name?: string; manifest_key?: string }>>(LEDGER_FILE, []);
   const beforeCount = ledger.length;
   const settledEntries = ledger.filter((entry) => idSet.has(entry.id));
-  ledger = ledger.filter((entry) => !idSet.has(entry.id));
+  const settledNow = new Date().toISOString();
+  ledger = ledger.map((entry) => {
+    if (idSet.has(entry.id)) {
+      return {
+        ...entry,
+        status: 'Settled',
+        structure_debt: 0,
+        settled_at: settledNow,
+      };
+    }
+    return entry;
+  });
   atomicWriteJson(LEDGER_FILE, ledger);
 
   // Synchronize with sponsorship audits so settled sponsorships do not resurrect

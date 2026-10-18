@@ -845,8 +845,8 @@ export async function saveRehearsalTemplate(templates: TaxiStopTemplate[]): Prom
     console.warn('Failed to cache rehearsal template in localStorage:', err);
   }
 
-  // 2. Central Server API (persists in data/rehearsal_template.json in DEV)
-  if (!import.meta.env.PROD && isServerOnline()) {
+  // 2. Central Server API (persists in data/rehearsal_template.json)
+  if (isServerOnline()) {
     try {
       await fetch('/api/rehearsal-template', {
         method: 'POST',
@@ -874,8 +874,8 @@ export async function saveRehearsalTemplate(templates: TaxiStopTemplate[]): Prom
  * Loads rehearsal template across devices from Server / Supabase, falling back to local storage.
  */
 export async function fetchRehearsalTemplate(): Promise<TaxiStopTemplate[] | null> {
-  // 1. Try server API in DEV only
-  if (!import.meta.env.PROD && isServerOnline()) {
+  // 1. Try server API
+  if (isServerOnline()) {
     try {
       const res = await fetch('/api/rehearsal-template');
       if (res.ok) {

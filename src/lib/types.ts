@@ -330,7 +330,6 @@ export const SERVICE_TYPES: { value: ServiceType; label: string; period: 'AM' | 
   { value: 'Rehearsal', label: 'Thursday Rehearsal Transport', period: 'PM', mode: 'Normal' },
 ];
 
-export const RESET_PASSWORD = (typeof import.meta !== 'undefined' && (import.meta.env?.VITE_RESET_PASSWORD as string | undefined)?.trim()) || 'CRC2026!';
 export const CANCELLATION_FEE = 40;
 export const DREAMWEEK_FARE = 45;
 

@@ -47,14 +47,14 @@ export default function App() {
               {/* Public / Unprotected Routes (Rep workflow kept in initial bundle) */}
               <Route path="/login" element={<LoginPage />} />
               <Route path="/signup" element={<SignupPage />} />
-              <Route path="/admin/approve" element={<ApprovalPage />} />
               <Route path="/rep" element={<RepPage />} />
               <Route path="/" element={<RepPage />} />
 
               {/* Protected Admin Routes */}
-              <Route element={<ProtectedRoute />}>
+              <Route element={<ProtectedRoute requireAdmin />}>
                 <Route path="/admin" element={<AdminPage />} />
                 <Route path="/ledger" element={<LedgerPage />} />
+                <Route path="/admin/approve" element={<ApprovalPage />} />
               </Route>
 
               {/* Catch-all */}

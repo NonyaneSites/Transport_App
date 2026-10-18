@@ -807,7 +807,19 @@ export async function resetManifest(key: string): Promise<void> {
     mockStorage.getTable(VEHICLES_TABLE).filter((r) => String(r.manifest_key) !== key)
   );
 
-  // 2. Clear remote Supabase
+  // 2. Clear remote Supabase via server-side RPC if available, or direct upsert
+  try {
+    const { data: rpcData, error: rpcError } = await supabase.rpc('reset_manifest_session', {
+      manifest_key: key,
+      confirmation: 'RESET',
+    });
+    if (!rpcError && rpcData?.success) {
+      return;
+    }
+  } catch (rpcErr) {
+    console.debug('[Manifest] RPC reset_manifest_session not found, using direct upsert fallback:', rpcErr);
+  }
+
   try {
     await supabase.from(MANIFESTS_TABLE).upsert(
       {

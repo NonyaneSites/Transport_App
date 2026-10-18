@@ -3,6 +3,7 @@ import {
   Loader2, AlertTriangle, FileSpreadsheet, Search, Filter, XCircle,
   ChevronDown, ChevronRight, Upload, CheckCircle2, FileText, Banknote, X, UserPlus, Plus,
   Pencil, Trash2, HeartHandshake, Clock, Check, CheckSquare, Square, Database, Copy,
+  ShieldCheck, BarChart3,
 } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
@@ -21,6 +22,11 @@ import {
 } from '@/lib/ledger';
 import { getFareForDate } from '@/lib/types';
 import { downloadCancellationDebtPdf } from '@/lib/pdfExport';
+import {
+  downloadReconciliationCsv,
+  generateReconciliationReport,
+  BASELINE_OCT_12_INFO,
+} from '@/lib/ledgerReconciliation';
 
 function HighlightMatch({ text, query }: { text: string; query: string }) {
   const q = query.trim();
@@ -211,6 +217,12 @@ export function LedgerPage() {
   const [isBatchConfirming, setIsBatchConfirming] = useState(false);
   const [showSupabaseSetupModal, setShowSupabaseSetupModal] = useState(false);
   const [copiedSql, setCopiedSql] = useState(false);
+  const [reviewModalBatch, setReviewModalBatch] = useState<Array<{
+    sponsorshipId: string;
+    status: SponsorshipStatus;
+    sponsorship?: ReportedSponsorship;
+  }> | null>(null);
+  const [showReconciliationModal, setShowReconciliationModal] = useState(false);
 
   // Reported Sponsorship Payment State
   const [paySponTarget, setPaySponTarget] = useState<ReportedSponsorship | null>(null);
@@ -287,16 +299,7 @@ export function LedgerPage() {
       async () => {
         if (mounted) {
           const sponRefreshed = await listReportedSponsorships();
-          setSponsorships((prev) => {
-            const merged = sponRefreshed.map((fresh) => {
-              const prevItem = prev.find((p) => p.id === fresh.id);
-              if (prevItem && prevItem.status !== 'pending' && fresh.status === 'pending') {
-                return { ...fresh, status: prevItem.status, status_updated_at: prevItem.status_updated_at };
-              }
-              return fresh;
-            });
-            return cleanAndDeduplicateSponsorships(merged);
-          });
+          setSponsorships(cleanAndDeduplicateSponsorships(sponRefreshed));
         }
       }
     );
@@ -889,21 +892,20 @@ export function LedgerPage() {
     setSelectedSponIds((prev) => new Set(prev).add(id));
   }
 
-  async function handleConfirmIndications(
+  function handleConfirmIndications(
     targetIds?: string[],
     overrideStatus?: SponsorshipStatus
   ) {
-    let idsToConfirm = targetIds && targetIds.length > 0 ? targetIds : Array.from(selectedSponIds);
+    const idsToConfirm = targetIds && targetIds.length > 0 ? targetIds : Array.from(selectedSponIds);
     if (idsToConfirm.length === 0) {
-      idsToConfirm = filteredSponsorships.filter((s) => s.status === 'pending').map((s) => s.id);
+      setSponsorshipNotice({
+        id: 'no_selection_warning',
+        text: '⚠️ Please select one or more reported sponsorships before confirming.',
+        type: 'warn',
+      });
+      setTimeout(() => setSponsorshipNotice(null), 4000);
+      return;
     }
-    if (idsToConfirm.length === 0) return;
-
-    setIsBatchConfirming(true);
-    if (idsToConfirm.length === 1) {
-      setSponsorshipUpdatingId(idsToConfirm[0]);
-    }
-    const count = idsToConfirm.length;
 
     const items = idsToConfirm.map((id) => {
       const currentItem = sponsorships.find((s) => s.id === id);
@@ -914,143 +916,72 @@ export function LedgerPage() {
       return { sponsorshipId: id, status: chosenStatus, sponsorship: currentItem };
     });
 
-    const statusMap = new Map(items.map((i) => [i.sponsorshipId, i.status]));
-    const now = new Date().toISOString();
+    // Open explicit admin confirmation preview modal
+    setReviewModalBatch(items);
+  }
 
-    // 1. Optimistic UI update: instantly update status so all indicated items clear out immediately
-    setSponsorships((prev) =>
-      prev.map((s) =>
-        statusMap.has(s.id)
-          ? { ...s, status: statusMap.get(s.id)!, status_updated_at: now }
-          : s
-      )
-    );
+  async function executeConfirmedBatch(
+    items: Array<{ sponsorshipId: string; status: SponsorshipStatus; sponsorship?: ReportedSponsorship }>
+  ) {
+    if (!items || items.length === 0) return;
+    setIsBatchConfirming(true);
+    const count = items.length;
 
-    // 2. Immediately add confirmed unaccounted sponsorships to actual cancellation list (entries)
-    setEntries((prevEntries) => {
-      let nextEntries = [...prevEntries];
-      for (const item of items) {
-        const spon = item.sponsorship || sponsorships.find((s) => s.id === item.sponsorshipId);
-        if (!spon) continue;
-
-        if (item.status === 'unaccounted_sponsorship' || item.status === 'unpaid_sponsorship') {
-          const rawNote = spon.sponsor_note ? cleanSponsorshipNote(spon.sponsor_note) : '';
-          const noteText = item.status === 'unaccounted_sponsorship'
-            ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
-            : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
-          const effectiveFee = getFareForDate(spon.date);
-          const cleanName = sanitizePassengerDisplayName(spon.passenger_name) || spon.passenger_name.trim();
-          const normStructure = normalizeStructureCode(spon.structure);
-
-          const existingIdx = nextEntries.findIndex((e) =>
-            (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
-            (e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanName.toLowerCase() && Boolean(e.sponsored))
-          );
-
-          if (existingIdx >= 0) {
-            nextEntries[existingIdx] = {
-              ...nextEntries[existingIdx],
-              structure_debt: effectiveFee,
-              sponsored: true,
-              sponsor_note: noteText,
-              general_notes: noteText,
-              structure: normStructure,
-              submitted_by: 'Cancellation Admin',
-              source: 'reported_sponsorship_audit',
-            };
-          } else {
-            const newEntryId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-            spon.ledger_entry_id = newEntryId;
-            nextEntries.unshift({
-              id: newEntryId,
-              manifest_key: spon.manifest_key || `manual-${Date.now()}`,
-              date: normalizeDateToYMD(spon.date) || spon.date,
-              service: spon.service || 'Service',
-              passenger_name: cleanName,
-              stop: spon.stop || '',
-              structure: normStructure,
-              vehicle_name: spon.vehicle_name || '—',
-              submitted_by: 'Cancellation Admin',
-              rep_name: spon.rep_name || '',
-              license_plate: '',
-              sponsored: true,
-              sponsor_note: noteText,
-              structure_debt: effectiveFee,
-              general_notes: noteText,
-              source: 'reported_sponsorship_audit',
-              submitted_at: now,
-            });
-          }
-        } else if (item.status === 'actually_sponsored') {
-          // If marked actually sponsored, remove any existing sponsorship debt from cancellation list
-          nextEntries = nextEntries.filter((e) => {
-            if (spon.ledger_entry_id && e.id === spon.ledger_entry_id) return false;
-            if (
-              e.manifest_key === spon.manifest_key &&
-              sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === sanitizePassengerDisplayName(spon.passenger_name).toLowerCase() &&
-              Boolean(e.sponsored)
-            ) {
-              return false;
-            }
-            return true;
-          });
-        }
-      }
-      return nextEntries;
-    });
-
-    // 3. Clear selections for confirmed items
-    setSelectedSponIds((prev) => {
-      const next = new Set(prev);
-      idsToConfirm!.forEach((id) => next.delete(id));
-      return next;
-    });
-    setStagedIndications((prev) => {
-      const next = { ...prev };
-      idsToConfirm!.forEach((id) => delete next[id]);
-      return next;
-    });
-
-    // 4. User notification
-    const actuallyCount = items.filter((i) => i.status === 'actually_sponsored').length;
-    const debtCount = items.filter((i) => i.status === 'unaccounted_sponsorship' || i.status === 'unpaid_sponsorship').length;
-    const statusText =
-      debtCount > 0
-        ? `Confirmed ${count} sponsorship${count === 1 ? '' : 's'} (${actuallyCount > 0 ? `${actuallyCount} actually sponsored, ` : ''}${debtCount} added to actual cancellation list as unaccounted sponsorship${debtCount === 1 ? '' : 's'}). Cleared from pending queue.`
-        : `Confirmed ${count} sponsorship${count === 1 ? '' : 's'} as Actually Sponsored. Cleared from pending queue.`;
-
-    setSponsorshipNotice({
-      id: 'batch_confirm',
-      text: `✓ ${statusText}`,
-      type: 'success',
-    });
-    setTimeout(() => setSponsorshipNotice(null), 6000);
-
-    // 5. Server call and sync
     try {
       const res = await verifyBatchSponsorships(items);
       if (res.success) {
+        // Authoritative re-fetch directly from server/Supabase
         const [updatedSpon, updatedLedger] = await Promise.all([
           listReportedSponsorships(),
-          listLedgerEntries(),
+          listLedgerEntries(true),
         ]);
-        setSponsorships((prev) => {
-          const merged = updatedSpon.map((fresh) => {
-            if (statusMap.has(fresh.id)) {
-              return { ...fresh, status: statusMap.get(fresh.id)!, status_updated_at: now };
-            }
-            const prevItem = prev.find((p) => p.id === fresh.id);
-            if (prevItem && prevItem.status !== 'pending' && fresh.status === 'pending') {
-              return { ...fresh, status: prevItem.status, status_updated_at: prevItem.status_updated_at };
-            }
-            return fresh;
-          });
-          return cleanAndDeduplicateSponsorships(merged);
-        });
+
+        setSponsorships(cleanAndDeduplicateSponsorships(updatedSpon));
         setEntries(updatedLedger);
+
+        // Clear confirmed IDs from selection and staged map
+        const confirmedIds = new Set(items.map((i) => i.sponsorshipId));
+        setSelectedSponIds((prev) => {
+          const next = new Set(prev);
+          confirmedIds.forEach((id) => next.delete(id));
+          return next;
+        });
+        setStagedIndications((prev) => {
+          const next = { ...prev };
+          confirmedIds.forEach((id) => delete next[id]);
+          return next;
+        });
+
+        const actuallyCount = items.filter((i) => i.status === 'actually_sponsored').length;
+        const debtCount = items.filter((i) => i.status === 'unaccounted_sponsorship' || i.status === 'unpaid_sponsorship').length;
+        const statusText =
+          debtCount > 0
+            ? `Verified ${count} sponsorship${count === 1 ? '' : 's'} (${actuallyCount > 0 ? `${actuallyCount} actually sponsored, ` : ''}${debtCount} recorded as debt). Official database updated.`
+            : `Verified ${count} sponsorship${count === 1 ? '' : 's'} as Actually Sponsored. Official database updated.`;
+
+        setSponsorshipNotice({
+          id: 'batch_confirm_success',
+          text: `✓ ${statusText}`,
+          type: 'success',
+        });
+        setTimeout(() => setSponsorshipNotice(null), 6000);
+        setReviewModalBatch(null);
+      } else {
+        setSponsorshipNotice({
+          id: 'batch_confirm_failed',
+          text: '⚠️ Database could not confirm sponsorship updates. Selections preserved for retry.',
+          type: 'warn',
+        });
+        setTimeout(() => setSponsorshipNotice(null), 6000);
       }
     } catch (err) {
       console.error('Failed to batch confirm sponsorships:', err);
+      setSponsorshipNotice({
+        id: 'batch_confirm_error',
+        text: '⚠️ Connection error while saving sponsorships. Please retry.',
+        type: 'warn',
+      });
+      setTimeout(() => setSponsorshipNotice(null), 6000);
     } finally {
       setIsBatchConfirming(false);
       setSponsorshipUpdatingId(null);
@@ -1454,6 +1385,14 @@ export function LedgerPage() {
                   >
                     <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />
                     <span className="truncate">Excel</span>
+                  </button>
+                  <button
+                    onClick={() => setShowReconciliationModal(true)}
+                    className="btn-secondary flex items-center justify-center gap-1.5 text-xs py-2 px-2 border-amber-500/30 text-amber-300 hover:text-amber-200"
+                    title="Compare active cancellation records against 12 October 2026 baseline report"
+                  >
+                    <BarChart3 className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+                    <span className="truncate">Audit (12 Oct)</span>
                   </button>
                 </div>
               </div>
@@ -2236,66 +2175,90 @@ export function LedgerPage() {
                     <>
                       <button
                         type="button"
+                        onClick={() => {
+                          const nextStaged = { ...stagedIndications };
+                          selectedSponIds.forEach((id) => {
+                            nextStaged[id] = 'actually_sponsored';
+                          });
+                          setStagedIndications(nextStaged);
+                        }}
+                        className="rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95"
+                        title="Stage selected items as Actually Sponsored (no debt)"
+                      >
+                        <Check className="h-3.5 w-3.5" />
+                        <span>Stage Sponsored</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const nextStaged = { ...stagedIndications };
+                          selectedSponIds.forEach((id) => {
+                            nextStaged[id] = 'unaccounted_sponsorship';
+                          });
+                          setStagedIndications(nextStaged);
+                        }}
+                        className="rounded-lg bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95"
+                        title="Stage selected items as Unaccounted Sponsorship (add debt)"
+                      >
+                        <AlertTriangle className="h-3.5 w-3.5" />
+                        <span>Stage Unaccounted</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const nextStaged = { ...stagedIndications };
+                          selectedSponIds.forEach((id) => {
+                            nextStaged[id] = 'unpaid_sponsorship';
+                          });
+                          setStagedIndications(nextStaged);
+                        }}
+                        className="rounded-lg bg-crimson-600/20 hover:bg-crimson-600/30 text-crimson-300 border border-crimson-500/30 font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95"
+                        title="Stage selected items as Unpaid Ride (add debt)"
+                      >
+                        <XCircle className="h-3.5 w-3.5" />
+                        <span>Stage Unpaid</span>
+                      </button>
+
+                      <button
+                        type="button"
                         disabled={isBatchConfirming}
-                        onClick={() => handleConfirmIndications(undefined, 'actually_sponsored')}
-                        className="rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
-                        title="Confirm selected as Actually Sponsored (No debt) and clear out from pending queue"
+                        onClick={() => handleConfirmIndications()}
+                        className="rounded-lg bg-crimson-600 hover:bg-crimson-500 text-white font-bold text-xs px-3.5 py-1.5 flex items-center gap-1.5 shadow-md transition-all active:scale-95 disabled:opacity-50"
+                        title="Preview classifications and confirm batch with Cancellation Admin approval"
                       >
                         {isBatchConfirming ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         ) : (
-                          <Check className="h-3.5 w-3.5" />
+                          <ShieldCheck className="h-3.5 w-3.5" />
                         )}
-                        <span>Confirm Selected as Actually Sponsored ({selectedSponIds.size})</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={isBatchConfirming}
-                        onClick={() => handleConfirmIndications(undefined, 'unaccounted_sponsorship')}
-                        className="rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
-                        title="Confirm selected as Unaccounted Sponsorship (Add Debt) and clear out"
-                      >
-                        <AlertTriangle className="h-3.5 w-3.5" />
-                        <span>Unaccounted (Add Debt)</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={isBatchConfirming}
-                        onClick={() => handleConfirmIndications(undefined, 'unpaid_sponsorship')}
-                        className="rounded-lg bg-crimson-600 hover:bg-crimson-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
-                        title="Confirm selected as Unpaid Sponsorship (Add Debt) and clear out"
-                      >
-                        <XCircle className="h-3.5 w-3.5" />
-                        <span>Unpaid (Add Debt)</span>
+                        <span>Review & Confirm ({selectedSponIds.size})</span>
                       </button>
 
                       <button
                         type="button"
                         disabled={isBatchConfirming}
                         onClick={handleBatchDeleteSpons}
-                        className="rounded-lg bg-crimson-900/30 hover:bg-crimson-900/50 text-crimson-300 border border-crimson-500/40 font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                        className="rounded-lg bg-card-2 hover:bg-crimson-900/30 text-muted hover:text-crimson-300 border border-line font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
                         title="Remove selected reported sponsorships and clear associated debt from ledger"
                       >
-                        <Trash2 className="h-3.5 w-3.5 text-crimson-400" />
-                        <span>Delete Selected ({selectedSponIds.size})</span>
+                        <Trash2 className="h-3.5 w-3.5" />
+                        <span>Delete</span>
                       </button>
                     </>
                   ) : (
                     <button
                       type="button"
-                      disabled={isBatchConfirming}
-                      onClick={() => handleConfirmIndications(undefined, 'actually_sponsored')}
-                      className="rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
-                      title="Confirm all pending reported sponsorships as Actually Sponsored and clear them out"
+                      onClick={() => {
+                        const visiblePending = filteredSponsorships.filter((s) => s.status === 'pending').map((s) => s.id);
+                        setSelectedSponIds(new Set(visiblePending));
+                      }}
+                      className="rounded-lg border border-line bg-card hover:bg-card-2 text-ink font-bold text-xs px-3 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95"
+                      title="Select all currently visible pending sponsorships for batch review"
                     >
-                      {isBatchConfirming ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Check className="h-3.5 w-3.5" />
-                      )}
-                      <span>Confirm All Pending Indications ({sponsorshipStats.pending})</span>
+                      <CheckSquare className="h-3.5 w-3.5 text-muted" />
+                      <span>Select Visible Pending ({filteredSponsorships.filter((s) => s.status === 'pending').length})</span>
                     </button>
                   )}
                 </div>
@@ -3999,6 +3962,245 @@ export function LedgerPage() {
                   </div>
                 </div>
               </form>
+            </div>
+          </div>
+        )}
+
+        {/* Sponsorship Review & Confirm Modal */}
+        {reviewModalBatch && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-xs animate-fade-in">
+            <div className="card w-full max-w-2xl max-h-[90vh] flex flex-col p-6 shadow-2xl border border-line bg-card overflow-hidden">
+              <div className="flex items-start justify-between gap-4 border-b border-line pb-4">
+                <div>
+                  <h3 className="font-display text-lg font-bold text-ink flex items-center gap-2">
+                    <ShieldCheck className="h-5 w-5 text-crimson-400" />
+                    <span>Review & Confirm Sponsorship Indications</span>
+                  </h3>
+                  <p className="text-xs text-muted mt-1">
+                    The Cancellation Admin must explicitly verify each classification before official records and cancellation debts are updated.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setReviewModalBatch(null)}
+                  className="rounded-lg p-1 text-muted hover:bg-card-2 hover:text-ink transition-colors"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {/* Classification Breakdown Summary */}
+              {(() => {
+                const actuallyList = reviewModalBatch.filter((i) => i.status === 'actually_sponsored');
+                const unaccountedList = reviewModalBatch.filter((i) => i.status === 'unaccounted_sponsorship');
+                const unpaidList = reviewModalBatch.filter((i) => i.status === 'unpaid_sponsorship');
+                const debtItems = [...unaccountedList, ...unpaidList];
+                const totalDebtAdded = debtItems.reduce((sum, item) => {
+                  const spon = item.sponsorship || sponsorships.find((s) => s.id === item.sponsorshipId);
+                  return sum + (spon ? getFareForDate(spon.date) : 40);
+                }, 0);
+
+                return (
+                  <div className="space-y-4 my-4 overflow-y-auto pr-1">
+                    <div className="grid grid-cols-3 gap-2">
+                      <div className="card p-3 bg-emerald-950/20 border-emerald-500/30">
+                        <div className="text-[10px] uppercase font-bold text-emerald-400">Actually Sponsored</div>
+                        <div className="text-xl font-bold text-emerald-200 mt-0.5">{actuallyList.length}</div>
+                        <div className="text-[10px] text-muted">No debt created</div>
+                      </div>
+                      <div className="card p-3 bg-amber-950/20 border-amber-500/30">
+                        <div className="text-[10px] uppercase font-bold text-amber-400">Unaccounted</div>
+                        <div className="text-xl font-bold text-amber-200 mt-0.5">{unaccountedList.length}</div>
+                        <div className="text-[10px] text-muted">Adds cancellation debt</div>
+                      </div>
+                      <div className="card p-3 bg-crimson-950/20 border-crimson-500/30">
+                        <div className="text-[10px] uppercase font-bold text-crimson-400">Unpaid Ride</div>
+                        <div className="text-xl font-bold text-crimson-200 mt-0.5">{unpaidList.length}</div>
+                        <div className="text-[10px] text-muted">Adds cancellation debt</div>
+                      </div>
+                    </div>
+
+                    {debtItems.length > 0 && (
+                      <div className="p-3 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs flex items-start gap-2">
+                        <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-amber-400" />
+                        <div>
+                          <strong className="font-semibold">Financial Impact Notice:</strong> Confirming this batch will record{' '}
+                          <strong className="text-amber-200">R{totalDebtAdded}</strong> across {debtItems.length} debtor entries in the official cancellation ledger.
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Preview Table */}
+                    <div className="border border-line rounded-lg overflow-hidden text-xs">
+                      <div className="bg-card-2 px-3 py-2 font-bold text-muted grid grid-cols-4 border-b border-line">
+                        <span className="col-span-2">Rider & Structure</span>
+                        <span>Date / Service</span>
+                        <span className="text-right">Action</span>
+                      </div>
+                      <div className="max-h-52 overflow-y-auto divide-y divide-line">
+                        {reviewModalBatch.map((item) => {
+                          const spon = item.sponsorship || sponsorships.find((s) => s.id === item.sponsorshipId);
+                          const riderName = spon?.passenger_name || 'Passenger';
+                          const struct = normalizeStructureCode(spon?.structure);
+                          const dateStr = spon?.date || '—';
+                          const fare = spon ? getFareForDate(spon.date) : 40;
+
+                          return (
+                            <div key={item.sponsorshipId} className="px-3 py-2 grid grid-cols-4 items-center">
+                              <div className="col-span-2">
+                                <div className="font-semibold text-ink">{riderName}</div>
+                                <div className="text-[10px] text-muted">{struct} {spon?.rep_name ? `• Rep: ${spon.rep_name}` : ''}</div>
+                              </div>
+                              <div className="text-muted text-[11px]">
+                                {dateStr} ({spon?.service || 'PM'})
+                              </div>
+                              <div className="text-right">
+                                {item.status === 'actually_sponsored' ? (
+                                  <span className="badge bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px]">
+                                    Sponsored (R0)
+                                  </span>
+                                ) : item.status === 'unaccounted_sponsorship' ? (
+                                  <span className="badge bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px]">
+                                    Unaccounted (+R{fare})
+                                  </span>
+                                ) : (
+                                  <span className="badge bg-crimson-500/20 text-crimson-300 border border-crimson-500/30 text-[10px]">
+                                    Unpaid (+R{fare})
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div className="flex items-center justify-end gap-2 border-t border-line pt-4">
+                <button
+                  type="button"
+                  onClick={() => setReviewModalBatch(null)}
+                  disabled={isBatchConfirming}
+                  className="btn-ghost text-xs py-2 px-3"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={isBatchConfirming}
+                  onClick={() => executeConfirmedBatch(reviewModalBatch)}
+                  className="btn-crimson flex items-center gap-1.5 text-xs py-2 px-4 shadow-sm"
+                >
+                  {isBatchConfirming ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Check className="h-3.5 w-3.5" />
+                  )}
+                  <span>Confirm & Save to Database ({reviewModalBatch.length})</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Historical Audit & Reconciliation Modal (12 Oct Baseline) */}
+        {showReconciliationModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-xs animate-fade-in">
+            <div className="card w-full max-w-3xl max-h-[90vh] flex flex-col p-6 shadow-2xl border border-line bg-card overflow-hidden">
+              <div className="flex items-start justify-between gap-4 border-b border-line pb-4">
+                <div>
+                  <h3 className="font-display text-lg font-bold text-ink flex items-center gap-2">
+                    <BarChart3 className="h-5 w-5 text-amber-400" />
+                    <span>Historical Cancellation Ledger Audit (12 Oct Baseline)</span>
+                  </h3>
+                  <p className="text-xs text-muted mt-1">
+                    Read-only reconciliation against the user-confirmed reference baseline ({BASELINE_OCT_12_INFO.description}).
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowReconciliationModal(false)}
+                  className="rounded-lg p-1 text-muted hover:bg-card-2 hover:text-ink transition-colors"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {(() => {
+                const report = generateReconciliationReport(entries);
+                const { summary } = report;
+
+                return (
+                  <div className="space-y-4 my-4 overflow-y-auto pr-1">
+                    {/* Benchmark comparison grid */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <div className="card p-3 bg-card-2 border-line">
+                        <div className="text-[10px] uppercase font-bold text-muted">12 Oct Baseline</div>
+                        <div className="text-lg font-bold text-ink mt-0.5">{summary.baselineDebtorsReported} debtors</div>
+                        <div className="text-[11px] text-amber-300 font-semibold">R{summary.baselineTotalDebtReported.toLocaleString()}</div>
+                      </div>
+                      <div className="card p-3 bg-card-2 border-line">
+                        <div className="text-[10px] uppercase font-bold text-muted">App as of Cutoff</div>
+                        <div className="text-lg font-bold text-ink mt-0.5">{summary.asOfCutoffDebtorsCount} debtors</div>
+                        <div className="text-[11px] text-amber-300 font-semibold">R{summary.asOfCutoffTotalDebt.toLocaleString()}</div>
+                      </div>
+                      <div className="card p-3 bg-card-2 border-line">
+                        <div className="text-[10px] uppercase font-bold text-muted">Active App Total</div>
+                        <div className="text-lg font-bold text-ink mt-0.5">{summary.currentActiveDebtorsCount} debtors</div>
+                        <div className="text-[11px] text-crimson-400 font-semibold">R{summary.currentActiveTotalDebt.toLocaleString()}</div>
+                      </div>
+                      <div className="card p-3 bg-card-2 border-line">
+                        <div className="text-[10px] uppercase font-bold text-muted">Settled After Cutoff</div>
+                        <div className="text-lg font-bold text-emerald-300 mt-0.5">{summary.settledAfterCutoffCount} records</div>
+                        <div className="text-[11px] text-emerald-400 font-semibold">R{summary.settledAfterCutoffTotal.toLocaleString()}</div>
+                      </div>
+                    </div>
+
+                    {/* Classification Breakdown */}
+                    <div className="card p-4 bg-card-2/50 border border-line space-y-2 text-xs">
+                      <h4 className="font-bold text-ink text-sm">Classification Breakdown</h4>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1 text-muted">
+                        <div>Verified Matches: <strong className="text-ink">{summary.classifiedCounts.matches || 0}</strong></div>
+                        <div>Category Alignments: <strong className="text-ink">{summary.classifiedCounts.category_mismatch || 0}</strong></div>
+                        <div>Special Fare Adjustments: <strong className="text-ink">{summary.classifiedCounts.altered_amount || 0}</strong></div>
+                        <div>New Charges (Post-12 Oct): <strong className="text-ink">{summary.classifiedCounts.extra_app_charge || 0}</strong></div>
+                        <div>Settled / Paid Charges: <strong className="text-ink">{summary.classifiedCounts.settled_after_cutoff || 0}</strong></div>
+                        <div>Duplicate Session Reports: <strong className="text-ink">{summary.classifiedCounts.duplicate || 0}</strong></div>
+                      </div>
+                    </div>
+
+                    {/* Non-destructive Policy Callout */}
+                    <div className="p-3 rounded-lg bg-bg border border-line text-xs text-muted space-y-1">
+                      <div className="font-semibold text-ink flex items-center gap-1.5">
+                        <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                        <span>Data Integrity Guarantee</span>
+                      </div>
+                      <p>
+                        The 12 October baseline PDF is a historical snapshot, not today&apos;s live database state. All legitimate post-cutoff trips, verified attendance records, and confirmed payments are securely preserved and will never be overwritten.
+                      </p>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div className="flex items-center justify-between border-t border-line pt-4 gap-2">
+                <button
+                  type="button"
+                  onClick={() => downloadReconciliationCsv(entries)}
+                  className="btn-success flex items-center gap-1.5 text-xs py-2 px-3"
+                  title="Download complete row-by-row reconciliation CSV"
+                >
+                  <FileSpreadsheet className="h-3.5 w-3.5" />
+                  <span>Download Reconciliation CSV</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowReconciliationModal(false)}
+                  className="btn-ghost text-xs py-2 px-4"
+                >
+                  Close
+                </button>
+              </div>
             </div>
           </div>
         )}

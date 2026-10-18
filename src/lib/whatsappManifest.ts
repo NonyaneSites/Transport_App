@@ -1,7 +1,7 @@
 import { shortDate, parseManifestKey } from './dates';
 import { SERVICE_TYPES, hubDisplayName, getEffectiveStop, type Manifest, type Vehicle, type Passenger, type ServiceType } from './types';
 import { sortVehiclesNatural } from './sort';
-import { isPassengerRepOfVehicle, matchRiderToOfficialRep, detectVehicleRep } from './officialReps';
+import { isPassengerRepOfVehicle, matchRiderToOfficialRep, detectVehicleRep, detectAllVehicleReps, getRepStructure } from './officialReps';
 
 function periodLabel(period: 'AM' | 'PM'): string {
   return period === 'AM' ? 'Morning' : 'Evening';
@@ -258,5 +258,124 @@ export function downloadTextFile(filename: string, content: string) {
   URL.revokeObjectURL(url);
 }
 
+/**
+ * Builds a dedicated list of the allocated rep for each Taxi (taxis only, buses strictly excluded).
+ * Returns a clean, WhatsApp-friendly formatted summary.
+ *
+ * Example:
+ * 🚕 *TAXI REPS — MORNING SERVING TAXIS*
+ * 📅 *Date:* 23/08/2026
+ * 👥 *Total Taxis:* 4
+ *
+ * • *Taxi 1*: Thato Ndwebi (S9) - 071 234 5678
+ * • *Taxi 2*: Keabetswe Mokoena (S2) - 082 345 6789
+ * • *Taxi 3*: Sipho Dlamini (S1)
+ * • *Taxi 4*: [No rep allocated]
+ */
+export function generateTaxiRepsManifest(manifest: Manifest, service: ServiceType): string {
+  const lines: string[] = [];
+  const { date: sessionDate } = parseManifestKey(manifest?.date || '');
+  const header = serviceTitle(service, 'rep');
+
+  lines.push(`🚕 *TAXI REPS — ${header.toUpperCase()}*`);
+  if (sessionDate) {
+    lines.push(`📅 *Date:* ${shortDate(sessionDate)}`);
+  }
+
+  // Taxis only — buses are strictly excluded
+  const taxiVehicles = sortVehiclesNatural(
+    (manifest?.vehicles || []).filter(
+      (v) => v.type === 'Taxi' || (v.type !== 'Bus' && !v.name.toLowerCase().includes('bus'))
+    )
+  );
+
+  if (taxiVehicles.length === 0) {
+    lines.push('');
+    lines.push('No taxis found in this session manifest.');
+    return lines.join('\n');
+  }
+
+  lines.push(`👥 *Total Taxis:* ${taxiVehicles.length}`);
+  lines.push('');
+
+  for (const vehicle of taxiVehicles) {
+    const riders = getRiderPassengers(manifest, vehicle);
+    const allDetectedReps = detectAllVehicleReps(riders);
+    const detectedOfficialRep = allDetectedReps.length > 0 ? allDetectedReps[0].rep.fullName : null;
+    const selectedRepObj = allDetectedReps.find((d) => isPassengerRepOfVehicle(d.rider, vehicle.repName));
+
+    // Resolved rep name
+    const effectiveRepName = (vehicle.repName || detectedOfficialRep || '').trim();
+
+    // Rep structure
+    const repStruct = vehicle.repName
+      ? getRepStructure(vehicle.repName)
+      : (selectedRepObj ? selectedRepObj.rep.structure : (detectedOfficialRep ? getRepStructure(detectedOfficialRep) : null));
+
+    // Rep phone (lookup in riders)
+    const repPassenger = riders.find((r) =>
+      effectiveRepName && (
+        isPassengerRepOfVehicle(r, effectiveRepName) ||
+        r.fullName.trim().toLowerCase() === effectiveRepName.toLowerCase()
+      )
+    );
+    const phone = repPassenger?.phone?.trim() || null;
+
+    // Co-reps if any
+    const coReps = (vehicle.coReps || vehicle.draftState?.coReps || []).filter(Boolean);
+
+    let repText = '';
+    if (effectiveRepName) {
+      const structText = repStruct ? ` (${repStruct})` : (repPassenger?.structure ? ` (${repPassenger.structure})` : '');
+      const coRepsText = coReps.length > 0 ? ` & ${coReps.join(', ')} (Co-rep)` : '';
+      const phoneText = phone ? ` - ${phone}` : '';
+      repText = `${effectiveRepName}${structText}${coRepsText}${phoneText}`;
+    } else if (riders.length === 0) {
+      repText = '[Empty taxi - 0 riders]';
+    } else {
+      repText = '[No rep allocated]';
+    }
+
+    lines.push(`• *${vehicle.name}*: ${repText}`);
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Builds a plain text list of taxi reps (one taxi per line).
+ */
+export function generateSimpleTaxiRepsList(manifest: Manifest): string {
+  const taxiVehicles = sortVehiclesNatural(
+    (manifest?.vehicles || []).filter(
+      (v) => v.type === 'Taxi' || (v.type !== 'Bus' && !v.name.toLowerCase().includes('bus'))
+    )
+  );
+  if (taxiVehicles.length === 0) return 'No taxis found';
+
+  return taxiVehicles.map((vehicle) => {
+    const riders = getRiderPassengers(manifest, vehicle);
+    const allDetectedReps = detectAllVehicleReps(riders);
+    const detectedOfficialRep = allDetectedReps.length > 0 ? allDetectedReps[0].rep.fullName : null;
+    const selectedRepObj = allDetectedReps.find((d) => isPassengerRepOfVehicle(d.rider, vehicle.repName));
+    const effectiveRepName = (vehicle.repName || detectedOfficialRep || '').trim();
+    const repStruct = vehicle.repName
+      ? getRepStructure(vehicle.repName)
+      : (selectedRepObj ? selectedRepObj.rep.structure : (detectedOfficialRep ? getRepStructure(detectedOfficialRep) : null));
+    const repPassenger = riders.find((r) =>
+      effectiveRepName && (
+        isPassengerRepOfVehicle(r, effectiveRepName) ||
+        r.fullName.trim().toLowerCase() === effectiveRepName.toLowerCase()
+      )
+    );
+    const phone = repPassenger?.phone?.trim() || null;
+    const structText = repStruct ? ` (${repStruct})` : (repPassenger?.structure ? ` (${repPassenger.structure})` : '');
+    const phoneText = phone ? ` - ${phone}` : '';
+    const repText = effectiveRepName ? `${effectiveRepName}${structText}${phoneText}` : '[No rep allocated]';
+    return `${vehicle.name}: ${repText}`;
+  }).join('\n');
+}
+
 export { formatRehearsalWhatsAppManifest, formatSingleTaxiRehearsalWhatsApp } from './rehearsal';
+
 

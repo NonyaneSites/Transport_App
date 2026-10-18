@@ -1697,8 +1697,8 @@ export function RepPage() {
         // storage unavailable
       }
 
-      // Synchronous beacon flush ensures zero loss on refresh or browser exit (only when local Express server is active in DEV)
-      if (!import.meta.env.PROD && isServerOnline() && typeof navigator !== 'undefined' && navigator.sendBeacon) {
+      // Synchronous beacon flush ensures zero loss on refresh or browser exit
+      if (isServerOnline() && typeof navigator !== 'undefined' && navigator.sendBeacon) {
         try {
           const payload = JSON.stringify({
             vehicleId: selectedVehicleId,

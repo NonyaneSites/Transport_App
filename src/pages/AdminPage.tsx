@@ -1,6 +1,6 @@
 import { useState, useEffect, Suspense, lazy } from 'react';
 import { Link } from 'react-router-dom';
-import { Lock, Trash2, Loader2, AlertTriangle, Calendar, Users, Bus, ArrowUpRight, XCircle, FileSpreadsheet, ChevronDown, ChevronRight, History, Download, FileDown, Eye, Table, CheckCircle2, X } from 'lucide-react';
+import { Lock, Trash2, Loader2, AlertTriangle, Calendar, Users, Bus, ArrowUpRight, XCircle, FileSpreadsheet, ChevronDown, ChevronRight, History, Download, FileDown, Eye, Table, CheckCircle2, X, Copy, Check } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
@@ -9,9 +9,9 @@ import { useManifest } from '@/lib/useManifest';
 import { listAllManifests, loadManifest } from '@/lib/manifest';
 import { listLedgerEntries } from '@/lib/ledger';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey as parseKey } from '@/lib/dates';
-import { SERVICE_TYPES, RESET_PASSWORD, type ServiceType, type Passenger, type Manifest } from '@/lib/types';
+import { SERVICE_TYPES, type ServiceType, type Passenger, type Manifest } from '@/lib/types';
 import { isSamePassenger, getSubmissionTimestampEpoch } from '@/lib/importer';
-import { generateWhatsAppRouteManifest, generateWhatsAppRepManifest, downloadTextFile } from '@/lib/whatsappManifest';
+import { generateWhatsAppRouteManifest, generateWhatsAppRepManifest, generateTaxiRepsManifest, downloadTextFile } from '@/lib/whatsappManifest';
 import { downloadTaxiStatsExcel, downloadTaxiStatsCSV } from '@/lib/statsExport';
 
 const AdminStatsExportModal = lazy(() =>
@@ -80,6 +80,25 @@ export function AdminPage() {
   const [transferModalOpen, setTransferModalOpen] = useState(false);
   const [transferModalPassenger, setTransferModalPassenger] = useState<Passenger | null>(null);
   const [transferSuccessNotice, setTransferSuccessNotice] = useState<string | null>(null);
+  const [copiedTaxiReps, setCopiedTaxiReps] = useState(false);
+
+  const handleCopyTaxiReps = async () => {
+    if (!manifest) return;
+    const text = generateTaxiRepsManifest(manifest, service);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    setCopiedTaxiReps(true);
+    setTransferSuccessNotice('Copied allocated rep of each taxi to clipboard (only taxis)!');
+    setTimeout(() => setCopiedTaxiReps(false), 2500);
+  };
 
   // Initial load on mount only — avoid re-fetching the entire database history on every live tick
   useEffect(() => {
@@ -189,7 +208,7 @@ export function AdminPage() {
   }
 
   async function handleReset() {
-    if (resetPwd.trim() !== RESET_PASSWORD) {
+    if (resetPwd.trim().toUpperCase() !== 'RESET') {
       setResetErr(true);
       return;
     }
@@ -277,10 +296,21 @@ export function AdminPage() {
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="font-mono text-xs text-muted bg-card-2 px-2.5 py-1 rounded-md border border-line">
               {key}
             </span>
+            {manifest && manifest.vehicles && manifest.vehicles.some((v) => v.type === 'Taxi' || (v.type !== 'Bus' && !v.name.toLowerCase().includes('bus'))) && (
+              <button
+                type="button"
+                onClick={handleCopyTaxiReps}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2.5 py-1 text-xs font-semibold text-sky-300 hover:bg-sky-500/20 transition-colors shadow-xs"
+                title="Copy the allocated rep of each taxi (only taxis)"
+              >
+                {copiedTaxiReps ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5 text-sky-400" />}
+                <span>{copiedTaxiReps ? 'Copied Taxi Reps!' : 'Copy Taxi Reps'}</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -621,10 +651,10 @@ export function AdminPage() {
               </div>
             </div>
             <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-muted">
-              Password
+              Confirmation
             </label>
             <input
-              type="password"
+              type="text"
               value={resetPwd}
               onChange={(e) => {
                 setResetPwd(e.target.value);
@@ -632,11 +662,11 @@ export function AdminPage() {
               }}
               onKeyDown={(e) => e.key === 'Enter' && handleReset()}
               autoFocus
-              placeholder="Enter reset password"
-              className={`input-field ${resetErr ? 'border-crimson-500' : ''}`}
+              placeholder="Type RESET to confirm"
+              className={`input-field font-mono text-center tracking-wider text-xs ${resetErr ? 'border-crimson-500' : ''}`}
             />
             {resetErr && (
-              <p className="mt-1.5 text-xs text-crimson-300">Incorrect password. Try again.</p>
+              <p className="mt-1.5 text-xs text-crimson-300">Please type RESET in all caps to confirm.</p>
             )}
             <div className="mt-4 flex gap-2">
               <button onClick={() => setResetOpen(false)} className="btn-ghost flex-1">

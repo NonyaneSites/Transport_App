@@ -290,6 +290,14 @@ export interface LedgerEntry {
   general_notes: string;
   source?: string;
   legs?: 'both' | 'going' | 'return';
+  status?: string;
+  fee?: number;
+  service_type?: string;
+  notes?: string;
+  sponsored_by?: string;
+  created_at?: string;
+  debt_type?: string;
+  debtType?: string;
 }
 
 export interface AbsenteeInput extends Passenger {
@@ -644,7 +652,7 @@ export async function insertAbsentees(
   if (error) throw error;
 }
 
-const LEDGER_SELECT_COLUMNS = 'id, manifest_key, date, service, passenger_name, stop, structure, vehicle_name, submitted_by, submitted_at, sponsored, sponsor_note, license_plate, rep_name, structure_debt, general_notes, source, legs';
+const LEDGER_SELECT_COLUMNS = 'id, manifest_key, date, service, passenger_name, stop, structure, vehicle_name, submitted_by, submitted_at, sponsored, sponsor_note, license_plate, rep_name, structure_debt, general_notes';
 
 let sessionLedgerCache: { data: LedgerEntry[]; timestamp: number } | null = null;
 const LEDGER_CACHE_TTL = 30000;
@@ -662,13 +670,26 @@ export async function fetchAllLedgerFromSupabase(): Promise<LedgerEntry[]> {
   let from = 0;
 
   while (true) {
-    const { data, error } = await supabase
+    let res = await supabase
       .from(LEDGER_TABLE)
       .select(LEDGER_SELECT_COLUMNS)
       .order('submitted_at', { ascending: false })
       .range(from, from + pageSize - 1);
 
-    if (error || !data || data.length === 0) {
+    if (res.error) {
+      console.warn('[Ledger] Supabase specific column select failed, trying select(*):', res.error.message);
+      res = await supabase
+        .from(LEDGER_TABLE)
+        .select('*')
+        .order('submitted_at', { ascending: false })
+        .range(from, from + pageSize - 1);
+    }
+
+    const data = res.data;
+    if (res.error || !data || data.length === 0) {
+      if (res.error) {
+        console.warn('[Ledger] Supabase query failed:', res.error);
+      }
       break;
     }
     allRows.push(...(data as LedgerEntry[]));
@@ -755,7 +776,22 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
       const audits = JSON.parse(localSponRaw) as ReportedSponsorship[];
       if (Array.isArray(audits)) {
         for (const spon of audits) {
-          if (spon.status === 'unaccounted_sponsorship' || spon.status === 'unpaid_sponsorship') {
+          if (spon.status === 'actually_sponsored') {
+            if (spon.ledger_entry_id && mergedMap.has(spon.ledger_entry_id)) {
+              mergedMap.delete(spon.ledger_entry_id);
+            }
+            const cleanName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
+            const d = normalizeDateToYMD(spon.date) || spon.date;
+            for (const [id, e] of mergedMap.entries()) {
+              if (
+                e.sponsored &&
+                sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanName &&
+                (normalizeDateToYMD(e.date) || e.date) === d
+              ) {
+                mergedMap.delete(id);
+              }
+            }
+          } else if (spon.status === 'unaccounted_sponsorship' || spon.status === 'unpaid_sponsorship') {
             const cleanName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
             const alreadyInMap = Array.from(mergedMap.values()).some((e) =>
               (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
@@ -802,6 +838,7 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
   // ensure debts are parsed into numbers, and exclude any entries whose debt has been reduced to zero or settled
   const formattedEntries = entries
     .filter((e) => {
+      if (e.status === 'Paid' || e.status === 'Settled') return false;
       let rawVal: unknown = e.structure_debt;
       if (rawVal === undefined || rawVal === null || (typeof rawVal === 'string' && rawVal === '')) {
         rawVal = ((e as unknown) as Record<string, unknown>).fee;
@@ -900,7 +937,11 @@ export async function settleLedgerEntries(ids: string[]): Promise<void> {
     console.debug('[Ledger] Server settle note:', err);
   }
   try {
-    await supabase.from(LEDGER_TABLE).delete().in('id', ids);
+    await supabase.from(LEDGER_TABLE).update({
+      status: 'Settled',
+      structure_debt: 0,
+      fee: 0,
+    }).in('id', ids);
   } catch {
     // local fallback
   }

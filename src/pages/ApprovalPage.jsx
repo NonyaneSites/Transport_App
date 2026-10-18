@@ -1,40 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
-import { Shield, CheckCircle2, XCircle, AlertTriangle, Users, ArrowLeft, RefreshCw, KeyRound, Building, Phone, Mail } from 'lucide-react';
-
-const SECRET_CODE = (import.meta.env.VITE_APPROVAL_SECRET || (import.meta.env.DEV ? '230825' : '')).trim();
+import { useAuth } from '@/context/AuthContext';
+import { CheckCircle2, XCircle, ArrowLeft, RefreshCw, Building, Phone, Mail, UserCheck } from 'lucide-react';
 
 export function ApprovalPage() {
-  const [accessCode, setAccessCode] = useState('');
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [authError, setAuthError] = useState(null);
+  const { user: currentAdmin } = useAuth();
   const [profiles, setProfiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('pending');
   const [actionNotice, setActionNotice] = useState(null);
 
-  useEffect(() => {
-    if (isAuthenticated) {
-      fetchProfiles();
-    }
-  }, [isAuthenticated]);
-
-  function handleAuth(e) {
-    e.preventDefault();
-    if (!SECRET_CODE) {
-      setAuthError('Master access code is not configured. Set VITE_APPROVAL_SECRET in environment variables.');
-      return;
-    }
-    if (accessCode.trim() === SECRET_CODE) {
-      setIsAuthenticated(true);
-      setAuthError(null);
-    } else {
-      setAuthError('Invalid Access Code. Please enter the master authorization key.');
-    }
-  }
-
-  async function fetchProfiles() {
+  const fetchProfiles = useCallback(async () => {
     setLoading(true);
     setActionNotice(null);
     try {
@@ -53,77 +30,64 @@ export function ApprovalPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    fetchProfiles();
+  }, [fetchProfiles]);
 
   async function handleAction(userId, newStatus, newRole) {
     setLoading(true);
     setActionNotice(null);
     try {
+      const targetRole = newRole || 'rep';
+
+      // 1. Try secure server-side RPC first
+      const { data: rpcData, error: rpcError } = await supabase.rpc('approve_user_profile', {
+        target_user_id: userId,
+        new_status: newStatus,
+        new_role: targetRole,
+      });
+
+      if (!rpcError && rpcData?.success) {
+        setProfiles((prev) =>
+          prev.map((u) =>
+            u.id === userId
+              ? { ...u, status: newStatus, role: targetRole, updated_at: new Date().toISOString() }
+              : u
+          )
+        );
+        setActionNotice(`Account ${newStatus === 'approved' ? 'approved' : 'declined'} successfully.`);
+        setTimeout(() => setActionNotice(null), 4000);
+        return;
+      }
+
+      // 2. Fallback to direct table update (guarded by RLS)
       const updates = {
         status: newStatus,
+        role: targetRole,
         updated_at: new Date().toISOString(),
       };
-      if (newRole) updates.role = newRole;
 
-      const { error } = await supabase
+      const { error: directError } = await supabase
         .from('profiles')
         .update(updates)
         .eq('id', userId);
 
-      if (!error) {
+      if (!directError) {
         setProfiles((prev) =>
           prev.map((u) => (u.id === userId ? { ...u, ...updates } : u))
         );
-        setActionNotice(`Account ${newStatus === 'approved' ? 'approved' : 'rejected'} successfully.`);
+        setActionNotice(`Account ${newStatus === 'approved' ? 'approved' : 'declined'} successfully.`);
         setTimeout(() => setActionNotice(null), 4000);
       } else {
-        setActionNotice(`Failed to update status: ${error.message}`);
+        setActionNotice(`Failed to update account: ${directError.message}`);
       }
     } catch (err) {
       setActionNotice(err instanceof Error ? err.message : 'Error updating user');
     } finally {
       setLoading(false);
     }
-  }
-
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background px-4 py-12 text-ink">
-        <form onSubmit={handleAuth} className="max-w-sm w-full bg-card border border-line p-8 rounded-2xl shadow-2xl backdrop-blur-md">
-          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/20 text-amber-400 border border-amber-500/30 mb-4">
-            <KeyRound className="h-6 w-6" />
-          </div>
-          <h2 className="text-xl font-display font-bold mb-1 text-center text-ink">Admin Approval Portal</h2>
-          <p className="text-xs text-muted text-center mb-6">Enter authorization secret to review and configure rep accounts.</p>
-
-          {authError && (
-            <div className="mb-4 flex items-center gap-2 rounded-xl bg-crimson-500/15 border border-crimson-500/40 p-3 text-xs text-crimson-300">
-              <AlertTriangle className="h-4 w-4 shrink-0" />
-              <span>{authError}</span>
-            </div>
-          )}
-
-          <div className="mb-4">
-            <input
-              type="password"
-              placeholder="Enter Master Secret Code"
-              className="input-field text-xs text-center tracking-widest font-mono"
-              value={accessCode}
-              onChange={(e) => setAccessCode(e.target.value)}
-              autoFocus
-            />
-          </div>
-          <button type="submit" className="btn-crimson w-full py-2.5 text-xs font-bold uppercase tracking-wider">
-            Authorize & Access
-          </button>
-          <div className="mt-4 text-center">
-            <Link to="/login" className="text-xs text-muted hover:text-ink">
-              ← Return to Login
-            </Link>
-          </div>
-        </form>
-      </div>
-    );
   }
 
   const pendingUsers = profiles.filter((u) => u.status === 'pending');
@@ -147,10 +111,10 @@ export function ApprovalPage() {
                 <ArrowLeft className="h-4 w-4" />
               </Link>
               <h1 className="text-2xl font-display font-bold text-ink">Account Authorizations</h1>
-              <span className="badge bg-card-2 border border-line text-muted text-xs">Profiles Control</span>
+              <span className="badge bg-card-2 border border-line text-muted text-xs">Admin Console</span>
             </div>
             <p className="text-xs sm:text-sm text-muted">
-              Approve, reject, or re-configure role permissions for transport reps and dispatchers.
+              Approve, decline, or configure role permissions for transport reps and dispatchers. Authenticated as <strong className="text-ink">{currentAdmin?.email}</strong>.
             </p>
           </div>
 
@@ -213,7 +177,7 @@ export function ApprovalPage() {
         </div>
 
         {/* Content List */}
-        {loading ? (
+        {loading && profiles.length === 0 ? (
           <div className="card p-12 text-center text-xs text-muted flex flex-col items-center justify-center gap-2">
             <RefreshCw className="h-6 w-6 animate-spin text-crimson-400" />
             <span>Loading accounts…</span>
@@ -232,7 +196,7 @@ export function ApprovalPage() {
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-bold text-sm text-ink">
-                      {user.full_name || 'No Name Provided'}
+                      {user.full_name || user.email?.split('@')[0] || 'User Profile'}
                     </span>
                     <span
                       className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
@@ -268,7 +232,7 @@ export function ApprovalPage() {
                       </span>
                     )}
                     <span className="text-[11px] opacity-75">
-                      Submitted: {user.created_at ? new Date(user.created_at).toLocaleDateString() : 'N/A'}
+                      Registered: {user.created_at ? new Date(user.created_at).toLocaleDateString() : 'N/A'}
                     </span>
                   </div>
                 </div>
@@ -276,7 +240,7 @@ export function ApprovalPage() {
                 <div className="flex items-center gap-2 shrink-0">
                   {user.status !== 'approved' && (
                     <button
-                      onClick={() => handleAction(user.id, 'approve', user.role || 'rep')}
+                      onClick={() => handleAction(user.id, 'approved', user.role || 'rep')}
                       className="btn-success py-1.5 px-3 text-xs flex items-center gap-1"
                     >
                       <CheckCircle2 className="h-3.5 w-3.5" />
@@ -293,15 +257,21 @@ export function ApprovalPage() {
                     </button>
                   )}
                   {user.status === 'approved' && (
-                    <select
-                      value={user.role || 'rep'}
-                      onChange={(e) => handleAction(user.id, 'approved', e.target.value)}
-                      className="input-field py-1 text-xs bg-card-2"
-                      title="Change user role"
-                    >
-                      <option value="rep">Role: Rep</option>
-                      <option value="admin">Role: Admin</option>
-                    </select>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={user.role || 'rep'}
+                        onChange={(e) => handleAction(user.id, 'approved', e.target.value)}
+                        className="input-field py-1 text-xs bg-card-2"
+                        title="Change user role"
+                      >
+                        <option value="rep">Role: Transport Rep</option>
+                        <option value="admin">Role: Administrator</option>
+                      </select>
+                      <span className="text-[11px] text-emerald-400 flex items-center gap-1">
+                        <UserCheck className="h-3.5 w-3.5" />
+                        <span>Active</span>
+                      </span>
+                    </div>
                   )}
                 </div>
               </div>
