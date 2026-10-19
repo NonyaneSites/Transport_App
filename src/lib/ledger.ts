@@ -271,6 +271,55 @@ export const BANK_DETAILS = {
 
 export const LEDGER_TABLE = 'cancellation_ledger';
 
+/**
+ * The 23 canonical columns guaranteed to exist on public.cancellation_ledger.
+ * Queries, inserts, and updates are restricted to these columns so that
+ * Supabase PostgREST never fails with schema cache errors (PGRST204).
+ */
+export const CANONICAL_LEDGER_COLUMNS = [
+  'id',
+  'passenger_name',
+  'structure',
+  'date',
+  'service_type',
+  'fee',
+  'status',
+  'notes',
+  'sponsored_by',
+  'submitted_at',
+  'created_at',
+  'manifest_key',
+  'vehicle_name',
+  'vehicle_id',
+  'rep_name',
+  'service',
+  'stop',
+  'submitted_by',
+  'license_plate',
+  'sponsored',
+  'sponsor_note',
+  'structure_debt',
+  'general_notes',
+] as const;
+
+export function sanitizeCancellationLedgerPayload<T extends Record<string, unknown>>(row: T): Record<string, unknown> {
+  const allowed = new Set<string>(CANONICAL_LEDGER_COLUMNS);
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (allowed.has(k) && v !== undefined) {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+export function appendAuditNote(existingNotes: string | null | undefined, auditMsg: string): string {
+  const base = (existingNotes || '').trim();
+  if (!base) return auditMsg;
+  if (base.includes(auditMsg)) return base;
+  return `${base} | ${auditMsg}`;
+}
+
 export interface LedgerEntry {
   id: string;
   manifest_key: string;
@@ -298,6 +347,54 @@ export interface LedgerEntry {
   created_at?: string;
   debt_type?: string;
   debtType?: string;
+  event_key?: string;
+  settled_at?: string;
+  settled_by?: string;
+  settlement_notes?: string;
+  removed_at?: string;
+  removed_by?: string;
+  removal_reason?: string;
+}
+
+/**
+ * Generates a stable, deterministic debt-event identity.
+ * Explicitly incorporates passenger identity, structure, service date,
+ * and session code (AM, PM, Rehe) to ensure legitimate separate charges
+ * on the same day remain distinct and collision-free.
+ */
+export function generateLedgerEventKey(params: {
+  passengerName: string;
+  date?: string | null;
+  service?: string | null;
+  structure?: string | null;
+  manifestKey?: string | null;
+}): string {
+  const normName = sanitizePassengerDisplayName(params.passengerName || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+  const cleanDate = normalizeDateToYMD(params.date || params.manifestKey) || (params.date || params.manifestKey || 'undated').split('_')[0].split('T')[0];
+  const serviceStr = String(params.service || '').toLowerCase().trim();
+  const serviceCode = serviceStr.includes('rehe') ? 'rehe' : (serviceStr.includes('am') ? 'am' : (serviceStr.includes('pm') ? 'pm' : (serviceStr ? serviceStr.slice(0, 10).replace(/[^a-z0-9]/g, '') : 'svc')));
+  const normStruct = normalizeStructureCode(params.structure || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return `ck_${cleanDate}_${serviceCode}_${normStruct}_${normName}`;
+}
+
+/**
+ * Authoritatively determines whether a ledger entry is active (unsettled with outstanding balance).
+ * Records marked 'Settled', 'Paid', or 'Removed' (or reduced to R0 debt) are excluded.
+ */
+export function isLedgerEntryActive(e: Partial<LedgerEntry>): boolean {
+  if (!e) return false;
+  const status = (e.status || '').trim();
+  if (status === 'Settled' || status === 'Paid' || status === 'Removed') {
+    return false;
+  }
+  let rawVal = e.structure_debt;
+  if (rawVal === undefined || rawVal === null || (typeof rawVal === 'string' && rawVal === '')) {
+    rawVal = e.fee;
+  }
+  const d = parseDebtAmount(rawVal, e.date || e.manifest_key);
+  return d > 0;
 }
 
 export interface AbsenteeInput extends Passenger {
@@ -582,77 +679,186 @@ export async function insertAbsentees(
   generalNotes: string,
   unpaidRiders?: Array<{ fullName: string; stop?: string; structure?: string; unpaidNote?: string }>
 ): Promise<void> {
-  // Delete any existing cancellation_ledger rows for this session
-  // (manifest_key) belonging to any passenger currently on this vehicle's
-  // roster — present or absent. Scoping the delete to passenger_name
-  // rather than vehicle_name guarantees a passenger can never end up with
-  // two open debt rows for the same service session, even if a rep
-  // resubmits after the admin reassigns them to a different vehicle.
-  if (allRiderNames.length > 0) {
-    const { error: delError } = await supabase
-      .from(LEDGER_TABLE)
-      .delete()
-      .eq('manifest_key', manifestKey)
-      .in('passenger_name', allRiderNames);
-    if (delError) throw delError;
-  }
-
+  invalidateLedgerCache();
   const isReheService = (serviceLabel || '').toLowerCase().includes('rehe');
   const normalizedService = isReheService ? 'Rehe' : serviceLabel;
-  const rows: Array<Record<string, unknown>> = absentees.map((p) => {
-    const passengerDebt = getPassengerFare(p, date);
-    return {
-      manifest_key: manifestKey,
-      date,
-      service: normalizedService,
-      passenger_name: p.fullName,
-      stop: p.stop,
-      structure: p.structure || '',
-      vehicle_name: vehicleName,
-      submitted_by: submittedBy,
-      rep_name: repName,
-      license_plate: licensePlate,
-      sponsored: false, // Absentees are regular cancellations, never auto-sent to sponsorship section!
-      sponsor_note: '',
-      structure_debt: passengerDebt,
-      general_notes: cleanPersonalAbsenteeNote((p as { notes?: string }).notes || ''),
-      legs: p.legs || (isReheService ? 'both' : undefined),
-    };
-  });
+  const nowIso = new Date().toISOString();
 
-  if (unpaidRiders && unpaidRiders.length > 0) {
-    for (const u of unpaidRiders) {
-      const uFare = getPassengerFare(u as unknown as Passenger, date);
-      rows.push({
-        manifest_key: manifestKey,
-        date,
-        service: normalizedService,
-        passenger_name: sanitizePassengerDisplayName(u.fullName),
-        stop: u.stop || '',
-        structure: normalizeStructureCode(u.structure),
-        vehicle_name: vehicleName,
-        submitted_by: submittedBy,
-        rep_name: repName,
-        license_plate: licensePlate,
-        sponsored: true,
-        debt_type: 'unpaid_sponsorship',
-        sponsor_note: u.unpaidNote ? `Did not pay: ${u.unpaidNote}` : 'Did not pay',
-        structure_debt: uFare,
-        general_notes: `Did not pay${u.unpaidNote ? `: ${u.unpaidNote}` : ''}`,
-        source: 'reported_sponsorship_audit',
-        legs: (u as { legs?: 'both' | 'going' | 'return' }).legs || (isReheService ? 'both' : undefined),
-      });
+  // Query existing records for this session to protect settled/removed records
+  let existingForSession: Array<{ id: string; passenger_name: string; status?: string; structure_debt: unknown }> = [];
+  try {
+    const { data } = await supabase
+      .from(LEDGER_TABLE)
+      .select('id, passenger_name, status, structure_debt')
+      .eq('manifest_key', manifestKey);
+    if (Array.isArray(data)) {
+      existingForSession = data;
+    }
+  } catch (err) {
+    console.warn('[Ledger] Failed to fetch session records for absentee validation:', err);
+  }
+
+  const existingMap = new Map<string, { id: string; status?: string; structure_debt: unknown }>();
+  for (const row of existingForSession) {
+    existingMap.set(sanitizePassengerDisplayName(row.passenger_name).toLowerCase(), {
+      id: row.id,
+      status: row.status,
+      structure_debt: row.structure_debt,
+    });
+  }
+
+  // If riders were previously marked absent on this vehicle roster, but are now present,
+  // remove their pending record only if it is still UNPAID and never settled/removed.
+  if (allRiderNames.length > 0) {
+    const presentRidersSet = new Set(allRiderNames.map((n) => sanitizePassengerDisplayName(n).toLowerCase()));
+    const absenteeNamesSet = new Set(absentees.map((p) => sanitizePassengerDisplayName(p.fullName).toLowerCase()));
+    const unpaidNamesSet = new Set((unpaidRiders || []).map((u) => sanitizePassengerDisplayName(u.fullName).toLowerCase()));
+
+    const idsToDelete: string[] = [];
+    for (const [normName, existing] of existingMap.entries()) {
+      if (presentRidersSet.has(normName) && !absenteeNamesSet.has(normName) && !unpaidNamesSet.has(normName)) {
+        if (existing.status !== 'Settled' && existing.status !== 'Paid' && existing.status !== 'Removed') {
+          idsToDelete.push(existing.id);
+        }
+      }
+    }
+
+    if (idsToDelete.length > 0) {
+      try {
+        await supabase.from(LEDGER_TABLE).delete().in('id', idsToDelete);
+      } catch (err) {
+        console.warn('[Ledger] Note: could not delete reopened absentees:', err);
+      }
     }
   }
 
-  if (rows.length === 0) return;
-  invalidateLedgerCache();
+  const rowsToInsert: Array<Record<string, unknown>> = [];
 
-  const { error } = await supabase.from(LEDGER_TABLE).insert(rows);
-  if (error) throw error;
+  for (const p of absentees) {
+    const cleanName = sanitizePassengerDisplayName(p.fullName);
+    const normName = cleanName.toLowerCase();
+    const existing = existingMap.get(normName);
+
+    // If already Settled, Paid, or deliberately Removed, PRESERVE IT — never resurrect as Unpaid!
+    if (existing && (existing.status === 'Settled' || existing.status === 'Paid' || existing.status === 'Removed')) {
+      continue;
+    }
+
+    const passengerDebt = getPassengerFare(p, date);
+
+    if (existing) {
+      // Update existing unpaid record
+      try {
+        await supabase
+          .from(LEDGER_TABLE)
+          .update(
+            sanitizeCancellationLedgerPayload({
+              date,
+              service: normalizedService,
+              stop: p.stop || '',
+              structure: p.structure || '',
+              vehicle_name: vehicleName,
+              submitted_by: submittedBy,
+              rep_name: repName,
+              license_plate: licensePlate,
+              structure_debt: passengerDebt,
+            })
+          )
+          .eq('id', existing.id);
+      } catch {
+        /* fallback */
+      }
+    } else {
+      rowsToInsert.push(
+        sanitizeCancellationLedgerPayload({
+          manifest_key: manifestKey,
+          date,
+          service: normalizedService,
+          passenger_name: p.fullName,
+          stop: p.stop || '',
+          structure: p.structure || '',
+          vehicle_name: vehicleName,
+          submitted_by: submittedBy,
+          rep_name: repName,
+          license_plate: licensePlate,
+          sponsored: false,
+          sponsor_note: '',
+          structure_debt: passengerDebt,
+          fee: passengerDebt,
+          status: 'Unpaid',
+          general_notes: cleanPersonalAbsenteeNote((p as { notes?: string }).notes || ''),
+          submitted_at: nowIso,
+        })
+      );
+    }
+  }
+
+  if (unpaidRiders && unpaidRiders.length > 0) {
+    for (const u of unpaidRiders) {
+      const cleanName = sanitizePassengerDisplayName(u.fullName);
+      const normName = cleanName.toLowerCase();
+      const existing = existingMap.get(normName);
+
+      if (existing && (existing.status === 'Settled' || existing.status === 'Paid' || existing.status === 'Removed')) {
+        continue;
+      }
+
+      const uFare = getPassengerFare(u as unknown as Passenger, date);
+
+      if (existing) {
+        try {
+          await supabase
+            .from(LEDGER_TABLE)
+            .update(
+              sanitizeCancellationLedgerPayload({
+                date,
+                service: normalizedService,
+                stop: u.stop || '',
+                structure: normalizeStructureCode(u.structure),
+                vehicle_name: vehicleName,
+                submitted_by: submittedBy,
+                rep_name: repName,
+                license_plate: licensePlate,
+                structure_debt: uFare,
+              })
+            )
+            .eq('id', existing.id);
+        } catch {
+          /* fallback */
+        }
+      } else {
+        rowsToInsert.push(
+          sanitizeCancellationLedgerPayload({
+            manifest_key: manifestKey,
+            date,
+            service: normalizedService,
+            passenger_name: cleanName,
+            stop: u.stop || '',
+            structure: normalizeStructureCode(u.structure),
+            vehicle_name: vehicleName,
+            submitted_by: submittedBy,
+            rep_name: repName,
+            license_plate: licensePlate,
+            sponsored: true,
+            sponsor_note: u.unpaidNote ? `Did not pay: ${u.unpaidNote}` : 'Did not pay',
+            structure_debt: uFare,
+            fee: uFare,
+            status: 'Unpaid',
+            general_notes: `Did not pay${u.unpaidNote ? `: ${u.unpaidNote}` : ''}`,
+            submitted_at: nowIso,
+          })
+        );
+      }
+    }
+  }
+
+  if (rowsToInsert.length > 0) {
+    const { error } = await supabase.from(LEDGER_TABLE).insert(rowsToInsert);
+    if (error) throw error;
+  }
 }
 
-const LEDGER_SELECT_COLUMNS = 'id, manifest_key, date, service, passenger_name, stop, structure, vehicle_name, submitted_by, submitted_at, sponsored, sponsor_note, license_plate, rep_name, structure_debt, general_notes';
+export const LEDGER_SELECT_COLUMNS = 'id, manifest_key, date, service, passenger_name, stop, structure, vehicle_name, submitted_by, submitted_at, sponsored, sponsor_note, license_plate, rep_name, structure_debt, general_notes, status, fee, event_key, settled_at, settled_by, settlement_notes, removed_at, removed_by, removal_reason, legs, source';
 
 let sessionLedgerCache: { data: LedgerEntry[]; timestamp: number } | null = null;
 const LEDGER_CACHE_TTL = 30000;
@@ -740,33 +946,49 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
   }
 
   const mergedMap = new Map<string, LedgerEntry>();
+  const settledOrRemovedIds = new Set<string>();
 
-  // 1. Primary: Central Express Server API (in DEV only)
+  // 1. Authoritative Primary: Supabase with full pagination
+  try {
+    const supabaseEntries = await fetchAllLedgerFromSupabase();
+    if (Array.isArray(supabaseEntries) && supabaseEntries.length > 0) {
+      for (const e of supabaseEntries) {
+        if (e && e.id) {
+          const idStr = String(e.id);
+          const st = (e.status || '').trim();
+          if (st === 'Settled' || st === 'Paid' || st === 'Removed') {
+            settledOrRemovedIds.add(idStr);
+          }
+          mergedMap.set(idStr, e);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Ledger] Supabase fetch error:', err);
+  }
+
+  // 2. Secondary: Central Express Server API (for locally queued DEV entries)
   try {
     const serverEntries = await listLedgerFromServer();
     if (Array.isArray(serverEntries) && serverEntries.length > 0) {
       for (const e of serverEntries) {
         if (e && e.id) {
-          mergedMap.set(String(e.id), e);
+          const idStr = String(e.id);
+          // Never let server cache revive a record that Supabase marked Settled or Removed!
+          if (settledOrRemovedIds.has(idStr)) continue;
+          const st = (e.status || '').trim();
+          if (st === 'Settled' || st === 'Paid' || st === 'Removed') {
+            settledOrRemovedIds.add(idStr);
+            continue;
+          }
+          if (!mergedMap.has(idStr)) {
+            mergedMap.set(idStr, e);
+          }
         }
       }
     }
   } catch (err) {
     console.debug('[Ledger] Server fetch note:', err);
-  }
-
-  // 2. Secondary: Supabase with full pagination (guarantees no 1000-row cutoff)
-  try {
-    const supabaseEntries = await fetchAllLedgerFromSupabase();
-    if (Array.isArray(supabaseEntries) && supabaseEntries.length > 0) {
-      for (const e of supabaseEntries) {
-        if (e && e.id && !mergedMap.has(String(e.id))) {
-          mergedMap.set(String(e.id), e);
-        }
-      }
-    }
-  } catch (err) {
-    console.warn('[Ledger] Exception fetching ledger entries:', err);
   }
 
   // 3. Reconcile any confirmed unaccounted or unpaid sponsorships from local storage audits
@@ -804,25 +1026,29 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
                 : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
               const effectiveDebt = getFareForDate(spon.date);
               const entryId = spon.ledger_entry_id || `ledger_sp_${spon.id || Date.now()}`;
-              mergedMap.set(entryId, {
-                id: entryId,
-                manifest_key: spon.manifest_key || `manual-${Date.now()}`,
-                date: normalizeDateToYMD(spon.date) || spon.date,
-                service: spon.service || 'Service',
-                passenger_name: sanitizePassengerDisplayName(spon.passenger_name),
-                stop: spon.stop || '',
-                structure: normalizeStructureCode(spon.structure),
-                vehicle_name: spon.vehicle_name || '—',
-                submitted_by: 'Cancellation Admin',
-                rep_name: spon.rep_name || '',
-                license_plate: '',
-                sponsored: true,
-                sponsor_note: noteText,
-                structure_debt: effectiveDebt,
-                general_notes: noteText,
-                source: 'reported_sponsorship_audit',
-                submitted_at: spon.submitted_at || new Date().toISOString(),
-              });
+              if (!settledOrRemovedIds.has(entryId)) {
+                mergedMap.set(entryId, {
+                  id: entryId,
+                  manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+                  date: normalizeDateToYMD(spon.date) || spon.date,
+                  service: spon.service || 'Service',
+                  passenger_name: sanitizePassengerDisplayName(spon.passenger_name),
+                  stop: spon.stop || '',
+                  structure: normalizeStructureCode(spon.structure),
+                  vehicle_name: spon.vehicle_name || '—',
+                  submitted_by: 'Cancellation Admin',
+                  rep_name: spon.rep_name || '',
+                  license_plate: '',
+                  sponsored: true,
+                  sponsor_note: noteText,
+                  structure_debt: effectiveDebt,
+                  fee: effectiveDebt,
+                  status: 'Unpaid',
+                  general_notes: noteText,
+                  source: 'reported_sponsorship_audit',
+                  submitted_at: spon.submitted_at || new Date().toISOString(),
+                });
+              }
             }
           }
         }
@@ -834,18 +1060,9 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
 
   const entries = Array.from(mergedMap.values());
 
-  // Ensure all structures are normalized to canonical codes, passenger names are cleanly formatted,
-  // ensure debts are parsed into numbers, and exclude any entries whose debt has been reduced to zero or settled
+  // Exclude settled, paid, or removed entries, and format active entries cleanly
   const formattedEntries = entries
-    .filter((e) => {
-      if (e.status === 'Paid' || e.status === 'Settled') return false;
-      let rawVal: unknown = e.structure_debt;
-      if (rawVal === undefined || rawVal === null || (typeof rawVal === 'string' && rawVal === '')) {
-        rawVal = ((e as unknown) as Record<string, unknown>).fee;
-      }
-      const d = parseDebtAmount(rawVal, e.date || e.manifest_key);
-      return d > 0;
-    })
+    .filter((e) => isLedgerEntryActive(e))
     .map((e) => {
       let rawVal: unknown = e.structure_debt;
       if (rawVal === undefined || rawVal === null || (typeof rawVal === 'string' && rawVal === '')) {
@@ -878,34 +1095,119 @@ export async function listLedgerByDate(date: string): Promise<LedgerEntry[]> {
   return all.filter((entry) => entry.date === date);
 }
 
-export async function deleteLedgerEntry(id: string): Promise<void> {
+/**
+ * Durably marks ledger entries as 'Removed' (logical removal/tombstone) with full audit logging.
+ * Guarantees that historical backfills, manifest regenerations, and page refreshes
+ * never silently resurrect removed records.
+ */
+/**
+ * Durably marks ledger entries as 'Removed' (logical removal/tombstone) with full audit logging.
+ * Guarantees that historical backfills, manifest regenerations, and page refreshes
+ * never silently resurrect removed records.
+ */
+export async function removeLedgerEntries(
+  ids: string[],
+  actorName = 'Admin',
+  reason = 'Removed by admin'
+): Promise<{ success: boolean; count: number }> {
+  const validIds = (ids || []).map(String).map((s) => s.trim()).filter(Boolean);
+  if (validIds.length === 0) return { success: true, count: 0 };
   invalidateLedgerCache();
+
+  const nowIso = new Date().toISOString();
+  let removedCount = 0;
+  let supabaseCommitted = false;
+
+  // 1. Transactional RPC attempt
   try {
-    await deleteLedgerOnServer(id);
+    const { data, error } = await supabase.rpc('remove_cancellation_debts', {
+      p_ids: validIds,
+      p_removed_by: actorName,
+      p_reason: reason,
+    });
+    if (!error && data && data.success) {
+      supabaseCommitted = true;
+      removedCount = typeof data.count === 'number' ? data.count : validIds.length;
+    }
+  } catch (rpcErr) {
+    console.debug('[Ledger] remove RPC note:', rpcErr);
+  }
+
+  // 2. Direct Supabase update against canonical schema
+  if (!supabaseCommitted) {
+    const updatePayload = sanitizeCancellationLedgerPayload({
+      status: 'Removed',
+      structure_debt: 0,
+      notes: reason,
+    });
+
+    const { data, error } = await supabase
+      .from(LEDGER_TABLE)
+      .update(updatePayload)
+      .in('id', validIds)
+      .select('id, status, structure_debt');
+
+    if (error) {
+      console.error('[Ledger] Supabase remove error:', error);
+      throw new Error(`Failed to remove debt in Supabase: ${error.message}`);
+    }
+
+    if (!data || data.length === 0) {
+      throw new Error(`Removal failed: no records were updated in Supabase for IDs: ${validIds.join(', ')}.`);
+    }
+
+    const unconfirmed = data.filter((r) => r.status !== 'Removed');
+    if (unconfirmed.length > 0) {
+      throw new Error(`Removal verification failed: Supabase did not commit 'Removed' status for ${unconfirmed.length} record(s).`);
+    }
+
+    removedCount = data.length;
+    supabaseCommitted = true;
+
+    // Best-effort audit log
+    try {
+      const auditPayload = validIds.map((id) => ({
+        ledger_id: id,
+        action: 'REMOVE',
+        previous_status: 'Unpaid',
+        new_status: 'Removed',
+        previous_debt: 40,
+        new_debt: 0,
+        actor_name: actorName,
+        notes: reason,
+        created_at: nowIso,
+      }));
+      await supabase.from('cancellation_ledger_audits').insert(auditPayload);
+    } catch {
+      // Best-effort audit table
+    }
+  }
+
+  // 3. Synchronize server (if DEV / server available)
+  try {
+    for (const id of validIds) {
+      await deleteLedgerOnServer(id);
+    }
   } catch (err) {
     console.debug('[Ledger] Server delete note:', err);
   }
-  try {
-    await supabase.from(LEDGER_TABLE).delete().eq('id', id);
-  } catch {
-    // local fallback
-  }
 
-  // Synchronize local sponsorship audit storage so it never resurrects
+  // 4. Synchronize local sponsorship audit storage so it never resurrects
   try {
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_SPONSORSHIPS_KEY) : null;
     if (raw) {
+      const idSet = new Set(validIds);
       let audits = JSON.parse(raw) as ReportedSponsorship[];
       let changed = false;
       audits = audits.map((a) => {
-        if (a.ledger_entry_id === id) {
+        if (a.ledger_entry_id && idSet.has(a.ledger_entry_id)) {
           changed = true;
           return {
             ...a,
             status: 'actually_sponsored' as const,
-            status_updated_at: new Date().toISOString(),
+            status_updated_at: nowIso,
             ledger_entry_id: null,
-            sponsor_note: a.sponsor_note ? `${a.sponsor_note} (Settled / Removed from ledger)` : 'Settled / Removed from ledger',
+            sponsor_note: a.sponsor_note ? `${a.sponsor_note} (Removed from ledger: ${reason})` : `Removed from ledger: ${reason}`,
           };
         }
         return a;
@@ -920,37 +1222,114 @@ export async function deleteLedgerEntry(id: string): Promise<void> {
   } catch {
     /* ignore */
   }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
+  }
+
+  return { success: true, count: removedCount };
+}
+
+/** Legacy wrapper to ensure backward compatibility with all existing callers. */
+export async function deleteLedgerEntry(id: string, actorName = 'Admin', reason = 'Removed by admin'): Promise<void> {
+  await removeLedgerEntries([id], actorName, reason);
 }
 
 /**
- * Settles (removes) a batch of past-cancellation ledger entries in one
- * call — used when a Rep collects R40 cash on behalf of someone with an
- * outstanding cancellation fee during a trip, so that entry no longer
- * appears as owing. No-op if `ids` is empty.
+ * Permanently settles a batch of debt records in Supabase.
+ * Updates status = 'Settled', structure_debt = 0, records settlement actor and notes,
+ * preserves historical baseline fee, verifies database response, and logs to financial audit trail.
  */
-export async function settleLedgerEntries(ids: string[]): Promise<void> {
-  if (ids.length === 0) return;
+export async function settleLedgerEntries(
+  ids: string[],
+  actorName = 'Admin',
+  notes = 'Settled in full'
+): Promise<{ success: boolean; count: number }> {
+  const validIds = (ids || []).map(String).map((s) => s.trim()).filter(Boolean);
+  if (validIds.length === 0) return { success: true, count: 0 };
   invalidateLedgerCache();
+
+  const nowIso = new Date().toISOString();
+  let settledCount = 0;
+  let supabaseCommitted = false;
+
+  // 1. Transactional RPC attempt
   try {
-    await settleLedgerOnServer(ids);
+    const { data, error } = await supabase.rpc('settle_cancellation_debts', {
+      p_ids: validIds,
+      p_settled_by: actorName,
+      p_notes: notes,
+    });
+    if (!error && data && data.success) {
+      supabaseCommitted = true;
+      settledCount = typeof data.count === 'number' ? data.count : validIds.length;
+    }
+  } catch (rpcErr) {
+    console.debug('[Ledger] settle RPC fallback note:', rpcErr);
+  }
+
+  // 2. Direct Supabase update against canonical schema
+  if (!supabaseCommitted) {
+    const updatePayload = sanitizeCancellationLedgerPayload({
+      status: 'Settled',
+      structure_debt: 0,
+      notes,
+    });
+
+    const { data, error } = await supabase
+      .from(LEDGER_TABLE)
+      .update(updatePayload)
+      .in('id', validIds)
+      .select('id, status, structure_debt');
+
+    if (error) {
+      console.error('[Ledger] Supabase settlement error:', error);
+      throw new Error(`Failed to persist settlement in Supabase: ${error.message}`);
+    }
+
+    if (!data || data.length === 0) {
+      throw new Error(`Settlement failed: 0 records were updated in Supabase for IDs: ${validIds.join(', ')}.`);
+    }
+
+    const unconfirmed = data.filter((r) => r.status !== 'Settled' || Number(r.structure_debt) !== 0);
+    if (unconfirmed.length > 0) {
+      throw new Error(`Settlement verification failed: database did not commit 'Settled' status for ${unconfirmed.length} record(s).`);
+    }
+
+    settledCount = data.length;
+    supabaseCommitted = true;
+
+    // Record audit entries
+    try {
+      const auditPayload = validIds.map((id) => ({
+        ledger_id: id,
+        action: 'SETTLE',
+        previous_status: 'Unpaid',
+        new_status: 'Settled',
+        previous_debt: 40,
+        new_debt: 0,
+        actor_name: actorName,
+        notes,
+        created_at: nowIso,
+      }));
+      await supabase.from('cancellation_ledger_audits').insert(auditPayload);
+    } catch {
+      // Best-effort audit
+    }
+  }
+
+  // 3. Synchronize server (if DEV / server available)
+  try {
+    await settleLedgerOnServer(validIds);
   } catch (err) {
     console.debug('[Ledger] Server settle note:', err);
   }
-  try {
-    await supabase.from(LEDGER_TABLE).update({
-      status: 'Settled',
-      structure_debt: 0,
-      fee: 0,
-    }).in('id', ids);
-  } catch {
-    // local fallback
-  }
 
-  // Synchronize local sponsorship audit storage
+  // 4. Synchronize local sponsorship audit storage
   try {
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_SPONSORSHIPS_KEY) : null;
     if (raw) {
-      const idSet = new Set(ids);
+      const idSet = new Set(validIds);
       let audits = JSON.parse(raw) as ReportedSponsorship[];
       let changed = false;
       audits = audits.map((a) => {
@@ -959,9 +1338,9 @@ export async function settleLedgerEntries(ids: string[]): Promise<void> {
           return {
             ...a,
             status: 'actually_sponsored' as const,
-            status_updated_at: new Date().toISOString(),
+            status_updated_at: nowIso,
             ledger_entry_id: null,
-            sponsor_note: a.sponsor_note ? `${a.sponsor_note} (Settled from ledger)` : 'Settled from ledger',
+            sponsor_note: a.sponsor_note ? `${a.sponsor_note} (Settled from ledger: ${notes})` : `Settled from ledger: ${notes}`,
           };
         }
         return a;
@@ -976,25 +1355,47 @@ export async function settleLedgerEntries(ids: string[]): Promise<void> {
   } catch {
     /* ignore */
   }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
+  }
+
+  return { success: true, count: settledCount };
 }
 
-export async function updateLedgerEntry(id: string, updates: Partial<LedgerEntry>): Promise<void> {
+export async function updateLedgerEntry(
+  id: string,
+  updates: Partial<LedgerEntry>,
+  actorName = 'Admin'
+): Promise<void> {
   invalidateLedgerCache();
-  // If the debt for this entry is reduced to zero or less, remove the debt entry
+  // If the debt for this entry is reduced to zero or less, mark it as Settled!
   if (updates.structure_debt !== undefined && Number(updates.structure_debt) <= 0) {
-    await deleteLedgerEntry(id);
+    await settleLedgerEntries([id], actorName, 'Settled via balance reduction to R0');
     return;
   }
+
+  const payload = sanitizeCancellationLedgerPayload(updates as Record<string, unknown>);
+
   try {
     await updateLedgerOnServer(id, updates as Record<string, unknown>);
   } catch (err) {
     console.debug('[Ledger] Server update note:', err);
   }
-  try {
-    const { error } = await supabase.from(LEDGER_TABLE).update(updates).eq('id', id);
-    if (error) console.warn('[Ledger] Supabase update note:', error);
-  } catch {
-    // local fallback
+
+  const { data, error } = await supabase
+    .from(LEDGER_TABLE)
+    .update(payload)
+    .eq('id', id)
+    .select('id, structure_debt, status');
+
+  if (error) {
+    console.error('[Ledger] Supabase update error:', error);
+    throw new Error(`Failed to update ledger entry in Supabase: ${error.message}`);
+  }
+
+  if (!data || data.length === 0) {
+    throw new Error(`Ledger entry ${id} could not be updated in Supabase.`);
   }
 }
 
@@ -1187,10 +1588,10 @@ export async function updateDebtorWithInstances(
     console.debug('[Ledger] Server updateDebtor error:', err);
   }
 
-  // If no instances remain (or all debts were reduced to zero), remove all debtor entries completely
+  // If no instances remain (or all debts were reduced to zero), mark all debtor entries as settled
   if (activeInstances.length === 0) {
     if (existingEntryIds.length > 0) {
-      await supabase.from(LEDGER_TABLE).delete().in('id', existingEntryIds);
+      await settleLedgerEntries(existingEntryIds, 'Admin', 'Settled via debtor balance reduction to R0');
     }
     return;
   }
@@ -1217,21 +1618,23 @@ export async function updateDebtorWithInstances(
       updatedIds.add(inst.id);
       await supabase
         .from(LEDGER_TABLE)
-        .update({
-          date: validDate,
-          service: validService,
-          passenger_name: cleanName,
-          structure: structCode,
-          structure_debt: validAmount,
-          sponsored: isSponsored,
-          sponsor_note: finalSponsorNote,
-          general_notes: finalGeneralNotes,
-          submitted_by: 'Cancellation Admin',
-        })
+        .update(
+          sanitizeCancellationLedgerPayload({
+            date: validDate,
+            service: validService,
+            passenger_name: cleanName,
+            structure: structCode,
+            structure_debt: validAmount,
+            sponsored: isSponsored,
+            sponsor_note: finalSponsorNote,
+            general_notes: finalGeneralNotes,
+            submitted_by: 'Cancellation Admin',
+          })
+        )
         .eq('id', inst.id);
     } else {
       // New instance added during edit: insert fresh entry
-      const insertPayload: Record<string, unknown> = {
+      const insertPayload = sanitizeCancellationLedgerPayload({
         manifest_key: templateEntry?.manifest_key || `manual-${Date.now()}`,
         date: validDate,
         service: validService,
@@ -1245,8 +1648,10 @@ export async function updateDebtorWithInstances(
         sponsored: isSponsored,
         sponsor_note: finalSponsorNote,
         structure_debt: validAmount,
+        fee: validAmount,
+        status: 'Unpaid',
         general_notes: finalGeneralNotes,
-      };
+      });
 
       const { data: newEntry } = await supabase
         .from(LEDGER_TABLE)
@@ -1260,10 +1665,10 @@ export async function updateDebtorWithInstances(
     }
   }
 
-  // Delete any instances that were removed by the admin (e.g. date removed in between)
-  const idsToDelete = existingEntryIds.filter((id) => !updatedIds.has(id));
-  if (idsToDelete.length > 0) {
-    await supabase.from(LEDGER_TABLE).delete().in('id', idsToDelete);
+  // Durably remove any instances that were removed by the admin (e.g. date removed in between)
+  const idsToRemove = existingEntryIds.filter((id) => !updatedIds.has(id));
+  if (idsToRemove.length > 0) {
+    await removeLedgerEntries(idsToRemove, 'Admin', 'Instance removed during debtor edit');
   }
 }
 
@@ -1297,8 +1702,8 @@ export async function updateDebtorDetails(
     const targetDebt = Math.max(0, updates.newTotalDebt);
 
     if (targetDebt === 0) {
-      // Remove all records if debt is set to 0
-      await supabase.from(LEDGER_TABLE).delete().in('id', entryIds);
+      // Durably settle all records if debt is set to 0
+      await settleLedgerEntries(entryIds, 'Admin', 'Settled via total debt set to R0');
       return;
     }
 
@@ -1306,18 +1711,19 @@ export async function updateDebtorDetails(
       // Single entry: update debt directly
       await supabase
         .from(LEDGER_TABLE)
-        .update({
-          passenger_name: updates.name ? updates.name.trim() : currentEntries[0].passenger_name,
-          structure: structCode ?? currentEntries[0].structure,
-          structure_debt: targetDebt,
-          general_notes: updates.isSponsored ? cleanSponsorshipNote(updates.notes) : '',
-          sponsored: !!updates.isSponsored,
-          sponsor_note: updates.isSponsored ? cleanSponsorshipNote(updates.notes) : '',
-        })
+        .update(
+          sanitizeCancellationLedgerPayload({
+            passenger_name: updates.name ? updates.name.trim() : currentEntries[0].passenger_name,
+            structure: structCode ?? currentEntries[0].structure,
+            structure_debt: targetDebt,
+            general_notes: updates.isSponsored ? cleanSponsorshipNote(updates.notes) : '',
+            sponsored: !!updates.isSponsored,
+            sponsor_note: updates.isSponsored ? cleanSponsorshipNote(updates.notes) : '',
+          })
+        )
         .eq('id', entryIds[0]);
     } else {
-      // Multiple entries: scale debt or apply to entries sequentially
-      // Sort oldest first
+      // Multiple entries: scale debt or apply to entries sequentially (oldest first)
       const sorted = [...currentEntries].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
       let debtPool = targetDebt;
 
@@ -1335,19 +1741,21 @@ export async function updateDebtorDetails(
         }
 
         if (rowDebt <= 0) {
-          // If debt for this date or service is reduced to zero, remove it completely
-          await deleteLedgerEntry(ent.id);
+          // If debt for this date or service is reduced to zero, mark settled
+          await settleLedgerEntries([ent.id], 'Admin', 'Settled via debt reduction to R0');
         } else {
           await supabase
             .from(LEDGER_TABLE)
-            .update({
-              passenger_name: updates.name ? updates.name.trim() : ent.passenger_name,
-              structure: structCode ?? ent.structure,
-              structure_debt: rowDebt,
-              general_notes: updates.isSponsored ? cleanSponsorshipNote(updates.notes) : '',
-              sponsored: !!updates.isSponsored,
-              sponsor_note: updates.isSponsored ? cleanSponsorshipNote(updates.notes) : '',
-            })
+            .update(
+              sanitizeCancellationLedgerPayload({
+                passenger_name: updates.name ? updates.name.trim() : ent.passenger_name,
+                structure: structCode ?? ent.structure,
+                structure_debt: rowDebt,
+                general_notes: updates.isSponsored ? cleanSponsorshipNote(updates.notes) : '',
+                sponsored: !!updates.isSponsored,
+                sponsor_note: updates.isSponsored ? cleanSponsorshipNote(updates.notes) : '',
+              })
+            )
             .eq('id', ent.id);
         }
       }
@@ -1366,7 +1774,8 @@ export async function updateDebtorDetails(
     }
 
     if (Object.keys(patch).length > 0) {
-      const { error } = await supabase.from(LEDGER_TABLE).update(patch).in('id', entryIds);
+      const sanitizedPatch = sanitizeCancellationLedgerPayload(patch);
+      const { error } = await supabase.from(LEDGER_TABLE).update(sanitizedPatch).in('id', entryIds);
       if (error) throw error;
     }
   }
@@ -1375,55 +1784,103 @@ export async function updateDebtorDetails(
 /**
  * Applies a partial or full payment against a debtor's aggregated entries.
  * Deducts amountPaid from the oldest entries first. If an entry reaches R0 debt,
- * it is removed/settled. If partially paid, its structure_debt is updated.
+ * it is permanently persisted as Settled (never deleted). If partially paid,
+ * its structure_debt is updated and status set to 'Partially Paid'.
  */
-export async function recordPartialPayment(entryIds: string[], amountPaid: number): Promise<void> {
-  if (entryIds.length === 0 || amountPaid <= 0) return;
+export async function recordPartialPayment(
+  entryIds: string[],
+  amountPaid: number,
+  actorName = 'Admin'
+): Promise<{ success: boolean; settledCount: number; updatedCount: number }> {
+  const validIds = (entryIds || []).map(String).map((s) => s.trim()).filter(Boolean);
+  if (validIds.length === 0 || amountPaid <= 0) {
+    return { success: true, settledCount: 0, updatedCount: 0 };
+  }
 
-  let entries: Array<{ id: string; structure_debt: unknown; date?: string }> = [];
+  let entries: Array<{ id: string; structure_debt: unknown; date?: string; fee?: unknown; status?: string }> = [];
   try {
     const { data, error } = await supabase
       .from(LEDGER_TABLE)
-      .select('id, structure_debt, date')
-      .in('id', entryIds);
-    if (!error && data && data.length > 0) {
+      .select('id, structure_debt, date, fee, status')
+      .in('id', validIds);
+    if (!error && Array.isArray(data) && data.length > 0) {
       entries = data;
     }
-  } catch {
-    // fallback to listLedgerEntries
+  } catch (err) {
+    console.warn('[Ledger] Failed to fetch entries directly from Supabase for payment:', err);
   }
 
   if (entries.length === 0) {
-    const all = await listLedgerEntries();
-    entries = all.filter((e) => entryIds.includes(e.id));
+    const all = await listLedgerEntries(true);
+    entries = all.filter((e) => validIds.includes(e.id));
   }
 
-  if (entries.length === 0) return;
+  if (entries.length === 0) {
+    throw new Error('No valid ledger records found in database to apply payment.');
+  }
 
   // Sort ascending by date (oldest debt settled first)
-  const sorted = [...entries].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  const sorted = [...entries].sort((a, b) => (String(a.date || '')).localeCompare(String(b.date || '')));
 
   let remainingToDeduct = amountPaid;
+  let settledCount = 0;
+  let updatedCount = 0;
 
   for (const entry of sorted) {
     if (remainingToDeduct <= 0) break;
     const currentDebt = parseDebtAmount(entry.structure_debt, entry.date);
 
     if (remainingToDeduct >= currentDebt) {
-      // Entire entry is paid off
+      // Entire entry is paid off -> DURABLE SETTLEMENT (never delete!)
       remainingToDeduct -= currentDebt;
-      await deleteLedgerEntry(entry.id);
+      const res = await settleLedgerEntries([entry.id], actorName, `Paid in full: R${currentDebt}`);
+      if (!res.success) {
+        throw new Error(`Failed to settle record ${entry.id} in Supabase.`);
+      }
+      settledCount++;
     } else {
       // Partial deduction on this entry
-      const newDebt = currentDebt - remainingToDeduct;
+      const newDebt = Math.max(0, currentDebt - remainingToDeduct);
+      const paidPortion = remainingToDeduct;
       remainingToDeduct = 0;
+
       if (newDebt <= 0) {
-        await deleteLedgerEntry(entry.id);
+        const res = await settleLedgerEntries([entry.id], actorName, `Paid in full: R${paidPortion}`);
+        if (!res.success) {
+          throw new Error(`Failed to settle record ${entry.id} in Supabase.`);
+        }
+        settledCount++;
       } else {
-        await updateLedgerEntry(entry.id, { structure_debt: newDebt });
+        const { data, error } = await supabase
+          .from(LEDGER_TABLE)
+          .update(
+            sanitizeCancellationLedgerPayload({
+              status: 'Partially Paid',
+              structure_debt: newDebt,
+            })
+          )
+          .eq('id', entry.id)
+          .select('id, structure_debt, status');
+
+        if (error) {
+          throw new Error(`Failed to update partial payment in Supabase: ${error.message}`);
+        }
+        if (!data || data.length === 0) {
+          throw new Error(`Partial payment update failed for record ${entry.id}: 0 records updated in Supabase.`);
+        }
+
+        try {
+          await updateLedgerOnServer(entry.id, { status: 'Partially Paid', structure_debt: newDebt });
+        } catch {
+          // ignore server dev sync note
+        }
+        updatedCount++;
       }
     }
   }
+
+  invalidateLedgerCache();
+  return { success: true, settledCount, updatedCount };
 }
 
 /** A single row parsed from a "Cancellation History" import workbook, ready to insert into cancellation_ledger. */
@@ -1705,37 +2162,125 @@ export async function parseHistoricalCancellationWorkbook(buffer: ArrayBuffer): 
 
 /**
  * Inserts pre-parsed historical cancellation rows directly into the
- * cancellation_ledger table. Unlike insertAbsentees (used for live
- * session submissions), this never deletes existing rows first —
- * historical backfills are purely additive.
+ * cancellation_ledger table.
+ * 
+ * IDEMPOTENT & PRESERVING:
+ * - Deterministically calculates event keys from passenger identity, date, service, structure.
+ * - Checks existing records in Supabase before inserting.
+ * - NEVER recreates or reactivates debts that have already been Settled, Paid, or Removed!
+ * - Skips duplicates if the unpaid debt already exists.
+ * - Sanitizes payloads to canonical 23-column schema.
  */
-export async function importHistoricalCancellations(rows: HistoricalCancellationRow[]): Promise<void> {
-  if (rows.length === 0) return;
-  const payload = rows.map((r) => {
+export async function importHistoricalCancellations(
+  rows: HistoricalCancellationRow[]
+): Promise<{ imported: number; skippedSettled: number; skippedDuplicate: number }> {
+  if (rows.length === 0) return { imported: 0, skippedSettled: 0, skippedDuplicate: 0 };
+  invalidateLedgerCache();
+
+  // 1. Fetch all existing ledger records to prevent duplicating or reviving settled/removed debts
+  let existingEntries: LedgerEntry[] = [];
+  try {
+    existingEntries = await fetchAllLedgerFromSupabase();
+  } catch (err) {
+    console.warn('[Ledger] Failed to fetch existing ledger entries for import deduplication:', err);
+  }
+
+  const settledOrRemovedKeys = new Set<string>();
+  const existingUnpaidKeys = new Set<string>();
+
+  for (const e of existingEntries) {
+    const key = generateLedgerEventKey({
+      passengerName: e.passenger_name,
+      date: e.date,
+      service: e.service,
+      structure: e.structure,
+      manifestKey: e.manifest_key,
+    });
+    const st = (e.status || '').trim();
+    if (st === 'Settled' || st === 'Paid' || st === 'Removed' || parseDebtAmount(e.structure_debt) <= 0) {
+      settledOrRemovedKeys.add(key);
+    } else {
+      existingUnpaidKeys.add(key);
+    }
+  }
+
+  let skippedSettled = 0;
+  let skippedDuplicate = 0;
+  const toInsert: Array<Record<string, unknown>> = [];
+  const seenBatchKeys = new Set<string>();
+  const nowIso = new Date().toISOString();
+
+  for (const r of rows) {
+    const cleanName = sanitizePassengerDisplayName(r.passenger_name);
+    const cleanDate = normalizeDateToYMD(r.date) || r.date;
+    const cleanService = (r.service || 'PM').trim();
+    const cleanStructure = normalizeStructureCode(r.structure);
+    const eventKey = generateLedgerEventKey({
+      passengerName: cleanName,
+      date: cleanDate,
+      service: cleanService,
+      structure: cleanStructure,
+    });
+
+    // 1. Never recreate a debt that was already Settled, Paid, or Removed!
+    if (settledOrRemovedKeys.has(eventKey)) {
+      skippedSettled++;
+      continue;
+    }
+
+    // 2. Do not insert duplicates if already unpaid or seen in current batch
+    if (existingUnpaidKeys.has(eventKey) || seenBatchKeys.has(eventKey)) {
+      skippedDuplicate++;
+      continue;
+    }
+    seenBatchKeys.add(eventKey);
+
     const isSponsorship =
       (r.general_notes || '').toLowerCase().includes('sponsorship') ||
       (r.general_notes || '').toLowerCase().includes('unaccounted') ||
       (r.general_notes || '').toLowerCase().includes('unpaid');
 
-    return {
-      manifest_key: `historical_${r.date || 'undated'}_${r.service}`.replace(/\s+/g, '_'),
-      date: r.date,
-      service: r.service,
-      passenger_name: r.passenger_name,
-      stop: '',
-      structure: r.structure,
-      vehicle_name: 'Historical Import',
-      submitted_by: 'Historical Import',
-      rep_name: r.rep_name || '',
-      license_plate: '',
-      sponsored: isSponsorship,
-      sponsor_note: isSponsorship ? cleanSponsorshipNote(r.general_notes) : '',
-      structure_debt: r.structure_debt,
-      general_notes: cleanSponsorshipNote(r.general_notes),
-    };
-  });
-  const { error } = await supabase.from(LEDGER_TABLE).insert(payload);
-  if (error) throw error;
+    const cleanNotes = cleanSponsorshipNote(r.general_notes);
+    const debtAmt = Number(r.structure_debt) || 40;
+
+    toInsert.push(
+      sanitizeCancellationLedgerPayload({
+        manifest_key: `historical_${cleanDate || 'undated'}_${cleanService}`.replace(/\s+/g, '_'),
+        date: cleanDate,
+        service: cleanService,
+        passenger_name: cleanName,
+        stop: 'Historical',
+        structure: cleanStructure,
+        vehicle_name: 'Historical Import',
+        submitted_by: 'Historical Import',
+        rep_name: r.rep_name || '',
+        license_plate: '',
+        sponsored: isSponsorship,
+        sponsor_note: isSponsorship ? cleanNotes : '',
+        structure_debt: debtAmt,
+        fee: debtAmt,
+        status: 'Unpaid',
+        general_notes: cleanNotes,
+        submitted_at: nowIso,
+      })
+    );
+  }
+
+  // 3. Batch insert in chunks of 100 to prevent payload limit errors
+  if (toInsert.length > 0) {
+    const chunkSize = 100;
+    for (let i = 0; i < toInsert.length; i += chunkSize) {
+      const chunk = toInsert.slice(i, i + chunkSize);
+      const { error } = await supabase.from(LEDGER_TABLE).insert(chunk);
+      if (error) {
+        console.error('[Ledger] Failed to insert historical cancellations batch:', error);
+        throw new Error(`Failed to import historical cancellations to database: ${error.message}`);
+      }
+    }
+  }
+
+  invalidateLedgerCache();
+  return { imported: toInsert.length, skippedSettled, skippedDuplicate };
 }
 
 export interface AggregatedLedgerInstance {
@@ -3496,7 +4041,7 @@ export async function recordReportedSponsorshipPayment(
     spon.status_updated_at = now;
     spon.sponsor_note = spon.sponsor_note ? `${spon.sponsor_note} (Settled: ${payNote})` : `Settled: ${payNote}`;
     if (spon.ledger_entry_id) {
-      await deleteLedgerEntry(spon.ledger_entry_id);
+      await settleLedgerEntries([spon.ledger_entry_id], 'Admin', `Settled via sponsorship payment: ${payNote}`);
       spon.ledger_entry_id = null;
     }
   } else {
@@ -3576,30 +4121,33 @@ export async function updateReportedSponsorship(
     } else {
       const newEntryId = `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       spon.ledger_entry_id = newEntryId;
-      await supabase.from(LEDGER_TABLE).insert([{
-        id: newEntryId,
-        manifest_key: spon.manifest_key || `manual-${Date.now()}`,
-        date: spon.date,
-        service: spon.service,
-        passenger_name: spon.passenger_name,
-        stop: spon.stop || '',
-        structure: spon.structure,
-        vehicle_name: spon.vehicle_name || '—',
-        submitted_by: 'Cancellation Admin',
-        rep_name: spon.rep_name || '',
-        license_plate: '',
-        sponsored: true,
-        sponsor_note: noteText,
-        structure_debt: customDebt,
-        general_notes: noteText,
-        source: 'reported_sponsorship_audit',
-        submitted_at: new Date().toISOString(),
-      }]);
+      await supabase.from(LEDGER_TABLE).insert([
+        sanitizeCancellationLedgerPayload({
+          id: newEntryId,
+          manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+          date: spon.date,
+          service: spon.service,
+          passenger_name: spon.passenger_name,
+          stop: spon.stop || '',
+          structure: spon.structure,
+          vehicle_name: spon.vehicle_name || '—',
+          submitted_by: 'Cancellation Admin',
+          rep_name: spon.rep_name || '',
+          license_plate: '',
+          sponsored: true,
+          sponsor_note: noteText,
+          structure_debt: customDebt,
+          fee: customDebt,
+          status: 'Unpaid',
+          general_notes: noteText,
+          submitted_at: new Date().toISOString(),
+        }),
+      ]);
     }
   } else {
     // Actually sponsored or pending -> remove any debt entry
     if (spon.ledger_entry_id) {
-      await deleteLedgerEntry(spon.ledger_entry_id);
+      await removeLedgerEntries([spon.ledger_entry_id], 'Admin', 'Sponsorship verified as actually sponsored');
       spon.ledger_entry_id = null;
     }
   }

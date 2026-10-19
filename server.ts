@@ -517,14 +517,18 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
     submitted_at: string;
   }>>(LEDGER_FILE, []);
 
-  // Remove any previous ledger entries for these riders in this session
+  // Remove any previous UNPAID ledger entries strictly for this specific manifest session
   if (Array.isArray(allRiderNames) && allRiderNames.length > 0) {
     const riderSet = new Set(allRiderNames.map((n) => sanitizePassengerDisplayName(n).toLowerCase()));
     ledger = ledger.filter((entry) => {
-      const eDate = normalizeDateToYMD(entry.date) || entry.date || (entry.manifest_key ? String(entry.manifest_key).split('_')[0] : '');
-      const isSameDate = entry.manifest_key === key || (parsedDate && eDate === normalizeDateToYMD(parsedDate));
+      const isSameSession = entry.manifest_key === key;
       const isRider = riderSet.has(sanitizePassengerDisplayName(entry.passenger_name).toLowerCase());
-      return !(isSameDate && isRider);
+      const isSettledOrRemoved = (entry as Record<string, unknown>).status === 'Settled' ||
+        (entry as Record<string, unknown>).status === 'Paid' ||
+        (entry as Record<string, unknown>).status === 'Removed';
+      // Never delete settled or removed debts, and never touch entries from other sessions/manifests!
+      if (isSettledOrRemoved) return true;
+      return !(isSameSession && isRider);
     });
   }
 
@@ -536,6 +540,15 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
 
   if (Array.isArray(absentees) && absentees.length > 0) {
     for (const a of absentees) {
+      const cleanAbsName = sanitizePassengerDisplayName(a.fullName);
+      // Check if rider already has a settled, paid, or removed debt for this manifest key
+      const alreadyHandled = ledger.some((e) =>
+        e.manifest_key === key &&
+        sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanAbsName.toLowerCase() &&
+        ((e as Record<string, unknown>).status === 'Settled' || (e as Record<string, unknown>).status === 'Paid' || (e as Record<string, unknown>).status === 'Removed')
+      );
+      if (alreadyHandled) continue;
+
       let aLegs = (a as { id?: string; fullName?: string; legs?: 'both' | 'going' | 'return' }).legs;
       const existS = (manifest.signups as Array<{ id: string; fullName?: string; legs?: 'both' | 'going' | 'return' }> || []).find(
         (s) => (a.id && String(s.id) === String(a.id)) || (s.fullName && a.fullName && s.fullName.trim().toLowerCase() === a.fullName.trim().toLowerCase())
@@ -567,6 +580,8 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
         sponsored: false,
         sponsor_note: '',
         structure_debt: absenteeDebt,
+        fee: absenteeDebt,
+        status: 'Unpaid',
         general_notes: cleanPersonalAbsenteeNote((a as { notes?: string }).notes || ''),
         submitted_at: nowIso,
         legs: aLegs || (isReheKey ? 'both' : undefined),
@@ -2213,10 +2228,10 @@ app.get('/api/ledger', (req, res) => {
     }
   }
 
-  // Filter out zero-debt items, settled items, actually-sponsored items, parse numeric debt, and sanitize boilerplate notes
+  // Filter out zero-debt items, settled items, removed items, actually-sponsored items, parse numeric debt, and sanitize boilerplate notes
   const activeLedger = ledger
     .filter((entry) => {
-      if (entry.status === 'Paid' || entry.status === 'Settled') return false;
+      if (entry.status === 'Paid' || entry.status === 'Settled' || entry.status === 'Removed') return false;
       if (actuallySponsoredIds.has(String(entry.id))) return false;
       const dateStr = normalizeDateToYMD(entry.date as string) || (entry.manifest_key ? String(entry.manifest_key).split('_')[0] : (entry.date as string) || '');
       if (entry.sponsored) {
@@ -2327,7 +2342,6 @@ app.post('/api/ledger/settle', (req, res) => {
 
   const idSet = new Set(ids.map(String));
   let ledger = readJsonFile<Array<{ id: string; passenger_name?: string; manifest_key?: string }>>(LEDGER_FILE, []);
-  const beforeCount = ledger.length;
   const settledEntries = ledger.filter((entry) => idSet.has(entry.id));
   const settledNow = new Date().toISOString();
   ledger = ledger.map((entry) => {
@@ -2371,7 +2385,7 @@ app.post('/api/ledger/settle', (req, res) => {
   }
 
   broadcastSse('ledger_updated', { timestamp: Date.now() });
-  res.json({ success: true, count: beforeCount - ledger.length });
+  res.json({ success: true, count: settledEntries.length });
 });
 
 // Add Manual Ledger Entry
@@ -2398,6 +2412,12 @@ app.post('/api/ledger/manual', (req, res) => {
     noteText = rawNote;
   }
 
+  const parsedDebt = typeof entry.structure_debt === 'number'
+    ? entry.structure_debt
+    : (entry.structure_debt !== undefined && entry.structure_debt !== null && entry.structure_debt !== ''
+        ? Number(entry.structure_debt) || getFareForDate(entry.date)
+        : getFareForDate(entry.date));
+
   const newEntry = {
     id: entry.id || `manual_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     manifest_key: entry.manifest_key || `manual-${Date.now()}`,
@@ -2412,11 +2432,9 @@ app.post('/api/ledger/manual', (req, res) => {
     license_plate: entry.license_plate || '',
     sponsored: isSponsored,
     sponsor_note: isSponsored ? noteText : '',
-    structure_debt: typeof entry.structure_debt === 'number'
-      ? entry.structure_debt
-      : (entry.structure_debt !== undefined && entry.structure_debt !== null && entry.structure_debt !== ''
-          ? Number(entry.structure_debt) || getFareForDate(entry.date)
-          : getFareForDate(entry.date)),
+    structure_debt: parsedDebt,
+    fee: parsedDebt,
+    status: 'Unpaid',
     general_notes: noteText,
     submitted_at: entry.submitted_at || new Date().toISOString(),
   };
@@ -2429,29 +2447,45 @@ app.post('/api/ledger/manual', (req, res) => {
   res.json({ success: true, entry: newEntry });
 });
 
-// Delete specific ledger entry
+// Remove specific ledger entry (durable logical removal)
 app.delete('/api/ledger/:id', (req, res) => {
   const id = req.params.id;
-  let ledger = readJsonFile<Array<{ id: string; passenger_name?: string; manifest_key?: string }>>(LEDGER_FILE, []);
-  const before = ledger.length;
-  const deletedItem = ledger.find((e) => e.id === id);
-  ledger = ledger.filter((e) => e.id !== id);
+  let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+  const nowIso = new Date().toISOString();
+  let found = false;
+  let removedItem: Record<string, unknown> | null = null;
+
+  ledger = ledger.map((e) => {
+    if (e.id === id) {
+      found = true;
+      removedItem = e;
+      return {
+        ...e,
+        status: 'Removed',
+        structure_debt: 0,
+        removed_at: nowIso,
+        removed_by: 'Cancellation Admin',
+        removal_reason: 'Removed by cancellation admin',
+      };
+    }
+    return e;
+  });
   atomicWriteJson(LEDGER_FILE, ledger);
 
   // Synchronize with sponsorship audits so it does not resurrect
   let audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
   let auditChanged = false;
-  const cleanName = deletedItem ? sanitizePassengerDisplayName(deletedItem.passenger_name || '').toLowerCase() : '';
+  const cleanName = removedItem ? sanitizePassengerDisplayName(String(removedItem.passenger_name || '')).toLowerCase() : '';
   audits = audits.map((a) => {
     if (
       String(a.ledger_entry_id) === id ||
-      (deletedItem && a.manifest_key === deletedItem.manifest_key && sanitizePassengerDisplayName(String(a.passenger_name || '')).toLowerCase() === cleanName)
+      (removedItem && a.manifest_key === removedItem.manifest_key && sanitizePassengerDisplayName(String(a.passenger_name || '')).toLowerCase() === cleanName)
     ) {
       auditChanged = true;
       return {
         ...a,
         status: 'actually_sponsored',
-        status_updated_at: new Date().toISOString(),
+        status_updated_at: nowIso,
         ledger_entry_id: null,
         sponsor_note: a.sponsor_note ? `${a.sponsor_note} (Settled / Removed from ledger)` : 'Settled / Removed from ledger',
       };
@@ -2464,19 +2498,26 @@ app.delete('/api/ledger/:id', (req, res) => {
   }
 
   broadcastSse('ledger_updated', { timestamp: Date.now() });
-  res.json({ success: true, removed: before - ledger.length });
+  res.json({ success: true, removed: found ? 1 : 0 });
 });
 
 // Update specific ledger entry (e.g. partial payment or fee adjustment)
 app.patch('/api/ledger/:id', (req, res) => {
   const id = req.params.id;
   const updates = req.body || {};
-  let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+  const ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
   const idx = ledger.findIndex((e) => e.id === id);
   if (idx !== -1) {
-    const wasRemoved = updates.structure_debt !== undefined && Number(updates.structure_debt) <= 0;
-    if (wasRemoved) {
-      ledger = ledger.filter((e) => e.id !== id);
+    const wasZeroDebt = updates.structure_debt !== undefined && Number(updates.structure_debt) <= 0;
+    if (wasZeroDebt) {
+      ledger[idx] = {
+        ...ledger[idx],
+        ...updates,
+        status: 'Settled',
+        structure_debt: 0,
+        settled_at: new Date().toISOString(),
+        settled_by: 'Cancellation Admin',
+      };
     } else {
       ledger[idx] = { ...ledger[idx], ...updates };
       if (updates.structure_debt !== undefined) {
@@ -2489,7 +2530,7 @@ app.patch('/api/ledger/:id', (req, res) => {
     const audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
     const sponIdx = audits.findIndex((a) => String(a.ledger_entry_id) === id);
     if (sponIdx !== -1) {
-      if (wasRemoved) {
+      if (wasZeroDebt) {
         audits[sponIdx].status = 'actually_sponsored';
         audits[sponIdx].status_updated_at = new Date().toISOString();
         audits[sponIdx].ledger_entry_id = null;

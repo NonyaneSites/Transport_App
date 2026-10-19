@@ -9,6 +9,7 @@ export const LEDGER_TABLE = 'cancellation_ledger';
 export const VEHICLES_TABLE = 'transport_vehicles';
 export const SPONSORSHIPS_TABLE = 'sponsorship_audits';
 export const PROFILES_TABLE = 'profiles';
+export const AUDITS_TABLE = 'cancellation_ledger_audits';
 
 export const isConfigured = Boolean(
   supabaseUrl &&
@@ -34,6 +35,7 @@ export class MockSupabaseStorage {
     [VEHICLES_TABLE]: [],
     [SPONSORSHIPS_TABLE]: [],
     [PROFILES_TABLE]: [],
+    [AUDITS_TABLE]: [],
   };
   private listeners: Set<(table: string, payload: StoragePayload) => void> = new Set();
 
@@ -369,6 +371,115 @@ export function createMockClient() {
     from(tableName: string) {
       return new MockQueryBuilder(tableName);
     },
+    rpc: async (fnName: string, args: Record<string, unknown> = {}) => {
+      const now = new Date().toISOString();
+      if (fnName === 'settle_cancellation_debts') {
+        const ids = (args.p_ids as string[]) || [];
+        const current = mockStorage.getTable(LEDGER_TABLE);
+        const idSet = new Set(ids.map(String));
+        let count = 0;
+        const updated = current.map((row) => {
+          if (idSet.has(String(row.id))) {
+            count++;
+            const prevStatus = (row.status as string) || 'Unpaid';
+            const prevDebt = Number(row.structure_debt) || 40;
+            const updatedRow = {
+              ...row,
+              status: 'Settled',
+              structure_debt: 0,
+              settled_at: now,
+              settled_by: (args.p_settled_by as string) || 'Admin',
+              settlement_notes: (args.p_notes as string) || '',
+              updated_at: now,
+            };
+            mockStorage.upsert(AUDITS_TABLE, {
+              id: `audit_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+              ledger_id: row.id,
+              action: 'SETTLE',
+              previous_status: prevStatus,
+              new_status: 'Settled',
+              previous_debt: prevDebt,
+              new_debt: 0,
+              actor_name: (args.p_settled_by as string) || 'Admin',
+              notes: (args.p_notes as string) || 'Settled in full',
+              created_at: now,
+            });
+            mockStorage.notify(LEDGER_TABLE, 'UPDATE', updatedRow);
+            return updatedRow;
+          }
+          return row;
+        });
+        mockStorage.setTable(LEDGER_TABLE, updated);
+        return { data: { success: true, count, settled_at: now }, error: null };
+      }
+      if (fnName === 'remove_cancellation_debts') {
+        const ids = (args.p_ids as string[]) || [];
+        const current = mockStorage.getTable(LEDGER_TABLE);
+        const idSet = new Set(ids.map(String));
+        let count = 0;
+        const updated = current.map((row) => {
+          if (idSet.has(String(row.id))) {
+            count++;
+            const prevStatus = (row.status as string) || 'Unpaid';
+            const prevDebt = Number(row.structure_debt) || 40;
+            const updatedRow = {
+              ...row,
+              status: 'Removed',
+              structure_debt: 0,
+              removed_at: now,
+              removed_by: (args.p_removed_by as string) || 'Admin',
+              removal_reason: (args.p_reason as string) || '',
+              updated_at: now,
+            };
+            mockStorage.upsert(AUDITS_TABLE, {
+              id: `audit_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+              ledger_id: row.id,
+              action: 'REMOVE',
+              previous_status: prevStatus,
+              new_status: 'Removed',
+              previous_debt: prevDebt,
+              new_debt: 0,
+              actor_name: (args.p_removed_by as string) || 'Admin',
+              notes: (args.p_reason as string) || 'Removed by admin',
+              created_at: now,
+            });
+            mockStorage.notify(LEDGER_TABLE, 'UPDATE', updatedRow);
+            return updatedRow;
+          }
+          return row;
+        });
+        mockStorage.setTable(LEDGER_TABLE, updated);
+        return { data: { success: true, count, removed_at: now }, error: null };
+      }
+      if (fnName === 'record_cancellation_payment') {
+        const id = String(args.p_id || '');
+        const amount = Number(args.p_amount) || 0;
+        const current = mockStorage.getTable(LEDGER_TABLE);
+        const row = current.find((r) => String(r.id) === id);
+        if (!row) return { data: null, error: { message: `Ledger entry ${id} not found` } };
+        const prevDebt = Number(row.structure_debt) || 40;
+        const newBalance = Math.max(0, prevDebt - amount);
+        const newStatus = newBalance === 0 ? 'Settled' : 'Partially Paid';
+        const updated = current.map((r) => {
+          if (String(r.id) === id) {
+            const updatedRow = {
+              ...r,
+              status: newStatus,
+              structure_debt: newBalance,
+              settled_at: newBalance === 0 ? now : r.settled_at,
+              settled_by: newBalance === 0 ? ((args.p_actor_name as string) || 'Admin') : r.settled_by,
+              updated_at: now,
+            };
+            mockStorage.notify(LEDGER_TABLE, 'UPDATE', updatedRow);
+            return updatedRow;
+          }
+          return r;
+        });
+        mockStorage.setTable(LEDGER_TABLE, updated);
+        return { data: { success: true, id, previous_debt: prevDebt, new_debt: newBalance, new_status: newStatus, updated_at: now }, error: null };
+      }
+      return { data: { success: true }, error: null };
+    },
     channel(channelName: string) {
       // ✅ Clean single declaration:
       const callbacks: ((payload: StoragePayload & { table: string }) => void)[] = [];
@@ -539,6 +650,22 @@ function createResilientSupabaseClient() {
       } catch {
         mockClient.removeChannel(channel);
       }
+    },
+    rpc(fnName: string, args: Record<string, unknown> = {}) {
+      if (typeof realClient.rpc === 'function') {
+        return realClient.rpc(fnName, args).then((res: { data?: unknown; error?: { message?: string } | null }) => {
+          if (res?.error && isNetworkFetchError(res.error)) {
+            return mockClient.rpc(fnName, args);
+          }
+          return res;
+        }).catch((err: unknown) => {
+          if (isNetworkFetchError(err)) {
+            return mockClient.rpc(fnName, args);
+          }
+          throw err;
+        });
+      }
+      return mockClient.rpc(fnName, args);
     },
   } as unknown as ReturnType<typeof createClient>;
 }

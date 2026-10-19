@@ -9,7 +9,7 @@ import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
 import { connectSyncEvents } from '@/lib/serverApi';
 import {
-  listLedgerEntries, deleteLedgerEntry, downloadLedgerExcel,
+  listLedgerEntries, removeLedgerEntries, downloadLedgerExcel,
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
   recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch, parseDebtAmount, serviceCodeForEntry,
   updateDebtorWithInstances, normalizeDateToYMD, normalizeStructureCode, structureSortComparator,
@@ -69,12 +69,28 @@ CREATE TABLE IF NOT EXISTS cancellation_ledger (
   sponsored boolean NOT NULL DEFAULT false,
   sponsor_note text NOT NULL DEFAULT '',
   structure_debt numeric NOT NULL DEFAULT 40,
+  fee numeric NOT NULL DEFAULT 40,
+  status text NOT NULL DEFAULT 'Unpaid',
   general_notes text NOT NULL DEFAULT '',
-  submitted_at timestamptz NOT NULL DEFAULT now()
+  submitted_at timestamptz NOT NULL DEFAULT now(),
+  event_key text,
+  settled_at timestamptz,
+  settled_by text DEFAULT '',
+  settlement_notes text DEFAULT '',
+  removed_at timestamptz,
+  removed_by text DEFAULT '',
+  removal_reason text DEFAULT '',
+  updated_at timestamptz DEFAULT now()
 );
 
 -- Ensure all required columns exist if table was previously created
 DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'status') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN status text NOT NULL DEFAULT 'Unpaid';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'fee') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN fee numeric NOT NULL DEFAULT 40;
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'rep_name') THEN
     ALTER TABLE cancellation_ledger ADD COLUMN rep_name text NOT NULL DEFAULT '';
   END IF;
@@ -93,6 +109,30 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'general_notes') THEN
     ALTER TABLE cancellation_ledger ADD COLUMN general_notes text NOT NULL DEFAULT '';
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'event_key') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN event_key text;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'settled_at') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN settled_at timestamptz;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'settled_by') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN settled_by text DEFAULT '';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'settlement_notes') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN settlement_notes text DEFAULT '';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'removed_at') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN removed_at timestamptz;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'removed_by') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN removed_by text DEFAULT '';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'removal_reason') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN removal_reason text DEFAULT '';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cancellation_ledger' AND column_name = 'updated_at') THEN
+    ALTER TABLE cancellation_ledger ADD COLUMN updated_at timestamptz DEFAULT now();
+  END IF;
 END $$;
 
 ALTER TABLE cancellation_ledger ENABLE ROW LEVEL SECURITY;
@@ -109,9 +149,30 @@ CREATE POLICY "anon_update_ledger" ON cancellation_ledger FOR UPDATE TO anon, au
 DROP POLICY IF EXISTS "anon_delete_ledger" ON cancellation_ledger;
 CREATE POLICY "anon_delete_ledger" ON cancellation_ledger FOR DELETE TO anon, authenticated USING (true);
 
+CREATE INDEX IF NOT EXISTS idx_cancellation_ledger_status ON cancellation_ledger(status);
 CREATE INDEX IF NOT EXISTS idx_cancellation_ledger_date ON cancellation_ledger(date);
 CREATE INDEX IF NOT EXISTS idx_cancellation_ledger_structure ON cancellation_ledger(structure);
 CREATE INDEX IF NOT EXISTS idx_cancellation_ledger_manifest_key ON cancellation_ledger(manifest_key);
+
+-- Financial Audit Trail Table
+CREATE TABLE IF NOT EXISTS cancellation_ledger_audits (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  ledger_id uuid REFERENCES cancellation_ledger(id) ON DELETE CASCADE,
+  action text NOT NULL,
+  previous_status text,
+  new_status text,
+  previous_debt numeric,
+  new_debt numeric,
+  actor_name text DEFAULT '',
+  notes text DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE cancellation_ledger_audits ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "audits_select_policy" ON cancellation_ledger_audits;
+CREATE POLICY "audits_select_policy" ON cancellation_ledger_audits FOR SELECT TO anon, authenticated USING (true);
+DROP POLICY IF EXISTS "audits_insert_policy" ON cancellation_ledger_audits;
+CREATE POLICY "audits_insert_policy" ON cancellation_ledger_audits FOR INSERT TO anon, authenticated WITH CHECK (true);
 
 -- 2. SPONSORSHIP AUDITS TABLE (Tracks all reported sponsorships and verification audits)
 CREATE TABLE IF NOT EXISTS sponsorship_audits (
@@ -748,9 +809,11 @@ export function LedgerPage() {
     setDeletingDebtor(true);
     setEditError(null);
     try {
-      await Promise.all(editTarget.entryIds.map((id) => deleteLedgerEntry(id)));
+      await removeLedgerEntries(editTarget.entryIds, 'Admin', 'Removed by admin');
       const idSet = new Set(editTarget.entryIds);
       setEntries((prev) => prev.filter((e) => !idSet.has(e.id)));
+      const refreshed = await listLedgerEntries();
+      setEntries(refreshed);
       const refSpons = await listReportedSponsorships();
       setSponsorships(refSpons);
       closeEditModal();
