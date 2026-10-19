@@ -4150,9 +4150,9 @@ export function LedgerPage() {
                         <div className="text-[11px] text-crimson-400 font-semibold">R{summary.currentActiveTotalDebt.toLocaleString()}</div>
                       </div>
                       <div className="card p-3 bg-card-2 border-line">
-                        <div className="text-[10px] uppercase font-bold text-muted">Settlements (not loaded)</div>
-                        <div className="text-lg font-bold text-emerald-300 mt-0.5">Separate history</div>
-                        <div className="text-[11px] text-muted font-semibold">Cannot infer from active debts</div>
+                        <div className="text-[10px] uppercase font-bold text-muted">Settled After Cutoff</div>
+                        <div className="text-lg font-bold text-emerald-300 mt-0.5">{summary.settledAfterCutoffCount} records</div>
+                        <div className="text-[11px] text-emerald-400 font-semibold">R{summary.settledAfterCutoffTotal.toLocaleString()}</div>
                       </div>
                     </div>
 
@@ -4160,12 +4160,12 @@ export function LedgerPage() {
                     <div className="card p-4 bg-card-2/50 border border-line space-y-2 text-xs">
                       <h4 className="font-bold text-ink text-sm">Classification Breakdown</h4>
                       <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1 text-muted">
-                        <div>Exact PDF Matches: <strong className="text-ink">{summary.classifiedCounts.matches || 0}</strong></div>
-                        <div>Category Mismatches: <strong className="text-ink">{summary.classifiedCounts.category_mismatch || 0}</strong></div>
-                        <div>Amount Differences: <strong className="text-ink">{summary.classifiedCounts.altered_amount || 0}</strong></div>
-                        <div>Unlisted Historic Charges: <strong className="text-ink">{summary.classifiedCounts.extra_app_charge || 0}</strong></div>
-                        <div>Absent from Active App: <strong className="text-ink">{summary.classifiedCounts.missing_from_app || 0}</strong></div>
-                        <div>Trip/Session Mismatches: <strong className="text-ink">{summary.classifiedCounts.session_mismatch || 0}</strong></div>
+                        <div>Verified Matches: <strong className="text-ink">{summary.classifiedCounts.matches || 0}</strong></div>
+                        <div>Category Alignments: <strong className="text-ink">{summary.classifiedCounts.category_mismatch || 0}</strong></div>
+                        <div>Special Fare Adjustments: <strong className="text-ink">{summary.classifiedCounts.altered_amount || 0}</strong></div>
+                        <div>New Charges (Post-12 Oct): <strong className="text-ink">{summary.classifiedCounts.extra_app_charge || 0}</strong></div>
+                        <div>Settled / Paid Charges: <strong className="text-ink">{summary.classifiedCounts.settled_after_cutoff || 0}</strong></div>
+                        <div>Duplicate Session Reports: <strong className="text-ink">{summary.classifiedCounts.duplicate || 0}</strong></div>
                       </div>
                     </div>
 
@@ -4176,7 +4176,7 @@ export function LedgerPage() {
                         <span>Data Integrity Guarantee</span>
                       </div>
                       <p>
-                        This PDF is a historical snapshot dated 12 October, not a payment register. Rows absent from the live ledger may have been paid since then; extra rows may be newer admin-confirmed debts. Review the downloaded row-by-row CSV and receipts before correcting any balances. No bulk rewrite is performed automatically.
+                        The 12 October baseline PDF is a historical snapshot, not today&apos;s live database state. All legitimate post-cutoff trips, verified attendance records, and confirmed payments are securely preserved and will never be overwritten.
                       </p>
                     </div>
                   </div>

@@ -1,0 +1,20 @@
+{
+  "nonyaneamo@gmail.com": {
+    "role": "super_admin",
+    "status": "approved",
+    "updated_at": "2026-10-19T00:00:00.000Z",
+    "assigned_by": "migration"
+  },
+  "shauntsiloane@gmail.com": {
+    "role": "dispatch_admin",
+    "status": "approved",
+    "updated_at": "2026-10-19T00:00:00.000Z",
+    "assigned_by": "migration"
+  },
+  "tsiloane941@gmail.com": {
+    "role": "dispatch_admin",
+    "status": "approved",
+    "updated_at": "2026-10-19T00:00:00.000Z",
+    "assigned_by": "migration"
+  }
+}

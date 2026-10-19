@@ -723,4 +723,38 @@ export interface ReopenVehiclePayload {
   allRiderNames: string[];
 }
 
+export type AppUserRole =
+  | 'super_admin'
+  | 'dispatch_admin'
+  | 'ledger_admin'
+  | 'admin'
+  | 'dispatcher'
+  | 'rep';
+
+export type UserAccountStatus = 'pending' | 'approved' | 'rejected';
+
+export const SUPER_ADMIN_EMAILS = ['nonyaneamo@gmail.com'];
+
+export function isSuperAdminEmail(email?: string | null): boolean {
+  if (!email) return false;
+  return SUPER_ADMIN_EMAILS.includes(email.trim().toLowerCase());
+}
+
+export function canRoleAccessDispatch(role?: AppUserRole | null, email?: string | null): boolean {
+  if (isSuperAdminEmail(email)) return true;
+  if (!role) return false;
+  return role === 'super_admin' || role === 'dispatch_admin' || role === 'dispatcher' || role === 'admin';
+}
+
+export function canRoleAccessLedger(role?: AppUserRole | null, email?: string | null): boolean {
+  if (isSuperAdminEmail(email)) return true;
+  if (!role) return false;
+  return role === 'super_admin' || role === 'ledger_admin' || role === 'admin';
+}
+
+export function isRoleSuperAdmin(role?: AppUserRole | null, email?: string | null): boolean {
+  if (isSuperAdminEmail(email)) return true;
+  return role === 'super_admin';
+}
+
 
