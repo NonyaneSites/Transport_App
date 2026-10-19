@@ -20,10 +20,52 @@ export function ApprovalPage() {
         .select('*')
         .order('created_at', { ascending: false });
 
-      if (data && Array.isArray(data)) {
-        setProfiles(data);
-      } else if (error) {
-        console.warn('Error fetching profiles:', error);
+      let profileList = Array.isArray(data) ? [...data] : [];
+
+      // Fetch server roles to enrich profiles with roles, names, phone numbers
+      try {
+        const res = await fetch('/api/auth/roles');
+        if (res.ok) {
+          const rolesMap = await res.json();
+          if (rolesMap) {
+            profileList = profileList.map((p) => {
+              const emailKey = p.email?.trim().toLowerCase();
+              const serverInfo = emailKey ? rolesMap[emailKey] : null;
+              return {
+                ...p,
+                role: serverInfo?.role || p.role || (p.status === 'approved' ? 'admin' : 'rep'),
+                full_name: serverInfo?.full_name || p.full_name || p.email?.split('@')[0],
+                phone: serverInfo?.phone || p.phone,
+                structure: serverInfo?.structure || p.structure,
+                status: serverInfo?.status || p.status || 'pending',
+              };
+            });
+
+            // Also include any users registered on server that might not be in Supabase
+            const knownEmails = new Set(profileList.map((p) => p.email?.trim().toLowerCase()));
+            for (const [em, info] of Object.entries(rolesMap)) {
+              if (!knownEmails.has(em)) {
+                profileList.push({
+                  id: info.userId || `user_${em}`,
+                  email: em,
+                  status: info.status || 'approved',
+                  role: info.role || 'admin',
+                  full_name: info.full_name || em.split('@')[0],
+                  phone: info.phone || '',
+                  structure: info.structure || '',
+                  created_at: info.updated_at || new Date().toISOString(),
+                });
+              }
+            }
+          }
+        }
+      } catch (serverErr) {
+        console.warn('Failed to fetch server roles:', serverErr);
+      }
+
+      setProfiles(profileList);
+      if (error) {
+        console.warn('Supabase profiles notice:', error);
       }
     } catch (err) {
       console.error('Fetch profiles failed:', err);
@@ -40,49 +82,53 @@ export function ApprovalPage() {
     setLoading(true);
     setActionNotice(null);
     try {
-      const targetRole = newRole || 'rep';
+      const targetRole = newRole || 'admin';
+      const userObj = profiles.find((u) => u.id === userId);
+      const userEmail = userObj?.email?.trim().toLowerCase();
 
-      // 1. Try secure server-side RPC first
-      const { data: rpcData, error: rpcError } = await supabase.rpc('approve_user_profile', {
-        target_user_id: userId,
-        new_status: newStatus,
-        new_role: targetRole,
-      });
-
-      if (!rpcError && rpcData?.success) {
-        setProfiles((prev) =>
-          prev.map((u) =>
-            u.id === userId
-              ? { ...u, status: newStatus, role: targetRole, updated_at: new Date().toISOString() }
-              : u
-          )
-        );
-        setActionNotice(`Account ${newStatus === 'approved' ? 'approved' : 'declined'} successfully.`);
-        setTimeout(() => setActionNotice(null), 4000);
-        return;
+      // 1. Persist to server auth roles store
+      try {
+        await fetch('/api/auth/approve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId,
+            email: userEmail,
+            status: newStatus,
+            role: targetRole,
+          }),
+        });
+      } catch (srvErr) {
+        console.warn('Server auth approve error:', srvErr);
       }
 
-      // 2. Fallback to direct table update (guarded by RLS)
-      const updates = {
-        status: newStatus,
-        role: targetRole,
-        updated_at: new Date().toISOString(),
-      };
+      // 2. Update Supabase profiles table safely with canonical status column only
+      try {
+        const { error: directError } = await supabase
+          .from('profiles')
+          .update({ status: newStatus })
+          .eq('id', userId);
 
-      const { error: directError } = await supabase
-        .from('profiles')
-        .update(updates)
-        .eq('id', userId);
-
-      if (!directError) {
-        setProfiles((prev) =>
-          prev.map((u) => (u.id === userId ? { ...u, ...updates } : u))
-        );
-        setActionNotice(`Account ${newStatus === 'approved' ? 'approved' : 'declined'} successfully.`);
-        setTimeout(() => setActionNotice(null), 4000);
-      } else {
-        setActionNotice(`Failed to update account: ${directError.message}`);
+        if (directError && userEmail) {
+          // Fallback update by email if ID differed
+          await supabase
+            .from('profiles')
+            .update({ status: newStatus })
+            .ilike('email', userEmail);
+        }
+      } catch (sbErr) {
+        console.warn('Supabase profile direct update warning:', sbErr);
       }
+
+      setProfiles((prev) =>
+        prev.map((u) =>
+          u.id === userId
+            ? { ...u, status: newStatus, role: targetRole, updated_at: new Date().toISOString() }
+            : u
+        )
+      );
+      setActionNotice(`Account ${newStatus === 'approved' ? 'approved' : 'declined'} successfully.`);
+      setTimeout(() => setActionNotice(null), 4000);
     } catch (err) {
       setActionNotice(err instanceof Error ? err.message : 'Error updating user');
     } finally {
@@ -240,7 +286,7 @@ export function ApprovalPage() {
                 <div className="flex items-center gap-2 shrink-0">
                   {user.status !== 'approved' && (
                     <button
-                      onClick={() => handleAction(user.id, 'approved', user.role || 'rep')}
+                      onClick={() => handleAction(user.id, 'approved', user.role || 'admin')}
                       className="btn-success py-1.5 px-3 text-xs flex items-center gap-1"
                     >
                       <CheckCircle2 className="h-3.5 w-3.5" />

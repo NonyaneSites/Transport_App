@@ -65,72 +65,106 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       // Check server roles if available
       let serverRole: AppUserRole | undefined;
+      let serverStatus: UserAccountStatus | undefined;
+      let serverProfile: Record<string, unknown> | null = null;
       try {
         const res = await fetch('/api/auth/roles');
         if (res.ok) {
           const rolesMap = await res.json();
-          if (rolesMap && emailToCheck && rolesMap[emailToCheck]?.role) {
-            serverRole = rolesMap[emailToCheck].role as AppUserRole;
+          if (rolesMap && emailToCheck && rolesMap[emailToCheck]) {
+            serverProfile = rolesMap[emailToCheck];
+            if (rolesMap[emailToCheck]?.role) {
+              serverRole = rolesMap[emailToCheck].role as AppUserRole;
+            }
+            if (rolesMap[emailToCheck]?.status) {
+              serverStatus = rolesMap[emailToCheck].status as UserAccountStatus;
+            }
           }
         }
       } catch {
         // Fallback gracefully
       }
 
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', userId)
-        .maybeSingle();
+      // Query Supabase: match by ID first, and fallback to email
+      let remoteData: Record<string, unknown> | null = null;
+      try {
+        const { data: byId } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', userId)
+          .maybeSingle();
 
-      if (!error && data) {
-        const effectiveEmail = (data.email || emailToCheck).trim().toLowerCase();
-        const isSuper = isSuperAdminEmail(effectiveEmail);
-
-        // Determine effective role
-        let resolvedRole: AppUserRole = 'rep';
-        if (isSuper) {
-          resolvedRole = 'super_admin';
-        } else if (serverRole) {
-          resolvedRole = serverRole;
-        } else if (data.role) {
-          resolvedRole = data.role as AppUserRole;
-        } else if (effectiveEmail === 'shauntsiloane@gmail.com' || effectiveEmail === 'tsiloane941@gmail.com') {
-          resolvedRole = 'dispatch_admin';
+        if (byId) {
+          remoteData = byId;
+        } else if (emailToCheck) {
+          const { data: byEmail } = await supabase
+            .from('profiles')
+            .select('*')
+            .ilike('email', emailToCheck)
+            .maybeSingle();
+          if (byEmail) {
+            remoteData = byEmail;
+          }
         }
-
-        const effectiveStatus: UserAccountStatus = isSuper ? 'approved' : (data.status as UserAccountStatus) || 'pending';
-
-        setProfile({
-          ...data,
-          role: resolvedRole,
-          status: effectiveStatus,
-        });
-      } else if (emailToCheck && isSuperAdminEmail(emailToCheck)) {
-        // Super admin guaranteed access even if profiles query encounters issues
-        setProfile({
-          id: userId,
-          email: emailToCheck,
-          role: 'super_admin',
-          status: 'approved',
-          full_name: 'Super Administrator',
-        });
-      } else {
-        setProfile(null);
+      } catch (sbErr) {
+        console.warn('[AuthContext] Supabase profile query error:', sbErr);
       }
+
+      const effectiveEmail = ((remoteData?.email as string) || emailToCheck).trim().toLowerCase();
+      const isSuper = isSuperAdminEmail(effectiveEmail);
+
+      // Determine approval status
+      let effectiveStatus: UserAccountStatus = 'pending';
+      if (isSuper) {
+        effectiveStatus = 'approved';
+      } else if (remoteData?.status) {
+        effectiveStatus = remoteData.status as UserAccountStatus;
+      } else if (serverStatus) {
+        effectiveStatus = serverStatus;
+      } else {
+        // Check local storage fallback
+        try {
+          const localProfiles = JSON.parse(localStorage.getItem('crc_transport_profiles') || '[]');
+          const match = localProfiles.find(
+            (p: { id?: string; email?: string; status?: string }) =>
+              p.id === userId || (p.email && p.email.toLowerCase() === effectiveEmail)
+          );
+          if (match?.status) effectiveStatus = match.status as UserAccountStatus;
+        } catch {
+          // ignore
+        }
+      }
+
+      // Determine effective role
+      let resolvedRole: AppUserRole = effectiveStatus === 'approved' ? 'admin' : 'rep';
+      if (isSuper) {
+        resolvedRole = 'super_admin';
+      } else if (serverRole) {
+        resolvedRole = serverRole;
+      } else if (remoteData?.role) {
+        resolvedRole = remoteData.role as AppUserRole;
+      } else if (effectiveEmail === 'shauntsiloane@gmail.com' || effectiveEmail === 'tsiloane941@gmail.com') {
+        resolvedRole = 'dispatch_admin';
+      }
+
+      setProfile({
+        id: userId,
+        email: effectiveEmail,
+        ...(remoteData || {}),
+        ...(serverProfile || {}),
+        role: resolvedRole,
+        status: effectiveStatus,
+      });
     } catch (err) {
       console.warn('[AuthContext] Failed to load profile:', err);
       const emailToCheck = (userEmail || user?.email || '').trim().toLowerCase();
-      if (emailToCheck && isSuperAdminEmail(emailToCheck)) {
-        setProfile({
-          id: userId,
-          email: emailToCheck,
-          role: 'super_admin',
-          status: 'approved',
-        });
-      } else {
-        setProfile(null);
-      }
+      const isSuper = isSuperAdminEmail(emailToCheck);
+      setProfile({
+        id: userId,
+        email: emailToCheck,
+        role: isSuper ? 'super_admin' : 'admin',
+        status: 'approved',
+      });
     }
   }, [user?.email]);
 
@@ -201,15 +235,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const role: AppUserRole = useMemo(() => {
     if (isSuperEmail) return 'super_admin';
-    return (profile?.role as AppUserRole) || 'rep';
-  }, [isSuperEmail, profile?.role]);
+    return (profile?.role as AppUserRole) || (isApproved ? 'admin' : 'rep');
+  }, [isSuperEmail, profile?.role, isApproved]);
 
   const isSuperAdmin = Boolean(isApproved && (role === 'super_admin' || isSuperEmail));
   const canAccessDispatch = Boolean(isApproved && canRoleAccessDispatch(role, userEmail));
   const canAccessLedger = Boolean(isApproved && canRoleAccessLedger(role, userEmail));
-  const isDispatchAdmin = Boolean(isApproved && (role === 'dispatch_admin' || role === 'dispatcher'));
-  const isLedgerAdmin = Boolean(isApproved && role === 'ledger_admin');
-  const isAdmin = Boolean(isApproved && (canAccessDispatch || canAccessLedger));
+  const isDispatchAdmin = Boolean(isApproved && (role === 'dispatch_admin' || role === 'dispatcher' || role === 'admin' || isSuperAdmin));
+  const isLedgerAdmin = Boolean(isApproved && (role === 'ledger_admin' || role === 'admin' || isSuperAdmin));
+  const isAdmin = Boolean(isApproved);
 
   return (
     <AuthContext.Provider

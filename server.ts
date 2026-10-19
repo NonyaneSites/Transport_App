@@ -13,6 +13,7 @@ const MANIFESTS_DIR = path.join(DATA_DIR, 'manifests');
 const LEDGER_FILE = path.join(DATA_DIR, 'ledger.json');
 const SPONSORSHIPS_FILE = path.join(DATA_DIR, 'sponsorship_audits.json');
 const REHEARSAL_TEMPLATE_FILE = path.join(DATA_DIR, 'rehearsal_template.json');
+const USER_ROLES_FILE = path.join(DATA_DIR, 'user_roles.json');
 
 function allowedLegsUpgrades(current?: string | null): Array<'both' | 'going' | 'return'> {
   if (current === 'going') return ['going', 'both'];
@@ -26,6 +27,7 @@ if (!fs.existsSync(MANIFESTS_DIR)) fs.mkdirSync(MANIFESTS_DIR, { recursive: true
 if (!fs.existsSync(LEDGER_FILE)) fs.writeFileSync(LEDGER_FILE, JSON.stringify([]), 'utf-8');
 if (!fs.existsSync(SPONSORSHIPS_FILE)) fs.writeFileSync(SPONSORSHIPS_FILE, JSON.stringify([]), 'utf-8');
 if (!fs.existsSync(REHEARSAL_TEMPLATE_FILE)) fs.writeFileSync(REHEARSAL_TEMPLATE_FILE, JSON.stringify([]), 'utf-8');
+if (!fs.existsSync(USER_ROLES_FILE)) fs.writeFileSync(USER_ROLES_FILE, JSON.stringify({}), 'utf-8');
 
 // Atomic write helper
 function atomicWriteJson(filePath: string, data: unknown): void {
@@ -101,6 +103,113 @@ app.use('/api', rateLimiter);
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
+});
+
+// User roles & authorization endpoints
+app.get('/api/auth/roles', (_req, res) => {
+  try {
+    const roles = readJsonFile<Record<string, Record<string, unknown>>>(USER_ROLES_FILE, {});
+    res.json(roles);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post('/api/auth/roles', (req, res) => {
+  try {
+    const { email, role, status, full_name, phone, structure, userId } = req.body || {};
+    if (!email) {
+      res.status(400).json({ error: 'Email is required' });
+      return;
+    }
+    const cleanEmail = String(email).trim().toLowerCase();
+    const roles = readJsonFile<Record<string, Record<string, unknown>>>(USER_ROLES_FILE, {});
+    const existing = roles[cleanEmail] || {};
+    roles[cleanEmail] = {
+      ...existing,
+      userId: userId || existing.userId || `user_${cleanEmail}`,
+      email: cleanEmail,
+      role: role || existing.role || 'admin',
+      status: status || existing.status || 'approved',
+      full_name: full_name !== undefined ? full_name : existing.full_name,
+      phone: phone !== undefined ? phone : existing.phone,
+      structure: structure !== undefined ? structure : existing.structure,
+      updated_at: new Date().toISOString(),
+    };
+    atomicWriteJson(USER_ROLES_FILE, roles);
+    res.json({ success: true, user: roles[cleanEmail] });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post('/api/auth/approve', (req, res) => {
+  try {
+    const { email, userId, status, role } = req.body || {};
+    const roles = readJsonFile<Record<string, Record<string, unknown>>>(USER_ROLES_FILE, {});
+    const cleanEmail = email ? String(email).trim().toLowerCase() : null;
+    
+    // Find by email or userId
+    let targetKey = cleanEmail;
+    if (!targetKey && userId) {
+      targetKey = Object.keys(roles).find((k) => roles[k].userId === userId) || null;
+    }
+
+    if (targetKey) {
+      const existing = roles[targetKey] || {};
+      roles[targetKey] = {
+        ...existing,
+        userId: userId || existing.userId,
+        status: status || 'approved',
+        role: role || existing.role || 'admin',
+        updated_at: new Date().toISOString(),
+      };
+      atomicWriteJson(USER_ROLES_FILE, roles);
+      res.json({ success: true, user: roles[targetKey] });
+    } else if (cleanEmail) {
+      roles[cleanEmail] = {
+        userId: userId || `user_${cleanEmail}`,
+        email: cleanEmail,
+        status: status || 'approved',
+        role: role || 'admin',
+        updated_at: new Date().toISOString(),
+      };
+      atomicWriteJson(USER_ROLES_FILE, roles);
+      res.json({ success: true, user: roles[cleanEmail] });
+    } else {
+      res.status(400).json({ error: 'User email or ID required' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post('/api/auth/profile', (req, res) => {
+  try {
+    const { id, email, full_name, phone, structure, role, status } = req.body || {};
+    if (!email) {
+      res.status(400).json({ error: 'Email is required' });
+      return;
+    }
+    const cleanEmail = String(email).trim().toLowerCase();
+    const roles = readJsonFile<Record<string, Record<string, unknown>>>(USER_ROLES_FILE, {});
+    const existing = roles[cleanEmail] || {};
+    roles[cleanEmail] = {
+      ...existing,
+      userId: id || existing.userId || `user_${cleanEmail}`,
+      email: cleanEmail,
+      full_name: full_name || existing.full_name,
+      phone: phone || existing.phone,
+      structure: structure || existing.structure,
+      role: role || existing.role || 'admin',
+      status: status || existing.status || 'pending',
+      updated_at: new Date().toISOString(),
+    };
+    atomicWriteJson(USER_ROLES_FILE, roles);
+    res.json({ success: true, profile: roles[cleanEmail] });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 // SSE Live Sync Stream

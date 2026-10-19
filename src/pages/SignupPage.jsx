@@ -48,24 +48,38 @@ export function SignupPage() {
       const userId = authData?.user?.id || `user_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const userEmail = authData?.user?.email || email.trim().toLowerCase();
 
-      // Configure and register the profile in the profiles table for admin review
-      const profileRow = {
-        id: userId,
-        email: userEmail,
-        full_name: fullName.trim(),
-        phone: phone.trim() || null,
-        structure: structure.trim() || null,
-        role: role || 'rep',
-        status: 'pending',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
+      // 1. Save full profile to server auth store
+      try {
+        await fetch('/api/auth/profile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: userId,
+            email: userEmail,
+            full_name: fullName.trim(),
+            phone: phone.trim() || null,
+            structure: structure.trim() || null,
+            role: role || 'admin',
+            status: 'pending',
+          }),
+        });
+      } catch (srvErr) {
+        console.warn('Server profile save warning:', srvErr);
+      }
 
-      const { error: profileError } = await supabase
-        .from('profiles')
-        .upsert(profileRow, { onConflict: 'id' });
-
-      if (profileError) {
+      // 2. Register in Supabase profiles table safely (only canonical database columns: id, email, status)
+      try {
+        await supabase
+          .from('profiles')
+          .upsert(
+            {
+              id: userId,
+              email: userEmail,
+              status: 'pending',
+            },
+            { onConflict: 'id' }
+          );
+      } catch (profileError) {
         console.warn('Profile record creation warning:', profileError);
       }
 

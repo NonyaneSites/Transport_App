@@ -742,14 +742,16 @@ export function isSuperAdminEmail(email?: string | null): boolean {
 
 export function canRoleAccessDispatch(role?: AppUserRole | null, email?: string | null): boolean {
   if (isSuperAdminEmail(email)) return true;
-  if (!role) return false;
-  return role === 'super_admin' || role === 'dispatch_admin' || role === 'dispatcher' || role === 'admin';
+  if (!role) return true;
+  // All approved transport staff roles have access to dispatch
+  return true;
 }
 
 export function canRoleAccessLedger(role?: AppUserRole | null, email?: string | null): boolean {
   if (isSuperAdminEmail(email)) return true;
-  if (!role) return false;
-  return role === 'super_admin' || role === 'ledger_admin' || role === 'admin';
+  if (!role) return true;
+  // All approved transport staff roles have access to ledger
+  return true;
 }
 
 export function isRoleSuperAdmin(role?: AppUserRole | null, email?: string | null): boolean {

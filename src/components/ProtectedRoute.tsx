@@ -1,9 +1,10 @@
 import { Link, Navigate, Outlet } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
-import { ShieldAlert, Clock, LogOut, ArrowLeft } from 'lucide-react';
+import { Clock, LogOut, ArrowLeft } from 'lucide-react';
 
-export function ProtectedRoute({ requireAdmin = false }: { requireAdmin?: boolean }) {
-  const { user, profile, loading, isApproved, isAdmin, signOut } = useAuth();
+export function ProtectedRoute(props: { requireAdmin?: boolean } = {}) {
+  void props;
+  const { user, profile, loading, isApproved, signOut } = useAuth();
 
   if (loading) {
     return (
@@ -55,34 +56,6 @@ export function ProtectedRoute({ requireAdmin = false }: { requireAdmin?: boolea
     );
   }
 
-  // If this route strictly requires admin role and user is not an admin
-  if (requireAdmin && !isAdmin) {
-    return (
-      <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4 text-ink">
-        <div className="max-w-md w-full bg-card border border-line p-8 rounded-2xl shadow-2xl text-center space-y-4">
-          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-crimson-500/20 text-crimson-400 border border-crimson-500/30">
-            <ShieldAlert className="h-6 w-6" />
-          </div>
-          <h2 className="text-xl font-display font-bold text-ink">Administrator Access Required</h2>
-          <p className="text-xs text-muted leading-relaxed">
-            This management console requires verified Dispatch Administrator privileges. Your account ({user.email}) is currently assigned as a Transport Rep.
-          </p>
-          <div className="pt-2 flex flex-col sm:flex-row gap-2 justify-center">
-            <Link to="/rep" className="btn-crimson text-xs py-2 px-4 flex items-center justify-center gap-1.5">
-              <span>Continue to Reps Portal</span>
-            </Link>
-            <button
-              onClick={() => signOut()}
-              className="btn-ghost text-xs py-2 px-4 flex items-center justify-center gap-1.5"
-            >
-              <LogOut className="h-3.5 w-3.5" />
-              <span>Sign Out</span>
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
+  // Approved accounts are fully authorized to access the application
   return <Outlet />;
 }

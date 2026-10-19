@@ -35,15 +35,51 @@ export function LoginPage() {
         return;
       }
 
-      // 2. Check the user's approval status in the profiles table
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', authData.user.id)
-        .maybeSingle();
+      // 2. Check the user's approval status in the profiles table (by id or email)
+      const cleanEmail = email.trim().toLowerCase();
+      let profile = null;
+      try {
+        const { data: byId } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', authData.user.id)
+          .maybeSingle();
 
-      // 3. Block access if not approved
-      if (profile && profile.status !== 'approved') {
+        if (byId) {
+          profile = byId;
+        } else {
+          const { data: byEmail } = await supabase
+            .from('profiles')
+            .select('*')
+            .ilike('email', cleanEmail)
+            .maybeSingle();
+          if (byEmail) {
+            profile = byEmail;
+          }
+        }
+      } catch (err) {
+        console.warn('Profile fetch error during login:', err);
+      }
+
+      // 3. Check server roles fallback if Supabase didn't return a record
+      if (!profile) {
+        try {
+          const res = await fetch('/api/auth/roles');
+          if (res.ok) {
+            const rolesMap = await res.json();
+            if (rolesMap && rolesMap[cleanEmail]) {
+              profile = rolesMap[cleanEmail];
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      const isSuper = cleanEmail === 'nonyaneamo@gmail.com';
+
+      // 4. Block access only if explicitly pending or rejected
+      if (!isSuper && profile && profile.status && profile.status !== 'approved') {
         await supabase.auth.signOut();
         
         if (profile.status === 'pending') {
@@ -53,14 +89,12 @@ export function LoginPage() {
         } else {
           setError('Your account is not approved to log in.');
         }
-      } else {
-        // 4. Success! Route according to role or go to dispatch
-        if (profile?.role === 'rep') {
-          navigate('/rep');
-        } else {
-          navigate('/admin');
-        }
+        setLoading(false);
+        return;
       }
+
+      // 5. Success! Navigate into the app
+      navigate('/admin');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed.');
     } finally {

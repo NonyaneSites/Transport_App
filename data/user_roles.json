@@ -1,0 +1,80 @@
+{
+  "nonyaneamo@gmail.com": {
+    "userId": "2a2bbe5c-f979-439e-b1b4-4b7d7a7d72e6",
+    "email": "nonyaneamo@gmail.com",
+    "role": "super_admin",
+    "status": "approved",
+    "full_name": "Amo Nhlabathi"
+  },
+  "shauntsiloane@gmail.com": {
+    "userId": "f17d5d30-4079-44e8-80bc-028e3e0d746f",
+    "email": "shauntsiloane@gmail.com",
+    "role": "dispatch_admin",
+    "status": "approved",
+    "full_name": "Shaun Tsiloane"
+  },
+  "tsiloane941@gmail.com": {
+    "userId": "3cade135-9db2-4b01-88b5-d01752736d50",
+    "email": "tsiloane941@gmail.com",
+    "role": "dispatch_admin",
+    "status": "approved",
+    "full_name": "Tsiloane"
+  },
+  "amogelangcr7@icloud.com": {
+    "userId": "72de61d5-d7dd-4fcd-8f57-40828ca26b1c",
+    "email": "amogelangcr7@icloud.com",
+    "role": "admin",
+    "status": "approved",
+    "full_name": "Amogelang",
+    "updated_at": "2026-10-19T13:22:18.846Z"
+  },
+  "neommuleleng15@gmail.com": {
+    "userId": "73a9cd8b-7cf2-41eb-ad39-dae16eeb592f",
+    "email": "neommuleleng15@gmail.com",
+    "role": "admin",
+    "status": "approved",
+    "full_name": "Neo Mmuleleng"
+  },
+  "makhmaanda@gmail.com": {
+    "userId": "e79a8fcc-47f2-43d6-a7ca-5c8106896be9",
+    "email": "makhmaanda@gmail.com",
+    "role": "admin",
+    "status": "approved",
+    "full_name": "Makh Maanda"
+  },
+  "mkgolaganyo2@gmail.com": {
+    "userId": "44392e83-7897-4538-ac94-daf4e9cf7715",
+    "email": "mkgolaganyo2@gmail.com",
+    "role": "admin",
+    "status": "approved",
+    "full_name": "Mkgolaganyo"
+  },
+  "mtshalimbali95@gmail.com": {
+    "userId": "8261ea02-c660-456b-b356-0b0eaca01a3d",
+    "email": "mtshalimbali95@gmail.com",
+    "role": "admin",
+    "status": "approved",
+    "full_name": "Mbali Mtshali"
+  },
+  "xabawandile48@gmail.com": {
+    "userId": "f8937e0b-ae80-4454-af79-5856168215ff",
+    "email": "xabawandile48@gmail.com",
+    "role": "admin",
+    "status": "approved",
+    "full_name": "Wandile Xaba"
+  },
+  "kamopitje@gmail.com": {
+    "userId": "c524de29-8cf1-4407-aab5-b6be8576cbda",
+    "email": "kamopitje@gmail.com",
+    "role": "admin",
+    "status": "approved",
+    "full_name": "Kamo Pitje"
+  },
+  "alicechinyadza5@gmail.com": {
+    "userId": "72e35e1b-a473-4357-a9d8-b1c995c5714b",
+    "email": "alicechinyadza5@gmail.com",
+    "role": "admin",
+    "status": "approved",
+    "full_name": "Alice Chinyadza"
+  }
+}
