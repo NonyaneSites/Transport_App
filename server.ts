@@ -522,9 +522,11 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
     const riderSet = new Set(allRiderNames.map((n) => sanitizePassengerDisplayName(n).toLowerCase()));
     ledger = ledger.filter((entry) => {
       const eDate = normalizeDateToYMD(entry.date) || entry.date || (entry.manifest_key ? String(entry.manifest_key).split('_')[0] : '');
-      const isSameDate = entry.manifest_key === key || (parsedDate && eDate === normalizeDateToYMD(parsedDate));
+      const isSameDate = entry.manifest_key === key; // Never touch other sessions on the same calendar date.
       const isRider = riderSet.has(sanitizePassengerDisplayName(entry.passenger_name).toLowerCase());
-      return !(isSameDate && isRider);
+      // Never erase a previously settled/admin-reconciled record.
+      const protectedRecord = ['paid', 'settled', 'reconciled'].includes(String((entry as { status?: string }).status || '').toLowerCase());
+      return protectedRecord || !(isSameDate && isRider);
     });
   }
 
@@ -533,9 +535,11 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
   const normalizedSvcLabel = isReheKey ? 'Rehe' : (serviceLabel || 'Service');
   const isDW = isDreamWeekDate(parsedDate || key);
   const effectiveDebt = getFareForDate(parsedDate || key);
+  const previouslyResolved = new Set(ledger.filter((e) => e.manifest_key === key && ['paid', 'settled', 'reconciled'].includes(String((e as { status?: string }).status || '').toLowerCase())).map((e) => sanitizePassengerDisplayName(e.passenger_name).toLowerCase()));
 
   if (Array.isArray(absentees) && absentees.length > 0) {
     for (const a of absentees) {
+      if (previouslyResolved.has(sanitizePassengerDisplayName(a.fullName).toLowerCase())) continue;
       let aLegs = (a as { id?: string; fullName?: string; legs?: 'both' | 'going' | 'return' }).legs;
       const existS = (manifest.signups as Array<{ id: string; fullName?: string; legs?: 'both' | 'going' | 'return' }> || []).find(
         (s) => (a.id && String(s.id) === String(a.id)) || (s.fullName && a.fullName && s.fullName.trim().toLowerCase() === a.fullName.trim().toLowerCase())
@@ -596,6 +600,7 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
   if (effectiveUnpaid.length > 0) {
     for (const u of effectiveUnpaid) {
       const cleanName = sanitizePassengerDisplayName(u.fullName);
+      if (previouslyResolved.has(cleanName.toLowerCase())) continue;
       const uLegs = (u as { legs?: 'both' | 'going' | 'return' }).legs;
       let unpaidDebt = effectiveDebt;
       if (!isDW) {
@@ -1166,6 +1171,7 @@ function syncSponsorshipAuditsWithLedger(
   }
 
   for (const entry of ledger) {
+    if (['paid', 'settled', 'reconciled'].includes(String(entry.status || '').toLowerCase()) || parseDebtAmount(entry.structure_debt, String(entry.date || '')) <= 0) continue;
     const origGn = typeof entry.general_notes === 'string' ? entry.general_notes : '';
     const origSn = typeof entry.sponsor_note === 'string' ? entry.sponsor_note : '';
     const dt = String(entry.debt_type || entry.debtType || '').toLowerCase();
@@ -1199,7 +1205,7 @@ function syncSponsorshipAuditsWithLedger(
         existing.ledger_entry_id = String(entry.id);
         changed = true;
       }
-      if (!existing.ledger_entry_id) {
+      if (!existing.ledger_entry_id && existing.status !== 'actually_sponsored') {
         existing.ledger_entry_id = String(entry.id);
         changed = true;
       }
@@ -1231,17 +1237,8 @@ function syncSponsorshipAuditsWithLedger(
   return { audits, changed };
 }
 
-// Initial sync on server module execution
-try {
-  const startupLedger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
-  const startupAudits = readJsonFile<ServerAuditItem[]>(SPONSORSHIPS_FILE, []);
-  const initialSync = syncSponsorshipAuditsWithLedger(startupAudits, startupLedger);
-  if (initialSync.changed) {
-    atomicWriteJson(SPONSORSHIPS_FILE, initialSync.audits);
-  }
-} catch (err) {
-  console.warn('[Server] Initial sponsorship sync note:', err);
-}
+// Avoid automatic startup audit writes: only explicit admin verification may
+// change a sponsorship's confirmed/pending status.
 
 // Record reported sponsorships from attendance check-in or transfers
 app.post('/api/ledger/sponsorships', (req, res) => {
@@ -1310,12 +1307,6 @@ app.post('/api/ledger/sponsorships', (req, res) => {
 // List reported sponsorships for cancellation admin audit
 app.get('/api/ledger/sponsorships', (req, res) => {
   let audits = readJsonFile<ServerAuditItem[]>(SPONSORSHIPS_FILE, []);
-  const ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
-
-  // Sync audits with ledger so confirmed indicated debt is never missing or reset
-  const syncResult = syncSponsorshipAuditsWithLedger(audits, ledger);
-  audits = syncResult.audits;
-
   // Auto-scan manifests to find any sponsored passengers
   // so all existing historical and in-progress sponsorship data is instantly visible
   try {
@@ -2165,43 +2156,10 @@ app.get('/api/ledger', (req, res) => {
     ledger_entry_id?: string | null;
   }>>(SPONSORSHIPS_FILE, []);
 
-  for (const spon of audits) {
-    if (spon.status === 'unaccounted_sponsorship' || spon.status === 'unpaid_sponsorship') {
-      const cleanSponName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
-      const hasEntry = ledger.some((e) =>
-        (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
-        (e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(e.passenger_name as string).toLowerCase() === cleanSponName && Boolean(e.sponsored))
-      );
-      if (!hasEntry) {
-        const rawNote = spon.sponsor_note ? cleanSponsorshipNote(spon.sponsor_note) : '';
-        const noteText = spon.status === 'unaccounted_sponsorship'
-          ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
-          : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
-        const auditDebt = getFareForDate(spon.date);
-        const newId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-        ledger.unshift({
-          id: newId,
-          manifest_key: spon.manifest_key || `manual-${Date.now()}`,
-          date: normalizeDateToYMD(spon.date) || spon.date,
-          service: spon.service || 'Service',
-          passenger_name: sanitizePassengerDisplayName(spon.passenger_name),
-          stop: spon.stop || '',
-          structure: normalizeStructureCode(spon.structure),
-          vehicle_name: spon.vehicle_name || '—',
-          submitted_by: 'Cancellation Admin',
-          rep_name: spon.rep_name || '',
-          license_plate: '',
-          sponsored: true,
-          sponsor_note: noteText,
-          structure_debt: auditDebt,
-          general_notes: noteText,
-          source: 'reported_sponsorship_audit',
-          submitted_at: spon.submitted_at || new Date().toISOString(),
-        });
-        dirty = true;
-      }
-    }
-  }
+  // Sponsorship audits are evidence for admin review, not debt write commands.
+  // The old GET handler silently recreated settled ledger rows whenever an
+  // earlier audit still said "unpaid". Only the explicit verification endpoint
+  // may create a sponsorship debt.
 
   const actuallySponsoredIds = new Set<string>();
   const actuallySponsoredKeys = new Set<string>();
@@ -2216,7 +2174,7 @@ app.get('/api/ledger', (req, res) => {
   // Filter out zero-debt items, settled items, actually-sponsored items, parse numeric debt, and sanitize boilerplate notes
   const activeLedger = ledger
     .filter((entry) => {
-      if (entry.status === 'Paid' || entry.status === 'Settled') return false;
+      if (['paid', 'settled', 'reconciled'].includes(String(entry.status || '').toLowerCase())) return false;
       if (actuallySponsoredIds.has(String(entry.id))) return false;
       const dateStr = normalizeDateToYMD(entry.date as string) || (entry.manifest_key ? String(entry.manifest_key).split('_')[0] : (entry.date as string) || '');
       if (entry.sponsored) {
@@ -2327,7 +2285,6 @@ app.post('/api/ledger/settle', (req, res) => {
 
   const idSet = new Set(ids.map(String));
   let ledger = readJsonFile<Array<{ id: string; passenger_name?: string; manifest_key?: string }>>(LEDGER_FILE, []);
-  const beforeCount = ledger.length;
   const settledEntries = ledger.filter((entry) => idSet.has(entry.id));
   const settledNow = new Date().toISOString();
   ledger = ledger.map((entry) => {
@@ -2371,7 +2328,7 @@ app.post('/api/ledger/settle', (req, res) => {
   }
 
   broadcastSse('ledger_updated', { timestamp: Date.now() });
-  res.json({ success: true, count: beforeCount - ledger.length });
+  res.json({ success: true, count: settledEntries.length });
 });
 
 // Add Manual Ledger Entry
@@ -2435,7 +2392,11 @@ app.delete('/api/ledger/:id', (req, res) => {
   let ledger = readJsonFile<Array<{ id: string; passenger_name?: string; manifest_key?: string }>>(LEDGER_FILE, []);
   const before = ledger.length;
   const deletedItem = ledger.find((e) => e.id === id);
-  ledger = ledger.filter((e) => e.id !== id);
+  // Persist a tombstone instead of physically deleting. A resubmitted
+  // attendance sheet must not revive an admin-removed historical charge.
+  ledger = ledger.map((e) => e.id === id
+    ? { ...e, status: 'Reconciled', structure_debt: 0, settled_at: new Date().toISOString() }
+    : e);
   atomicWriteJson(LEDGER_FILE, ledger);
 
   // Synchronize with sponsorship audits so it does not resurrect
@@ -2476,7 +2437,7 @@ app.patch('/api/ledger/:id', (req, res) => {
   if (idx !== -1) {
     const wasRemoved = updates.structure_debt !== undefined && Number(updates.structure_debt) <= 0;
     if (wasRemoved) {
-      ledger = ledger.filter((e) => e.id !== id);
+      ledger[idx] = { ...ledger[idx], status: 'Settled', structure_debt: 0, settled_at: new Date().toISOString() };
     } else {
       ledger[idx] = { ...ledger[idx], ...updates };
       if (updates.structure_debt !== undefined) {
