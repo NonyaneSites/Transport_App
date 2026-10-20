@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react';
+import { Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { RepPage } from '@/pages/RepPage';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
@@ -7,12 +7,14 @@ import { OfflineGuard } from '@/components/OfflineGuard';
 import { AuthProvider } from '@/context/AuthContext'; 
 import { isSupabaseConfigured } from '@/lib/supabase';
 
-// Lazy-load admin, ledger, and auth routes to keep the main Rep workflow fast and lightweight
-const AdminPage = lazy(() => import('@/pages/AdminPage').then((m) => ({ default: m.AdminPage })));
-const LedgerPage = lazy(() => import('@/pages/LedgerPage').then((m) => ({ default: m.LedgerPage })));
-const LoginPage = lazy(() => import('@/pages/LoginPage').then((m) => ({ default: m.LoginPage })));
-const SignupPage = lazy(() => import('@/pages/SignupPage').then((m) => ({ default: m.SignupPage })));
-const ApprovalPage = lazy(() => import('@/pages/ApprovalPage').then((m) => ({ default: m.ApprovalPage })));
+import { lazyWithRetry } from '@/lib/lazyWithRetry';
+
+// Lazy-load admin, ledger, and auth routes with automatic retry & recovery on deployment updates
+const AdminPage = lazyWithRetry(() => import('@/pages/AdminPage'), 'AdminPage');
+const LedgerPage = lazyWithRetry(() => import('@/pages/LedgerPage'), 'LedgerPage');
+const LoginPage = lazyWithRetry(() => import('@/pages/LoginPage'), 'LoginPage');
+const SignupPage = lazyWithRetry(() => import('@/pages/SignupPage'), 'SignupPage');
+const ApprovalPage = lazyWithRetry(() => import('@/pages/ApprovalPage'), 'ApprovalPage');
 
 function RouteLoadingFallback() {
   return (
