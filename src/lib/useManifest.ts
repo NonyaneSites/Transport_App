@@ -579,44 +579,30 @@ export function useManifest(
 
     setupChannel();
 
-    // 4. Lightweight Background Polling Fallback
-    // Only runs as a slow 60s fallback when Realtime channel is disconnected, paused when tab is hidden
+    // 4. Periodic authoritative reconciliation even if Realtime reports SUBSCRIBED.
+    // Mobile browsers can silently drop individual websocket events while the
+    // channel still looks connected. Fetch a snapshot rather than relying on the
+    // parent manifest's updated_at (vehicle draft saves need not update it).
+    let polling = false;
     const pollCheck = async () => {
-      if (!key || keyRef.current !== key) return;
-      if (typeof document !== 'undefined' && (document.hidden || document.visibilityState === 'hidden')) return;
-      // Skip poll when Realtime channel is healthy and subscribed
-      if (isChannelSubscribedRef.current) return;
+      if (polling || !key || keyRef.current !== key) return;
+      if (typeof document !== 'undefined' && document.hidden) return;
       if (Date.now() - lastLocalSaveTimeRef.current < 5000) return;
+      polling = true;
       try {
-        const { data, error: pollError } = await supabase
-          .from(MANIFESTS_TABLE)
-          .select('updated_at')
-          .eq('date', key)
-          .maybeSingle();
-
-        if (pollError) return;
-        const remoteUpdatedAt = (data as { updated_at?: string })?.updated_at;
-
-        if (
-          remoteUpdatedAt &&
-          remoteUpdatedAt !== lastSavedUpdatedAtRef.current &&
-          remoteUpdatedAt !== lastKnownUpdatedAtRef.current
-        ) {
-          lastKnownUpdatedAtRef.current = remoteUpdatedAt;
-          const fresh = await loadManifest(key);
-          if (fresh && keyRef.current === key) {
-            setManifest((prev) => mergeIncomingManifest(prev, fresh, activeVehicleIdRef.current));
-            setLastSyncedAt(Date.now());
-          }
+        const fresh = await loadManifest(key);
+        if (fresh && keyRef.current === key) {
+          setManifest((prev) => mergeIncomingManifest(prev, fresh, activeVehicleIdRef.current));
+          if (fresh.updated_at) lastKnownUpdatedAtRef.current = fresh.updated_at;
+          setLastSyncedAt(Date.now());
         }
-      } catch {
-        // non-blocking
+      } catch (err) {
+        console.warn('[useManifest] Reconciliation poll failed:', err);
+      } finally {
+        polling = false;
       }
     };
-
-    const pollInterval = setInterval(() => {
-      pollCheck();
-    }, 60000);
+    const pollInterval = setInterval(pollCheck, 15000);
 
     // 5. Trigger on tab visible, network online, or pageshow (guarded against overwriting local saves):
     const handleResume = async () => {
