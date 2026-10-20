@@ -101,8 +101,10 @@ export function LoginPage() {
         return;
       }
 
-      // 5. Success! Navigate based on authorized role
-      if (profile?.role === 'ledger_admin') {
+      // 5. Success! Navigate based on authorized role: Reps stay on Rep Portal, Admins to Admin
+      if (profile?.role === 'rep') {
+        navigate('/rep');
+      } else if (profile?.role === 'ledger_admin') {
         navigate('/ledger');
       } else {
         navigate('/admin');

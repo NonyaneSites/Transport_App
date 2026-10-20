@@ -741,16 +741,16 @@ export function isSuperAdminEmail(email?: string | null): boolean {
 
 export function canRoleAccessDispatch(role?: AppUserRole | null, email?: string | null): boolean {
   if (isSuperAdminEmail(email)) return true;
-  // All approved members of the transport team have access to dispatch operations
-  if (!role) return true;
-  return role === 'super_admin' || role === 'dispatch_admin' || role === 'dispatcher' || role === 'admin' || role === 'rep';
+  // Reps are strictly denied access to the Admin Dispatch console
+  if (!role || role === 'rep') return false;
+  return role === 'super_admin' || role === 'dispatch_admin' || role === 'dispatcher' || role === 'admin';
 }
 
 export function canRoleAccessLedger(role?: AppUserRole | null, email?: string | null): boolean {
   if (isSuperAdminEmail(email)) return true;
-  // All approved members of the transport team have access to cancellation & debt ledger
-  if (!role) return true;
-  return role === 'super_admin' || role === 'ledger_admin' || role === 'admin' || role === 'dispatch_admin' || role === 'dispatcher' || role === 'rep';
+  // Reps are strictly denied access to the cancellation & debt ledger
+  if (!role || role === 'rep') return false;
+  return role === 'super_admin' || role === 'ledger_admin' || role === 'admin' || role === 'dispatch_admin' || role === 'dispatcher';
 }
 
 export function canRoleAccessGovernance(role?: AppUserRole | null, email?: string | null): boolean {

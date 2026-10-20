@@ -227,16 +227,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const role: AppUserRole = useMemo(() => {
     if (isSuperEmail && isApproved) return 'super_admin';
-    return (profile?.role as AppUserRole) || (isApproved ? 'admin' : 'rep');
+    if (profile?.role) return profile.role as AppUserRole;
+    return isApproved ? 'admin' : 'rep';
   }, [isSuperEmail, isApproved, profile?.role]);
 
   const isSuperAdmin = Boolean(isApproved && (role === 'super_admin' || isSuperEmail));
   const canAccessDispatch = Boolean(isApproved && canRoleAccessDispatch(role, userEmail));
   const canAccessLedger = Boolean(isApproved && canRoleAccessLedger(role, userEmail));
   const canAccessGovernance = Boolean(isApproved && (role === 'super_admin' || isSuperAdmin));
-  const isDispatchAdmin = Boolean(isApproved && (role === 'dispatch_admin' || role === 'dispatcher' || role === 'admin' || isSuperAdmin));
-  const isLedgerAdmin = Boolean(isApproved && (role === 'ledger_admin' || role === 'admin' || isSuperAdmin));
-  const isAdmin = Boolean(isApproved && (canAccessDispatch || canAccessLedger || canAccessGovernance));
+  const isDispatchAdmin = Boolean(isApproved && role !== 'rep' && (role === 'dispatch_admin' || role === 'dispatcher' || role === 'admin' || isSuperAdmin));
+  const isLedgerAdmin = Boolean(isApproved && role !== 'rep' && (role === 'ledger_admin' || role === 'admin' || isSuperAdmin));
+  const isAdmin = Boolean(isApproved && role !== 'rep' && (canAccessDispatch || canAccessLedger || canAccessGovernance));
 
   return (
     <AuthContext.Provider

@@ -70,21 +70,12 @@ export function Header({ current }: HeaderProps = {}) {
             </span>
           </div>
           {isRep ? (
-            /* Rep Portal: Show badge and option to go to Admin */
+            /* Rep Portal: Show Rep Portal badge only (not accessible to admin from reps) */
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold border bg-emerald-500/15 text-emerald-300 border-emerald-500/30">
                 <Smartphone className="h-3.5 w-3.5" />
                 <span>Rep Portal</span>
               </div>
-              <Link
-                to="/admin"
-                className="flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold border border-crimson-500/30 bg-crimson-500/10 text-crimson-300 hover:bg-crimson-500/20 transition-colors"
-                title="Go to Admin Portal"
-              >
-                <ShieldCheck className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Go to </span>
-                <span>Admin</span>
-              </Link>
             </div>
           ) : isLedger ? (
             /* Ledger Page: Can navigate to Admin and Rep Portal */
