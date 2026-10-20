@@ -33,11 +33,11 @@ export function ApprovalPage() {
               const serverInfo = emailKey ? rolesMap[emailKey] : null;
               return {
                 ...p,
-                role: serverInfo?.role || p.role || (p.status === 'approved' ? 'admin' : 'rep'),
+                role: p.role || 'rep',
                 full_name: serverInfo?.full_name || p.full_name || p.email?.split('@')[0],
                 phone: serverInfo?.phone || p.phone,
                 structure: serverInfo?.structure || p.structure,
-                status: serverInfo?.status || p.status || 'pending',
+                status: p.status || 'pending',
               };
             });
 
@@ -49,7 +49,7 @@ export function ApprovalPage() {
                   id: info.userId || `user_${em}`,
                   email: em,
                   status: info.status || 'approved',
-                  role: info.role || 'admin',
+                  role: 'rep',
                   full_name: info.full_name || em.split('@')[0],
                   phone: info.phone || '',
                   structure: info.structure || '',
@@ -82,48 +82,21 @@ export function ApprovalPage() {
     setLoading(true);
     setActionNotice(null);
     try {
-      const targetRole = newRole || 'admin';
       const userObj = profiles.find((u) => u.id === userId);
+      const targetRole = newRole || userObj?.role || 'rep';
       const userEmail = userObj?.email?.trim().toLowerCase();
 
-      // 1. Persist to server auth roles store with authenticated token
-      try {
-        const sessionRes = await supabase.auth.getSession();
-        const token = sessionRes?.data?.session?.access_token;
-        await fetch('/api/auth/approve', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          body: JSON.stringify({
-            userId,
-            email: userEmail,
-            status: newStatus,
-            role: targetRole,
-          }),
-        });
-      } catch (srvErr) {
-        console.warn('Server auth approve error:', srvErr);
+      // One authoritative, server-authorized database operation. Never report success
+      // when a remote write failed (the old implementation silently ignored errors).
+      if (!userId || String(userId).startsWith('user_')) {
+        throw new Error('This account has no verified Supabase Auth profile. Ask the user to sign up first.');
       }
-
-      // 2. Update Supabase profiles table safely with canonical status column only
-      try {
-        const { error: directError } = await supabase
-          .from('profiles')
-          .update({ status: newStatus })
-          .eq('id', userId);
-
-        if (directError && userEmail) {
-          // Fallback update by email if ID differed
-          await supabase
-            .from('profiles')
-            .update({ status: newStatus })
-            .ilike('email', userEmail);
-        }
-      } catch (sbErr) {
-        console.warn('Supabase profile direct update warning:', sbErr);
-      }
+      const { error: updateError } = await supabase.rpc('admin_update_profile_role', {
+        target_user_id: userId,
+        requested_role: targetRole,
+        requested_status: newStatus,
+      });
+      if (updateError) throw new Error(`Supabase approval failed: ${updateError.message}. Apply the supplied V23 migration first.`);
 
       setProfiles((prev) =>
         prev.map((u) =>
@@ -291,7 +264,7 @@ export function ApprovalPage() {
                 <div className="flex items-center gap-2 shrink-0">
                   {user.status !== 'approved' && (
                     <button
-                      onClick={() => handleAction(user.id, 'approved', user.role || 'admin')}
+                      onClick={() => handleAction(user.id, 'approved', user.role && user.role !== 'rep' ? user.role : 'dispatch_admin')}
                       className="btn-success py-1.5 px-3 text-xs flex items-center gap-1"
                     >
                       <CheckCircle2 className="h-3.5 w-3.5" />

@@ -43,6 +43,7 @@ import {
   type LedgerEntry,
 } from '@/lib/ledger';
 import { supabase, MANIFESTS_TABLE } from '@/lib/supabase';
+import { listSharedSponsorships, createSharedSponsorship, revokeSharedSponsorship, canRevokeSharedSponsorship, type SharedSponsorship } from '@/lib/crossTaxiSponsorships';
 import { type SubmitVehiclePayload } from '@/lib/types';
 import { isServerOnline, submitVehicleToServer, reopenVehicleOnServer } from '@/lib/serverApi';
 import { extractVehicleStats } from '@/lib/statsExport';
@@ -278,6 +279,26 @@ export function RepPage() {
 
   // Cash & sponsorship calculator
   const [externalSponsees, setExternalSponsees] = useState<ExternalSponsee[]>([]);
+  const [sharedSponsorships, setSharedSponsorships] = useState<SharedSponsorship[]>([]);
+  const [, setSharedSponsorshipError] = useState<string | null>(null);
+  const refreshSharedSponsorships = useCallback(async () => {
+    try {
+      const rows = await listSharedSponsorships(key);
+      setSharedSponsorships(rows);
+      setSharedSponsorshipError(null);
+    } catch (e) {
+      setSharedSponsorshipError(e instanceof Error ? e.message : String(e));
+    }
+  }, [key]);
+  useEffect(() => {
+    void refreshSharedSponsorships();
+    const interval = window.setInterval(() => void refreshSharedSponsorships(), 15000);
+    const channel = supabase.channel(`cross-taxi:${key}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'cross_taxi_sponsorships', filter: `target_manifest_key=eq.${key}` },
+        () => void refreshSharedSponsorships()).subscribe();
+    return () => { clearInterval(interval); void supabase.removeChannel(channel); };
+  }, [key, refreshSharedSponsorships]);
+
 
   // Past-cancellation cash collection & manual cancellation settlement
   const [pastCancellations, setPastCancellations] = useState<LedgerEntry[]>([]);
@@ -381,6 +402,7 @@ export function RepPage() {
   const [walkInFirstName, setWalkInFirstName] = useState('');
   const [walkInSurname, setWalkInSurname] = useState('');
   const [walkInStructure, setWalkInStructure] = useState('');
+  const [walkInStop, setWalkInStop] = useState('');
   const [transferPrompt, setTransferPrompt] = useState<{
     passenger: Passenger;
     fromVehicle?: Vehicle | null;
@@ -492,6 +514,19 @@ export function RepPage() {
     }>();
     if (!manifest) return map;
 
+    // The central record overrides stale sponsorship data in vehicle drafts.
+    for (const shared of sharedSponsorships) {
+      const payer = shared.payer_name;
+      const fromVeh = shared.source_vehicle_name;
+      const canRemove = shared.source_vehicle_id === selectedVehicleId && canRevokeSharedSponsorship(shared.id);
+      const fullNoteText = `Paid by ${payer} in ${fromVeh}${shared.note ? ` (${shared.note})` : ''}`;
+      map.set(String(shared.recipient_passenger_id), {
+        payerName: payer, payerId: shared.payer_passenger_id || undefined,
+        fromVehicleName: fromVeh, fromVehicleId: shared.source_vehicle_id,
+        externalSponseeId: shared.id, canRemove, note: shared.note || undefined, fullNoteText,
+      });
+    }
+
     for (const v of manifest.vehicles) {
       const extList = (v.draftState?.externalSponsees || []) as ExternalSponsee[];
       for (const ext of extList) {
@@ -513,16 +548,16 @@ export function RepPage() {
           fullNoteText,
         };
 
-        if (ext.sponseeId) {
+        if (ext.sponseeId && !map.has(String(ext.sponseeId))) {
           map.set(String(ext.sponseeId), info);
         }
         if (ext.sponseeName) {
-          map.set(`name:${ext.sponseeName.trim().toLowerCase()}`, info);
+          if (!map.has(`name:${ext.sponseeName.trim().toLowerCase()}`)) map.set(`name:${ext.sponseeName.trim().toLowerCase()}`, info);
         }
       }
     }
     return map;
-  }, [manifest, selectedVehicleId]);
+  }, [manifest, selectedVehicleId, sharedSponsorships]);
 
   // All other vehicles with their riders for cross-vehicle sponsorship search
   const otherVehiclesWithRiders = useMemo(() => {
@@ -1286,7 +1321,23 @@ export function RepPage() {
       : FARE;
     const finalAmount = data.amount || defaultSponseeAmount;
 
-    const newId = `sponsee-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    // Persist the authoritative sponsorship BEFORE changing either vehicle's local draft.
+    // On failure leave both taxis untouched rather than displaying false success.
+    let newId: string;
+    try {
+      newId = await createSharedSponsorship({
+        manifestKey: key, targetManifestKey: manifestKey(date, (data.targetService || service) as ServiceType),
+        payerId: data.payerId, payerName: data.payerName || 'Passenger',
+        sourceVehicleId: String(selectedVehicle.id), sourceVehicleName: selectedVehicle.name,
+        recipientId: String(resolvedSponseeId || ''), recipientName: data.sponseeName,
+        targetVehicleId: String(resolvedTargetVehId || ''), targetVehicleName: resolvedTaxiName,
+        amount: finalAmount, note: data.note,
+      });
+      await refreshSharedSponsorships();
+    } catch (error) {
+      setBatchActionMsg(`Sponsorship was NOT saved: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
     const newEntry: ExternalSponsee = {
       id: newId,
       payerId: data.payerId,
@@ -1512,6 +1563,17 @@ export function RepPage() {
     lastLocalEditTimeRef.current = Date.now();
 
     const targetEntry = externalSponsees.find((s) => s.id === id);
+    const sharedEntry = sharedSponsorships.find((row) => row.id === id);
+    // A different taxi's rep may not revoke this cross-taxi sponsorship.
+    if (sharedEntry || canRevokeSharedSponsorship(id)) {
+      try {
+        await revokeSharedSponsorship(id);
+        await refreshSharedSponsorships();
+      } catch (error) {
+        setBatchActionMsg(`Could not revoke sponsorship: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+    }
     const nextExternalSponsees = externalSponsees.filter((s) => s.id !== id);
     setExternalSponsees(nextExternalSponsees);
 
@@ -1589,7 +1651,7 @@ export function RepPage() {
     }
     setBatchActionMsg(`✓ Removed cross-vehicle sponsorship${targetEntry?.sponseeName ? ` for ${targetEntry.sponseeName}` : ''}.`);
     setTimeout(() => setBatchActionMsg(null), 4000);
-  }, [manifest, selectedVehicle, externalSponsees, baseCash, pastCancellationCash, FARE, save, broadcastLiveAction]);
+  }, [manifest, selectedVehicle, externalSponsees, sharedSponsorships, refreshSharedSponsorships, baseCash, pastCancellationCash, FARE, save, broadcastLiveAction]);
 
   // Conflict-Safe Debounced Background Sync & Instant Local Cache
   useEffect(() => {
@@ -2143,6 +2205,10 @@ export function RepPage() {
     const effectiveStruct = walkInStructure.trim();
     const query = [effectiveFirstName, effectiveSurname].filter(Boolean).join(' ');
     if (!manifest || !selectedVehicle || !query) return;
+    if (!walkInStop.trim() && !findPassengerForTransfer(query, effectiveStruct, allKnownPassengers)) {
+      setBatchActionMsg('Please enter a pickup/drop-off location before adding this passenger.');
+      return;
+    }
 
     // 1. First check within current manifest (same service, different vehicle or unassigned)
     const existing = findPassengerForTransfer(query, effectiveStruct, allKnownPassengers);
@@ -2155,7 +2221,8 @@ export function RepPage() {
           setTimeout(() => setBatchActionMsg(null), 5000);
           return;
         }
-        // Automatically transfer: removed from original vehicle and added to this one!
+        // Never silently transfer a passenger who may be in another rep's vehicle.
+        if (!window.confirm(`${existing.fullName} is already in ${fromVehicle.name}. Transfer this existing passenger to ${selectedVehicle.name}?`)) return;
         await assignWalkIn(existing, fromVehicle.id);
         setWalkInFirstName('');
         setWalkInSurname('');
@@ -2222,7 +2289,7 @@ export function RepPage() {
     const newPassenger: Passenger = {
       id: `walkin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       fullName: finalName,
-      stop: 'Walk-In',
+      stop: walkInStop.trim(),
       structure: finalStructure,
       assignedTo: selectedVehicle.id,
       present: true,
@@ -2248,10 +2315,16 @@ export function RepPage() {
     setMyCreatedWalkInIds((prev) => new Set(prev).add(newPassenger.id));
 
     // Atomic transaction: allows multiple users to append walk-ins simultaneously
-    await appendWalkIn(selectedVehicle.id, newPassenger, draftMetadata);
+    try {
+      await appendWalkIn(selectedVehicle.id, newPassenger, draftMetadata);
+    } catch (err) {
+      setBatchActionMsg(`Could not save passenger: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
     setWalkInFirstName('');
     setWalkInSurname('');
     setWalkInStructure('');
+    setWalkInStop('');
     setWalkInOpen(false);
     setBatchActionMsg(`✓ Added walk-in ${finalName} into ${selectedVehicle.name}`);
     setTimeout(() => setBatchActionMsg(null), 4000);
@@ -3548,6 +3621,18 @@ export function RepPage() {
                               />
                             </div>
 
+                            <div>
+                              <label className="mb-1 block text-[10px] font-semibold text-muted">Pickup / drop-off location</label>
+                              <input
+                                type="text"
+                                value={walkInStop}
+                                onChange={(e) => setWalkInStop(e.target.value)}
+                                placeholder="Enter actual pickup stop (no default)"
+                                className="input-field text-xs w-full"
+                              />
+                              <p className="text-[10px] text-muted mt-1">Required for new passengers. Existing passengers keep their saved stop.</p>
+                            </div>
+
                             {isRehearsal && (
                               <div>
                                 <label className="mb-1 block text-[10px] font-semibold text-muted uppercase tracking-wider">
@@ -3641,6 +3726,7 @@ export function RepPage() {
                                 disabled={
                                   (!walkInFirstName.trim() && !walkInSurname.trim()) ||
                                   isCheckingCrossService ||
+                                  (!walkInStop.trim() && !detectedTransfer) ||
                                   Boolean(isRehearsal && detectedTransfer && detectedTransfer.vehicle && !detectedTransfer.isSameVehicle)
                                 }
                                 className={`flex-1 py-2 px-3 text-xs font-bold whitespace-nowrap shadow-sm disabled:opacity-40 flex items-center justify-center gap-1.5 rounded-lg transition-all ${
