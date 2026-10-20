@@ -55,9 +55,6 @@ const CancellationSearchModal = React.lazy(() => import('@/components/Cancellati
 const CrossTaxiSponsorshipModal = React.lazy(() => import('@/components/CrossTaxiSponsorshipModal').then((m) => ({ default: m.CrossTaxiSponsorshipModal })));
 const RepTransferPassengerModal = React.lazy(() => import('@/components/RepTransferPassengerModal').then((m) => ({ default: m.RepTransferPassengerModal })));
 import {
-  createDeterministicRehearsalPassengerId,
-} from '@/lib/rehearsal';
-import {
   transferPassengerAcrossServices,
   crossCheckPassengerAcrossDate,
   isPassengerTransferMatch,
@@ -399,7 +396,8 @@ export function RepPage() {
   const prevVehicleIdRef = useRef<string | null>(null);
 
   const serviceLabel = SERVICE_TYPES.find((s) => s.value === service)?.label ?? service;
-  const isRehearsal = service === 'Rehearsal';
+  // Thursday Rehearsal retired from current rep workflows
+  const isRehearsal = false;
   const { date: parsedDate, service: parsedServiceLabel } = parseManifestKey(key);
 
   const [walkInLegs, setWalkInLegs] = useState<'both' | 'going' | 'return'>('both');
@@ -2222,9 +2220,7 @@ export function RepPage() {
     const finalStructure = (effectiveStruct || extracted.structure || '').toUpperCase();
 
     const newPassenger: Passenger = {
-      id: isRehearsal
-        ? createDeterministicRehearsalPassengerId(date, finalName)
-        : `walkin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: `walkin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       fullName: finalName,
       stop: 'Walk-In',
       structure: finalStructure,
@@ -2232,8 +2228,6 @@ export function RepPage() {
       present: true,
       cancellationFeeOwed: false,
       walkIn: true,
-      legs: isRehearsal ? walkInLegs : undefined,
-      service: isRehearsal ? 'Rehearsal' : undefined,
       createdBy: repName.trim() || undefined,
       createdClientId: clientIdRef.current,
     };

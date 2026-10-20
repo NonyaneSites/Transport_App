@@ -112,3 +112,58 @@ test('Security: Prototype pollution attempt via payload is rejected by row sanit
   const emptyObj = {} as Record<string, unknown>;
   assert.strictEqual(emptyObj.admin, undefined);
 });
+
+test('P0 Security: Strict Role Permission Matrix isolates dispatch and ledger roles', async () => {
+  const { canRoleAccessDispatch, canRoleAccessLedger, canRoleAccessGovernance } = await import('./types.js');
+
+  // 1. Super Admin: Full workspace access
+  assert.strictEqual(canRoleAccessDispatch('super_admin'), true);
+  assert.strictEqual(canRoleAccessLedger('super_admin'), true);
+  assert.strictEqual(canRoleAccessGovernance('super_admin'), true);
+
+  // 2. Dispatch Admin: Dispatch only, strictly denied ledger and governance
+  assert.strictEqual(canRoleAccessDispatch('dispatch_admin'), true);
+  assert.strictEqual(canRoleAccessLedger('dispatch_admin'), false, 'dispatch_admin must be isolated from ledger');
+  assert.strictEqual(canRoleAccessGovernance('dispatch_admin'), false);
+
+  // 3. Dispatcher: Dispatch only
+  assert.strictEqual(canRoleAccessDispatch('dispatcher'), true);
+  assert.strictEqual(canRoleAccessLedger('dispatcher'), false, 'dispatcher must be isolated from ledger');
+
+  // 4. Ledger Admin: Ledger only, strictly denied dispatch and governance
+  assert.strictEqual(canRoleAccessLedger('ledger_admin'), true);
+  assert.strictEqual(canRoleAccessDispatch('ledger_admin'), false, 'ledger_admin must be isolated from dispatch');
+  assert.strictEqual(canRoleAccessGovernance('ledger_admin'), false);
+
+  // 5. Dual-Role Admin: Explicitly permitted both dispatch and ledger
+  assert.strictEqual(canRoleAccessDispatch('admin_dual'), true);
+  assert.strictEqual(canRoleAccessLedger('admin_dual'), true);
+  assert.strictEqual(canRoleAccessGovernance('admin_dual'), false);
+
+  // 6. Account-Free Transport Rep: Strictly denied dispatch, ledger, and governance
+  assert.strictEqual(canRoleAccessDispatch('rep'), false, 'rep must be denied dispatch');
+  assert.strictEqual(canRoleAccessLedger('rep'), false, 'rep must be denied ledger');
+  assert.strictEqual(canRoleAccessGovernance('rep'), false, 'rep must be denied governance');
+
+  // 7. Unspecified role: Denied by default
+  assert.strictEqual(canRoleAccessDispatch(null), false);
+  assert.strictEqual(canRoleAccessLedger(null), false);
+  assert.strictEqual(canRoleAccessGovernance(null), false);
+});
+
+test('P1 Retirement: Thursday Rehearsal is removed from active services but preserved in historical ledger', async () => {
+  const { SERVICE_TYPES } = await import('./types.js');
+  const { parseDebtAmount } = await import('./ledger.js');
+
+  // Active current service selection does NOT include Rehearsal
+  const activeServiceValues = SERVICE_TYPES.map((s) => s.value);
+  assert.strictEqual((activeServiceValues as string[]).includes('Rehearsal'), false, 'Rehearsal must be retired from active services');
+  assert.deepStrictEqual(activeServiceValues, ['AM_Serving', 'AM_Ushers', 'AM_Normal', 'PM_Serving', 'PM_Normal']);
+
+  // Historical archival Rehearsal calculations preserve accurate fares without error
+  assert.strictEqual(parseDebtAmount(undefined, '2026-09-17', 'Rehearsal', 'both'), 70);
+  assert.strictEqual(parseDebtAmount(undefined, '2026-09-17', 'Rehearsal', 'going'), 40);
+  assert.strictEqual(parseDebtAmount(undefined, '2026-09-17', 'Rehearsal', 'return'), 40);
+  assert.strictEqual(parseDebtAmount(undefined, '2026-10-01', 'Rehearsal', 'both'), 45, 'DreamWeek overrides historical rehearsal to R45');
+});
+

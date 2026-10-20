@@ -23,9 +23,6 @@ const TransferSponsorshipModal = lazy(() =>
 const VehicleAllocation = lazy(() =>
   import('@/components/VehicleAllocation').then((m) => ({ default: m.VehicleAllocation }))
 );
-const ThursdayRehearsalUpload = lazy(() =>
-  import('@/components/ThursdayRehearsalUpload').then((m) => ({ default: m.ThursdayRehearsalUpload }))
-);
 const AdminAttendanceNotesSection = lazy(() =>
   import('@/components/AdminAttendanceNotesSection').then((m) => ({ default: m.AdminAttendanceNotesSection }))
 );
@@ -265,22 +262,12 @@ export function AdminPage() {
             onDateChange={setDate}
             onServiceChange={setService}
           />
-          {service === 'Rehearsal' ? (
-            <Suspense fallback={<div className="card h-48 animate-pulse bg-card-2" />}>
-              <ThursdayRehearsalUpload
-                date={date}
-                onImport={handleImport}
-                existingCount={manifest?.signups?.length ?? 0}
-              />
-            </Suspense>
-          ) : (
-            <ExcelUpload
-              date={date}
-              service={service}
-              onImport={handleImport}
-              existingCount={manifest?.signups?.length ?? 0}
-            />
-          )}
+          <ExcelUpload
+            date={date}
+            service={service}
+            onImport={handleImport}
+            existingCount={manifest?.signups?.length ?? 0}
+          />
         </div>
 
         {/* Session banner */}

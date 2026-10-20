@@ -726,12 +726,17 @@ export type AppUserRole =
   | 'super_admin'
   | 'dispatch_admin'
   | 'ledger_admin'
+  | 'admin_dual'
   | 'admin'
   | 'dispatcher'
   | 'rep';
 
 export type UserAccountStatus = 'pending' | 'approved' | 'rejected';
 
+/**
+ * Display convenience only: Server-side profile claims & RLS are the true authority.
+ * Never use email matching as an authoritative bypass.
+ */
 export const SUPER_ADMIN_EMAILS = ['nonyaneamo@gmail.com'];
 
 export function isSuperAdminEmail(email?: string | null): boolean {
@@ -741,16 +746,15 @@ export function isSuperAdminEmail(email?: string | null): boolean {
 
 export function canRoleAccessDispatch(role?: AppUserRole | null, email?: string | null): boolean {
   if (isSuperAdminEmail(email)) return true;
-  // Reps are strictly denied access to the Admin Dispatch console
   if (!role || role === 'rep') return false;
-  return role === 'super_admin' || role === 'dispatch_admin' || role === 'dispatcher' || role === 'admin';
+  return role === 'super_admin' || role === 'dispatch_admin' || role === 'dispatcher' || role === 'admin' || role === 'admin_dual';
 }
 
 export function canRoleAccessLedger(role?: AppUserRole | null, email?: string | null): boolean {
   if (isSuperAdminEmail(email)) return true;
-  // Reps are strictly denied access to the cancellation & debt ledger
-  if (!role || role === 'rep') return false;
-  return role === 'super_admin' || role === 'ledger_admin' || role === 'admin' || role === 'dispatch_admin' || role === 'dispatcher';
+  // Dispatch admins strictly excluded from Ledger unless explicitly designated as dual role
+  if (!role || role === 'rep' || role === 'dispatch_admin' || role === 'dispatcher') return false;
+  return role === 'super_admin' || role === 'ledger_admin' || role === 'admin_dual';
 }
 
 export function canRoleAccessGovernance(role?: AppUserRole | null, email?: string | null): boolean {

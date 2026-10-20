@@ -653,17 +653,19 @@ function createResilientSupabaseClient() {
     },
     rpc(fnName: string, args: Record<string, unknown> = {}) {
       if (typeof realClient.rpc === 'function') {
-        return realClient.rpc(fnName, args).then((res: { data?: unknown; error?: { message?: string } | null }) => {
-          if (res?.error && isNetworkFetchError(res.error)) {
-            return mockClient.rpc(fnName, args);
-          }
-          return res;
-        }).catch((err: unknown) => {
-          if (isNetworkFetchError(err)) {
-            return mockClient.rpc(fnName, args);
-          }
-          throw err;
-        });
+        return Promise.resolve(realClient.rpc(fnName, args))
+          .then((res: { data?: unknown; error?: { message?: string } | null }) => {
+            if (res?.error && isNetworkFetchError(res.error)) {
+              return mockClient.rpc(fnName, args);
+            }
+            return res;
+          })
+          .catch((err: unknown) => {
+            if (isNetworkFetchError(err)) {
+              return mockClient.rpc(fnName, args);
+            }
+            throw err;
+          });
       }
       return mockClient.rpc(fnName, args);
     },
