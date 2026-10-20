@@ -86,11 +86,16 @@ export function ApprovalPage() {
       const userObj = profiles.find((u) => u.id === userId);
       const userEmail = userObj?.email?.trim().toLowerCase();
 
-      // 1. Persist to server auth roles store
+      // 1. Persist to server auth roles store with authenticated token
       try {
+        const sessionRes = await supabase.auth.getSession();
+        const token = sessionRes?.data?.session?.access_token;
         await fetch('/api/auth/approve', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
           body: JSON.stringify({
             userId,
             email: userEmail,
@@ -310,8 +315,10 @@ export function ApprovalPage() {
                         className="input-field py-1 text-xs bg-card-2"
                         title="Change user role"
                       >
-                        <option value="rep">Role: Transport Rep</option>
-                        <option value="admin">Role: Administrator</option>
+                        <option value="rep">Role: Transport Rep (Reps Only)</option>
+                        <option value="dispatch_admin">Role: Dispatch Admin</option>
+                        <option value="ledger_admin">Role: Ledger Admin</option>
+                        <option value="super_admin">Role: Super Administrator</option>
                       </select>
                       <span className="text-[11px] text-emerald-400 flex items-center gap-1">
                         <UserCheck className="h-3.5 w-3.5" />

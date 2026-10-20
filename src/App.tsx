@@ -50,10 +50,16 @@ export default function App() {
               <Route path="/rep" element={<RepPage />} />
               <Route path="/" element={<RepPage />} />
 
-              {/* Protected Admin Routes */}
-              <Route element={<ProtectedRoute requireAdmin />}>
+              {/* Protected Routes with Explicit Capability Guards */}
+              <Route element={<ProtectedRoute requiredCapability="dispatch" />}>
                 <Route path="/admin" element={<AdminPage />} />
+              </Route>
+
+              <Route element={<ProtectedRoute requiredCapability="ledger" />}>
                 <Route path="/ledger" element={<LedgerPage />} />
+              </Route>
+
+              <Route element={<ProtectedRoute requiredCapability="governance" />}>
                 <Route path="/admin/approve" element={<ApprovalPage />} />
               </Route>
 

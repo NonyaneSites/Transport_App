@@ -327,7 +327,6 @@ export const SERVICE_TYPES: { value: ServiceType; label: string; period: 'AM' | 
   { value: 'AM_Normal', label: 'AM Service — Normal Only', period: 'AM', mode: 'Normal' },
   { value: 'PM_Serving', label: 'PM Service — Serving Only', period: 'PM', mode: 'Serving' },
   { value: 'PM_Normal', label: 'PM Service — Normal Only', period: 'PM', mode: 'Normal' },
-  { value: 'Rehearsal', label: 'Thursday Rehearsal Transport', period: 'PM', mode: 'Normal' },
 ];
 
 export const CANCELLATION_FEE = 40;
@@ -742,21 +741,28 @@ export function isSuperAdminEmail(email?: string | null): boolean {
 
 export function canRoleAccessDispatch(role?: AppUserRole | null, email?: string | null): boolean {
   if (isSuperAdminEmail(email)) return true;
+  // All approved members of the transport team have access to dispatch operations
   if (!role) return true;
-  // All approved transport staff roles have access to dispatch
-  return true;
+  return role === 'super_admin' || role === 'dispatch_admin' || role === 'dispatcher' || role === 'admin' || role === 'rep';
 }
 
 export function canRoleAccessLedger(role?: AppUserRole | null, email?: string | null): boolean {
   if (isSuperAdminEmail(email)) return true;
+  // All approved members of the transport team have access to cancellation & debt ledger
   if (!role) return true;
-  // All approved transport staff roles have access to ledger
-  return true;
+  return role === 'super_admin' || role === 'ledger_admin' || role === 'admin' || role === 'dispatch_admin' || role === 'dispatcher' || role === 'rep';
+}
+
+export function canRoleAccessGovernance(role?: AppUserRole | null, email?: string | null): boolean {
+  if (isSuperAdminEmail(email)) return true;
+  if (!role) return false;
+  return role === 'super_admin';
 }
 
 export function isRoleSuperAdmin(role?: AppUserRole | null, email?: string | null): boolean {
   if (isSuperAdminEmail(email)) return true;
   return role === 'super_admin';
 }
+
 
 

@@ -105,7 +105,53 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
 });
 
-// User roles & authorization endpoints
+// Helper: Verify calling user is authenticated Super Admin
+async function authenticateSuperAdmin(req: express.Request): Promise<{ authorized: boolean; email?: string; error?: string }> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    return { authorized: false, error: 'Authorization header required with valid Bearer token.' };
+  }
+  const token = authHeader.slice(7).trim();
+  if (!token) {
+    return { authorized: false, error: 'Empty bearer token.' };
+  }
+
+  const supabaseUrl = process.env.VITE_SUPABASE_URL;
+  const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY;
+  if (!supabaseUrl || !supabaseAnonKey) {
+    return { authorized: false, error: 'Database authentication service unconfigured.' };
+  }
+
+  try {
+    const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+      headers: {
+        apikey: supabaseAnonKey,
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (!response.ok) {
+      return { authorized: false, error: 'Invalid or expired authentication session.' };
+    }
+
+    const userData = (await response.json()) as { email?: string };
+    const email = userData?.email?.trim().toLowerCase();
+    if (!email) {
+      return { authorized: false, error: 'User email not found in session.' };
+    }
+
+    // Authoritative check: Only designated Super Administrator can govern account roles
+    if (email !== 'nonyaneamo@gmail.com') {
+      return { authorized: false, error: 'Access Denied: Only the Super Administrator can manage user account authorizations.' };
+    }
+
+    return { authorized: true, email };
+  } catch (err) {
+    return { authorized: false, error: `Authentication verification error: ${String(err)}` };
+  }
+}
+
+// User roles & authorization endpoints (Read: authenticated staff or public app config)
 app.get('/api/auth/roles', (_req, res) => {
   try {
     const roles = readJsonFile<Record<string, Record<string, unknown>>>(USER_ROLES_FILE, {});
@@ -115,8 +161,15 @@ app.get('/api/auth/roles', (_req, res) => {
   }
 });
 
-app.post('/api/auth/roles', (req, res) => {
+// Update user roles: STRICTLY requires Super Administrator authorization
+app.post('/api/auth/roles', async (req, res) => {
   try {
+    const authCheck = await authenticateSuperAdmin(req);
+    if (!authCheck.authorized) {
+      res.status(403).json({ error: authCheck.error });
+      return;
+    }
+
     const { email, role, status, full_name, phone, structure, userId } = req.body || {};
     if (!email) {
       res.status(400).json({ error: 'Email is required' });
@@ -129,7 +182,7 @@ app.post('/api/auth/roles', (req, res) => {
       ...existing,
       userId: userId || existing.userId || `user_${cleanEmail}`,
       email: cleanEmail,
-      role: role || existing.role || 'admin',
+      role: role || existing.role || 'rep',
       status: status || existing.status || 'approved',
       full_name: full_name !== undefined ? full_name : existing.full_name,
       phone: phone !== undefined ? phone : existing.phone,
@@ -143,13 +196,19 @@ app.post('/api/auth/roles', (req, res) => {
   }
 });
 
-app.post('/api/auth/approve', (req, res) => {
+// Approve user: STRICTLY requires Super Administrator authorization
+app.post('/api/auth/approve', async (req, res) => {
   try {
+    const authCheck = await authenticateSuperAdmin(req);
+    if (!authCheck.authorized) {
+      res.status(403).json({ error: authCheck.error });
+      return;
+    }
+
     const { email, userId, status, role } = req.body || {};
     const roles = readJsonFile<Record<string, Record<string, unknown>>>(USER_ROLES_FILE, {});
     const cleanEmail = email ? String(email).trim().toLowerCase() : null;
     
-    // Find by email or userId
     let targetKey = cleanEmail;
     if (!targetKey && userId) {
       targetKey = Object.keys(roles).find((k) => roles[k].userId === userId) || null;
@@ -184,9 +243,10 @@ app.post('/api/auth/approve', (req, res) => {
   }
 });
 
+// Profile self-registration: strictly locked to pending status and rep role to prevent self-elevation
 app.post('/api/auth/profile', (req, res) => {
   try {
-    const { id, email, full_name, phone, structure, role, status } = req.body || {};
+    const { id, email, full_name, phone, structure } = req.body || {};
     if (!email) {
       res.status(400).json({ error: 'Email is required' });
       return;
@@ -194,6 +254,8 @@ app.post('/api/auth/profile', (req, res) => {
     const cleanEmail = String(email).trim().toLowerCase();
     const roles = readJsonFile<Record<string, Record<string, unknown>>>(USER_ROLES_FILE, {});
     const existing = roles[cleanEmail] || {};
+    
+    // Prevent unauthenticated self-promotion: new registrations MUST be pending and rep role
     roles[cleanEmail] = {
       ...existing,
       userId: id || existing.userId || `user_${cleanEmail}`,
@@ -201,8 +263,8 @@ app.post('/api/auth/profile', (req, res) => {
       full_name: full_name || existing.full_name,
       phone: phone || existing.phone,
       structure: structure || existing.structure,
-      role: role || existing.role || 'admin',
-      status: status || existing.status || 'pending',
+      role: existing.role || 'rep',
+      status: existing.status || 'pending',
       updated_at: new Date().toISOString(),
     };
     atomicWriteJson(USER_ROLES_FILE, roles);

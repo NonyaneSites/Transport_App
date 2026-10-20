@@ -33,6 +33,7 @@ interface AuthContextType {
   isApproved: boolean;
   canAccessDispatch: boolean;
   canAccessLedger: boolean;
+  canAccessGovernance: boolean;
   loading: boolean;
   refreshProfile: () => Promise<void>;
   signOut: () => Promise<void>;
@@ -49,6 +50,7 @@ const AuthContext = createContext<AuthContextType>({
   isApproved: false,
   canAccessDispatch: false,
   canAccessLedger: false,
+  canAccessGovernance: false,
   loading: true,
   refreshProfile: async () => {},
   signOut: async () => {},
@@ -85,7 +87,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // Fallback gracefully
       }
 
-      // Query Supabase: match by ID first, and fallback to email
+      // Query Supabase: check by userId and check by email to ensure approvals are never missed
       let remoteData: Record<string, unknown> | null = null;
       try {
         const { data: byId } = await supabase
@@ -94,55 +96,50 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           .eq('id', userId)
           .maybeSingle();
 
-        if (byId) {
-          remoteData = byId;
-        } else if (emailToCheck) {
-          const { data: byEmail } = await supabase
+        let byEmail: Record<string, unknown> | null = null;
+        if (emailToCheck) {
+          const { data: match } = await supabase
             .from('profiles')
             .select('*')
             .ilike('email', emailToCheck)
             .maybeSingle();
-          if (byEmail) {
-            remoteData = byEmail;
-          }
+          byEmail = match;
+        }
+
+        // Prioritize approved profile record if one exists
+        if (byId && byId.status === 'approved') {
+          remoteData = byId;
+        } else if (byEmail && byEmail.status === 'approved') {
+          remoteData = byEmail;
+        } else {
+          remoteData = byId || byEmail;
         }
       } catch (sbErr) {
         console.warn('[AuthContext] Supabase profile query error:', sbErr);
       }
 
       const effectiveEmail = ((remoteData?.email as string) || emailToCheck).trim().toLowerCase();
-      const isSuper = isSuperAdminEmail(effectiveEmail);
 
-      // Determine approval status
+      // Determine approval status from authoritative sources (DB first, server roles second)
       let effectiveStatus: UserAccountStatus = 'pending';
-      if (isSuper) {
+      if (remoteData?.status === 'approved' || serverStatus === 'approved') {
         effectiveStatus = 'approved';
+      } else if (remoteData?.status === 'rejected' || serverStatus === 'rejected') {
+        effectiveStatus = 'rejected';
       } else if (remoteData?.status) {
         effectiveStatus = remoteData.status as UserAccountStatus;
       } else if (serverStatus) {
         effectiveStatus = serverStatus;
-      } else {
-        // Check local storage fallback
-        try {
-          const localProfiles = JSON.parse(localStorage.getItem('crc_transport_profiles') || '[]');
-          const match = localProfiles.find(
-            (p: { id?: string; email?: string; status?: string }) =>
-              p.id === userId || (p.email && p.email.toLowerCase() === effectiveEmail)
-          );
-          if (match?.status) effectiveStatus = match.status as UserAccountStatus;
-        } catch {
-          // ignore
-        }
       }
 
-      // Determine effective role
+      // Determine effective role: approved accounts default to admin so they have full workspace access
       let resolvedRole: AppUserRole = effectiveStatus === 'approved' ? 'admin' : 'rep';
-      if (isSuper) {
+      if (effectiveEmail === 'nonyaneamo@gmail.com') {
         resolvedRole = 'super_admin';
-      } else if (serverRole) {
-        resolvedRole = serverRole;
       } else if (remoteData?.role) {
         resolvedRole = remoteData.role as AppUserRole;
+      } else if (serverRole) {
+        resolvedRole = serverRole;
       } else if (effectiveEmail === 'shauntsiloane@gmail.com' || effectiveEmail === 'tsiloane941@gmail.com') {
         resolvedRole = 'dispatch_admin';
       }
@@ -157,14 +154,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       });
     } catch (err) {
       console.warn('[AuthContext] Failed to load profile:', err);
-      const emailToCheck = (userEmail || user?.email || '').trim().toLowerCase();
-      const isSuper = isSuperAdminEmail(emailToCheck);
-      setProfile({
-        id: userId,
-        email: emailToCheck,
-        role: isSuper ? 'super_admin' : 'admin',
-        status: 'approved',
-      });
+      // Deny by default on unexpected error
+      setProfile(null);
     }
   }, [user?.email]);
 
@@ -227,23 +218,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const userEmail = (user?.email || profile?.email || '').trim().toLowerCase();
-  const isSuperEmail = isSuperAdminEmail(userEmail);
+  const isSuperEmail = Boolean(user && isSuperAdminEmail(userEmail));
 
+  // Authoritative approval requirement: profile must be approved in DB or verified session
   const isApproved = Boolean(
-    isSuperEmail || (profile && profile.status === 'approved')
+    profile && profile.status === 'approved' && user
   );
 
   const role: AppUserRole = useMemo(() => {
-    if (isSuperEmail) return 'super_admin';
+    if (isSuperEmail && isApproved) return 'super_admin';
     return (profile?.role as AppUserRole) || (isApproved ? 'admin' : 'rep');
-  }, [isSuperEmail, profile?.role, isApproved]);
+  }, [isSuperEmail, isApproved, profile?.role]);
 
   const isSuperAdmin = Boolean(isApproved && (role === 'super_admin' || isSuperEmail));
   const canAccessDispatch = Boolean(isApproved && canRoleAccessDispatch(role, userEmail));
   const canAccessLedger = Boolean(isApproved && canRoleAccessLedger(role, userEmail));
+  const canAccessGovernance = Boolean(isApproved && (role === 'super_admin' || isSuperAdmin));
   const isDispatchAdmin = Boolean(isApproved && (role === 'dispatch_admin' || role === 'dispatcher' || role === 'admin' || isSuperAdmin));
   const isLedgerAdmin = Boolean(isApproved && (role === 'ledger_admin' || role === 'admin' || isSuperAdmin));
-  const isAdmin = Boolean(isApproved);
+  const isAdmin = Boolean(isApproved && (canAccessDispatch || canAccessLedger || canAccessGovernance));
 
   return (
     <AuthContext.Provider
@@ -258,6 +251,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         isApproved,
         canAccessDispatch,
         canAccessLedger,
+        canAccessGovernance,
         loading,
         refreshProfile,
         signOut,

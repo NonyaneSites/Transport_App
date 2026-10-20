@@ -45,47 +45,55 @@ export function LoginPage() {
           .eq('id', authData.user.id)
           .maybeSingle();
 
-        if (byId) {
-          profile = byId;
-        } else {
-          const { data: byEmail } = await supabase
+        let byEmail = null;
+        if (cleanEmail) {
+          const { data: match } = await supabase
             .from('profiles')
             .select('*')
             .ilike('email', cleanEmail)
             .maybeSingle();
-          if (byEmail) {
-            profile = byEmail;
-          }
+          byEmail = match;
+        }
+
+        if (byId && byId.status === 'approved') {
+          profile = byId;
+        } else if (byEmail && byEmail.status === 'approved') {
+          profile = byEmail;
+        } else {
+          profile = byId || byEmail;
         }
       } catch (err) {
         console.warn('Profile fetch error during login:', err);
       }
 
-      // 3. Check server roles fallback if Supabase didn't return a record
-      if (!profile) {
-        try {
-          const res = await fetch('/api/auth/roles');
-          if (res.ok) {
-            const rolesMap = await res.json();
-            if (rolesMap && rolesMap[cleanEmail]) {
-              profile = rolesMap[cleanEmail];
-            }
+      // 3. Check server roles store and merge role & status metadata
+      try {
+        const res = await fetch('/api/auth/roles');
+        if (res.ok) {
+          const rolesMap = await res.json();
+          if (rolesMap && cleanEmail && rolesMap[cleanEmail]) {
+            const serverInfo = rolesMap[cleanEmail];
+            const isApproved = profile?.status === 'approved' || serverInfo?.status === 'approved';
+            profile = {
+              ...(serverInfo || {}),
+              ...(profile || {}),
+              status: isApproved ? 'approved' : (profile?.status || serverInfo?.status || 'pending'),
+              role: serverInfo?.role || profile?.role || (isApproved ? 'admin' : 'rep'),
+            };
           }
-        } catch {
-          // ignore
         }
+      } catch {
+        // ignore
       }
 
-      const isSuper = cleanEmail === 'nonyaneamo@gmail.com';
-
-      // 4. Block access only if explicitly pending or rejected
-      if (!isSuper && profile && profile.status && profile.status !== 'approved') {
+      // 4. Block access if account is pending or rejected
+      if (profile && profile.status && profile.status !== 'approved') {
         await supabase.auth.signOut();
         
         if (profile.status === 'pending') {
-          setError('Your account is currently pending administrator approval. Please wait for an admin to authorize your access.');
+          setError('Your account is currently pending administrator approval. Please wait for an Administrator to authorize your access.');
         } else if (profile.status === 'rejected') {
-          setError('Your account request was declined. Please contact the transport administrator.');
+          setError('Your account request was declined. Please contact church transport leadership.');
         } else {
           setError('Your account is not approved to log in.');
         }
@@ -93,8 +101,12 @@ export function LoginPage() {
         return;
       }
 
-      // 5. Success! Navigate into the app
-      navigate('/admin');
+      // 5. Success! Navigate based on authorized role
+      if (profile?.role === 'ledger_admin') {
+        navigate('/ledger');
+      } else {
+        navigate('/admin');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed.');
     } finally {
