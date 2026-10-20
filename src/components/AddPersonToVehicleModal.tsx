@@ -67,7 +67,7 @@ export function AddPersonToVehicleModal({
 
   // Tab 2 new passenger form
   const [newName, setNewName] = useState('');
-  const [newStop, setNewStop] = useState(() => (isRehearsal ? 'Braam' : 'Braam'));
+  const [newStop, setNewStop] = useState('');
   const [newStructure, setNewStructure] = useState('');
   const [newPhone, setNewPhone] = useState('');
   const [newCategory, setNewCategory] = useState<'Normal' | 'Ushers' | 'Choir' | 'Band'>('Normal');
@@ -85,13 +85,6 @@ export function AddPersonToVehicleModal({
     });
     return Array.from(set).sort(naturalCompare);
   }, [signups, isRehearsal]);
-
-  // If newStop is empty, default to first known stop
-  useEffect(() => {
-    if (!newStop && knownStops.length > 0) {
-      setNewStop(knownStops[0]);
-    }
-  }, [knownStops, newStop]);
 
   // Map of passenger ID -> vehicle
   const passengerVehicleMap = useMemo(() => {
@@ -139,10 +132,34 @@ export function AddPersonToVehicleModal({
       setFormError('Please enter passenger full name');
       return;
     }
-    const stopToSave = (newStop || knownStops[0] || 'Braam').trim();
+    const stopToSave = newStop.trim();
     if (!stopToSave) {
       setFormError('Please select or enter a pickup stop');
       return;
+    }
+
+    // Warn before creating an entry already allocated anywhere in this manifest.
+    // Matching names alone do not prove identity; the admin must choose the existing
+    // record or explicitly confirm a genuinely different person.
+    const normalized = (value: string) => value.trim().toLocaleLowerCase().replace(/\s+/g, ' ');
+    const matches = signups.filter((p) => normalized(p.fullName) === normalized(newName));
+    if (matches.length) {
+      const detail = matches.map((p) => {
+        const taxi = passengerVehicleMap.get(String(p.id));
+        return `${p.fullName} (${p.structure || 'No structure'}) — ${taxi?.name || 'unassigned'}`;
+      }).join('\n');
+      const exactPhone = newPhone.trim() && matches.some((p) => p.phone?.replace(/\D/g, '') === newPhone.replace(/\D/g, ''));
+      if (exactPhone) {
+        setFormError('A passenger with this name and phone already exists. Use the Existing Passenger tab.');
+        setActiveTab('existing');
+        setSearchQuery(newName.trim());
+        return;
+      }
+      if (!window.confirm(`Possible duplicate in this manifest:\n${detail}\n\nOnly continue if this is genuinely a different person. Cancel to assign the existing passenger.`)) {
+        setActiveTab('existing');
+        setSearchQuery(newName.trim());
+        return;
+      }
     }
 
     onAddNewPassenger(
@@ -160,6 +177,7 @@ export function AddPersonToVehicleModal({
 
     // Reset and close
     setNewName('');
+    setNewStop('');
     setNewPhone('');
     setNewStructure('');
     setFormError(null);
