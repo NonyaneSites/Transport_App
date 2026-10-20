@@ -140,9 +140,11 @@ async function authenticateSuperAdmin(req: express.Request): Promise<{ authorize
       return { authorized: false, error: 'User email not found in session.' };
     }
 
-    // Authoritative check: Only designated Super Administrator can govern account roles
-    if (email !== 'nonyaneamo@gmail.com') {
-      return { authorized: false, error: 'Access Denied: Only the Super Administrator can manage user account authorizations.' };
+    // Authoritative check: Caller must have approved status and super_admin role in role store
+    const roles = readJsonFile<Record<string, Record<string, unknown>>>(USER_ROLES_FILE, {});
+    const userRecord = roles[email];
+    if (!userRecord || userRecord.status !== 'approved' || userRecord.role !== 'super_admin') {
+      return { authorized: false, error: 'Access Denied: Only an approved Super Administrator can manage user account authorizations.' };
     }
 
     return { authorized: true, email };

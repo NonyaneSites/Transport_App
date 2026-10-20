@@ -1,0 +1,41 @@
+-- ============================================================================
+-- MANUAL RECOVERY REFERENCE DOCUMENT (NON-EXECUTABLE)
+-- File: supabase/manual_recovery/20261020110000_rollback_reference.txt
+-- Description: Detailed reference for manual rollback of migration 20261020110000.
+-- IMPORTANT: Do NOT execute unless explicitly instructed by the administrator.
+-- ============================================================================
+
+/*
+1. Revert cancellation_ledger policies:
+DROP POLICY IF EXISTS "ledger_admin_select" ON cancellation_ledger;
+DROP POLICY IF EXISTS "ledger_admin_insert" ON cancellation_ledger;
+DROP POLICY IF EXISTS "ledger_admin_update" ON cancellation_ledger;
+DROP POLICY IF EXISTS "ledger_admin_delete" ON cancellation_ledger;
+
+CREATE POLICY "anon_select_ledger" ON cancellation_ledger FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "anon_insert_ledger" ON cancellation_ledger FOR INSERT TO anon, authenticated WITH CHECK (true);
+CREATE POLICY "anon_update_ledger" ON cancellation_ledger FOR UPDATE TO anon, authenticated USING (true) WITH CHECK (true);
+
+2. Revert cancellation_ledger_audits policies:
+DROP POLICY IF EXISTS "audits_admin_select" ON cancellation_ledger_audits;
+DROP POLICY IF EXISTS "audits_admin_insert" ON cancellation_ledger_audits;
+
+CREATE POLICY "audits_select_policy" ON cancellation_ledger_audits FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "audits_insert_policy" ON cancellation_ledger_audits FOR INSERT TO anon, authenticated WITH CHECK (true);
+
+3. Revert sponsorship_audits policies:
+DROP POLICY IF EXISTS "sponsorship_admin_select" ON sponsorship_audits;
+DROP POLICY IF EXISTS "sponsorship_admin_insert" ON sponsorship_audits;
+DROP POLICY IF EXISTS "sponsorship_admin_update" ON sponsorship_audits;
+DROP POLICY IF EXISTS "sponsorship_admin_delete" ON sponsorship_audits;
+
+4. Revert RPC grants:
+GRANT EXECUTE ON FUNCTION settle_cancellation_debts(text[], text, text) TO PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION remove_cancellation_debts(text[], text, text) TO PUBLIC, anon;
+
+5. Drop helper functions:
+DROP FUNCTION IF EXISTS rep_submit_operational_debt(text, text, text, text, text, text, text, text, text);
+DROP FUNCTION IF EXISTS public.is_dispatch_admin_or_super();
+DROP FUNCTION IF EXISTS public.is_ledger_admin_or_super();
+DROP FUNCTION IF EXISTS public.is_super_admin_user();
+*/

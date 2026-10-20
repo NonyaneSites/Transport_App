@@ -734,37 +734,26 @@ export type AppUserRole =
 export type UserAccountStatus = 'pending' | 'approved' | 'rejected';
 
 /**
- * Display convenience only: Server-side profile claims & RLS are the true authority.
- * Never use email matching as an authoritative bypass.
+ * Authoritative access control: Granted strictly via approved Supabase profile claims
+ * and server authorization, never via client-side email strings.
  */
-export const SUPER_ADMIN_EMAILS = ['nonyaneamo@gmail.com'];
-
-export function isSuperAdminEmail(email?: string | null): boolean {
-  if (!email) return false;
-  return SUPER_ADMIN_EMAILS.includes(email.trim().toLowerCase());
-}
-
-export function canRoleAccessDispatch(role?: AppUserRole | null, email?: string | null): boolean {
-  if (isSuperAdminEmail(email)) return true;
-  if (!role || role === 'rep') return false;
+export function canRoleAccessDispatch(role?: AppUserRole | null): boolean {
+  if (!role || role === 'rep' || role === 'ledger_admin') return false;
   return role === 'super_admin' || role === 'dispatch_admin' || role === 'dispatcher' || role === 'admin' || role === 'admin_dual';
 }
 
-export function canRoleAccessLedger(role?: AppUserRole | null, email?: string | null): boolean {
-  if (isSuperAdminEmail(email)) return true;
+export function canRoleAccessLedger(role?: AppUserRole | null): boolean {
   // Dispatch admins strictly excluded from Ledger unless explicitly designated as dual role
   if (!role || role === 'rep' || role === 'dispatch_admin' || role === 'dispatcher') return false;
   return role === 'super_admin' || role === 'ledger_admin' || role === 'admin_dual';
 }
 
-export function canRoleAccessGovernance(role?: AppUserRole | null, email?: string | null): boolean {
-  if (isSuperAdminEmail(email)) return true;
+export function canRoleAccessGovernance(role?: AppUserRole | null): boolean {
   if (!role) return false;
   return role === 'super_admin';
 }
 
-export function isRoleSuperAdmin(role?: AppUserRole | null, email?: string | null): boolean {
-  if (isSuperAdminEmail(email)) return true;
+export function isRoleSuperAdmin(role?: AppUserRole | null): boolean {
   return role === 'super_admin';
 }
 

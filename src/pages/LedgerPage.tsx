@@ -137,17 +137,34 @@ END $$;
 
 ALTER TABLE cancellation_ledger ENABLE ROW LEVEL SECURITY;
 
-DROP POLICY IF EXISTS "anon_select_ledger" ON cancellation_ledger;
-CREATE POLICY "anon_select_ledger" ON cancellation_ledger FOR SELECT TO anon, authenticated USING (true);
+DO $$
+DECLARE
+  pol RECORD;
+BEGIN
+  FOR pol IN SELECT policyname FROM pg_policies WHERE tablename = 'cancellation_ledger'
+  LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON cancellation_ledger', pol.policyname);
+  END LOOP;
+END $$;
 
-DROP POLICY IF EXISTS "anon_insert_ledger" ON cancellation_ledger;
-CREATE POLICY "anon_insert_ledger" ON cancellation_ledger FOR INSERT TO anon, authenticated WITH CHECK (true);
+REVOKE INSERT, UPDATE, DELETE ON cancellation_ledger FROM PUBLIC, anon;
 
-DROP POLICY IF EXISTS "anon_update_ledger" ON cancellation_ledger;
-CREATE POLICY "anon_update_ledger" ON cancellation_ledger FOR UPDATE TO anon, authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "ledger_admin_select" ON cancellation_ledger
+  FOR SELECT TO authenticated
+  USING (public.is_ledger_admin_or_super());
 
-DROP POLICY IF EXISTS "anon_delete_ledger" ON cancellation_ledger;
-CREATE POLICY "anon_delete_ledger" ON cancellation_ledger FOR DELETE TO anon, authenticated USING (true);
+CREATE POLICY "ledger_admin_insert" ON cancellation_ledger
+  FOR INSERT TO authenticated
+  WITH CHECK (public.is_ledger_admin_or_super());
+
+CREATE POLICY "ledger_admin_update" ON cancellation_ledger
+  FOR UPDATE TO authenticated
+  USING (public.is_ledger_admin_or_super())
+  WITH CHECK (public.is_ledger_admin_or_super());
+
+CREATE POLICY "ledger_admin_delete" ON cancellation_ledger
+  FOR DELETE TO authenticated
+  USING (public.is_super_admin_user());
 
 CREATE INDEX IF NOT EXISTS idx_cancellation_ledger_status ON cancellation_ledger(status);
 CREATE INDEX IF NOT EXISTS idx_cancellation_ledger_date ON cancellation_ledger(date);
@@ -170,11 +187,11 @@ CREATE TABLE IF NOT EXISTS cancellation_ledger_audits (
 
 ALTER TABLE cancellation_ledger_audits ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "audits_select_policy" ON cancellation_ledger_audits;
-CREATE POLICY "audits_select_policy" ON cancellation_ledger_audits FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "audits_select_policy" ON cancellation_ledger_audits FOR SELECT TO authenticated USING (public.is_ledger_admin_or_super());
 DROP POLICY IF EXISTS "audits_insert_policy" ON cancellation_ledger_audits;
-CREATE POLICY "audits_insert_policy" ON cancellation_ledger_audits FOR INSERT TO anon, authenticated WITH CHECK (true);
+CREATE POLICY "audits_insert_policy" ON cancellation_ledger_audits FOR INSERT TO authenticated WITH CHECK (public.is_ledger_admin_or_super());
 
--- 2. SPONSORSHIP AUDITS TABLE (Tracks all reported sponsorships and verification audits)
+-- 2. SPONSORSHIP AUDITS TABLE (Strict RLS: Only Ledger Admins and Super Admins manage classifications)
 CREATE TABLE IF NOT EXISTS sponsorship_audits (
   id text PRIMARY KEY,
   manifest_key text NOT NULL DEFAULT '',
@@ -187,7 +204,7 @@ CREATE TABLE IF NOT EXISTS sponsorship_audits (
   vehicle_name text NOT NULL DEFAULT '',
   rep_name text NOT NULL DEFAULT '',
   sponsor_note text NOT NULL DEFAULT '',
-  status text NOT NULL DEFAULT 'pending', -- 'pending', 'actually_sponsored', 'unaccounted_sponsorship', 'unpaid_sponsorship'
+  status text NOT NULL DEFAULT 'pending', -- 'pending', 'actually_sponsored', 'unaccounted_sponsorship', 'unpaid_sponsorship', 'settled', 'removed'
   status_updated_at timestamptz,
   ledger_entry_id text DEFAULT '',
   submitted_at timestamptz NOT NULL DEFAULT now()
@@ -196,16 +213,16 @@ CREATE TABLE IF NOT EXISTS sponsorship_audits (
 ALTER TABLE sponsorship_audits ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "anon_select_sponsorships" ON sponsorship_audits;
-CREATE POLICY "anon_select_sponsorships" ON sponsorship_audits FOR SELECT TO anon, authenticated USING (true);
-
 DROP POLICY IF EXISTS "anon_insert_sponsorships" ON sponsorship_audits;
-CREATE POLICY "anon_insert_sponsorships" ON sponsorship_audits FOR INSERT TO anon, authenticated WITH CHECK (true);
-
 DROP POLICY IF EXISTS "anon_update_sponsorships" ON sponsorship_audits;
-CREATE POLICY "anon_update_sponsorships" ON sponsorship_audits FOR UPDATE TO anon, authenticated USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "anon_delete_sponsorships" ON sponsorship_audits;
-CREATE POLICY "anon_delete_sponsorships" ON sponsorship_audits FOR DELETE TO anon, authenticated USING (true);
+DROP POLICY IF EXISTS "sponsorship_select_policy" ON sponsorship_audits;
+DROP POLICY IF EXISTS "sponsorship_insert_policy" ON sponsorship_audits;
+DROP POLICY IF EXISTS "sponsorship_update_policy" ON sponsorship_audits;
+
+CREATE POLICY "sponsorship_select_policy" ON sponsorship_audits FOR SELECT TO authenticated USING (public.is_ledger_admin_or_super());
+CREATE POLICY "sponsorship_insert_policy" ON sponsorship_audits FOR INSERT TO authenticated WITH CHECK (public.is_ledger_admin_or_super());
+CREATE POLICY "sponsorship_update_policy" ON sponsorship_audits FOR UPDATE TO authenticated USING (public.is_ledger_admin_or_super()) WITH CHECK (public.is_ledger_admin_or_super());
 
 CREATE INDEX IF NOT EXISTS idx_sponsorship_audits_date ON sponsorship_audits(date);
 CREATE INDEX IF NOT EXISTS idx_sponsorship_audits_status ON sponsorship_audits(status);

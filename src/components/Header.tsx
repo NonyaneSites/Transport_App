@@ -30,6 +30,9 @@ export function Header({ current }: HeaderProps = {}) {
           <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-crimson-500/15 text-crimson-400 border border-crimson-500/20">
             JHB
           </span>
+          <span className="hidden sm:inline-flex text-[10px] font-mono text-muted/80 px-1.5 py-0.5 rounded bg-card-2 border border-line">
+            v3.1 · Oct 2026
+          </span>
         </div>
       </div>
     </div>

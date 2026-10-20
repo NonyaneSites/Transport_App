@@ -3,9 +3,9 @@ import { supabase } from '@/lib/supabase';
 import {
   type AppUserRole,
   type UserAccountStatus,
-  isSuperAdminEmail,
   canRoleAccessDispatch,
   canRoleAccessLedger,
+  canRoleAccessGovernance,
 } from '@/lib/types';
 import type { User } from '@supabase/supabase-js';
 
@@ -132,16 +132,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         effectiveStatus = serverStatus;
       }
 
-      // Determine effective role: approved accounts default to admin so they have full workspace access
+      // Determine effective role: obtained strictly from DB claims or server auth configuration
       let resolvedRole: AppUserRole = effectiveStatus === 'approved' ? 'admin' : 'rep';
-      if (effectiveEmail === 'nonyaneamo@gmail.com') {
-        resolvedRole = 'super_admin';
-      } else if (remoteData?.role) {
+      if (remoteData?.role) {
         resolvedRole = remoteData.role as AppUserRole;
       } else if (serverRole) {
         resolvedRole = serverRole;
-      } else if (effectiveEmail === 'shauntsiloane@gmail.com' || effectiveEmail === 'tsiloane941@gmail.com') {
-        resolvedRole = 'dispatch_admin';
       }
 
       setProfile({
@@ -217,8 +213,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setProfile(null);
   }, []);
 
-  const userEmail = (user?.email || profile?.email || '').trim().toLowerCase();
-  const isSuperEmail = Boolean(user && isSuperAdminEmail(userEmail));
 
   // Authoritative approval requirement: profile must be approved in DB or verified session
   const isApproved = Boolean(
@@ -226,18 +220,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const role: AppUserRole = useMemo(() => {
-    if (isSuperEmail && isApproved) return 'super_admin';
     if (profile?.role) return profile.role as AppUserRole;
     return isApproved ? 'admin' : 'rep';
-  }, [isSuperEmail, isApproved, profile?.role]);
+  }, [isApproved, profile?.role]);
 
-  const isSuperAdmin = Boolean(isApproved && (role === 'super_admin' || isSuperEmail));
-  const canAccessDispatch = Boolean(isApproved && canRoleAccessDispatch(role, userEmail));
-  const canAccessLedger = Boolean(isApproved && canRoleAccessLedger(role, userEmail));
-  const canAccessGovernance = Boolean(isApproved && (role === 'super_admin' || isSuperAdmin));
-  const isDispatchAdmin = Boolean(isApproved && role !== 'rep' && (role === 'dispatch_admin' || role === 'dispatcher' || role === 'admin' || isSuperAdmin));
-  const isLedgerAdmin = Boolean(isApproved && role !== 'rep' && (role === 'ledger_admin' || role === 'admin' || isSuperAdmin));
-  const isAdmin = Boolean(isApproved && role !== 'rep' && (canAccessDispatch || canAccessLedger || canAccessGovernance));
+  const isSuperAdmin = Boolean(isApproved && role === 'super_admin');
+  const canAccessDispatch = Boolean(isApproved && canRoleAccessDispatch(role));
+  const canAccessLedger = Boolean(isApproved && canRoleAccessLedger(role));
+  const canAccessGovernance = Boolean(isApproved && canRoleAccessGovernance(role));
+  const isDispatchAdmin = Boolean(isApproved && (role === 'dispatch_admin' || role === 'dispatcher' || role === 'admin' || role === 'admin_dual' || role === 'super_admin'));
+  const isLedgerAdmin = Boolean(isApproved && (role === 'ledger_admin' || role === 'admin_dual' || role === 'super_admin'));
+  const isAdmin = Boolean(isApproved && (canAccessDispatch || canAccessLedger || canAccessGovernance));
 
   return (
     <AuthContext.Provider
