@@ -1,13 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { supabase, MANIFESTS_TABLE, VEHICLES_TABLE, mockStorage } from './supabase';
+import { supabase, MANIFESTS_TABLE, mockStorage } from './supabase';
 import {
   loadManifest,
   normalizeManifestData,
   applyWalkInToManifest,
   reconcileManifestForSave,
   saveVehicleToDb,
-  syncVehiclesToDb,
-  dbRowToVehicle,
   resetManifest,
 } from './manifest';
 import {
@@ -1184,7 +1182,7 @@ export function useManifest(
 
       // 2. If RPC not available or failed, perform conflict-safe fetch & per-vehicle merge on transport_manifests
       if (!rpcSucceeded) {
-        const { data: latestRow, error: fetchError } = await supabase
+        const { data: latestRow } = await supabase
           .from(MANIFESTS_TABLE)
           .select('date, signups, vehicles, updated_at')
           .eq('date', key)
