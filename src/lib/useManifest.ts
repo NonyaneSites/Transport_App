@@ -10,6 +10,14 @@ import {
   dbRowToVehicle,
   resetManifest,
 } from './manifest';
+import {
+  connectSyncEvents,
+  isServerOnline,
+  updateVehicleDraftOnServer,
+  saveManifestToServer,
+  fetchManifestFromServer,
+  broadcastLiveActionToServer,
+} from './serverApi';
 import type { Manifest, Vehicle, Passenger, VehicleDraftState, LiveSyncAction } from './types';
 
 export interface ActiveCoRep {
@@ -17,6 +25,8 @@ export interface ActiveCoRep {
   repName: string;
   lastSeen: number;
 }
+
+export type ManifestSyncStatus = 'synced' | 'syncing' | 'failed' | 'offline';
 
 export { normalizeManifestData };
 
@@ -83,29 +93,101 @@ export function mergeIncomingManifest(
     const incDraft = incV.draftState;
     const curDraft = currentActiveVehicle.draftState;
 
-    // Prune any draft presence/absence for riders that are no longer in this vehicle
-    const cleanDraftState: VehicleDraftState = incDraft
-      ? {
-          ...(curDraft || {}),
-          ...incDraft,
-          presentIds: (incDraft.presentIds !== undefined ? incDraft.presentIds : (curDraft?.presentIds || [])).filter((id) => activeRiderStrSet.has(String(id))),
-          absentIds: (incDraft.absentIds !== undefined ? incDraft.absentIds : (curDraft?.absentIds || [])).filter((id) => activeRiderStrSet.has(String(id))),
-          sponsoredIds: (incDraft.sponsoredIds !== undefined ? incDraft.sponsoredIds : (curDraft?.sponsoredIds || [])).filter((id) => activeRiderStrSet.has(String(id))),
-          unpaidIds: (incDraft.unpaidIds !== undefined ? incDraft.unpaidIds : (curDraft?.unpaidIds || [])).filter((id) => activeRiderStrSet.has(String(id))),
-          absentPaidIds: (incDraft.absentPaidIds !== undefined ? incDraft.absentPaidIds : (curDraft?.absentPaidIds || [])).filter((id) => activeRiderStrSet.has(String(id))),
-          notes: Object.fromEntries(
-            Object.entries({ ...(curDraft?.notes || {}), ...(incDraft.notes || {}) }).filter(([k]) => activeRiderStrSet.has(String(k)))
-          ),
-          updatedAt: incDraft.updatedAt || curDraft?.updatedAt || new Date().toISOString(),
-          updatedBy: incDraft.updatedBy || curDraft?.updatedBy,
-        }
-      : (curDraft || {});
+    const curPSet = new Set((curDraft?.presentIds || []).map(String));
+    const incPSet = new Set((incDraft?.presentIds || []).map(String));
+    const curASet = new Set((curDraft?.absentIds || []).map(String));
+    const incASet = new Set((incDraft?.absentIds || []).map(String));
+
+    const incIsNewer = Boolean(
+      incDraft?.updatedAt && curDraft?.updatedAt && incDraft.updatedAt >= curDraft.updatedAt
+    );
+
+    const mergedPresent = Array.from(
+      new Set([
+        ...(curDraft?.presentIds || []).filter((id) => !incIsNewer || !incASet.has(String(id))),
+        ...(incDraft?.presentIds || []).filter((id) => incIsNewer || !curASet.has(String(id))),
+      ])
+    ).filter((id) => activeRiderStrSet.has(String(id)));
+
+    const mergedAbsent = Array.from(
+      new Set([
+        ...(curDraft?.absentIds || []).filter((id) => !incIsNewer || !incPSet.has(String(id))),
+        ...(incDraft?.absentIds || []).filter((id) => incIsNewer || !curPSet.has(String(id))),
+      ])
+    ).filter((id) => activeRiderStrSet.has(String(id)));
+
+    const mergedSponsored = Array.from(
+      new Set([...(curDraft?.sponsoredIds || []), ...(incDraft?.sponsoredIds || [])])
+    ).filter((id) => activeRiderStrSet.has(String(id)));
+
+    const mergedUnpaid = Array.from(
+      new Set([...(curDraft?.unpaidIds || []), ...(incDraft?.unpaidIds || [])])
+    ).filter((id) => activeRiderStrSet.has(String(id)));
+
+    const mergedAbsentPaid = Array.from(
+      new Set([...(curDraft?.absentPaidIds || []), ...(incDraft?.absentPaidIds || [])])
+    ).filter((id) => activeRiderStrSet.has(String(id)));
+
+    const mergedNotes = Object.fromEntries(
+      Object.entries({ ...(curDraft?.notes || {}), ...(incDraft?.notes || {}) }).filter(([k]) =>
+        activeRiderStrSet.has(String(k))
+      )
+    );
+
+    const finalRepName =
+      (incIsNewer ? incDraft?.repName : curDraft?.repName) ||
+      curDraft?.repName ||
+      incDraft?.repName ||
+      currentActiveVehicle.repName ||
+      incV.repName;
+
+    const finalPlate =
+      (incIsNewer ? incDraft?.licensePlate : curDraft?.licensePlate) ||
+      curDraft?.licensePlate ||
+      incDraft?.licensePlate ||
+      currentActiveVehicle.licensePlate ||
+      incV.licensePlate;
+
+    const finalGeneralNotes =
+      (incIsNewer ? incDraft?.generalNotes : curDraft?.generalNotes) ||
+      curDraft?.generalNotes ||
+      incDraft?.generalNotes ||
+      currentActiveVehicle.generalNotes ||
+      incV.generalNotes;
+
+    const isSubmitted = Boolean(
+      incV.submitted ||
+        currentActiveVehicle.submitted ||
+        incDraft?.submitted ||
+        curDraft?.submitted
+    );
+
+    const cleanDraftState: VehicleDraftState = {
+      ...(curDraft || {}),
+      ...(incDraft || {}),
+      presentIds: mergedPresent,
+      absentIds: mergedAbsent,
+      sponsoredIds: mergedSponsored,
+      unpaidIds: mergedUnpaid,
+      absentPaidIds: mergedAbsentPaid,
+      notes: mergedNotes,
+      repName: finalRepName,
+      licensePlate: finalPlate,
+      generalNotes: finalGeneralNotes,
+      submitted: isSubmitted,
+      updatedAt: incDraft?.updatedAt || curDraft?.updatedAt || new Date().toISOString(),
+      updatedBy: incDraft?.updatedBy || curDraft?.updatedBy,
+    };
 
     return {
       ...incV,
+      ...currentActiveVehicle,
+      repName: finalRepName,
+      licensePlate: finalPlate,
+      generalNotes: finalGeneralNotes,
       riders: activeRiders,
       orderedStops: incV.orderedStops || currentActiveVehicle.orderedStops || [],
-      submitted: Boolean(incV.submitted || currentActiveVehicle.submitted),
+      submitted: isSubmitted,
       submittedAt: incV.submittedAt || currentActiveVehicle.submittedAt,
       submittedBy: incV.submittedBy || currentActiveVehicle.submittedBy,
       draftState: cleanDraftState,
@@ -135,6 +217,8 @@ export function useManifest(
   loading: boolean;
   error: string | null;
   isSyncing: boolean;
+  syncStatus: ManifestSyncStatus;
+  syncError: string | null;
   lastSyncedAt: number | null;
   activeCoReps: ActiveCoRep[];
   refresh: () => Promise<void>;
@@ -158,6 +242,8 @@ export function useManifest(
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [loading, setLoading] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<ManifestSyncStatus>('synced');
+  const [syncError, setSyncError] = useState<string | null>(null);
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeCoReps, setActiveCoReps] = useState<ActiveCoRep[]>([]);
@@ -271,6 +357,9 @@ export function useManifest(
       event: 'live_action',
       payload: action,
     });
+    if (isServerOnline()) {
+      broadcastLiveActionToServer(action).catch(() => {});
+    }
   }, [safeChannelSend]);
 
   // Track the updatedAt timestamp of the last thing WE saved.
@@ -283,6 +372,7 @@ export function useManifest(
   const refresh = async () => {
     if (!key) return;
     setIsSyncing(true);
+    setSyncStatus('syncing');
     try {
       const fresh = await loadManifest(key);
       if (keyRef.current === key && fresh) {
@@ -291,27 +381,59 @@ export function useManifest(
           lastKnownUpdatedAtRef.current = fresh.updated_at;
         }
         setLastSyncedAt(Date.now());
+        setSyncStatus('synced');
+        setSyncError(null);
       }
     } catch (err) {
       console.warn('[useManifest] Refresh error:', err);
+      const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+      setSyncStatus(isOffline ? 'offline' : 'failed');
+      setSyncError(isOffline ? 'Offline - displaying cached manifest' : (err instanceof Error ? err.message : String(err)));
     } finally {
       setIsSyncing(false);
     }
   };
 
-  const executeRemotePersist = useCallback(async (targetManifest: Manifest) => {
+  const executeRemotePersist = useCallback(async (targetManifest: Manifest, baselineSnapshot?: Manifest | null) => {
+    setIsSyncing(true);
+    setSyncStatus('syncing');
     try {
-      await syncVehiclesToDb(targetManifest.date, targetManifest.vehicles).catch((err) => {
-        console.warn('[useManifest] Error saving individual vehicles:', err);
-      });
+      // 1. Fetch freshest remote row from Supabase to prevent overwriting concurrent updates from other reps/taxis
+      let authoritativeRemote: Manifest | null = null;
+      try {
+        const { data: remoteRow, error: fetchErr } = await supabase
+          .from(MANIFESTS_TABLE)
+          .select('date, signups, vehicles, updated_at')
+          .eq('date', targetManifest.date)
+          .maybeSingle();
+        if (!fetchErr && remoteRow) {
+          authoritativeRemote = normalizeManifestData(remoteRow);
+        }
+      } catch (err) {
+        console.warn('[useManifest] Error fetching remote manifest for reconciliation:', err);
+      }
 
+      // Reconcile our intended save on top of authoritative remote
+      const base = baselineSnapshot ?? manifestRef.current;
+      const reconciled = authoritativeRemote
+        ? reconcileManifestForSave(base, targetManifest, authoritativeRemote)
+        : targetManifest;
+
+      // 2. Also persist to backend server if online
+      if (isServerOnline()) {
+        await saveManifestToServer(reconciled).catch((err) => {
+          console.warn('[useManifest] Error syncing reconciled manifest to backend server:', err);
+        });
+      }
+
+      // 3. Upsert reconciled manifest to Supabase
       const { error: upsertError, data } = await supabase
         .from(MANIFESTS_TABLE)
         .upsert(
           {
-            date: targetManifest.date,
-            signups: targetManifest.signups,
-            vehicles: targetManifest.vehicles,
+            date: reconciled.date,
+            signups: reconciled.signups,
+            vehicles: reconciled.vehicles,
           },
           { onConflict: 'date' }
         )
@@ -321,14 +443,22 @@ export function useManifest(
       if (upsertError) {
         console.warn('[useManifest] Supabase upsert error, syncing to local storage:', upsertError);
         mockStorage.upsert(MANIFESTS_TABLE, {
-          date: targetManifest.date,
-          signups: targetManifest.signups,
-          vehicles: targetManifest.vehicles,
+          date: reconciled.date,
+          signups: reconciled.signups,
+          vehicles: reconciled.vehicles,
           updated_at: new Date().toISOString(),
         });
+        const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+        setSyncStatus(isOffline ? 'offline' : 'failed');
+        setSyncError(isOffline ? 'Saved locally (Offline)' : upsertError.message);
       } else if (data?.updated_at) {
         lastSavedUpdatedAtRef.current = data.updated_at;
         lastKnownUpdatedAtRef.current = data.updated_at;
+        setSyncStatus('synced');
+        setSyncError(null);
+        if (authoritativeRemote) {
+          setManifest((prev) => (prev && prev.date === reconciled.date ? mergeIncomingManifest(prev, reconciled, activeVehicleIdRef.current) : reconciled));
+        }
       }
     } catch (err) {
       console.warn('[useManifest] Exception during supabase save, falling back locally:', err);
@@ -338,6 +468,11 @@ export function useManifest(
         vehicles: targetManifest.vehicles,
         updated_at: new Date().toISOString(),
       });
+      const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+      setSyncStatus(isOffline ? 'offline' : 'failed');
+      setSyncError(isOffline ? 'Saved locally (Offline)' : String(err));
+    } finally {
+      setIsSyncing(false);
     }
   }, []);
 
@@ -462,11 +597,7 @@ export function useManifest(
             const row = payload.new as (Partial<Manifest> & { updated_at?: string }) | null;
             if (!row) return;
 
-            // Suppress echoes of our own recent saves
-            if (Date.now() - lastLocalSaveTimeRef.current < 4000) {
-              return;
-            }
-
+            // Suppress exact echo of our own last save
             if (
               lastSavedUpdatedAtRef.current &&
               row.updated_at === lastSavedUpdatedAtRef.current
@@ -482,40 +613,8 @@ export function useManifest(
             if (normalized) {
               setManifest((prev) => mergeIncomingManifest(prev, normalized, activeVehicleIdRef.current));
               setLastSyncedAt(Date.now());
+              setSyncStatus('synced');
             }
-          }
-        )
-        .on(
-          'postgres_changes',
-          { event: '*', schema: 'public', table: VEHICLES_TABLE, filter: `manifest_key=eq.${key}` },
-          (payload) => {
-            if (keyRef.current !== key) return;
-            // Suppress echoes of our own recent saves
-            if (Date.now() - lastLocalSaveTimeRef.current < 4000) {
-              return;
-            }
-
-            const row = payload.new as Record<string, unknown> | null;
-            if (!row || !row.id) return;
-            const incomingVehicle = dbRowToVehicle(row);
-
-            setManifest((prev) => {
-              if (!prev || prev.date !== key) return prev;
-              const isTargetActive = activeVehicleIdRef.current === incomingVehicle.id;
-              const idx = prev.vehicles.findIndex((v) => v.id === incomingVehicle.id);
-              let updatedVehicles: Vehicle[];
-              if (idx !== -1) {
-                if (isTargetActive && prev.vehicles[idx].draftState?.updatedBy === incomingVehicle.draftState?.updatedBy) {
-                  return prev;
-                }
-                updatedVehicles = [...prev.vehicles];
-                updatedVehicles[idx] = incomingVehicle;
-              } else {
-                updatedVehicles = [...prev.vehicles, incomingVehicle];
-              }
-              return { ...prev, vehicles: updatedVehicles };
-            });
-            setLastSyncedAt(Date.now());
           }
         )
         .on('broadcast', { event: 'vehicle_draft_delta' }, (msg: {
@@ -547,6 +646,7 @@ export function useManifest(
             return { ...prev, vehicles: updatedVehicles };
           });
           setLastSyncedAt(Date.now());
+          setSyncStatus('synced');
         });
 
       (channel as unknown as { on: (event: string, filter: unknown, cb: (msg: { payload?: unknown }) => void) => typeof channel })
@@ -564,6 +664,7 @@ export function useManifest(
             }
             setManifest((prev) => mergeIncomingManifest(prev, incoming, activeVehicleIdRef.current));
             setLastSyncedAt(Date.now());
+            setSyncStatus('synced');
           }
         })
         .subscribe((status) => {
@@ -579,56 +680,95 @@ export function useManifest(
 
     setupChannel();
 
-    // 4. Periodic authoritative reconciliation even if Realtime reports SUBSCRIBED.
-    // Mobile browsers can silently drop individual websocket events while the
-    // channel still looks connected. Fetch a snapshot rather than relying on the
-    // parent manifest's updated_at (vehicle draft saves need not update it).
-    let polling = false;
+    // 4. Low-cost periodic version/timestamp check (every 20s while tab is visible)
+    // Runs even while Realtime is subscribed to catch any missed postgres_changes events
     const pollCheck = async () => {
-      if (polling || !key || keyRef.current !== key) return;
-      if (typeof document !== 'undefined' && document.hidden) return;
-      if (Date.now() - lastLocalSaveTimeRef.current < 5000) return;
-      polling = true;
+      if (!key || keyRef.current !== key) return;
+      if (typeof document !== 'undefined' && (document.hidden || document.visibilityState === 'hidden')) return;
+      // Do not poll immediately after a local write
+      if (Date.now() - lastLocalSaveTimeRef.current < 2500) return;
       try {
-        const fresh = await loadManifest(key);
-        if (fresh && keyRef.current === key) {
-          setManifest((prev) => mergeIncomingManifest(prev, fresh, activeVehicleIdRef.current));
-          if (fresh.updated_at) lastKnownUpdatedAtRef.current = fresh.updated_at;
-          setLastSyncedAt(Date.now());
+        const { data, error: pollError } = await supabase
+          .from(MANIFESTS_TABLE)
+          .select('updated_at')
+          .eq('date', key)
+          .maybeSingle();
+
+        if (pollError) {
+          if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            setSyncStatus('offline');
+          } else if (isServerOnline()) {
+            const serverManifest = await fetchManifestFromServer(key).catch(() => null);
+            if (serverManifest?.updated_at && serverManifest.updated_at !== lastKnownUpdatedAtRef.current) {
+              lastKnownUpdatedAtRef.current = serverManifest.updated_at;
+              setManifest((prev) => mergeIncomingManifest(prev, serverManifest, activeVehicleIdRef.current));
+              setLastSyncedAt(Date.now());
+              setSyncStatus('synced');
+            }
+          }
+          return;
         }
-      } catch (err) {
-        console.warn('[useManifest] Reconciliation poll failed:', err);
-      } finally {
-        polling = false;
+        const remoteUpdatedAt = (data as { updated_at?: string })?.updated_at;
+
+        if (
+          remoteUpdatedAt &&
+          remoteUpdatedAt !== lastSavedUpdatedAtRef.current &&
+          remoteUpdatedAt !== lastKnownUpdatedAtRef.current
+        ) {
+          lastKnownUpdatedAtRef.current = remoteUpdatedAt;
+          const fresh = await loadManifest(key);
+          if (fresh && keyRef.current === key) {
+            setManifest((prev) => mergeIncomingManifest(prev, fresh, activeVehicleIdRef.current));
+            setLastSyncedAt(Date.now());
+            setSyncStatus('synced');
+            setSyncError(null);
+          }
+        }
+      } catch {
+        // non-blocking
       }
     };
-    const pollInterval = setInterval(pollCheck, 15000);
 
-    // 5. Trigger on tab visible, network online, or pageshow (guarded against overwriting local saves):
+    const pollInterval = setInterval(() => {
+      pollCheck();
+    }, 20000);
+
+    // 5. Trigger on tab visible, window focus, network online, or pageshow:
     const handleResume = async () => {
       if (!key || keyRef.current !== key) return;
-      if (Date.now() - lastLocalSaveTimeRef.current < 5000) return;
+      if (Date.now() - lastLocalSaveTimeRef.current < 2500) return;
 
       // Reconnect websocket if dropped or disconnected
       if (!isChannelSubscribedRef.current) {
         setupChannel();
       }
 
-      // Force an immediate fresh reload from server
+      // Check remote updated_at before performing full refresh
       try {
-        const fresh = await loadManifest(key);
-        if (fresh && keyRef.current === key) {
-          if (fresh.updated_at) {
-            lastKnownUpdatedAtRef.current = fresh.updated_at;
-          }
-          manifestRef.current = fresh;
-          setManifest((prev) => mergeIncomingManifest(prev, fresh, activeVehicleIdRef.current));
-          setLastSyncedAt(Date.now());
-          if (broadcastChannelRef.current) {
-            try {
-              broadcastChannelRef.current.postMessage({ key: fresh.date, manifest: fresh });
-            } catch {
-              // broadcast failed
+        const { data: checkData, error: checkError } = await supabase
+          .from(MANIFESTS_TABLE)
+          .select('updated_at')
+          .eq('date', key)
+          .maybeSingle();
+
+        const remoteUpdatedAt = !checkError ? (checkData as { updated_at?: string })?.updated_at : undefined;
+        if (!remoteUpdatedAt || remoteUpdatedAt !== lastKnownUpdatedAtRef.current) {
+          const fresh = await loadManifest(key);
+          if (fresh && keyRef.current === key) {
+            if (fresh.updated_at) {
+              lastKnownUpdatedAtRef.current = fresh.updated_at;
+            }
+            manifestRef.current = fresh;
+            setManifest((prev) => mergeIncomingManifest(prev, fresh, activeVehicleIdRef.current));
+            setLastSyncedAt(Date.now());
+            setSyncStatus('synced');
+            setSyncError(null);
+            if (broadcastChannelRef.current) {
+              try {
+                broadcastChannelRef.current.postMessage({ key: fresh.date, manifest: fresh });
+              } catch {
+                // broadcast failed
+              }
             }
           }
         }
@@ -642,6 +782,9 @@ export function useManifest(
         handleResume();
       }
     };
+    const handleFocus = () => {
+      handleResume();
+    };
     const handleOnline = () => {
       handleResume();
     };
@@ -653,17 +796,67 @@ export function useManifest(
       document.addEventListener('visibilitychange', handleVisibilityChange);
     }
     if (typeof window !== 'undefined') {
+      window.addEventListener('focus', handleFocus);
       window.addEventListener('online', handleOnline);
       window.addEventListener('pageshow', handlePageShow);
     }
 
+    // 6. Connect SSE listener for full-stack instant local/server synchronization
+    const disconnectSse = connectSyncEvents(
+      (data) => {
+        if (keyRef.current !== key || !data || data.key !== key) return;
+        if (data.manifest) {
+          const incoming = normalizeManifestData(data.manifest);
+          if (incoming) {
+            if (data.manifest.updated_at) {
+              lastKnownUpdatedAtRef.current = data.manifest.updated_at;
+            }
+            setManifest((prev) => mergeIncomingManifest(prev, incoming, activeVehicleIdRef.current));
+            setLastSyncedAt(Date.now());
+            setSyncStatus('synced');
+          }
+        } else {
+          handleResume();
+        }
+      },
+      undefined,
+      (delta) => {
+        if (keyRef.current !== key || !delta || delta.key !== key) return;
+        const { vehicleId, draftState, repName, licensePlate } = delta;
+        setManifest((prev) => {
+          if (!prev || prev.date !== key) return prev;
+          const isTargetActive = activeVehicleIdRef.current === vehicleId;
+          const updatedVehicles = prev.vehicles.map((v) => {
+            if (v.id !== vehicleId) return v;
+            if (isTargetActive && v.draftState?.updatedBy === draftState.updatedBy) return v;
+            return {
+              ...v,
+              draftState,
+              repName: repName?.trim() || draftState.repName?.trim() || v.repName,
+              licensePlate: licensePlate?.trim() || draftState.licensePlate?.trim() || v.licensePlate,
+            };
+          });
+          return { ...prev, vehicles: updatedVehicles };
+        });
+        setLastSyncedAt(Date.now());
+        setSyncStatus('synced');
+      },
+      undefined,
+      (action) => {
+        if (keyRef.current !== key || !action) return;
+        handleIncomingLiveAction(action);
+      }
+    );
+
     return () => {
       keyRef.current = null;
       clearInterval(pollInterval);
+      disconnectSse();
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', handleVisibilityChange);
       }
       if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', handleFocus);
         window.removeEventListener('online', handleOnline);
         window.removeEventListener('pageshow', handlePageShow);
       }
@@ -708,44 +901,36 @@ export function useManifest(
     setManifest(normalized);
     setLastSyncedAt(Date.now());
 
-    // 2. Reconcile against existing state if external changes arrived without an extra heavy remote GET
-    let merged = normalized;
-    if (baseline && manifestRef.current && manifestRef.current !== baseline) {
-      merged = reconcileManifestForSave(baseline, normalized, manifestRef.current);
-    }
-
-    // 3. Broadcast across local browser tabs immediately
+    // 2. Broadcast across local browser tabs immediately
     if (broadcastChannelRef.current) {
       try {
-        broadcastChannelRef.current.postMessage({ key: merged.date, manifest: merged });
+        broadcastChannelRef.current.postMessage({ key: normalized.date, manifest: normalized });
       } catch {
         // Broadcast failed
       }
     }
 
-    // 4. Broadcast across connected devices via Supabase channel
+    // 3. Broadcast across connected devices via Supabase channel
     safeChannelSend({
       type: 'broadcast',
       event: 'manifest_updated',
-      payload: { date: merged.date, manifest: merged },
+      payload: { date: normalized.date, manifest: normalized },
     });
 
-    // 5. Update local state and timestamp with the authoritative reconciled result
-    manifestRef.current = merged;
-    lastLocalSaveTimeRef.current = Date.now();
-    setManifest(merged);
+    // 4. Update local state and timestamp
+    manifestRef.current = normalized;
 
-    // 6. Persist the reconciled manifest to Supabase with debounce (600ms) to protect edge requests on rapid saves
-    pendingRemoteSaveManifestRef.current = merged;
+    // 5. Persist the reconciled manifest to server and database with debounce (400ms)
+    pendingRemoteSaveManifestRef.current = normalized;
     if (pendingRemoteSaveTimerRef.current) {
       clearTimeout(pendingRemoteSaveTimerRef.current);
     }
     pendingRemoteSaveTimerRef.current = setTimeout(() => {
       pendingRemoteSaveTimerRef.current = null;
       if (pendingRemoteSaveManifestRef.current) {
-        executeRemotePersist(pendingRemoteSaveManifestRef.current);
+        executeRemotePersist(pendingRemoteSaveManifestRef.current, baseline);
       }
-    }, 600);
+    }, 400);
   }
 
   async function reset(): Promise<void> {
@@ -970,32 +1155,110 @@ export function useManifest(
       updated_at: new Date().toISOString(),
     });
 
+    setIsSyncing(true);
+    setSyncStatus('syncing');
     try {
-      if (targetVehRecord) {
-        saveVehicleToDb(mergedManifest.date, targetVehRecord).catch((err) => {
-          console.warn('[useManifest] Error saving individual vehicle:', err);
+      // 1. Try atomic database RPC first for instant concurrency-safe execution
+      let rpcSucceeded = false;
+      try {
+        const { data: rpcRes, error: rpcErr } = await supabase.rpc('rep_update_vehicle_draft', {
+          p_manifest_key: key,
+          p_vehicle_id: vehicleId,
+          p_draft_state: mergedDraft,
+          p_rep_name: repName?.trim() || mergedDraft?.repName?.trim() || '',
+          p_license_plate: licensePlate?.trim() || mergedDraft?.licensePlate?.trim() || '',
+        });
+        if (!rpcErr && rpcRes && (rpcRes as { success?: boolean }).success) {
+          rpcSucceeded = true;
+          const updatedTime = (rpcRes as { updated_at?: string }).updated_at;
+          if (updatedTime) {
+            lastSavedUpdatedAtRef.current = updatedTime;
+            lastKnownUpdatedAtRef.current = updatedTime;
+          }
+          setSyncStatus('synced');
+          setSyncError(null);
+        }
+      } catch {
+        rpcSucceeded = false;
+      }
+
+      // 2. If RPC not available or failed, perform conflict-safe fetch & per-vehicle merge on transport_manifests
+      if (!rpcSucceeded) {
+        const { data: latestRow, error: fetchError } = await supabase
+          .from(MANIFESTS_TABLE)
+          .select('date, signups, vehicles, updated_at')
+          .eq('date', key)
+          .maybeSingle();
+
+        const remote = latestRow ? normalizeManifestData(latestRow) : null;
+        let finalVehicles = updatedVehicles;
+        let finalSignups = updatedSignups;
+
+        if (remote && Array.isArray(remote.vehicles) && remote.vehicles.length > 0) {
+          // Strictly preserve all other vehicles exactly as recorded on the authoritative server row
+          finalVehicles = remote.vehicles.map((v) => {
+            if (v.id === vehicleId) {
+              const remoteSubmitted = Boolean(v.submitted || v.draftState?.submitted);
+              return {
+                ...v,
+                repName: mergedDraft?.repName?.trim() || repName?.trim() || v.repName,
+                licensePlate: mergedDraft?.licensePlate?.trim() || licensePlate?.trim() || v.licensePlate,
+                submitted: remoteSubmitted || v.submitted,
+                draftState: mergedDraft,
+              };
+            }
+            return v;
+          });
+
+          // Update signups only for riders belonging to this vehicle
+          const vehicleRiderSet = new Set((targetVehicle?.riders ?? []).map(String));
+          finalSignups = remote.signups.map((p) => {
+            const sId = String(p.id);
+            if (vehicleRiderSet.has(sId)) {
+              const incP = updatedSignups.find((sp) => String(sp.id) === sId);
+              return incP || p;
+            }
+            return p;
+          });
+        }
+
+        const { data: upsertData, error: upsertErr } = await supabase
+          .from(MANIFESTS_TABLE)
+          .upsert(
+            {
+              date: key,
+              signups: finalSignups,
+              vehicles: finalVehicles,
+            },
+            { onConflict: 'date' }
+          )
+          .select('updated_at')
+          .maybeSingle();
+
+        if (upsertErr) {
+          const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+          setSyncStatus(isOffline ? 'offline' : 'failed');
+          setSyncError(isOffline ? 'Saved locally (Offline)' : upsertErr.message);
+        } else if (upsertData?.updated_at) {
+          lastSavedUpdatedAtRef.current = upsertData.updated_at;
+          lastKnownUpdatedAtRef.current = upsertData.updated_at;
+          setSyncStatus('synced');
+          setSyncError(null);
+        }
+      }
+
+      // 3. Keep backend server JSON and SSE in sync
+      if (isServerOnline()) {
+        await updateVehicleDraftOnServer(key, vehicleId, mergedDraft || {}, repName, licensePlate, targetVehRecord, mergedManifest).catch((err) => {
+          console.warn('[useManifest] Error updating vehicle draft on server:', err);
         });
       }
-
-      const { data } = await supabase
-        .from(MANIFESTS_TABLE)
-        .upsert(
-          {
-            date: mergedManifest.date,
-            signups: mergedManifest.signups,
-            vehicles: mergedManifest.vehicles,
-          },
-          { onConflict: 'date' }
-        )
-        .select('updated_at')
-        .single();
-
-      if (data?.updated_at) {
-        lastSavedUpdatedAtRef.current = data.updated_at;
-        lastKnownUpdatedAtRef.current = data.updated_at;
-      }
-    } catch {
-      // Supabase is secondary; Firestore is primary cloud database
+    } catch (err) {
+      const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+      setSyncStatus(isOffline ? 'offline' : 'failed');
+      setSyncError(isOffline ? 'Saved locally (Offline)' : String(err));
+    } finally {
+      setIsSyncing(false);
     }
   }
 
@@ -1080,6 +1343,8 @@ export function useManifest(
     loading,
     error,
     isSyncing,
+    syncStatus,
+    syncError,
     lastSyncedAt,
     activeCoReps,
     refresh,

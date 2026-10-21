@@ -65,21 +65,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const emailToCheck = (userEmail || user?.email || '').trim().toLowerCase();
 
-      // Check server roles if available
+      // Check server roles if authenticated session exists
       let serverRole: AppUserRole | undefined;
       let serverStatus: UserAccountStatus | undefined;
       let serverProfile: Record<string, unknown> | null = null;
       try {
-        const res = await fetch('/api/auth/roles');
-        if (res.ok) {
-          const rolesMap = await res.json();
-          if (rolesMap && emailToCheck && rolesMap[emailToCheck]) {
-            serverProfile = rolesMap[emailToCheck];
-            if (rolesMap[emailToCheck]?.role) {
-              serverRole = rolesMap[emailToCheck].role as AppUserRole;
-            }
-            if (rolesMap[emailToCheck]?.status) {
-              serverStatus = rolesMap[emailToCheck].status as UserAccountStatus;
+        const sessionRes = await supabase.auth.getSession();
+        const token = sessionRes?.data?.session?.access_token;
+        if (token) {
+          const res = await fetch('/api/auth/roles', {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (res.ok) {
+            const rolesMap = await res.json();
+            if (rolesMap && emailToCheck && rolesMap[emailToCheck]) {
+              serverProfile = rolesMap[emailToCheck];
+              if (rolesMap[emailToCheck]?.role) {
+                serverRole = rolesMap[emailToCheck].role as AppUserRole;
+              }
+              if (rolesMap[emailToCheck]?.status) {
+                serverStatus = rolesMap[emailToCheck].status as UserAccountStatus;
+              }
             }
           }
         }
@@ -120,11 +126,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       const effectiveEmail = ((remoteData?.email as string) || emailToCheck).trim().toLowerCase();
 
-      // Determine approval status from authoritative sources (DB first, server roles second)
+      // 1. Authoritative approval status: Supabase profiles table
       let effectiveStatus: UserAccountStatus = 'pending';
-      if (remoteData?.status === 'approved' || serverStatus === 'approved') {
+      if (remoteData?.status === 'approved') {
         effectiveStatus = 'approved';
-      } else if (remoteData?.status === 'rejected' || serverStatus === 'rejected') {
+      } else if (remoteData?.status === 'rejected') {
         effectiveStatus = 'rejected';
       } else if (remoteData?.status) {
         effectiveStatus = remoteData.status as UserAccountStatus;
@@ -132,8 +138,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         effectiveStatus = serverStatus;
       }
 
-      // Determine effective role: obtained strictly from DB claims or server auth configuration
-      let resolvedRole: AppUserRole = effectiveStatus === 'approved' ? 'admin' : 'rep';
+      // 2. Authoritative role: Supabase profile role first, server role second.
+      // Strict Least Privilege: Default to 'rep' (strictly NO administrative privileges).
+      let resolvedRole: AppUserRole = 'rep';
       if (remoteData?.role) {
         resolvedRole = remoteData.role as AppUserRole;
       } else if (serverRole) {
@@ -221,8 +228,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const role: AppUserRole = useMemo(() => {
     if (profile?.role) return profile.role as AppUserRole;
-    return isApproved ? 'admin' : 'rep';
-  }, [isApproved, profile?.role]);
+    return 'rep';
+  }, [profile?.role]);
 
   const isSuperAdmin = Boolean(isApproved && role === 'super_admin');
   const canAccessDispatch = Boolean(isApproved && canRoleAccessDispatch(role));

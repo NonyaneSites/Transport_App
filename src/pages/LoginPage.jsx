@@ -66,20 +66,24 @@ export function LoginPage() {
         console.warn('Profile fetch error during login:', err);
       }
 
-      // 3. Check server roles store and merge role & status metadata
+      // 3. Check server roles store and merge role & status metadata with authenticated token
       try {
-        const res = await fetch('/api/auth/roles');
-        if (res.ok) {
-          const rolesMap = await res.json();
-          if (rolesMap && cleanEmail && rolesMap[cleanEmail]) {
-            const serverInfo = rolesMap[cleanEmail];
-            const isApproved = profile?.status === 'approved' || serverInfo?.status === 'approved';
-            profile = {
-              ...(serverInfo || {}),
-              ...(profile || {}),
-              status: isApproved ? 'approved' : (profile?.status || serverInfo?.status || 'pending'),
-              role: serverInfo?.role || profile?.role || (isApproved ? 'admin' : 'rep'),
-            };
+        const token = authData?.session?.access_token;
+        if (token) {
+          const res = await fetch('/api/auth/roles', {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (res.ok) {
+            const rolesMap = await res.json();
+            if (rolesMap && cleanEmail && rolesMap[cleanEmail]) {
+              const serverInfo = rolesMap[cleanEmail];
+              profile = {
+                ...(serverInfo || {}),
+                ...(profile || {}),
+                status: profile?.status || serverInfo?.status || 'pending',
+                role: profile?.role || serverInfo?.role || 'rep',
+              };
+            }
           }
         }
       } catch {
@@ -106,8 +110,10 @@ export function LoginPage() {
         navigate('/rep');
       } else if (profile?.role === 'ledger_admin') {
         navigate('/ledger');
-      } else {
+      } else if (profile?.role === 'dispatch_admin' || profile?.role === 'dispatcher' || profile?.role === 'admin' || profile?.role === 'admin_dual' || profile?.role === 'super_admin') {
         navigate('/admin');
+      } else {
+        navigate('/rep');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed.');

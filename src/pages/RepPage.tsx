@@ -43,7 +43,6 @@ import {
   type LedgerEntry,
 } from '@/lib/ledger';
 import { supabase, MANIFESTS_TABLE } from '@/lib/supabase';
-import { listSharedSponsorships, createSharedSponsorship, revokeSharedSponsorship, canRevokeSharedSponsorship, type SharedSponsorship } from '@/lib/crossTaxiSponsorships';
 import { type SubmitVehiclePayload } from '@/lib/types';
 import { isServerOnline, submitVehicleToServer, reopenVehicleOnServer } from '@/lib/serverApi';
 import { extractVehicleStats } from '@/lib/statsExport';
@@ -166,15 +165,22 @@ export function RepPage() {
   }, [myCreatedWalkInIds, key]);
 
   // Concurrency tracking
+  const repNameFocusedRef = useRef(false);
   const licensePlateFocusedRef = useRef(false);
   const generalNotesFocusedRef = useRef(false);
   const clientIdRef = useRef<string>(makeClientId());
   const recentlyEditedRidersRef = useRef<Map<string, number>>(new Map());
   const recentlyToggledSponsoredRef = useRef<Map<string, boolean>>(new Map());
   const recentlyToggledUnpaidRef = useRef<Map<string, boolean>>(new Map());
+  const refreshRef = useRef<() => Promise<void> | void>();
 
   const handleLiveActionReceived = useCallback((action: LiveSyncAction) => {
     if (action.clientId === clientIdRef.current) return;
+
+    if (action.type === 'vehicle_submitted' || action.type === 'vehicle_reopened') {
+      refreshRef.current?.();
+      return;
+    }
 
     if (action.vehicleId === selectedVehicleId) {
       if (action.type === 'rider_attendance') {
@@ -249,6 +255,9 @@ export function RepPage() {
         const { riderId, note } = action;
         setNotes((prev) => ({ ...prev, [riderId]: note }));
       } else if (action.type === 'metadata_change') {
+        if (action.repName && !repNameFocusedRef.current) {
+          setRepName(action.repName);
+        }
         if (action.licensePlate && !licensePlateFocusedRef.current) {
           setLicensePlate(action.licensePlate);
         }
@@ -264,12 +273,15 @@ export function RepPage() {
     loading,
     error,
     isSyncing,
+    syncStatus,
+    syncError,
     refresh,
     save,
     updateVehicleDraft,
     appendWalkIn,
     broadcastLiveAction,
   } = useManifest(key, selectedVehicleId, handleLiveActionReceived);
+  refreshRef.current = refresh;
 
   // Rider search, filtering, and view mode for person-by-person check-in
   const [riderSearch, setRiderSearch] = useState('');
@@ -279,26 +291,6 @@ export function RepPage() {
 
   // Cash & sponsorship calculator
   const [externalSponsees, setExternalSponsees] = useState<ExternalSponsee[]>([]);
-  const [sharedSponsorships, setSharedSponsorships] = useState<SharedSponsorship[]>([]);
-  const [, setSharedSponsorshipError] = useState<string | null>(null);
-  const refreshSharedSponsorships = useCallback(async () => {
-    try {
-      const rows = await listSharedSponsorships(key);
-      setSharedSponsorships(rows);
-      setSharedSponsorshipError(null);
-    } catch (e) {
-      setSharedSponsorshipError(e instanceof Error ? e.message : String(e));
-    }
-  }, [key]);
-  useEffect(() => {
-    void refreshSharedSponsorships();
-    const interval = window.setInterval(() => void refreshSharedSponsorships(), 15000);
-    const channel = supabase.channel(`cross-taxi:${key}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'cross_taxi_sponsorships', filter: `target_manifest_key=eq.${key}` },
-        () => void refreshSharedSponsorships()).subscribe();
-    return () => { clearInterval(interval); void supabase.removeChannel(channel); };
-  }, [key, refreshSharedSponsorships]);
-
 
   // Past-cancellation cash collection & manual cancellation settlement
   const [pastCancellations, setPastCancellations] = useState<LedgerEntry[]>([]);
@@ -402,7 +394,6 @@ export function RepPage() {
   const [walkInFirstName, setWalkInFirstName] = useState('');
   const [walkInSurname, setWalkInSurname] = useState('');
   const [walkInStructure, setWalkInStructure] = useState('');
-  const [walkInStop, setWalkInStop] = useState('');
   const [transferPrompt, setTransferPrompt] = useState<{
     passenger: Passenger;
     fromVehicle?: Vehicle | null;
@@ -514,19 +505,6 @@ export function RepPage() {
     }>();
     if (!manifest) return map;
 
-    // The central record overrides stale sponsorship data in vehicle drafts.
-    for (const shared of sharedSponsorships) {
-      const payer = shared.payer_name;
-      const fromVeh = shared.source_vehicle_name;
-      const canRemove = shared.source_vehicle_id === selectedVehicleId && canRevokeSharedSponsorship(shared.id);
-      const fullNoteText = `Paid by ${payer} in ${fromVeh}${shared.note ? ` (${shared.note})` : ''}`;
-      map.set(String(shared.recipient_passenger_id), {
-        payerName: payer, payerId: shared.payer_passenger_id || undefined,
-        fromVehicleName: fromVeh, fromVehicleId: shared.source_vehicle_id,
-        externalSponseeId: shared.id, canRemove, note: shared.note || undefined, fullNoteText,
-      });
-    }
-
     for (const v of manifest.vehicles) {
       const extList = (v.draftState?.externalSponsees || []) as ExternalSponsee[];
       for (const ext of extList) {
@@ -548,16 +526,16 @@ export function RepPage() {
           fullNoteText,
         };
 
-        if (ext.sponseeId && !map.has(String(ext.sponseeId))) {
+        if (ext.sponseeId) {
           map.set(String(ext.sponseeId), info);
         }
         if (ext.sponseeName) {
-          if (!map.has(`name:${ext.sponseeName.trim().toLowerCase()}`)) map.set(`name:${ext.sponseeName.trim().toLowerCase()}`, info);
+          map.set(`name:${ext.sponseeName.trim().toLowerCase()}`, info);
         }
       }
     }
     return map;
-  }, [manifest, selectedVehicleId, sharedSponsorships]);
+  }, [manifest, selectedVehicleId]);
 
   // All other vehicles with their riders for cross-vehicle sponsorship search
   const otherVehiclesWithRiders = useMemo(() => {
@@ -867,13 +845,13 @@ export function RepPage() {
     }
 
     // 3. Vehicle metadata fields (repName, licensePlate, generalNotes)
-    if (draft.repName && !repName.trim()) {
+    if (draft.repName && !repNameFocusedRef.current && (!repName.trim() || draft.updatedBy !== clientIdRef.current)) {
       setRepName(draft.repName);
     }
-    if (draft.licensePlate && !licensePlate.trim()) {
+    if (draft.licensePlate && !licensePlateFocusedRef.current && (!licensePlate.trim() || draft.updatedBy !== clientIdRef.current)) {
       setLicensePlate(draft.licensePlate);
     }
-    if (draft.generalNotes && !generalNotes.trim()) {
+    if (draft.generalNotes !== undefined && !generalNotesFocusedRef.current && (!generalNotes.trim() || draft.updatedBy !== clientIdRef.current)) {
       setGeneralNotes(draft.generalNotes);
     }
 
@@ -945,41 +923,73 @@ export function RepPage() {
 
     const cloudDraft = vehicle.draftState;
 
-    // Pick whichever draft has the freshest edits or merge them so no checked-in riders are lost
+    // Treat persisted server draft as authoritative; prevent stale local storage from overriding server state
     let draft: VehicleDraftState | undefined = undefined;
-    if (localDraft && cloudDraft) {
-      const isLocalFresher = Boolean(
-        localDraft.updatedAt &&
-        (!cloudDraft.updatedAt || new Date(localDraft.updatedAt) >= new Date(cloudDraft.updatedAt))
-      );
-      const fresher = isLocalFresher ? localDraft : cloudDraft;
-      const older = isLocalFresher ? cloudDraft : localDraft;
-
-      const mergedDraft: VehicleDraftState = {
-        ...cloudDraft,
-        ...localDraft,
-        presentIds: Array.from(new Set([...(cloudDraft.presentIds || []), ...(localDraft.presentIds || [])].map(String))),
-        absentIds: Array.from(new Set([...(cloudDraft.absentIds || []), ...(localDraft.absentIds || [])].map(String))),
-        sponsoredIds: fresher.sponsoredIds !== undefined ? fresher.sponsoredIds.map(String) : (older.sponsoredIds || []).map(String),
-        unpaidIds: fresher.unpaidIds !== undefined ? fresher.unpaidIds.map(String) : (older.unpaidIds || []).map(String),
-        absentPaidIds: fresher.absentPaidIds !== undefined ? fresher.absentPaidIds.map(String) : (older.absentPaidIds || []).map(String),
-        notes: { ...(cloudDraft.notes || {}), ...(localDraft.notes || {}) },
-        repName: localDraft.repName || cloudDraft.repName || vehicle.repName || (vehicle.type === 'Bus' ? vehicle.submittedBy || '' : ''),
-        licensePlate: localDraft.licensePlate || cloudDraft.licensePlate || vehicle.licensePlate || '',
-        generalNotes: localDraft.generalNotes || cloudDraft.generalNotes || vehicle.generalNotes || '',
-        coReps: Array.from(new Set([...(cloudDraft.coReps || []), ...(localDraft.coReps || [])])),
-        externalSponsees: localDraft.externalSponsees && localDraft.externalSponsees.length > 0 ? localDraft.externalSponsees : (cloudDraft.externalSponsees || []),
-        settledLedgerIds: Array.from(new Set([...(cloudDraft.settledLedgerIds || []), ...(localDraft.settledLedgerIds || [])])),
-        manualCancellations: localDraft.manualCancellations && localDraft.manualCancellations.length > 0 ? localDraft.manualCancellations : (cloudDraft.manualCancellations || []),
-        updatedAt: (localDraft.updatedAt && cloudDraft.updatedAt)
-          ? (new Date(localDraft.updatedAt) > new Date(cloudDraft.updatedAt) ? localDraft.updatedAt : cloudDraft.updatedAt)
-          : localDraft.updatedAt || cloudDraft.updatedAt || new Date().toISOString(),
+    if (vehicle.submitted || cloudDraft?.submitted) {
+      // Server submission is strictly authoritative: clear out any old unsubmitted local draft
+      draft = cloudDraft || {
+        presentIds: currentRiders.filter((r) => r.present).map((r) => String(r.id)),
+        absentIds: currentRiders.filter((r) => !r.present).map((r) => String(r.id)),
+        repName: vehicle.repName || vehicle.submittedBy || '',
+        licensePlate: vehicle.licensePlate || '',
+        submitted: true,
+        updatedAt: vehicle.submittedAt || new Date().toISOString(),
       };
-      draft = mergedDraft;
-    } else if (localDraft) {
-      draft = localDraft;
+      try {
+        localStorage.removeItem(`crc_rep_draft_${key}_${selectedVehicleId}`);
+      } catch {
+        // ignore
+      }
+    } else if (cloudDraft && localDraft) {
+      const cloudTime = cloudDraft.updatedAt ? new Date(cloudDraft.updatedAt).getTime() : 0;
+      const localTime = localDraft.updatedAt ? new Date(localDraft.updatedAt).getTime() : 0;
+      const isCloudFresher = cloudTime > localTime;
+
+      if (isCloudFresher) {
+        // Cloud is newer: server is authoritative
+        draft = cloudDraft;
+      } else {
+        // Local has unsynced offline edits: merge safely without duplicating IDs in both present and absent
+        const localPresentSet = new Set((localDraft.presentIds || []).map(String));
+        const localAbsentSet = new Set((localDraft.absentIds || []).map(String));
+        const cloudPresentSet = new Set((cloudDraft.presentIds || []).map(String));
+        const cloudAbsentSet = new Set((cloudDraft.absentIds || []).map(String));
+
+        const finalPresent = new Set([...localPresentSet, ...cloudPresentSet]);
+        const finalAbsent = new Set([...localAbsentSet, ...cloudAbsentSet]);
+
+        // Explicit conflict resolution: if rider is marked in both, local takes precedence
+        for (const pId of localPresentSet) {
+          finalAbsent.delete(pId);
+        }
+        for (const aId of localAbsentSet) {
+          finalPresent.delete(aId);
+        }
+
+        const mergedDraft: VehicleDraftState = {
+          ...cloudDraft,
+          ...localDraft,
+          presentIds: Array.from(finalPresent),
+          absentIds: Array.from(finalAbsent),
+          sponsoredIds: localDraft.sponsoredIds !== undefined ? localDraft.sponsoredIds.map(String) : (cloudDraft.sponsoredIds || []).map(String),
+          unpaidIds: localDraft.unpaidIds !== undefined ? localDraft.unpaidIds.map(String) : (cloudDraft.unpaidIds || []).map(String),
+          absentPaidIds: localDraft.absentPaidIds !== undefined ? localDraft.absentPaidIds.map(String) : (cloudDraft.absentPaidIds || []).map(String),
+          notes: { ...(cloudDraft.notes || {}), ...(localDraft.notes || {}) },
+          repName: localDraft.repName || cloudDraft.repName || vehicle.repName || '',
+          licensePlate: localDraft.licensePlate || cloudDraft.licensePlate || vehicle.licensePlate || '',
+          generalNotes: localDraft.generalNotes || cloudDraft.generalNotes || vehicle.generalNotes || '',
+          coReps: Array.from(new Set([...(cloudDraft.coReps || []), ...(localDraft.coReps || [])])),
+          externalSponsees: localDraft.externalSponsees && localDraft.externalSponsees.length > 0 ? localDraft.externalSponsees : (cloudDraft.externalSponsees || []),
+          settledLedgerIds: Array.from(new Set([...(cloudDraft.settledLedgerIds || []), ...(localDraft.settledLedgerIds || [])])),
+          manualCancellations: localDraft.manualCancellations && localDraft.manualCancellations.length > 0 ? localDraft.manualCancellations : (cloudDraft.manualCancellations || []),
+          updatedAt: localDraft.updatedAt || cloudDraft.updatedAt || new Date().toISOString(),
+        };
+        draft = mergedDraft;
+      }
     } else if (cloudDraft) {
       draft = cloudDraft;
+    } else if (localDraft) {
+      draft = localDraft;
     }
 
     if (draft) {
@@ -1321,23 +1331,7 @@ export function RepPage() {
       : FARE;
     const finalAmount = data.amount || defaultSponseeAmount;
 
-    // Persist the authoritative sponsorship BEFORE changing either vehicle's local draft.
-    // On failure leave both taxis untouched rather than displaying false success.
-    let newId: string;
-    try {
-      newId = await createSharedSponsorship({
-        manifestKey: key, targetManifestKey: manifestKey(date, (data.targetService || service) as ServiceType),
-        payerId: data.payerId, payerName: data.payerName || 'Passenger',
-        sourceVehicleId: String(selectedVehicle.id), sourceVehicleName: selectedVehicle.name,
-        recipientId: String(resolvedSponseeId || ''), recipientName: data.sponseeName,
-        targetVehicleId: String(resolvedTargetVehId || ''), targetVehicleName: resolvedTaxiName,
-        amount: finalAmount, note: data.note,
-      });
-      await refreshSharedSponsorships();
-    } catch (error) {
-      setBatchActionMsg(`Sponsorship was NOT saved: ${error instanceof Error ? error.message : String(error)}`);
-      return;
-    }
+    const newId = `sponsee-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const newEntry: ExternalSponsee = {
       id: newId,
       payerId: data.payerId,
@@ -1563,17 +1557,6 @@ export function RepPage() {
     lastLocalEditTimeRef.current = Date.now();
 
     const targetEntry = externalSponsees.find((s) => s.id === id);
-    const sharedEntry = sharedSponsorships.find((row) => row.id === id);
-    // A different taxi's rep may not revoke this cross-taxi sponsorship.
-    if (sharedEntry || canRevokeSharedSponsorship(id)) {
-      try {
-        await revokeSharedSponsorship(id);
-        await refreshSharedSponsorships();
-      } catch (error) {
-        setBatchActionMsg(`Could not revoke sponsorship: ${error instanceof Error ? error.message : String(error)}`);
-        return;
-      }
-    }
     const nextExternalSponsees = externalSponsees.filter((s) => s.id !== id);
     setExternalSponsees(nextExternalSponsees);
 
@@ -1651,7 +1634,7 @@ export function RepPage() {
     }
     setBatchActionMsg(`✓ Removed cross-vehicle sponsorship${targetEntry?.sponseeName ? ` for ${targetEntry.sponseeName}` : ''}.`);
     setTimeout(() => setBatchActionMsg(null), 4000);
-  }, [manifest, selectedVehicle, externalSponsees, sharedSponsorships, refreshSharedSponsorships, baseCash, pastCancellationCash, FARE, save, broadcastLiveAction]);
+  }, [manifest, selectedVehicle, externalSponsees, baseCash, pastCancellationCash, FARE, save, broadcastLiveAction]);
 
   // Conflict-Safe Debounced Background Sync & Instant Local Cache
   useEffect(() => {
@@ -2205,10 +2188,6 @@ export function RepPage() {
     const effectiveStruct = walkInStructure.trim();
     const query = [effectiveFirstName, effectiveSurname].filter(Boolean).join(' ');
     if (!manifest || !selectedVehicle || !query) return;
-    if (!walkInStop.trim() && !findPassengerForTransfer(query, effectiveStruct, allKnownPassengers)) {
-      setBatchActionMsg('Please enter a pickup/drop-off location before adding this passenger.');
-      return;
-    }
 
     // 1. First check within current manifest (same service, different vehicle or unassigned)
     const existing = findPassengerForTransfer(query, effectiveStruct, allKnownPassengers);
@@ -2221,8 +2200,7 @@ export function RepPage() {
           setTimeout(() => setBatchActionMsg(null), 5000);
           return;
         }
-        // Never silently transfer a passenger who may be in another rep's vehicle.
-        if (!window.confirm(`${existing.fullName} is already in ${fromVehicle.name}. Transfer this existing passenger to ${selectedVehicle.name}?`)) return;
+        // Automatically transfer: removed from original vehicle and added to this one!
         await assignWalkIn(existing, fromVehicle.id);
         setWalkInFirstName('');
         setWalkInSurname('');
@@ -2289,7 +2267,7 @@ export function RepPage() {
     const newPassenger: Passenger = {
       id: `walkin-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       fullName: finalName,
-      stop: walkInStop.trim(),
+      stop: 'Walk-In',
       structure: finalStructure,
       assignedTo: selectedVehicle.id,
       present: true,
@@ -2315,16 +2293,10 @@ export function RepPage() {
     setMyCreatedWalkInIds((prev) => new Set(prev).add(newPassenger.id));
 
     // Atomic transaction: allows multiple users to append walk-ins simultaneously
-    try {
-      await appendWalkIn(selectedVehicle.id, newPassenger, draftMetadata);
-    } catch (err) {
-      setBatchActionMsg(`Could not save passenger: ${err instanceof Error ? err.message : String(err)}`);
-      return;
-    }
+    await appendWalkIn(selectedVehicle.id, newPassenger, draftMetadata);
     setWalkInFirstName('');
     setWalkInSurname('');
     setWalkInStructure('');
-    setWalkInStop('');
     setWalkInOpen(false);
     setBatchActionMsg(`✓ Added walk-in ${finalName} into ${selectedVehicle.name}`);
     setTimeout(() => setBatchActionMsg(null), 4000);
@@ -2881,6 +2853,13 @@ export function RepPage() {
       }
 
       await save(submittedManifest);
+      broadcastLiveAction({
+        type: 'vehicle_submitted',
+        vehicleId: selectedVehicle.id,
+        repName: repName.trim(),
+        clientId: clientIdRef.current,
+        timestamp: Date.now(),
+      });
       const submittedVehicle = submittedManifest.vehicles.find((v) => v.id === selectedVehicle.id);
       if (submittedVehicle) {
         saveVehicleToDb(key, submittedVehicle).catch(() => {});
@@ -3014,6 +2993,13 @@ export function RepPage() {
           : v
       );
       await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
+      broadcastLiveAction({
+        type: 'vehicle_reopened',
+        vehicleId: selectedVehicle.id,
+        repName: repName.trim(),
+        clientId: clientIdRef.current,
+        timestamp: Date.now(),
+      });
       isUserDirtyRef.current = true;
 
       setSubmitMsg(
@@ -3226,8 +3212,26 @@ export function RepPage() {
               CRC <span className="text-crimson-400">Rep Portal</span>
             </div>
             <div className="flex items-center gap-1.5 text-[11px] text-muted">
-              <span className={`inline-block h-2 w-2 rounded-full ${isSyncing ? 'bg-amber-400 animate-ping' : 'bg-success'}`} />
-              <span>{isSyncing ? 'Syncing…' : 'Live Synced'}</span>
+              <span
+                className={`inline-block h-2 w-2 rounded-full ${
+                  syncStatus === 'failed'
+                    ? 'bg-rose-500'
+                    : syncStatus === 'offline'
+                    ? 'bg-amber-500'
+                    : isSyncing || syncStatus === 'syncing'
+                    ? 'bg-amber-400 animate-ping'
+                    : 'bg-success'
+                }`}
+              />
+              <span className={syncStatus === 'failed' ? 'text-rose-400 font-semibold' : ''}>
+                {syncStatus === 'failed'
+                  ? 'Sync Failed'
+                  : syncStatus === 'offline'
+                  ? 'Offline (saved locally)'
+                  : isSyncing || syncStatus === 'syncing'
+                  ? 'Syncing…'
+                  : 'Live Synced'}
+              </span>
             </div>
           </div>
           <button
@@ -3366,9 +3370,25 @@ export function RepPage() {
                     <input
                       type="text"
                       value={repName}
+                      onFocus={() => {
+                        repNameFocusedRef.current = true;
+                      }}
+                      onBlur={() => {
+                        repNameFocusedRef.current = false;
+                      }}
                       onChange={(e) => {
+                        const val = e.target.value;
                         isUserDirtyRef.current = true;
-                        setRepName(e.target.value);
+                        setRepName(val);
+                        if (selectedVehicleId) {
+                          broadcastLiveAction({
+                            type: 'metadata_change',
+                            vehicleId: selectedVehicleId,
+                            repName: val,
+                            clientId: clientIdRef.current,
+                            timestamp: Date.now(),
+                          });
+                        }
                       }}
                       placeholder={selectedVehicle.type === 'Bus' ? 'Enter your name to submit bus stats…' : 'Enter rep name for this vehicle…'}
                       className="input-field mb-1.5"
@@ -3401,6 +3421,12 @@ export function RepPage() {
                     <input
                       type="text"
                       value={licensePlate}
+                      onFocus={() => {
+                        licensePlateFocusedRef.current = true;
+                      }}
+                      onBlur={() => {
+                        licensePlateFocusedRef.current = false;
+                      }}
                       onChange={(e) => {
                         const val = e.target.value.toUpperCase();
                         isUserDirtyRef.current = true;
@@ -3463,10 +3489,36 @@ export function RepPage() {
             )}
 
             {selectedVehicle && !isSubmitted && !draftRestored && (
-              <div className="flex items-center justify-between rounded-lg border border-line bg-card/60 px-3 py-1.5 text-[11px] text-muted">
+              <div
+                className={`flex items-center justify-between rounded-lg border px-3 py-1.5 text-[11px] ${
+                  syncStatus === 'failed'
+                    ? 'border-rose-500/30 bg-rose-500/10 text-rose-300'
+                    : syncStatus === 'offline'
+                    ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+                    : 'border-line bg-card/60 text-muted'
+                }`}
+              >
                 <span className="flex items-center gap-1.5">
-                  <span className={`inline-block h-2 w-2 rounded-full ${isSyncing ? 'bg-amber-400 animate-ping' : 'bg-success'}`} />
-                  {isSyncing ? 'Syncing across devices…' : 'Live synced across all devices & reps'}
+                  <span
+                    className={`inline-block h-2 w-2 rounded-full ${
+                      syncStatus === 'failed'
+                        ? 'bg-rose-500'
+                        : syncStatus === 'offline'
+                        ? 'bg-amber-500'
+                        : isSyncing || syncStatus === 'syncing'
+                        ? 'bg-amber-400 animate-ping'
+                        : 'bg-success'
+                    }`}
+                  />
+                  <span>
+                    {syncStatus === 'failed'
+                      ? `Sync failed: ${syncError || 'Could not connect to server'}`
+                      : syncStatus === 'offline'
+                      ? 'Working offline — edits saved on this device'
+                      : isSyncing || syncStatus === 'syncing'
+                      ? 'Syncing across devices…'
+                      : 'Live synced across all devices & reps'}
+                  </span>
                 </span>
                 <button
                   type="button"
@@ -3475,7 +3527,7 @@ export function RepPage() {
                   className="flex items-center gap-1 text-[11px] font-semibold text-crimson-400 hover:text-crimson-300 transition"
                 >
                   <RotateCcw className={`h-2.5 w-2.5 ${isSyncing ? 'animate-spin' : ''}`} />
-                  <span>Sync now</span>
+                  <span>{syncStatus === 'failed' ? 'Retry sync' : 'Sync now'}</span>
                 </button>
               </div>
             )}
@@ -3621,18 +3673,6 @@ export function RepPage() {
                               />
                             </div>
 
-                            <div>
-                              <label className="mb-1 block text-[10px] font-semibold text-muted">Pickup / drop-off location</label>
-                              <input
-                                type="text"
-                                value={walkInStop}
-                                onChange={(e) => setWalkInStop(e.target.value)}
-                                placeholder="Enter actual pickup stop (no default)"
-                                className="input-field text-xs w-full"
-                              />
-                              <p className="text-[10px] text-muted mt-1">Required for new passengers. Existing passengers keep their saved stop.</p>
-                            </div>
-
                             {isRehearsal && (
                               <div>
                                 <label className="mb-1 block text-[10px] font-semibold text-muted uppercase tracking-wider">
@@ -3726,7 +3766,6 @@ export function RepPage() {
                                 disabled={
                                   (!walkInFirstName.trim() && !walkInSurname.trim()) ||
                                   isCheckingCrossService ||
-                                  (!walkInStop.trim() && !detectedTransfer) ||
                                   Boolean(isRehearsal && detectedTransfer && detectedTransfer.vehicle && !detectedTransfer.isSameVehicle)
                                 }
                                 className={`flex-1 py-2 px-3 text-xs font-bold whitespace-nowrap shadow-sm disabled:opacity-40 flex items-center justify-center gap-1.5 rounded-lg transition-all ${
@@ -4080,6 +4119,12 @@ export function RepPage() {
                       </label>
                       <textarea
                         value={generalNotes}
+                        onFocus={() => {
+                          generalNotesFocusedRef.current = true;
+                        }}
+                        onBlur={() => {
+                          generalNotesFocusedRef.current = false;
+                        }}
                         onChange={(e) => {
                           const val = e.target.value;
                           isUserDirtyRef.current = true;

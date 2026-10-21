@@ -105,15 +105,23 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
 });
 
-// Helper: Verify calling user is authenticated Super Admin
-async function authenticateSuperAdmin(req: express.Request): Promise<{ authorized: boolean; email?: string; error?: string }> {
+// Helper: Verify calling user session from Supabase Auth
+async function authenticateUser(req: express.Request): Promise<{
+  authorized: boolean;
+  email?: string;
+  userId?: string;
+  role?: string;
+  status?: string;
+  isSuperAdmin?: boolean;
+  error?: string;
+}> {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
-    return { authorized: false, error: 'Authorization header required with valid Bearer token.' };
+    return { authorized: false, error: 'Authentication required. Authorization header missing.' };
   }
   const token = authHeader.slice(7).trim();
   if (!token) {
-    return { authorized: false, error: 'Empty bearer token.' };
+    return { authorized: false, error: 'Authentication required. Empty bearer token.' };
   }
 
   const supabaseUrl = process.env.VITE_SUPABASE_URL;
@@ -134,30 +142,95 @@ async function authenticateSuperAdmin(req: express.Request): Promise<{ authorize
       return { authorized: false, error: 'Invalid or expired authentication session.' };
     }
 
-    const userData = (await response.json()) as { email?: string };
+    const userData = (await response.json()) as { id?: string; email?: string };
     const email = userData?.email?.trim().toLowerCase();
+    const userId = userData?.id;
     if (!email) {
       return { authorized: false, error: 'User email not found in session.' };
     }
 
-    // Authoritative check: Caller must have approved status and super_admin role in role store
     const roles = readJsonFile<Record<string, Record<string, unknown>>>(USER_ROLES_FILE, {});
-    const userRecord = roles[email];
-    if (!userRecord || userRecord.status !== 'approved' || userRecord.role !== 'super_admin') {
-      return { authorized: false, error: 'Access Denied: Only an approved Super Administrator can manage user account authorizations.' };
-    }
+    const userRecord = roles[email] || (userId ? Object.values(roles).find((r) => r.userId === userId) : null);
+    const role = (userRecord?.role as string) || 'rep';
+    const status = (userRecord?.status as string) || 'pending';
+    const isSuperAdmin = status === 'approved' && role === 'super_admin';
 
-    return { authorized: true, email };
+    return {
+      authorized: true,
+      email,
+      userId,
+      role,
+      status,
+      isSuperAdmin,
+    };
   } catch (err) {
     return { authorized: false, error: `Authentication verification error: ${String(err)}` };
   }
 }
 
-// User roles & authorization endpoints (Read: authenticated staff or public app config)
-app.get('/api/auth/roles', (_req, res) => {
+// Helper: Verify calling user is authenticated Super Admin
+async function authenticateSuperAdmin(req: express.Request): Promise<{ authorized: boolean; email?: string; error?: string }> {
+  const auth = await authenticateUser(req);
+  if (!auth.authorized) {
+    return { authorized: false, error: auth.error };
+  }
+  if (!auth.isSuperAdmin) {
+    return { authorized: false, error: 'Access Denied: Only an approved Super Administrator can manage user account authorizations.' };
+  }
+  return { authorized: true, email: auth.email };
+}
+
+// User roles & authorization endpoints
+// Unauthenticated callers cannot retrieve the account directory.
+// Non-super-admin users receive ONLY their own account information.
+// Super Administrators receive the sanitized management directory.
+app.get('/api/auth/roles', async (req, res) => {
   try {
+    const auth = await authenticateUser(req);
+    if (!auth.authorized || !auth.email) {
+      res.status(401).json({ error: 'Authentication required to access account authorization information.' });
+      return;
+    }
+
     const roles = readJsonFile<Record<string, Record<string, unknown>>>(USER_ROLES_FILE, {});
-    res.json(roles);
+
+    // Super Admin: return directory for management console (sanitized)
+    if (auth.isSuperAdmin) {
+      const sanitizedDirectory: Record<string, Record<string, unknown>> = {};
+      for (const [em, rec] of Object.entries(roles)) {
+        sanitizedDirectory[em] = {
+          userId: rec.userId,
+          email: rec.email || em,
+          role: rec.role || 'rep',
+          status: rec.status || 'pending',
+          full_name: rec.full_name || '',
+          phone: rec.phone || '',
+          structure: rec.structure || '',
+          updated_at: rec.updated_at,
+        };
+      }
+      res.json(sanitizedDirectory);
+      return;
+    }
+
+    // Authenticated non-super-admin: return ONLY their own account information
+    const myRecord = roles[auth.email] || {
+      userId: auth.userId,
+      email: auth.email,
+      role: auth.role || 'rep',
+      status: auth.status || 'pending',
+    };
+
+    res.json({
+      [auth.email]: {
+        userId: myRecord.userId,
+        email: auth.email,
+        role: myRecord.role || 'rep',
+        status: myRecord.status || 'pending',
+        full_name: myRecord.full_name || '',
+        structure: myRecord.structure || '',
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -222,7 +295,7 @@ app.post('/api/auth/approve', async (req, res) => {
         ...existing,
         userId: userId || existing.userId,
         status: status || 'approved',
-        role: role || existing.role || 'admin',
+        role: role || existing.role || 'rep',
         updated_at: new Date().toISOString(),
       };
       atomicWriteJson(USER_ROLES_FILE, roles);
@@ -232,7 +305,7 @@ app.post('/api/auth/approve', async (req, res) => {
         userId: userId || `user_${cleanEmail}`,
         email: cleanEmail,
         status: status || 'approved',
-        role: role || 'admin',
+        role: role || 'rep',
         updated_at: new Date().toISOString(),
       };
       atomicWriteJson(USER_ROLES_FILE, roles);

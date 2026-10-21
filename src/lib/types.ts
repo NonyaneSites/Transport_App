@@ -305,6 +305,20 @@ export type LiveSyncAction =
       repName: string;
       clientId: string;
       timestamp: number;
+    }
+  | {
+      type: 'vehicle_submitted';
+      vehicleId: string;
+      repName: string;
+      clientId: string;
+      timestamp: number;
+    }
+  | {
+      type: 'vehicle_reopened';
+      vehicleId: string;
+      repName: string;
+      clientId: string;
+      timestamp: number;
     };
 
 export interface LiveRiderIndicator {
