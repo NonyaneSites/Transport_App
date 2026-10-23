@@ -480,7 +480,7 @@ export function createMockClient() {
         mockStorage.setTable(LEDGER_TABLE, updated);
         return { data: { success: true, id, previous_debt: prevDebt, new_debt: newBalance, new_status: newStatus, updated_at: now }, error: null };
       }
-      if (fnName === 'rep_get_or_create_vehicle_session') {
+      if (fnName === 'admin_issue_vehicle_credential') {
         const manifestKey = String(args.p_manifest_key || '');
         const vehicleId = String(args.p_vehicle_id || '');
         if (!manifestKey || !vehicleId) {
@@ -493,39 +493,84 @@ export function createMockClient() {
         if (!m || !targetVehicle) {
           return { data: null, error: { message: 'Vehicle not found in manifest' } };
         }
-        if (targetVehicle.submitted || (targetVehicle.draftState as Record<string, unknown>)?.submitted) {
-          return { data: null, error: { message: 'Vehicle has already been submitted and locked' } };
-        }
-        const auths = mockStorage.getTable(VEHICLE_AUTH_TABLE);
-        const existingAuth = auths.find(
-          (a) => String(a.manifest_key) === manifestKey && String(a.vehicle_id) === vehicleId
-        );
-        if (existingAuth && typeof existingAuth.auth_token === 'string') {
-          return {
-            data: {
-              success: true,
-              auth_token: existingAuth.auth_token,
-              expires_at: existingAuth.expires_at || new Date(Date.now() + 86400000).toISOString(),
-            },
-            error: null,
-          };
-        }
-        const token = `token_${manifestKey}_${vehicleId}_${Date.now().toString(36)}`;
+        const token = `token_${manifestKey}_${vehicleId}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+        const code = Math.random().toString(36).slice(2, 8).toUpperCase();
+        const expiresAt = new Date(Date.now() + 86400000).toISOString();
         mockStorage.upsert(VEHICLE_AUTH_TABLE, {
           manifest_key: manifestKey,
           vehicle_id: vehicleId,
           auth_token: token,
+          access_code: code,
           created_at: now,
-          expires_at: new Date(Date.now() + 86400000).toISOString(),
+          expires_at: expiresAt,
+          revoked: false,
           last_updated_at: now,
         }, 'vehicle_id');
         return {
           data: {
             success: true,
+            manifest_key: manifestKey,
+            vehicle_id: vehicleId,
             auth_token: token,
-            expires_at: new Date(Date.now() + 86400000).toISOString(),
+            access_code: code,
+            expires_at: expiresAt,
           },
           error: null,
+        };
+      }
+      if (fnName === 'admin_revoke_vehicle_credential') {
+        const manifestKey = String(args.p_manifest_key || '');
+        const vehicleId = String(args.p_vehicle_id || '');
+        const auths = mockStorage.getTable(VEHICLE_AUTH_TABLE);
+        const matchAuth = auths.find(
+          (a) => String(a.manifest_key) === manifestKey && String(a.vehicle_id) === vehicleId
+        );
+        if (matchAuth) {
+          matchAuth.revoked = true;
+          matchAuth.last_updated_at = now;
+          mockStorage.setTable(VEHICLE_AUTH_TABLE, auths);
+        }
+        return { data: { success: true, revoked: true }, error: null };
+      }
+      if (fnName === 'rep_claim_vehicle_session') {
+        const manifestKey = String(args.p_manifest_key || '');
+        const vehicleId = String(args.p_vehicle_id || '');
+        const cred = typeof args.p_credential === 'string' ? args.p_credential.trim() : '';
+        if (!manifestKey || !vehicleId || !cred) {
+          return { data: { success: false, error: 'Manifest key, vehicle ID, and credential are required' }, error: null };
+        }
+        const auths = mockStorage.getTable(VEHICLE_AUTH_TABLE);
+        const matchAuth = auths.find(
+          (a) => String(a.manifest_key) === manifestKey &&
+                 String(a.vehicle_id) === vehicleId &&
+                 (String(a.auth_token) === cred || String(a.access_code).toUpperCase() === cred.toUpperCase())
+        );
+        if (!matchAuth) {
+          return { data: { success: false, error: 'Invalid vehicle credential' }, error: null };
+        }
+        if (matchAuth.revoked) {
+          return { data: { success: false, error: 'Vehicle credential has been revoked by Dispatch' }, error: null };
+        }
+        if (matchAuth.expires_at && new Date(String(matchAuth.expires_at)).getTime() < Date.now()) {
+          return { data: { success: false, error: 'Vehicle credential has expired' }, error: null };
+        }
+        return {
+          data: {
+            success: true,
+            auth_token: matchAuth.auth_token,
+            expires_at: matchAuth.expires_at,
+          },
+          error: null,
+        };
+      }
+      if (fnName === 'rep_get_or_create_vehicle_session') {
+        // Disarmed for anonymous callers: credentials must be issued by Dispatch
+        return {
+          data: {
+            success: false,
+            error: 'Unauthorized: Vehicle credentials must be issued by a Dispatch Administrator.',
+          },
+          error: { message: 'Unauthorized: Vehicle credentials must be issued by a Dispatch Administrator.' },
         };
       }
       if (fnName === 'rep_update_vehicle_draft') {
@@ -541,13 +586,19 @@ export function createMockClient() {
           return { data: null, error: { message: 'Manifest key and vehicle ID are required' } };
         }
 
-        // Authorization check: token must match vehicle
+        // Authorization check: token must match vehicle and must not be revoked
         const auths = mockStorage.getTable(VEHICLE_AUTH_TABLE);
         const matchAuth = auths.find(
           (a) => String(a.manifest_key) === manifestKey && String(a.vehicle_id) === vehicleId
         );
-        if (!matchAuth || matchAuth.auth_token !== authToken) {
+        if (!matchAuth || matchAuth.auth_token !== authToken || !authToken) {
           return { data: null, error: { message: 'Unauthorized: Invalid vehicle authorization token' } };
+        }
+        if (matchAuth.revoked) {
+          return { data: null, error: { message: 'Unauthorized: Vehicle authorization token has been revoked by Dispatch' } };
+        }
+        if (matchAuth.expires_at && new Date(String(matchAuth.expires_at)).getTime() < Date.now()) {
+          return { data: null, error: { message: 'Unauthorized: Vehicle authorization token has expired' } };
         }
 
         const lastTs = matchAuth.last_updated_at ? new Date(String(matchAuth.last_updated_at)).getTime() : 0;
@@ -612,6 +663,7 @@ export function createMockClient() {
         const authToken = typeof args.p_auth_token === 'string' ? args.p_auth_token.trim() : '';
         const pPassenger = (args.p_passenger as Record<string, unknown>) || {};
         const pDraftUpdate = (args.p_draft_update as Record<string, unknown>) || {};
+        const pConfirmTransfer = Boolean(args.p_confirm_transfer);
 
         if (!manifestKey || !vehicleId || !pPassenger.id) {
           return { data: null, error: { message: 'Manifest key, vehicle ID, and passenger are required' } };
@@ -621,8 +673,14 @@ export function createMockClient() {
         const matchAuth = auths.find(
           (a) => String(a.manifest_key) === manifestKey && String(a.vehicle_id) === vehicleId
         );
-        if (!matchAuth || matchAuth.auth_token !== authToken) {
+        if (!matchAuth || matchAuth.auth_token !== authToken || !authToken) {
           return { data: null, error: { message: 'Unauthorized: Invalid vehicle authorization token' } };
+        }
+        if (matchAuth.revoked) {
+          return { data: null, error: { message: 'Unauthorized: Vehicle authorization token has been revoked by Dispatch' } };
+        }
+        if (matchAuth.expires_at && new Date(String(matchAuth.expires_at)).getTime() < Date.now()) {
+          return { data: null, error: { message: 'Unauthorized: Vehicle authorization token has expired' } };
         }
 
         const manifests = mockStorage.getTable(MANIFESTS_TABLE);
@@ -638,6 +696,30 @@ export function createMockClient() {
           ? (currentManifest.vehicles as Array<Record<string, unknown>>)
           : [];
         const passengerId = String(pPassenger.id);
+
+        // Check if passenger already assigned to another vehicle (in signups or in another vehicle's riders)
+        const existingSignup = signups.find((p) => String(p.id) === passengerId);
+        let existingAssignedVeh = existingSignup?.assignedTo ? String(existingSignup.assignedTo) : '';
+        if (!existingAssignedVeh) {
+          const otherVeh = vehicles.find((v) => Array.isArray(v.riders) && (v.riders as string[]).includes(passengerId));
+          if (otherVeh) {
+            existingAssignedVeh = String(otherVeh.id);
+          }
+        }
+
+        if (existingAssignedVeh && existingAssignedVeh !== vehicleId) {
+          if (!pConfirmTransfer) {
+            return {
+              data: {
+                success: false,
+                requires_confirmation: true,
+                existing_vehicle_id: existingAssignedVeh,
+                error: `Passenger is already assigned to ${existingAssignedVeh}. Explicit transfer confirmation required.`,
+              },
+              error: null,
+            };
+          }
+        }
 
         const targetSignup = { ...pPassenger, assignedTo: vehicleId, present: true, walkIn: true };
         const signupIdx = signups.findIndex((p) => String(p.id) === passengerId);
@@ -702,7 +784,14 @@ export function createMockClient() {
         mockStorage.setTable(VEHICLE_AUTH_TABLE, auths);
 
         return {
-          data: { success: true, date: manifestKey, vehicle_id: vehicleId, passenger_id: passengerId, updated_at: now },
+          data: {
+            success: true,
+            date: manifestKey,
+            vehicle_id: vehicleId,
+            passenger_id: passengerId,
+            transferred: Boolean(existingSignup && existingSignup.assignedTo && String(existingSignup.assignedTo) !== vehicleId),
+            updated_at: now,
+          },
           error: null,
         };
       }

@@ -340,8 +340,8 @@ test('Prompt 01B Security: Vehicle-scoped token for Taxi 1 cannot authorize edit
   manifest.date = testKey;
   mockStorage.upsert(MANIFESTS_TABLE, manifest, 'date');
 
-  // Obtain authorized token for Taxi 1
-  const sessionRes = await supabase.rpc('rep_get_or_create_vehicle_session', {
+  // Obtain authorized token for Taxi 1 via admin issuance
+  const sessionRes = await supabase.rpc('admin_issue_vehicle_credential', {
     p_manifest_key: testKey,
     p_vehicle_id: 'taxi-1',
   });
@@ -365,8 +365,8 @@ test('Prompt 01B Security: Replay attack with stale client timestamp is rejected
   manifest.date = testKey;
   mockStorage.upsert(MANIFESTS_TABLE, manifest, 'date');
 
-  // Obtain authorized token
-  const sessionRes = await supabase.rpc('rep_get_or_create_vehicle_session', {
+  // Obtain authorized token via admin issuance
+  const sessionRes = await supabase.rpc('admin_issue_vehicle_credential', {
     p_manifest_key: testKey,
     p_vehicle_id: 'taxi-1',
   });
@@ -399,8 +399,8 @@ test('Prompt 01B Concurrency: rep_add_walk_in adds walk-in atomically to signups
   manifest.date = testKey;
   mockStorage.upsert(MANIFESTS_TABLE, manifest, 'date');
 
-  // Get token for taxi-1
-  const sessionRes = await supabase.rpc('rep_get_or_create_vehicle_session', {
+  // Get token for taxi-1 via admin issuance
+  const sessionRes = await supabase.rpc('admin_issue_vehicle_credential', {
     p_manifest_key: testKey,
     p_vehicle_id: 'taxi-1',
   });
@@ -447,13 +447,13 @@ test('Prompt 01B Concurrency: Simultaneous walk-in additions to different taxis 
   manifest.date = testKey;
   mockStorage.upsert(MANIFESTS_TABLE, manifest, 'date');
 
-  const sessionT1 = await supabase.rpc('rep_get_or_create_vehicle_session', {
+  const sessionT1 = await supabase.rpc('admin_issue_vehicle_credential', {
     p_manifest_key: testKey,
     p_vehicle_id: 'taxi-1',
   });
   const tokenT1 = (sessionT1.data as { auth_token: string }).auth_token;
 
-  const sessionT2 = await supabase.rpc('rep_get_or_create_vehicle_session', {
+  const sessionT2 = await supabase.rpc('admin_issue_vehicle_credential', {
     p_manifest_key: testKey,
     p_vehicle_id: 'taxi-2',
   });
@@ -504,4 +504,218 @@ test('Prompt 01B Concurrency: Simultaneous walk-in additions to different taxis 
   const v2 = vehicles.find((v) => v.id === 'taxi-2');
   assert.ok(v1?.riders.includes('walkin-rep1'));
   assert.ok(v2?.riders.includes('walkin-rep2'));
+});
+
+test('Prompt 01C Security: Anonymous callers CANNOT obtain or issue vehicle credentials via rep_get_or_create_vehicle_session', async () => {
+  const manifest = makeTestManifest();
+  const testKey = '2026-10-25_ANON_TOKEN_TEST';
+  manifest.date = testKey;
+  mockStorage.upsert(MANIFESTS_TABLE, manifest, 'date');
+
+  // Anonymous request without admin session MUST fail
+  const res = await supabase.rpc('rep_get_or_create_vehicle_session', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+  });
+  assert.ok(res.error || (res.data && !(res.data as { success?: boolean }).success));
+});
+
+test('Prompt 01C Security: rep_claim_vehicle_session verifies valid access code or token and rejects invalid/revoked credentials', async () => {
+  const manifest = makeTestManifest();
+  const testKey = '2026-10-25_CLAIM_TEST';
+  manifest.date = testKey;
+  mockStorage.upsert(MANIFESTS_TABLE, manifest, 'date');
+
+  // Admin issues credential
+  const adminRes = await supabase.rpc('admin_issue_vehicle_credential', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+  });
+  const data = adminRes.data as { auth_token: string; access_code: string };
+  assert.ok(data?.auth_token);
+  assert.ok(data?.access_code);
+
+  // Claim with access code -> MUST SUCCEED
+  const claimCode = await supabase.rpc('rep_claim_vehicle_session', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+    p_credential: data.access_code.toLowerCase(), // case-insensitive
+  });
+  assert.ok(claimCode.data && (claimCode.data as { success?: boolean }).success);
+  assert.equal((claimCode.data as { auth_token: string }).auth_token, data.auth_token);
+
+  // Claim with invalid code -> MUST FAIL
+  const claimFake = await supabase.rpc('rep_claim_vehicle_session', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+    p_credential: 'WRONG_CODE',
+  });
+  assert.ok(claimFake.error || (claimFake.data && !(claimFake.data as { success?: boolean }).success));
+
+  // Revoke credential by Dispatch Admin
+  const revokeRes = await supabase.rpc('admin_revoke_vehicle_credential', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+  });
+  assert.ok(revokeRes.data && (revokeRes.data as { success?: boolean }).success);
+
+  // Claim after revocation -> MUST FAIL
+  const claimRevoked = await supabase.rpc('rep_claim_vehicle_session', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+    p_credential: data.access_code,
+  });
+  assert.ok(claimRevoked.error || (claimRevoked.data && !(claimRevoked.data as { success?: boolean }).success));
+
+  // Edit draft with revoked token -> MUST BE REJECTED
+  const editRevoked = await supabase.rpc('rep_update_vehicle_draft', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+    p_draft_state: { presentIds: ['p1'] },
+    p_auth_token: data.auth_token,
+  });
+  assert.ok(editRevoked.error || (editRevoked.data && !(editRevoked.data as { success?: boolean }).success));
+});
+
+test('Prompt 01C Concurrency: rep_add_walk_in preserves full vehicle JSON structure across empty and occupied vehicles', async () => {
+  const manifest = makeTestManifest();
+  const testKey = '2026-10-25_WALKIN_PRESERVE_TEST';
+  manifest.date = testKey;
+  // Make taxi-2 completely empty
+  const v2 = manifest.vehicles.find((v) => v.id === 'taxi-2');
+  if (v2) {
+    v2.riders = [];
+  }
+  mockStorage.upsert(MANIFESTS_TABLE, manifest, 'date');
+
+  const adminRes = await supabase.rpc('admin_issue_vehicle_credential', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-2',
+  });
+  const token = (adminRes.data as { auth_token: string }).auth_token;
+
+  const newRider: Passenger = {
+    id: 'walkin-empty-taxi',
+    fullName: 'Grace Hopper',
+    stop: 'Gate 3',
+    structure: 'Engineering',
+    present: true,
+  };
+
+  const addRes = await supabase.rpc('rep_add_walk_in', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-2',
+    p_passenger: newRider,
+    p_auth_token: token,
+  });
+  assert.ok(addRes.data && (addRes.data as { success?: boolean }).success);
+
+  const updatedRows = mockStorage.getTable(MANIFESTS_TABLE);
+  const row = updatedRows.find((r) => r.date === testKey);
+  const targetVeh = (row?.vehicles as Vehicle[])?.find((v) => v.id === 'taxi-2');
+
+  // Verify all vehicle fields were preserved without corrupting structure (no JSON string cast bug)
+  assert.equal(targetVeh?.id, 'taxi-2');
+  assert.equal(targetVeh?.name, 'Taxi 2');
+  assert.equal(targetVeh?.type, 'Taxi');
+  assert.equal(targetVeh?.capacity, 15);
+  assert.deepEqual(targetVeh?.orderedStops, ['Taxi: Gate 3']);
+  assert.deepEqual(targetVeh?.riders, ['walkin-empty-taxi']);
+  assert.deepEqual(targetVeh?.draftState?.presentIds, ['walkin-empty-taxi']);
+});
+
+test('Prompt 01C Concurrency: rep_add_walk_in prevents silent cross-taxi theft without confirmTransfer', async () => {
+  const manifest = makeTestManifest();
+  const testKey = '2026-10-25_THEFT_PREVENTION_TEST';
+  manifest.date = testKey;
+  // p1 is in taxi-1
+  mockStorage.upsert(MANIFESTS_TABLE, manifest, 'date');
+
+  // Get token for taxi-2
+  const adminRes = await supabase.rpc('admin_issue_vehicle_credential', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-2',
+  });
+  const tokenTaxi2 = (adminRes.data as { auth_token: string }).auth_token;
+
+  // Rep on Taxi 2 attempts to add p1 (who is in Taxi 1) WITHOUT confirmTransfer
+  const stolenPassenger: Passenger = {
+    id: 'p1', // already assigned to taxi-1 in initial manifest
+    fullName: 'Alice Walker',
+    stop: 'Gate 2',
+    structure: 'Zone A',
+    present: true,
+  };
+
+  const silentTheft = await supabase.rpc('rep_add_walk_in', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-2',
+    p_passenger: stolenPassenger,
+    p_auth_token: tokenTaxi2,
+    p_confirm_transfer: false,
+  });
+
+  // MUST BE REJECTED or require explicit confirmation
+  assert.ok(
+    silentTheft.error ||
+    (silentTheft.data && !(silentTheft.data as { success?: boolean }).success) ||
+    (silentTheft.data as { requires_confirmation?: boolean })?.requires_confirmation
+  );
+
+  // Now perform with explicit confirmation
+  const confirmedTransfer = await supabase.rpc('rep_add_walk_in', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-2',
+    p_passenger: stolenPassenger,
+    p_auth_token: tokenTaxi2,
+    p_confirm_transfer: true,
+  });
+  assert.ok(confirmedTransfer.data && (confirmedTransfer.data as { success?: boolean }).success);
+
+  const updatedRows = mockStorage.getTable(MANIFESTS_TABLE);
+  const row = updatedRows.find((r) => r.date === testKey);
+  const v1 = (row?.vehicles as Vehicle[])?.find((v) => v.id === 'taxi-1');
+  const v2 = (row?.vehicles as Vehicle[])?.find((v) => v.id === 'taxi-2');
+
+  // p1 moved to taxi-2 and removed from taxi-1
+  assert.ok(!v1?.riders.includes('p1'));
+  assert.ok(v2?.riders.includes('p1'));
+});
+
+test('Prompt 01C Concurrency: rep_add_walk_in adding passenger already in same taxi does not duplicate riders', async () => {
+  const manifest = makeTestManifest();
+  const testKey = '2026-10-25_SAME_TAXI_TEST';
+  manifest.date = testKey;
+  mockStorage.upsert(MANIFESTS_TABLE, manifest, 'date');
+
+  const adminRes = await supabase.rpc('admin_issue_vehicle_credential', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+  });
+  const tokenTaxi1 = (adminRes.data as { auth_token: string }).auth_token;
+
+  // p1 is already in taxi-1
+  const existingRider: Passenger = {
+    id: 'p1',
+    fullName: 'Alice Walker',
+    stop: 'Gate 2',
+    structure: 'Zone A',
+    present: true,
+  };
+
+  const reAdd = await supabase.rpc('rep_add_walk_in', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+    p_passenger: existingRider,
+    p_auth_token: tokenTaxi1,
+  });
+  assert.ok(reAdd.data && (reAdd.data as { success?: boolean }).success);
+
+  const updatedRows = mockStorage.getTable(MANIFESTS_TABLE);
+  const row = updatedRows.find((r) => r.date === testKey);
+  const v1 = (row?.vehicles as Vehicle[])?.find((v) => v.id === 'taxi-1');
+
+  // riders array must have p1 exactly once
+  const p1Count = v1?.riders.filter((id) => id === 'p1').length;
+  assert.equal(p1Count, 1);
 });

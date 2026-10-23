@@ -305,9 +305,15 @@ export function RepPage() {
     save,
     updateVehicleDraft,
     appendWalkIn,
+    claimVehicleSession,
+    hasVehicleAuth,
     broadcastLiveAction,
   } = useManifest(key, selectedVehicleId, handleLiveActionReceived);
   refreshRef.current = refresh;
+
+  const [accessCodeInput, setAccessCodeInput] = useState('');
+  const [accessCodeError, setAccessCodeError] = useState<string | null>(null);
+  const [claimingAuth, setClaimingAuth] = useState(false);
 
   // Rider search, filtering, and view mode for person-by-person check-in
   const [riderSearch, setRiderSearch] = useState('');
@@ -3555,6 +3561,51 @@ export function RepPage() {
                   <RotateCcw className={`h-2.5 w-2.5 ${isSyncing ? 'animate-spin' : ''}`} />
                   <span>{syncStatus === 'failed' ? 'Retry sync' : 'Sync now'}</span>
                 </button>
+              </div>
+            )}
+
+            {selectedVehicle && !isSubmitted && !hasVehicleAuth(selectedVehicle.id) && (
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs text-amber-200 shadow-sm">
+                <div className="font-semibold text-amber-300 flex items-center gap-2">
+                  <Lock className="h-4 w-4" />
+                  <span>Vehicle Access Authorization Required</span>
+                </div>
+                <p className="mt-1 text-muted text-[11px]">
+                  To check in riders on {selectedVehicle.name}, please open the link sent to your WhatsApp by Dispatch, or enter your 6-character vehicle access code below:
+                </p>
+                <div className="mt-2.5 flex items-center gap-2">
+                  <input
+                    type="text"
+                    placeholder="e.g. A9X2M4"
+                    maxLength={32}
+                    value={accessCodeInput}
+                    onChange={(e) => setAccessCodeInput(e.target.value.toUpperCase())}
+                    className="w-36 rounded-lg border border-line bg-card px-2.5 py-1.5 font-mono text-xs uppercase tracking-wider text-ink focus:border-crimson-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!selectedVehicle || !accessCodeInput.trim()) return;
+                      setClaimingAuth(true);
+                      setAccessCodeError(null);
+                      const res = await claimVehicleSession(selectedVehicle.id, accessCodeInput.trim());
+                      setClaimingAuth(false);
+                      if (!res.success) {
+                        setAccessCodeError(res.error || 'Invalid code');
+                      } else {
+                        setAccessCodeInput('');
+                        setAccessCodeError(null);
+                      }
+                    }}
+                    disabled={claimingAuth || !accessCodeInput.trim()}
+                    className="rounded-lg bg-crimson-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-crimson-500 disabled:opacity-50 transition"
+                  >
+                    {claimingAuth ? 'Verifying…' : 'Unlock Taxi'}
+                  </button>
+                </div>
+                {accessCodeError && (
+                  <div className="mt-1 text-[11px] text-rose-400 font-medium">⚠️ {accessCodeError}</div>
+                )}
               </div>
             )}
 

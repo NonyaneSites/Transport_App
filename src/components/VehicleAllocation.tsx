@@ -1172,7 +1172,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     downloadTextFile(`taxi_reps_${sessionDate}_${service}.txt`, text);
   }
 
-  function handleWhatsAppRep(vehicle: Vehicle) {
+  async function handleWhatsAppRep(vehicle: Vehicle) {
     if (vehicle.type === 'Bus') return;
     if (!vehicle.repName?.trim()) {
       setWhatsAppNotice({ type: 'error', text: `Assign a transport rep to ${vehicle.name} before sending its passenger list.` });
@@ -1197,8 +1197,22 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       return;
     }
 
+    let authParam = '';
+    try {
+      const { data: credRes } = await supabase.rpc('admin_issue_vehicle_credential', {
+        p_manifest_key: localManifest.date,
+        p_vehicle_id: vehicle.id,
+        p_duration_hours: 24,
+      });
+      if (credRes && (credRes as { auth_token?: string }).auth_token) {
+        authParam = `&auth=${encodeURIComponent((credRes as { auth_token: string }).auth_token)}`;
+      }
+    } catch (err) {
+      console.warn('Could not issue vehicle credential via RPC:', err);
+    }
+
     const { date: sessionDate } = parseManifestKey(localManifest.date);
-    const repPortalUrl = `${window.location.origin}/rep?date=${encodeURIComponent(sessionDate)}&service=${encodeURIComponent(service)}&vehicle=${encodeURIComponent(vehicle.id)}`;
+    const repPortalUrl = `${window.location.origin}/rep?date=${encodeURIComponent(sessionDate)}&service=${encodeURIComponent(service)}&vehicle=${encodeURIComponent(vehicle.id)}${authParam}`;
     const message = generateWhatsAppVehicleRepMessage(localManifest, vehicle, service, repPortalUrl);
     const whatsAppUrl = `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
     try {

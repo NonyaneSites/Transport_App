@@ -275,30 +275,9 @@ export function useManifest(
     if (key && activeVehicleId) {
       try {
         const cached = sessionStorage.getItem(`crc_vehicle_auth_${key}_${activeVehicleId}`);
-        if (cached) {
-          vehicleAuthTokenRef.current = cached;
-        } else {
-          Promise.resolve(
-            supabase.rpc('rep_get_or_create_vehicle_session', {
-              p_manifest_key: key,
-              p_vehicle_id: activeVehicleId,
-            })
-          )
-            .then(({ data, error: rpcErr }) => {
-              if (!rpcErr && data && (data as { auth_token?: string }).auth_token) {
-                const token = (data as { auth_token: string }).auth_token;
-                vehicleAuthTokenRef.current = token;
-                try {
-                  sessionStorage.setItem(`crc_vehicle_auth_${key}_${activeVehicleId}`, token);
-                } catch {
-                  // ignore
-                }
-              }
-            })
-            .catch(() => {});
-        }
+        vehicleAuthTokenRef.current = cached || null;
       } catch {
-        // ignore
+        vehicleAuthTokenRef.current = null;
       }
     }
   }, [key, activeVehicleId]);
@@ -1194,32 +1173,19 @@ export function useManifest(
       updated_at: new Date().toISOString(),
     });
 
-    let currentToken =
+    const currentToken =
       vehicleAuthTokenRef.current ||
       (typeof sessionStorage !== 'undefined'
         ? sessionStorage.getItem(`crc_vehicle_auth_${key}_${vehicleId}`)
         : null);
 
     if (!currentToken) {
-      try {
-        const { data: authData } = await supabase.rpc('rep_get_or_create_vehicle_session', {
-          p_manifest_key: key,
-          p_vehicle_id: vehicleId,
-        });
-        if (authData && (authData as { auth_token?: string }).auth_token) {
-          currentToken = (authData as { auth_token: string }).auth_token;
-          vehicleAuthTokenRef.current = currentToken;
-          if (typeof sessionStorage !== 'undefined') {
-            try {
-              sessionStorage.setItem(`crc_vehicle_auth_${key}_${vehicleId}`, currentToken);
-            } catch {
-              // ignore
-            }
-          }
-        }
-      } catch {
-        // ignore
-      }
+      pendingDraftRetryRef.current = { vehicleId, draftState: mergedDraft, repName, licensePlate };
+      const errMsg = 'Unauthorized: Vehicle credentials required. Open the link sent by Dispatch or claim your session with a vehicle access code.';
+      setSyncStatus('failed');
+      setSyncError(errMsg);
+      setIsSyncing(false);
+      return;
     }
 
     setIsSyncing(true);
@@ -1292,39 +1258,26 @@ export function useManifest(
     async (
       vehicleId: string,
       newPassenger: Passenger,
-      draftUpdate?: Partial<VehicleDraftState>
+      draftUpdate?: Partial<VehicleDraftState>,
+      confirmTransfer = false
     ): Promise<Manifest> => {
       const activeKey = keyRef.current || key;
       if (!activeKey) throw new Error('No active manifest key');
       setIsSyncing(true);
       setSyncStatus('syncing');
 
-      let currentToken =
+      const currentToken =
         vehicleAuthTokenRef.current ||
         (typeof sessionStorage !== 'undefined'
           ? sessionStorage.getItem(`crc_vehicle_auth_${activeKey}_${vehicleId}`)
           : null);
 
       if (!currentToken) {
-        try {
-          const { data: authData } = await supabase.rpc('rep_get_or_create_vehicle_session', {
-            p_manifest_key: activeKey,
-            p_vehicle_id: vehicleId,
-          });
-          if (authData && (authData as { auth_token?: string }).auth_token) {
-            currentToken = (authData as { auth_token: string }).auth_token;
-            vehicleAuthTokenRef.current = currentToken;
-            if (typeof sessionStorage !== 'undefined') {
-              try {
-                sessionStorage.setItem(`crc_vehicle_auth_${activeKey}_${vehicleId}`, currentToken);
-              } catch {
-                // ignore
-              }
-            }
-          }
-        } catch {
-          // ignore
-        }
+        const errMsg = 'Unauthorized: Vehicle credentials required. Open the link sent by Dispatch or claim your session with a vehicle access code.';
+        setSyncStatus('failed');
+        setSyncError(errMsg);
+        setIsSyncing(false);
+        throw new Error(errMsg);
       }
 
       try {
@@ -1335,6 +1288,7 @@ export function useManifest(
           p_passenger: newPassenger,
           p_draft_update: draftUpdate || null,
           p_auth_token: currentToken || '',
+          p_confirm_transfer: confirmTransfer,
         });
 
         if (rpcErr || !rpcRes || !(rpcRes as { success?: boolean }).success) {
@@ -1397,6 +1351,53 @@ export function useManifest(
     [key, safeChannelSend, broadcastLiveAction]
   );
 
+  const claimVehicleSession = useCallback(
+    async (vehicleId: string, credential: string): Promise<{ success: boolean; error?: string }> => {
+      const activeKey = keyRef.current || key;
+      if (!activeKey || !vehicleId || !credential.trim()) {
+        return { success: false, error: 'Vehicle ID and credential are required' };
+      }
+      try {
+        const { data, error: rpcErr } = await supabase.rpc('rep_claim_vehicle_session', {
+          p_manifest_key: activeKey,
+          p_vehicle_id: vehicleId,
+          p_credential: credential.trim(),
+        });
+        if (!rpcErr && data && (data as { success?: boolean; auth_token?: string }).success && (data as { auth_token?: string }).auth_token) {
+          const token = (data as { auth_token: string }).auth_token;
+          vehicleAuthTokenRef.current = token;
+          if (typeof sessionStorage !== 'undefined') {
+            try {
+              sessionStorage.setItem(`crc_vehicle_auth_${activeKey}_${vehicleId}`, token);
+            } catch {
+              // ignore
+            }
+          }
+          setSyncError(null);
+          return { success: true };
+        }
+        const errMsg = rpcErr?.message || (data as { error?: string })?.error || 'Invalid or expired vehicle credential';
+        return { success: false, error: errMsg };
+      } catch (err: unknown) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+    [key]
+  );
+
+  const hasVehicleAuth = useCallback(
+    (vehicleId: string): boolean => {
+      const activeKey = keyRef.current || key;
+      if (!activeKey || !vehicleId) return false;
+      if (vehicleAuthTokenRef.current) return true;
+      if (typeof sessionStorage !== 'undefined') {
+        return Boolean(sessionStorage.getItem(`crc_vehicle_auth_${activeKey}_${vehicleId}`));
+      }
+      return false;
+    },
+    [key]
+  );
+
   return {
     manifest,
     loading,
@@ -1411,6 +1412,8 @@ export function useManifest(
     reset,
     updateVehicleDraft,
     appendWalkIn,
+    claimVehicleSession,
+    hasVehicleAuth,
     broadcastLiveAction,
   };
 }
