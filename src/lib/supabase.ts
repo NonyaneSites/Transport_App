@@ -11,6 +11,18 @@ export const SPONSORSHIPS_TABLE = 'sponsorship_audits';
 export const PROFILES_TABLE = 'profiles';
 export const AUDITS_TABLE = 'cancellation_ledger_audits';
 export const VEHICLE_AUTH_TABLE = 'vehicle_authorizations';
+export const CLAIM_LIMITS_TABLE = 'vehicle_claim_rate_limits';
+
+export function simpleHashCred(salt: string, cred: string): string {
+  let hash = 0;
+  const str = salt + cred;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash |= 0;
+  }
+  return Math.abs(hash).toString(16).padStart(8, '0');
+}
 
 export const isConfigured = Boolean(
   supabaseUrl &&
@@ -38,6 +50,7 @@ export class MockSupabaseStorage {
     [PROFILES_TABLE]: [],
     [AUDITS_TABLE]: [],
     [VEHICLE_AUTH_TABLE]: [],
+    [CLAIM_LIMITS_TABLE]: [],
   };
   private listeners: Set<(table: string, payload: StoragePayload) => void> = new Set();
 
@@ -495,17 +508,33 @@ export function createMockClient() {
         }
         const token = `token_${manifestKey}_${vehicleId}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
         const code = Math.random().toString(36).slice(2, 8).toUpperCase();
+        const salt = Math.random().toString(36).slice(2, 10);
+        const codeHash = simpleHashCred(salt, code);
+        const tokenHash = simpleHashCred(salt, token);
         const expiresAt = new Date(Date.now() + 86400000).toISOString();
+        
         mockStorage.upsert(VEHICLE_AUTH_TABLE, {
           manifest_key: manifestKey,
           vehicle_id: vehicleId,
           auth_token: token,
-          access_code: code,
+          auth_token_hash: tokenHash,
+          access_code: null, // Zero plaintext access codes in DB!
+          access_code_hash: codeHash,
+          salt,
           created_at: now,
           expires_at: expiresAt,
           revoked: false,
+          failed_attempts: 0,
           last_updated_at: now,
         }, 'vehicle_id');
+
+        // Clear failed attempts for this vehicle on re-issue
+        const attempts = mockStorage.getTable(CLAIM_LIMITS_TABLE);
+        mockStorage.setTable(
+          CLAIM_LIMITS_TABLE,
+          attempts.filter((a) => !(String(a.manifest_key) === manifestKey && String(a.vehicle_id) === vehicleId))
+        );
+
         return {
           data: {
             success: true,
@@ -527,6 +556,9 @@ export function createMockClient() {
         );
         if (matchAuth) {
           matchAuth.revoked = true;
+          matchAuth.auth_token = null;
+          matchAuth.access_code_hash = null;
+          matchAuth.auth_token_hash = null;
           matchAuth.last_updated_at = now;
           mockStorage.setTable(VEHICLE_AUTH_TABLE, auths);
         }
@@ -537,28 +569,131 @@ export function createMockClient() {
         const vehicleId = String(args.p_vehicle_id || '');
         const cred = typeof args.p_credential === 'string' ? args.p_credential.trim() : '';
         if (!manifestKey || !vehicleId || !cred) {
-          return { data: { success: false, error: 'Manifest key, vehicle ID, and credential are required' }, error: null };
+          return { data: { success: false, error: 'Invalid or expired vehicle credential' }, error: null };
         }
+
+        // Server-enforced rate limiting: check recent failed attempts
+        const attempts = mockStorage.getTable(CLAIM_LIMITS_TABLE);
+        const fifteenMinutesAgo = Date.now() - 15 * 60 * 1000;
+        const recentFails = attempts.filter((a) =>
+          String(a.manifest_key) === manifestKey &&
+          String(a.vehicle_id) === vehicleId &&
+          !a.success &&
+          new Date(String(a.attempt_time)).getTime() > fifteenMinutesAgo
+        );
+
+        if (recentFails.length >= 5) {
+          return {
+            data: {
+              success: false,
+              rate_limited: true,
+              error: 'Too many failed claim attempts. Please wait 15 minutes or ask Dispatch for a new direct link.',
+            },
+            error: null,
+          };
+        }
+
         const auths = mockStorage.getTable(VEHICLE_AUTH_TABLE);
         const matchAuth = auths.find(
-          (a) => String(a.manifest_key) === manifestKey &&
-                 String(a.vehicle_id) === vehicleId &&
-                 (String(a.auth_token) === cred || String(a.access_code).toUpperCase() === cred.toUpperCase())
+          (a) => String(a.manifest_key) === manifestKey && String(a.vehicle_id) === vehicleId
         );
-        if (!matchAuth) {
-          return { data: { success: false, error: 'Invalid vehicle credential' }, error: null };
+
+        // Generic error anti-enumeration: don't reveal if vehicle or auth exists
+        if (!matchAuth || matchAuth.revoked || (matchAuth.expires_at && new Date(String(matchAuth.expires_at)).getTime() < Date.now()) || !matchAuth.auth_token) {
+          attempts.push({
+            id: `attempt_${Date.now()}_${Math.random()}`,
+            manifest_key: manifestKey,
+            vehicle_id: vehicleId,
+            attempt_time: now,
+            success: false,
+          });
+          mockStorage.setTable(CLAIM_LIMITS_TABLE, attempts);
+          return { data: { success: false, error: 'Invalid or expired vehicle credential' }, error: null };
         }
-        if (matchAuth.revoked) {
-          return { data: { success: false, error: 'Vehicle credential has been revoked by Dispatch' }, error: null };
+
+        const salt = String(matchAuth.salt || '');
+        const codeHash = simpleHashCred(salt, cred.toUpperCase());
+        const tokenHash = simpleHashCred(salt, cred);
+
+        const isMatch =
+          (matchAuth.access_code_hash && matchAuth.access_code_hash === codeHash) ||
+          (matchAuth.auth_token_hash && matchAuth.auth_token_hash === tokenHash) ||
+          (matchAuth.auth_token && matchAuth.auth_token === cred);
+
+        if (!isMatch) {
+          attempts.push({
+            id: `attempt_${Date.now()}_${Math.random()}`,
+            manifest_key: manifestKey,
+            vehicle_id: vehicleId,
+            attempt_time: now,
+            success: false,
+          });
+          mockStorage.setTable(CLAIM_LIMITS_TABLE, attempts);
+          return { data: { success: false, error: 'Invalid or expired vehicle credential' }, error: null };
         }
-        if (matchAuth.expires_at && new Date(String(matchAuth.expires_at)).getTime() < Date.now()) {
-          return { data: { success: false, error: 'Vehicle credential has expired' }, error: null };
-        }
+
+        // Record success
+        attempts.push({
+          id: `attempt_${Date.now()}_${Math.random()}`,
+          manifest_key: manifestKey,
+          vehicle_id: vehicleId,
+          attempt_time: now,
+          success: true,
+        });
+        mockStorage.setTable(CLAIM_LIMITS_TABLE, attempts);
+
         return {
           data: {
             success: true,
             auth_token: matchAuth.auth_token,
             expires_at: matchAuth.expires_at,
+          },
+          error: null,
+        };
+      }
+      if (fnName === 'admin_save_manifest_atomic') {
+        const manifestKey = String(args.p_manifest_key || '');
+        const pSignups = Array.isArray(args.p_signups) ? args.p_signups : [];
+        const pVehicles = Array.isArray(args.p_vehicles) ? args.p_vehicles : [];
+        const pExpectedUpdatedAt = typeof args.p_expected_updated_at === 'string' ? args.p_expected_updated_at : null;
+        const pForce = Boolean(args.p_force);
+
+        if (!manifestKey) {
+          return { data: null, error: { message: 'Manifest key is required' } };
+        }
+
+        const manifests = mockStorage.getTable(MANIFESTS_TABLE);
+        const currentManifest = manifests.find((m) => String(m.date) === manifestKey);
+
+        if (currentManifest && pExpectedUpdatedAt && !pForce) {
+          const currentTs = new Date(String(currentManifest.updated_at || 0)).getTime();
+          const expectedTs = new Date(pExpectedUpdatedAt).getTime();
+          if (currentTs > expectedTs) {
+            return {
+              data: {
+                success: false,
+                conflict: true,
+                server_updated_at: currentManifest.updated_at,
+                error: 'Conflict: Manifest was modified by another user since last loaded. Please reload to resolve.',
+              },
+              error: null,
+            };
+          }
+        }
+
+        const updated = {
+          date: manifestKey,
+          signups: pSignups,
+          vehicles: pVehicles,
+          updated_at: now,
+        };
+        mockStorage.upsert(MANIFESTS_TABLE, updated, 'date');
+
+        return {
+          data: {
+            success: true,
+            date: manifestKey,
+            updated_at: now,
           },
           error: null,
         };

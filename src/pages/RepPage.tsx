@@ -42,7 +42,6 @@ import {
   normalizeDateToYMD,
   type LedgerEntry,
 } from '@/lib/ledger';
-import { supabase, MANIFESTS_TABLE } from '@/lib/supabase';
 import { type SubmitVehiclePayload } from '@/lib/types';
 import { isServerOnline, submitVehicleToServer, reopenVehicleOnServer } from '@/lib/serverApi';
 import { extractVehicleStats } from '@/lib/statsExport';
@@ -302,7 +301,6 @@ export function RepPage() {
     syncStatus,
     syncError,
     refresh,
-    save,
     updateVehicleDraft,
     appendWalkIn,
     claimVehicleSession,
@@ -1419,18 +1417,7 @@ export function RepPage() {
             return v;
           });
 
-          const updatedTargetSignups = targetManifest.signups.map((p) => {
-            if (String(p.id) === sSponId) {
-              return { ...p, sponsored: true, sponsorNote: sponsorLabel };
-            }
-            return p;
-          });
 
-          const nextTargetManifest = {
-            ...targetManifest,
-            vehicles: updatedTargetVehicles,
-            signups: updatedTargetSignups,
-          };
 
           if (foundTargetVehId) {
             const tgtVeh = updatedTargetVehicles.find((v) => v.id === foundTargetVehId);
@@ -1438,14 +1425,6 @@ export function RepPage() {
               saveVehicleToDb(targetKey, tgtVeh).catch(() => {});
             }
           }
-          await supabase.from(MANIFESTS_TABLE).upsert(
-            {
-              date: nextTargetManifest.date,
-              signups: nextTargetManifest.signups,
-              vehicles: nextTargetManifest.vehicles,
-            },
-            { onConflict: 'date' }
-          );
         }
       } catch (err) {
         console.warn('[RepPage] Cross-service sponsorship target update note:', err);
@@ -1537,7 +1516,10 @@ export function RepPage() {
     };
 
     manifestRef.current = nextManifest;
-    await save(nextManifest);
+    const targetVehRecord = updatedVehicles.find((v) => v.id === selectedVehicle.id);
+    if (targetVehRecord?.draftState) {
+      await updateVehicleDraft(selectedVehicle.id, targetVehRecord.draftState, repName, licensePlate);
+    }
 
     if (sponseeId && finalTargetVehId) {
       broadcastLiveAction({
@@ -1651,7 +1633,10 @@ export function RepPage() {
     };
 
     manifestRef.current = nextManifest;
-    await save(nextManifest);
+    const targetVehRecord = updatedVehicles.find((v) => v.id === selectedVehicle.id);
+    if (targetVehRecord?.draftState) {
+      await updateVehicleDraft(selectedVehicle.id, targetVehRecord.draftState, repName, licensePlate);
+    }
 
     if (sponseeId && resolvedTargetVehId) {
       broadcastLiveAction({
@@ -1666,7 +1651,7 @@ export function RepPage() {
     }
     setBatchActionMsg(`✓ Removed cross-vehicle sponsorship${targetEntry?.sponseeName ? ` for ${targetEntry.sponseeName}` : ''}.`);
     setTimeout(() => setBatchActionMsg(null), 4000);
-  }, [manifest, selectedVehicle, externalSponsees, baseCash, pastCancellationCash, FARE, save, broadcastLiveAction]);
+  }, [manifest, selectedVehicle, externalSponsees, baseCash, pastCancellationCash, FARE, broadcastLiveAction, repName, licensePlate, updateVehicleDraft]);
 
   // Conflict-Safe Debounced Background Sync & Instant Local Cache
   useEffect(() => {
@@ -2452,7 +2437,10 @@ export function RepPage() {
       timestamp: Date.now(),
     });
 
-    await save(nextManifest);
+    const targetVehRecord = updatedVehicles.find((v) => v.id === selectedVehicle.id);
+    if (targetVehRecord?.draftState) {
+      await updateVehicleDraft(selectedVehicle.id, targetVehRecord.draftState, repName, licensePlate);
+    }
   }
 
   function handleOpenChangeStop(p: Passenger) {
@@ -2479,24 +2467,12 @@ export function RepPage() {
         : upgradeNote
       : passenger.notes;
 
-    const updatedSignups = manifest.signups.map((p) => {
-      if (String(p.id) === pIdStr) {
-        return {
-          ...p,
-          legs: 'both' as const,
-          service: 'Rehearsal',
-          notes: updatedNotes,
-        };
-      }
-      return p;
-    });
 
-    const nextManifest: Manifest = {
-      ...manifest,
-      signups: updatedSignups,
-    };
-    manifestRef.current = nextManifest;
-    await save(nextManifest);
+
+    if (!selectedVehicle) return;
+    const curDraft = selectedVehicle.draftState || {};
+    const nextNotes = { ...(curDraft.notes || {}), [pIdStr]: updatedNotes || '' };
+    await updateVehicleDraft(selectedVehicle.id, { ...curDraft, notes: nextNotes }, repName, licensePlate);
     setBatchActionMsg(`✓ Upgraded ${passenger.fullName} to Full Trip (Going & Return)`);
     setTimeout(() => setBatchActionMsg(null), 4000);
   }
@@ -2507,22 +2483,12 @@ export function RepPage() {
     const existingP = manifest.signups.find((p) => String(p.id) === pIdStr);
     if (!existingP) return;
 
-    const updatedSignups = manifest.signups.map((p) => {
-      if (String(p.id) === pIdStr) {
-        return {
-          ...p,
-          stop: newStop,
-        };
-      }
-      return p;
-    });
 
-    const nextManifest: Manifest = {
-      ...manifest,
-      signups: updatedSignups,
-    };
-    manifestRef.current = nextManifest;
-    await save(nextManifest);
+
+    if (!selectedVehicle) return;
+    const curDraft = selectedVehicle.draftState || {};
+    const nextNotes = { ...(curDraft.notes || {}), [pIdStr]: `Stop updated: ${newStop}` };
+    await updateVehicleDraft(selectedVehicle.id, { ...curDraft, notes: nextNotes }, repName, licensePlate);
     setBatchActionMsg(`✓ Updated stop for ${existingP.fullName}`);
     setTimeout(() => setBatchActionMsg(null), 4000);
   }
@@ -2530,27 +2496,12 @@ export function RepPage() {
   async function handleRepTransferConfirm(
     passenger: Passenger,
     targetVehicleId: string,
-    markPresent: boolean,
-    transferNote?: string
+    markPresent: boolean
   ) {
     if (!manifest || isRehearsal) return;
     const pIdStr = String(passenger.id);
 
-    // 1. Update signups
-    const targetAssigned = targetVehicleId === 'unassigned' ? null : targetVehicleId;
-    const updatedSignups = manifest.signups.map((p) => {
-      if (String(p.id) === pIdStr) {
-        return {
-          ...p,
-          assignedTo: targetAssigned,
-          present: targetVehicleId !== 'unassigned' && markPresent,
-          notes: transferNote ? `${p.notes ? `${p.notes}; ` : ''}${transferNote}` : p.notes,
-        };
-      }
-      return p;
-    });
-
-    // 2. Update vehicles
+    // 1. Update vehicles
     const updatedVehicles = manifest.vehicles.map((v) => {
       const isSource = (v.riders || []).some((id) => String(id) === pIdStr);
       const isTarget = v.id === targetVehicleId;
@@ -2585,9 +2536,11 @@ export function RepPage() {
       return v;
     });
 
-    const nextManifest: Manifest = { ...manifest, signups: updatedSignups, vehicles: updatedVehicles };
-    manifestRef.current = nextManifest;
-    await save(nextManifest);
+    if (!selectedVehicle) return;
+    const sourceVeh = updatedVehicles.find((v) => v.id === selectedVehicle.id);
+    if (sourceVeh?.draftState) {
+      await updateVehicleDraft(selectedVehicle.id, sourceVeh.draftState, repName, licensePlate);
+    }
     setBatchActionMsg(`✓ Moved ${passenger.fullName} to ${targetVehicleId === 'unassigned' ? 'Unassigned Pool' : 'destination vehicle'}`);
     setTimeout(() => setBatchActionMsg(null), 4000);
   }
@@ -2884,7 +2837,13 @@ export function RepPage() {
         console.warn('[RepPage] Server submission queued offline:', err);
       }
 
-      await save(submittedManifest);
+      // TASK 1: Submit vehicle atomically using vehicle-scoped updateVehicleDraft
+      await updateVehicleDraft(
+        selectedVehicle.id,
+        finalizedDraft,
+        repName.trim(),
+        licensePlate.trim()
+      );
       broadcastLiveAction({
         type: 'vehicle_submitted',
         vehicleId: selectedVehicle.id,
@@ -2999,20 +2958,6 @@ export function RepPage() {
         /* ignore */
       }
 
-      // Revoke submitted attendance flags for riders in this vehicle on manifest.signups
-      const vehicleRiderIdSet = new Set((selectedVehicle.riders || []).map(String));
-      const updatedSignups = manifest.signups.map((p) => {
-        if (vehicleRiderIdSet.has(String(p.id))) {
-          return {
-            ...p,
-            present: false,
-            sponsored: false,
-            didNotPay: false,
-          };
-        }
-        return p;
-      });
-
       const updatedVehicles = manifest.vehicles.map((v) =>
         v.id === selectedVehicle.id
           ? {
@@ -3024,7 +2969,15 @@ export function RepPage() {
             }
           : v
       );
-      await save({ ...manifest, signups: updatedSignups, vehicles: updatedVehicles });
+      // TASK 1: Reopen vehicle draft atomically via vehicle-scoped updateVehicleDraft
+      const reopenedTargetV = updatedVehicles.find((v) => v.id === selectedVehicle.id);
+      const reopenedDraft = reopenedTargetV?.draftState || { ...(selectedVehicle.draftState || {}), submitted: false, submittedAt: undefined };
+      await updateVehicleDraft(
+        selectedVehicle.id,
+        reopenedDraft,
+        repName.trim(),
+        licensePlate.trim()
+      );
       broadcastLiveAction({
         type: 'vehicle_reopened',
         vehicleId: selectedVehicle.id,
@@ -3150,12 +3103,16 @@ export function RepPage() {
 
       isUserDirtyRef.current = true;
       const newManifest = { ...manifest, signups: updatedSignups, vehicles: updatedVehicles };
-      await save(newManifest);
+      manifestRef.current = newManifest;
+      const targetCleanedV = updatedVehicles.find((v) => v.id === selectedVehicle.id);
+      if (targetCleanedV?.draftState) {
+        await updateVehicleDraft(selectedVehicle.id, targetCleanedV.draftState, repName, licensePlate);
+      }
 
       setBatchActionMsg(`✓ Removed walk-in "${targetPassenger.fullName}".`);
       setTimeout(() => setBatchActionMsg(null), 5000);
     },
-    [manifest, selectedVehicle, save, myCreatedWalkInIds, repName]
+    [manifest, selectedVehicle, myCreatedWalkInIds, repName, licensePlate, updateVehicleDraft]
   );
 
   const handleSelectVehicle = (newVehicleId: string) => {

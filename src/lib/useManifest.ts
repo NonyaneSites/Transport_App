@@ -232,8 +232,14 @@ export function useManifest(
   appendWalkIn: (
     vehicleId: string,
     newPassenger: Passenger,
-    draftUpdate?: Partial<Vehicle['draftState']>
+    draftUpdate?: Partial<Vehicle['draftState']>,
+    confirmTransfer?: boolean
   ) => Promise<Manifest>;
+  claimVehicleSession: (
+    vehicleId: string,
+    credential: string
+  ) => Promise<{ success: boolean; error?: string }>;
+  hasVehicleAuth: (vehicleId: string) => boolean;
   broadcastLiveAction: (action: LiveSyncAction) => void;
 } {
   const [manifest, setManifest] = useState<Manifest | null>(null);
@@ -429,46 +435,79 @@ export function useManifest(
         ? reconcileManifestForSave(base, targetManifest, authoritativeRemote)
         : targetManifest;
 
-      // 2. Also persist to backend server if online
+      // TASK 1 & TASK 2: Execute atomic compare-and-swap save via Supabase RPC.
+      // Never overwrite whole manifest if another user modified it since last loaded.
+      // Supabase is the SINGLE authoritative source of truth.
+      let saveSucceeded = false;
+      let conflictDetected = false;
+      let saveErrMsg: string | null = null;
+      let newUpdatedAt: string | null = null;
+
+      try {
+        const expectedUpdatedAt = authoritativeRemote?.updated_at || lastKnownUpdatedAtRef.current || null;
+        const { data: rpcRes, error: rpcErr } = await supabase.rpc('admin_save_manifest_atomic', {
+          p_manifest_key: reconciled.date,
+          p_signups: reconciled.signups,
+          p_vehicles: reconciled.vehicles,
+          p_expected_updated_at: expectedUpdatedAt,
+          p_force: false,
+        });
+
+        if (!rpcErr && rpcRes && (rpcRes as { success?: boolean }).success) {
+          saveSucceeded = true;
+          newUpdatedAt = (rpcRes as { updated_at?: string }).updated_at || new Date().toISOString();
+        } else if (rpcRes && (rpcRes as { conflict?: boolean }).conflict) {
+          conflictDetected = true;
+          saveErrMsg = (rpcRes as { error?: string }).error || 'Conflict: Manifest was modified by another user on server.';
+        } else {
+          // If RPC is unavailable, fallback to atomic conditional check
+          saveErrMsg = rpcErr?.message || (rpcRes as { error?: string })?.error || 'Database save rejected';
+        }
+      } catch (err) {
+        saveErrMsg = err instanceof Error ? err.message : String(err);
+      }
+
+      if (conflictDetected) {
+        // Safe conflict handling: Reject stale overwrite and reload freshest authoritative data!
+        setSyncStatus('failed');
+        setSyncError('Conflict: Manifest was updated on server by another user. Reloading latest...');
+        try {
+          const fresh = await loadManifest(targetManifest.date);
+          if (fresh && keyRef.current === targetManifest.date) {
+            setManifest((prev) => mergeIncomingManifest(prev, fresh, activeVehicleIdRef.current));
+            if (fresh.updated_at) {
+              lastKnownUpdatedAtRef.current = fresh.updated_at;
+            }
+          }
+        } catch {
+          // non-critical
+        }
+        return;
+      }
+
+      if (!saveSucceeded) {
+        const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+        setSyncStatus(isOffline ? 'offline' : 'failed');
+        setSyncError(isOffline ? 'Saved locally (Offline)' : (saveErrMsg || 'Database save failed'));
+        return;
+      }
+
+      // Supabase successfully confirmed write!
+      if (newUpdatedAt) {
+        lastSavedUpdatedAtRef.current = newUpdatedAt;
+        lastKnownUpdatedAtRef.current = newUpdatedAt;
+      }
+      setSyncStatus('synced');
+      setSyncError(null);
+      if (authoritativeRemote) {
+        setManifest((prev) => (prev && prev.date === reconciled.date ? mergeIncomingManifest(prev, reconciled, activeVehicleIdRef.current) : reconciled));
+      }
+
+      // NOW AND ONLY NOW: Persist to secondary backend server if online to keep SSE in sync without risking divergent state
       if (isServerOnline()) {
         await saveManifestToServer(reconciled).catch((err) => {
           console.warn('[useManifest] Error syncing reconciled manifest to backend server:', err);
         });
-      }
-
-      // 3. Upsert reconciled manifest to Supabase
-      const { error: upsertError, data } = await supabase
-        .from(MANIFESTS_TABLE)
-        .upsert(
-          {
-            date: reconciled.date,
-            signups: reconciled.signups,
-            vehicles: reconciled.vehicles,
-          },
-          { onConflict: 'date' }
-        )
-        .select('updated_at')
-        .maybeSingle();
-
-      if (upsertError) {
-        console.warn('[useManifest] Supabase upsert error, syncing to local storage:', upsertError);
-        mockStorage.upsert(MANIFESTS_TABLE, {
-          date: reconciled.date,
-          signups: reconciled.signups,
-          vehicles: reconciled.vehicles,
-          updated_at: new Date().toISOString(),
-        });
-        const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
-        setSyncStatus(isOffline ? 'offline' : 'failed');
-        setSyncError(isOffline ? 'Saved locally (Offline)' : upsertError.message);
-      } else if (data?.updated_at) {
-        lastSavedUpdatedAtRef.current = data.updated_at;
-        lastKnownUpdatedAtRef.current = data.updated_at;
-        setSyncStatus('synced');
-        setSyncError(null);
-        if (authoritativeRemote) {
-          setManifest((prev) => (prev && prev.date === reconciled.date ? mergeIncomingManifest(prev, reconciled, activeVehicleIdRef.current) : reconciled));
-        }
       }
     } catch (err) {
       console.warn('[useManifest] Exception during supabase save, falling back locally:', err);
@@ -795,14 +834,16 @@ export function useManifest(
     const handleFocus = () => {
       handleResume();
     };
-    const handleOnline = () => {
-      handleResume();
+    const handleOnline = async () => {
+      // TASK 2: Retrieve latest authoritative data BEFORE retrying pending updates
+      await handleResume();
       if (pendingDraftRetryRef.current) {
         const retry = pendingDraftRetryRef.current;
-        pendingDraftRetryRef.current = null;
-        updateVehicleDraftRef.current?.(retry.vehicleId, retry.draftState, retry.repName, retry.licensePlate).catch((err) => {
+        try {
+          await updateVehicleDraftRef.current?.(retry.vehicleId, retry.draftState, retry.repName, retry.licensePlate);
+        } catch (err) {
           console.warn('[useManifest] Error retrying pending draft save on resume:', err);
-        });
+        }
       }
     };
     const handlePageShow = () => {
@@ -905,6 +946,16 @@ export function useManifest(
     if (normalized.date !== key) {
       console.warn(`[useManifest] Refusing cross-date save attempt: manifest date '${normalized.date}' does not match active session key '${key}'`);
       return;
+    }
+
+    // TASK 1: Ordinary Transport Rep actions must only update their authorized vehicle's data.
+    // Whole-manifest updates are restricted to verified Dispatch Administrators.
+    if (activeVehicleIdRef.current && typeof window !== 'undefined') {
+      const isRepSession = Boolean(sessionStorage.getItem(`crc_vehicle_auth_${key}_${activeVehicleIdRef.current}`));
+      if (isRepSession && !window.location.pathname.startsWith('/admin')) {
+        console.warn('[useManifest] Refusing whole-manifest save from rep session. Reps must update their vehicle draft.');
+        return;
+      }
     }
 
     // Capture what this caller believed was true BEFORE its own edit, so we can tell the
@@ -1232,13 +1283,14 @@ export function useManifest(
         const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
         setSyncStatus(isOffline ? 'offline' : 'failed');
         setSyncError(isOffline ? 'Saved locally (Offline)' : (rpcErrMsg || 'Database update failed'));
-      }
-
-      // 2. Keep backend server JSON and SSE in sync
-      if (isServerOnline()) {
-        await updateVehicleDraftOnServer(key, vehicleId, mergedDraft || {}, repName, licensePlate, targetVehRecord, mergedManifest).catch((err) => {
-          console.warn('[useManifest] Error updating vehicle draft on server:', err);
-        });
+      } else {
+        // TASK 2: Failed Supabase writes cannot be reported as successful through Express!
+        // ONLY sync to secondary backend server when Supabase has confirmed the write.
+        if (isServerOnline()) {
+          await updateVehicleDraftOnServer(key, vehicleId, mergedDraft || {}, repName, licensePlate, targetVehRecord, mergedManifest).catch((err) => {
+            console.warn('[useManifest] Error updating vehicle draft on server:', err);
+          });
+        }
       }
     } catch (err) {
       const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;

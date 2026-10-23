@@ -719,3 +719,162 @@ test('Prompt 01C Concurrency: rep_add_walk_in adding passenger already in same t
   const p1Count = v1?.riders.filter((id) => id === 'p1').length;
   assert.equal(p1Count, 1);
 });
+
+test('Prompt 01D Rate Limiting: 5 failed access code claim attempts trigger enforced rate limits', async () => {
+  const testKey = '2026-10-23_09-00_rate_limit_test';
+  const manifest = makeTestManifest();
+  manifest.date = testKey;
+  mockStorage.upsert(MANIFESTS_TABLE, manifest, 'date');
+
+  const adminRes = await supabase.rpc('admin_issue_vehicle_credential', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+  });
+  assert.ok(adminRes.data && (adminRes.data as { success?: boolean }).success);
+
+  // Attempt 5 incorrect claims
+  for (let i = 0; i < 5; i++) {
+    const failRes = await supabase.rpc('rep_claim_vehicle_session', {
+      p_manifest_key: testKey,
+      p_vehicle_id: 'taxi-1',
+      p_credential: `WRONG${i}`,
+    });
+    assert.equal((failRes.data as { success: boolean }).success, false);
+    assert.equal((failRes.data as { error: string }).error, 'Invalid or expired vehicle credential');
+  }
+
+  // 6th attempt must trigger server-enforced rate limit!
+  const rateLimitedRes = await supabase.rpc('rep_claim_vehicle_session', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+    p_credential: 'WRONG_AGAIN',
+  });
+  assert.equal((rateLimitedRes.data as { success: boolean }).success, false);
+  assert.equal((rateLimitedRes.data as { rate_limited?: boolean }).rate_limited, true);
+  assert.ok((rateLimitedRes.data as { error: string }).error.includes('Too many failed claim attempts'));
+});
+
+test('Prompt 01D Security: Plaintext access codes are NOT stored in vehicle_authorizations table', async () => {
+  const testKey = '2026-10-23_09-00_hash_storage_test';
+  const manifest = makeTestManifest();
+  manifest.date = testKey;
+  mockStorage.upsert(MANIFESTS_TABLE, manifest, 'date');
+
+  const adminRes = await supabase.rpc('admin_issue_vehicle_credential', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+  });
+  const code = (adminRes.data as { access_code: string }).access_code;
+  assert.ok(code);
+
+  const authRows = mockStorage.getTable('vehicle_authorizations');
+  const authRecord = authRows.find((r) => r.manifest_key === testKey && r.vehicle_id === 'taxi-1');
+  assert.ok(authRecord);
+
+  // Zero plaintext access codes in DB!
+  assert.equal(authRecord.access_code, null);
+  assert.ok(authRecord.access_code_hash);
+  assert.ok(authRecord.salt);
+
+  // Valid access code can still successfully claim session using secure verifier
+  const claimRes = await supabase.rpc('rep_claim_vehicle_session', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+    p_credential: code,
+  });
+  assert.equal((claimRes.data as { success: boolean }).success, true);
+  assert.ok((claimRes.data as { auth_token: string }).auth_token);
+});
+
+test('Prompt 01D Concurrency: admin_save_manifest_atomic rejects stale whole-manifest writes without losing newer changes', async () => {
+  const testKey = '2026-10-23_09-00_atomic_save_test';
+  const manifest = makeTestManifest();
+  manifest.date = testKey;
+  manifest.updated_at = new Date(Date.now() - 50000).toISOString();
+  mockStorage.upsert(MANIFESTS_TABLE, manifest, 'date');
+
+  const baselineTimestamp = manifest.updated_at;
+
+  // Rep checks in Alice in Taxi 1, updating server manifest to a newer timestamp
+  const adminRes = await supabase.rpc('admin_issue_vehicle_credential', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+  });
+  const token = (adminRes.data as { auth_token: string }).auth_token;
+
+  await supabase.rpc('rep_update_vehicle_draft', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+    p_draft_state: { presentIds: ['p1'], updatedAt: new Date().toISOString() },
+    p_rep_name: 'Rep Alice',
+    p_license_plate: 'CA-1234',
+    p_auth_token: token,
+    p_client_timestamp: new Date().toISOString(),
+  });
+
+  const intermediateRows = mockStorage.getTable(MANIFESTS_TABLE);
+  const intermediateManifest = intermediateRows.find((r) => r.date === testKey);
+  assert.ok(intermediateManifest?.updated_at);
+  const serverNewerTime = intermediateManifest?.updated_at;
+
+  // Stale admin save attempt with old baseline timestamp must be REJECTED with conflict
+  const staleSaveRes = await supabase.rpc('admin_save_manifest_atomic', {
+    p_manifest_key: testKey,
+    p_signups: manifest.signups,
+    p_vehicles: manifest.vehicles,
+    p_expected_updated_at: baselineTimestamp,
+    p_force: false,
+  });
+
+  assert.equal((staleSaveRes.data as { success: boolean }).success, false);
+  assert.equal((staleSaveRes.data as { conflict: boolean }).conflict, true);
+  assert.equal((staleSaveRes.data as { server_updated_at: string }).server_updated_at, serverNewerTime);
+
+  // Server state was NOT overwritten: Alice is still checked in!
+  const finalRows = mockStorage.getTable(MANIFESTS_TABLE);
+  const finalM = finalRows.find((r) => r.date === testKey);
+  const v1 = (finalM?.vehicles as Vehicle[])?.find((v) => v.id === 'taxi-1');
+  assert.deepEqual(v1?.draftState?.presentIds, ['p1']);
+});
+
+test('Prompt 01D Revocation: Revoking vehicle access credential immediately rejects subsequent operations and claim attempts', async () => {
+  const testKey = '2026-10-23_09-00_revocation_test';
+  const manifest = makeTestManifest();
+  manifest.date = testKey;
+  mockStorage.upsert(MANIFESTS_TABLE, manifest, 'date');
+
+  const adminRes = await supabase.rpc('admin_issue_vehicle_credential', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+  });
+  const token = (adminRes.data as { auth_token: string }).auth_token;
+  const code = (adminRes.data as { access_code: string }).access_code;
+
+  // Admin revokes credential
+  const revokeRes = await supabase.rpc('admin_revoke_vehicle_credential', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+  });
+  assert.equal((revokeRes.data as { success: boolean }).success, true);
+  assert.equal((revokeRes.data as { revoked: boolean }).revoked, true);
+
+  // Subsequent claim attempt with code is rejected
+  const claimRes = await supabase.rpc('rep_claim_vehicle_session', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+    p_credential: code,
+  });
+  assert.equal((claimRes.data as { success: boolean }).success, false);
+
+  // Subsequent draft update with old token is rejected
+  const updateRes = await supabase.rpc('rep_update_vehicle_draft', {
+    p_manifest_key: testKey,
+    p_vehicle_id: 'taxi-1',
+    p_draft_state: { presentIds: ['p1'] },
+    p_rep_name: 'Attacker',
+    p_license_plate: 'FAKE',
+    p_auth_token: token,
+  });
+  assert.ok(updateRes.error);
+});
+

@@ -707,27 +707,41 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
           const indDraft = ind.draftState;
           const vTime = vDraft?.updatedAt ? new Date(vDraft.updatedAt).getTime() : 0;
           const indTime = indDraft?.updatedAt ? new Date(indDraft.updatedAt).getTime() : 0;
-          const fresherDraft = indTime >= vTime ? indDraft : (vDraft || indDraft);
+          
+          // TASK 2: When loadedFromRemote is true, Supabase is single authoritative source.
+          // Never allow stale local storage drafts to overwrite remote data!
+          const preferRemote = loadedFromRemote && Boolean(vDraft);
+          const fresherDraft = preferRemote ? vDraft : (indTime >= vTime ? indDraft : (vDraft || indDraft));
 
-          const mergedPresIds = indTime >= vTime
-            ? (indDraft?.presentIds ?? vDraft?.presentIds ?? [])
-            : (vDraft?.presentIds ?? indDraft?.presentIds ?? []);
+          const mergedPresIds = preferRemote
+            ? (vDraft?.presentIds ?? [])
+            : (indTime >= vTime
+              ? (indDraft?.presentIds ?? vDraft?.presentIds ?? [])
+              : (vDraft?.presentIds ?? indDraft?.presentIds ?? []));
 
-          const mergedAbsIds = indTime >= vTime
-            ? (indDraft?.absentIds ?? vDraft?.absentIds ?? [])
-            : (vDraft?.absentIds ?? indDraft?.absentIds ?? []);
+          const mergedAbsIds = preferRemote
+            ? (vDraft?.absentIds ?? [])
+            : (indTime >= vTime
+              ? (indDraft?.absentIds ?? vDraft?.absentIds ?? [])
+              : (vDraft?.absentIds ?? indDraft?.absentIds ?? []));
 
-          const mergedSponIds = indTime >= vTime
-            ? (indDraft?.sponsoredIds ?? vDraft?.sponsoredIds ?? [])
-            : (vDraft?.sponsoredIds ?? indDraft?.sponsoredIds ?? []);
+          const mergedSponIds = preferRemote
+            ? (vDraft?.sponsoredIds ?? [])
+            : (indTime >= vTime
+              ? (indDraft?.sponsoredIds ?? vDraft?.sponsoredIds ?? [])
+              : (vDraft?.sponsoredIds ?? indDraft?.sponsoredIds ?? []));
 
-          const mergedUnpIds = indTime >= vTime
-            ? (indDraft?.unpaidIds ?? vDraft?.unpaidIds ?? [])
-            : (vDraft?.unpaidIds ?? indDraft?.unpaidIds ?? []);
+          const mergedUnpIds = preferRemote
+            ? (vDraft?.unpaidIds ?? [])
+            : (indTime >= vTime
+              ? (indDraft?.unpaidIds ?? vDraft?.unpaidIds ?? [])
+              : (vDraft?.unpaidIds ?? indDraft?.unpaidIds ?? []));
 
-          const mergedApIds = indTime >= vTime
-            ? (indDraft?.absentPaidIds ?? vDraft?.absentPaidIds ?? [])
-            : (vDraft?.absentPaidIds ?? indDraft?.absentPaidIds ?? []);
+          const mergedApIds = preferRemote
+            ? (vDraft?.absentPaidIds ?? [])
+            : (indTime >= vTime
+              ? (indDraft?.absentPaidIds ?? vDraft?.absentPaidIds ?? [])
+              : (vDraft?.absentPaidIds ?? indDraft?.absentPaidIds ?? []));
 
           mergedVehicles.push({
             ...ind,
@@ -849,47 +863,33 @@ export async function upsertManifest(manifest: Manifest): Promise<void> {
     console.warn('[Manifest] Error saving individual vehicles:', err);
   }
 
-  // 2. Save manifest to Supabase (source of truth) with a local-storage fallback if offline.
+  // 2. Save manifest to Supabase (source of truth) with atomic RPC
   try {
-    const { error } = await supabase
-      .from(MANIFESTS_TABLE)
-      .upsert(
-        {
-          date: manifest.date,
-          signups: Array.isArray(manifest.signups) ? manifest.signups : [],
-          vehicles: Array.isArray(manifest.vehicles) ? manifest.vehicles : [],
-        },
-        { onConflict: 'date' }
-      );
-    if (error) {
-      console.warn('[Manifest] Remote upsert failed, saving to local store:', error);
-      mockStorage.setTable(
-        MANIFESTS_TABLE,
-        [
-          ...mockStorage.getTable(MANIFESTS_TABLE).filter((r) => r.date !== manifest.date),
+    const { data: rpcRes, error: rpcErr } = await supabase.rpc('admin_save_manifest_atomic', {
+      p_manifest_key: manifest.date,
+      p_signups: Array.isArray(manifest.signups) ? manifest.signups : [],
+      p_vehicles: Array.isArray(manifest.vehicles) ? manifest.vehicles : [],
+      p_expected_updated_at: manifest.updated_at || null,
+      p_force: true,
+    });
+
+    if (rpcErr || (rpcRes && !(rpcRes as { success?: boolean }).success)) {
+      const { error } = await supabase
+        .from(MANIFESTS_TABLE)
+        .upsert(
           {
             date: manifest.date,
-            signups: manifest.signups,
-            vehicles: manifest.vehicles,
-            updated_at: new Date().toISOString(),
+            signups: Array.isArray(manifest.signups) ? manifest.signups : [],
+            vehicles: Array.isArray(manifest.vehicles) ? manifest.vehicles : [],
           },
-        ]
-      );
+          { onConflict: 'date' }
+        );
+      if (error) {
+        console.warn('[Manifest] Remote upsert failed, saving to local store:', error);
+      }
     }
   } catch (err) {
-    console.warn('[Manifest] Exception in upsertManifest, saving locally:', err);
-    mockStorage.setTable(
-      MANIFESTS_TABLE,
-      [
-        ...mockStorage.getTable(MANIFESTS_TABLE).filter((r) => r.date !== manifest.date),
-        {
-          date: manifest.date,
-          signups: manifest.signups,
-          vehicles: manifest.vehicles,
-          updated_at: new Date().toISOString(),
-        },
-      ]
-    );
+    console.warn('[Manifest] Exception in upsertManifest:', err);
   }
 }
 

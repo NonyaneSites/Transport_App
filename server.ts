@@ -478,7 +478,19 @@ app.post('/api/manifests/:key', (req, res) => {
       draftState?: unknown;
       riders?: string[];
     }>;
+    updated_at?: string;
   }>(filePath, { date: key, signups: [], vehicles: [] });
+
+  // TASK 2: Prevent stale local/server writes from overwriting newer records
+  if (existingManifest.updated_at && manifest.updated_at) {
+    const diskTime = new Date(existingManifest.updated_at).getTime();
+    const incomingTime = new Date(manifest.updated_at).getTime();
+    if (incomingTime < diskTime) {
+      console.warn(`[Server] Stale manifest write rejected for ${key}: disk has ${existingManifest.updated_at}, incoming has ${manifest.updated_at}`);
+      res.status(409).json({ error: 'Conflict: Stale manifest payload rejected', manifest: existingManifest });
+      return;
+    }
+  }
 
   const existingVehMap = new Map((existingManifest.vehicles || []).map((v) => [String(v.id), v]));
 

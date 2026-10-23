@@ -13,6 +13,7 @@ const TransferSponsorshipModal = lazy(() =>
 import { AddPersonToVehicleModal } from './AddPersonToVehicleModal';
 import { ChangeServiceModal } from './ChangeServiceModal';
 import { ChangeStopModal } from './ChangeStopModal';
+import { supabase } from '@/lib/supabase';
 import type { Manifest, Passenger, Vehicle, ServiceType } from '@/lib/types';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
