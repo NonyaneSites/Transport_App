@@ -104,6 +104,13 @@ function findPassengerForTransfer(name: string, structure: string, passengers: P
 export function RepPage() {
   const [date, setDate] = useState(() => {
     try {
+      if (typeof window !== 'undefined') {
+        const params = new URLSearchParams(window.location.search);
+        const urlDate = params.get('date');
+        if (urlDate && /^\d{4}-\d{2}-\d{2}$/.test(urlDate.trim())) {
+          return urlDate.trim();
+        }
+      }
       const stored = localStorage.getItem('crc_rep_selected_date');
       if (stored && /^\d{4}-\d{2}-\d{2}$/.test(stored.trim())) {
         return stored.trim();
@@ -116,6 +123,13 @@ export function RepPage() {
   const FARE = useMemo(() => getFareForDate(date), [date]);
   const [service, setService] = useState<ServiceType>(() => {
     try {
+      if (typeof window !== 'undefined') {
+        const params = new URLSearchParams(window.location.search);
+        const urlService = params.get('service') as ServiceType | null;
+        if (urlService && ['AM_Normal', 'PM_Normal', 'AM_Serving', 'PM_Serving'].includes(urlService)) {
+          return urlService;
+        }
+      }
       return (localStorage.getItem('crc_rep_selected_service') as ServiceType) || 'PM_Normal';
     } catch {
       return 'PM_Normal';
@@ -125,7 +139,19 @@ export function RepPage() {
 
   const [selectedVehicleId, setSelectedVehicleId] = useState<string>(() => {
     try {
-      return localStorage.getItem(`crc_rep_vehicle_${key}`) || '';
+      let initVeh = '';
+      if (typeof window !== 'undefined') {
+        const params = new URLSearchParams(window.location.search);
+        const urlVeh = params.get('vehicle') || params.get('vehicleId');
+        const urlAuth = params.get('auth') || params.get('token');
+        if (urlVeh) {
+          initVeh = urlVeh.trim();
+          if (urlAuth) {
+            sessionStorage.setItem(`crc_vehicle_auth_${key}_${initVeh}`, urlAuth.trim());
+          }
+        }
+      }
+      return initVeh || localStorage.getItem(`crc_rep_vehicle_${key}`) || '';
     } catch {
       return '';
     }

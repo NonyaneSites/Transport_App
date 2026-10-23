@@ -10,6 +10,7 @@ export const VEHICLES_TABLE = 'transport_vehicles';
 export const SPONSORSHIPS_TABLE = 'sponsorship_audits';
 export const PROFILES_TABLE = 'profiles';
 export const AUDITS_TABLE = 'cancellation_ledger_audits';
+export const VEHICLE_AUTH_TABLE = 'vehicle_authorizations';
 
 export const isConfigured = Boolean(
   supabaseUrl &&
@@ -36,6 +37,7 @@ export class MockSupabaseStorage {
     [SPONSORSHIPS_TABLE]: [],
     [PROFILES_TABLE]: [],
     [AUDITS_TABLE]: [],
+    [VEHICLE_AUTH_TABLE]: [],
   };
   private listeners: Set<(table: string, payload: StoragePayload) => void> = new Set();
 
@@ -478,6 +480,232 @@ export function createMockClient() {
         mockStorage.setTable(LEDGER_TABLE, updated);
         return { data: { success: true, id, previous_debt: prevDebt, new_debt: newBalance, new_status: newStatus, updated_at: now }, error: null };
       }
+      if (fnName === 'rep_get_or_create_vehicle_session') {
+        const manifestKey = String(args.p_manifest_key || '');
+        const vehicleId = String(args.p_vehicle_id || '');
+        if (!manifestKey || !vehicleId) {
+          return { data: null, error: { message: 'Manifest key and vehicle ID are required' } };
+        }
+        const manifests = mockStorage.getTable(MANIFESTS_TABLE);
+        const m = manifests.find((row) => String(row.date) === manifestKey);
+        const vehicles = Array.isArray(m?.vehicles) ? (m.vehicles as Array<Record<string, unknown>>) : [];
+        const targetVehicle = vehicles.find((v) => String(v.id) === vehicleId);
+        if (!m || !targetVehicle) {
+          return { data: null, error: { message: 'Vehicle not found in manifest' } };
+        }
+        if (targetVehicle.submitted || (targetVehicle.draftState as Record<string, unknown>)?.submitted) {
+          return { data: null, error: { message: 'Vehicle has already been submitted and locked' } };
+        }
+        const auths = mockStorage.getTable(VEHICLE_AUTH_TABLE);
+        const existingAuth = auths.find(
+          (a) => String(a.manifest_key) === manifestKey && String(a.vehicle_id) === vehicleId
+        );
+        if (existingAuth && typeof existingAuth.auth_token === 'string') {
+          return {
+            data: {
+              success: true,
+              auth_token: existingAuth.auth_token,
+              expires_at: existingAuth.expires_at || new Date(Date.now() + 86400000).toISOString(),
+            },
+            error: null,
+          };
+        }
+        const token = `token_${manifestKey}_${vehicleId}_${Date.now().toString(36)}`;
+        mockStorage.upsert(VEHICLE_AUTH_TABLE, {
+          manifest_key: manifestKey,
+          vehicle_id: vehicleId,
+          auth_token: token,
+          created_at: now,
+          expires_at: new Date(Date.now() + 86400000).toISOString(),
+          last_updated_at: now,
+        }, 'vehicle_id');
+        return {
+          data: {
+            success: true,
+            auth_token: token,
+            expires_at: new Date(Date.now() + 86400000).toISOString(),
+          },
+          error: null,
+        };
+      }
+      if (fnName === 'rep_update_vehicle_draft') {
+        const manifestKey = String(args.p_manifest_key || '');
+        const vehicleId = String(args.p_vehicle_id || '');
+        const authToken = typeof args.p_auth_token === 'string' ? args.p_auth_token.trim() : '';
+        const draftState = (args.p_draft_state as Record<string, unknown>) || {};
+        const repName = (args.p_rep_name as string) || '';
+        const licensePlate = (args.p_license_plate as string) || '';
+        const clientTimestamp = (args.p_client_timestamp as string) || (draftState.updatedAt as string) || now;
+
+        if (!manifestKey || !vehicleId) {
+          return { data: null, error: { message: 'Manifest key and vehicle ID are required' } };
+        }
+
+        // Authorization check: token must match vehicle
+        const auths = mockStorage.getTable(VEHICLE_AUTH_TABLE);
+        const matchAuth = auths.find(
+          (a) => String(a.manifest_key) === manifestKey && String(a.vehicle_id) === vehicleId
+        );
+        if (!matchAuth || matchAuth.auth_token !== authToken) {
+          return { data: null, error: { message: 'Unauthorized: Invalid vehicle authorization token' } };
+        }
+
+        const lastTs = matchAuth.last_updated_at ? new Date(String(matchAuth.last_updated_at)).getTime() : 0;
+        const currentTs = new Date(clientTimestamp).getTime();
+
+        // Anti-replay check: client timestamp cannot be older than last_updated_at
+        if (lastTs > 0 && currentTs < lastTs) {
+          return { data: { success: false, error: 'Conflict: Stale or replayed update rejected' }, error: null };
+        }
+
+        const manifests = mockStorage.getTable(MANIFESTS_TABLE);
+        const currentManifest = manifests.find((m) => String(m.date) === manifestKey);
+        if (!currentManifest) {
+          return { data: null, error: { message: 'Manifest session not found' } };
+        }
+
+        const vehicles = Array.isArray(currentManifest.vehicles)
+          ? (currentManifest.vehicles as Array<Record<string, unknown>>)
+          : [];
+        let found = false;
+        const updatedVehicles = vehicles.map((v) => {
+          if (String(v.id) === vehicleId) {
+            found = true;
+            if (v.submitted && !draftState.submitted) {
+              throw new Error('Vehicle is submitted and locked');
+            }
+            return {
+              ...v,
+              repName: repName?.trim() || v.repName,
+              licensePlate: licensePlate?.trim() || v.licensePlate,
+              submitted: Boolean(draftState.submitted || v.submitted),
+              draftState: {
+                ...((v.draftState as Record<string, unknown>) || {}),
+                ...draftState,
+              },
+            };
+          }
+          return v;
+        });
+
+        if (!found) {
+          return { data: null, error: { message: 'Vehicle not found in manifest' } };
+        }
+
+        const updatedManifest = {
+          ...currentManifest,
+          vehicles: updatedVehicles,
+          updated_at: now,
+        };
+        mockStorage.upsert(MANIFESTS_TABLE, updatedManifest, 'date');
+        matchAuth.last_updated_at = new Date(Math.max(Date.now(), currentTs)).toISOString();
+        mockStorage.setTable(VEHICLE_AUTH_TABLE, auths);
+
+        return {
+          data: { success: true, date: manifestKey, vehicle_id: vehicleId, updated_at: now },
+          error: null,
+        };
+      }
+      if (fnName === 'rep_add_walk_in') {
+        const manifestKey = String(args.p_manifest_key || '');
+        const vehicleId = String(args.p_vehicle_id || '');
+        const authToken = typeof args.p_auth_token === 'string' ? args.p_auth_token.trim() : '';
+        const pPassenger = (args.p_passenger as Record<string, unknown>) || {};
+        const pDraftUpdate = (args.p_draft_update as Record<string, unknown>) || {};
+
+        if (!manifestKey || !vehicleId || !pPassenger.id) {
+          return { data: null, error: { message: 'Manifest key, vehicle ID, and passenger are required' } };
+        }
+
+        const auths = mockStorage.getTable(VEHICLE_AUTH_TABLE);
+        const matchAuth = auths.find(
+          (a) => String(a.manifest_key) === manifestKey && String(a.vehicle_id) === vehicleId
+        );
+        if (!matchAuth || matchAuth.auth_token !== authToken) {
+          return { data: null, error: { message: 'Unauthorized: Invalid vehicle authorization token' } };
+        }
+
+        const manifests = mockStorage.getTable(MANIFESTS_TABLE);
+        const currentManifest = manifests.find((m) => String(m.date) === manifestKey);
+        if (!currentManifest) {
+          return { data: null, error: { message: 'Manifest session not found' } };
+        }
+
+        const signups = Array.isArray(currentManifest.signups)
+          ? (currentManifest.signups as Array<Record<string, unknown>>)
+          : [];
+        const vehicles = Array.isArray(currentManifest.vehicles)
+          ? (currentManifest.vehicles as Array<Record<string, unknown>>)
+          : [];
+        const passengerId = String(pPassenger.id);
+
+        const targetSignup = { ...pPassenger, assignedTo: vehicleId, present: true, walkIn: true };
+        const signupIdx = signups.findIndex((p) => String(p.id) === passengerId);
+        const updatedSignups = [...signups];
+        if (signupIdx >= 0) {
+          updatedSignups[signupIdx] = { ...signups[signupIdx], ...targetSignup };
+        } else {
+          updatedSignups.push(targetSignup);
+        }
+
+        let foundVehicle = false;
+        const updatedVehicles = vehicles.map((v) => {
+          if (String(v.id) === vehicleId) {
+            foundVehicle = true;
+            const curRiders = Array.isArray(v.riders) ? (v.riders as string[]) : [];
+            const newRiders = curRiders.includes(passengerId) ? curRiders : [...curRiders, passengerId];
+            const curDraft = ((v.draftState as Record<string, unknown>) || {}) as {
+              presentIds?: string[];
+              absentIds?: string[];
+              repName?: string;
+              licensePlate?: string;
+            };
+            const curPres = new Set(curDraft.presentIds || []);
+            curPres.add(passengerId);
+            const curAbs = (curDraft.absentIds || []).filter((id) => String(id) !== passengerId);
+
+            return {
+              ...v,
+              riders: newRiders,
+              repName: (pDraftUpdate.repName as string) || v.repName,
+              licensePlate: (pDraftUpdate.licensePlate as string) || v.licensePlate,
+              draftState: {
+                ...curDraft,
+                presentIds: Array.from(curPres),
+                absentIds: curAbs,
+                repName: (pDraftUpdate.repName as string) || curDraft.repName || v.repName,
+                licensePlate: (pDraftUpdate.licensePlate as string) || curDraft.licensePlate || v.licensePlate,
+                updatedAt: now,
+              },
+            };
+          } else {
+            const curRiders = Array.isArray(v.riders) ? (v.riders as string[]) : [];
+            return {
+              ...v,
+              riders: curRiders.filter((id) => String(id) !== passengerId),
+            };
+          }
+        });
+
+        if (!foundVehicle) {
+          return { data: null, error: { message: 'Vehicle not found in manifest' } };
+        }
+
+        const updatedManifest = {
+          ...currentManifest,
+          signups: updatedSignups,
+          vehicles: updatedVehicles,
+          updated_at: now,
+        };
+        mockStorage.upsert(MANIFESTS_TABLE, updatedManifest, 'date');
+        matchAuth.last_updated_at = now;
+        mockStorage.setTable(VEHICLE_AUTH_TABLE, auths);
+
+        return {
+          data: { success: true, date: manifestKey, vehicle_id: vehicleId, passenger_id: passengerId, updated_at: now },
+          error: null,
+        };
+      }
       return { data: { success: true }, error: null };
     },
     channel(channelName: string) {
@@ -651,17 +879,29 @@ function createResilientSupabaseClient() {
         mockClient.removeChannel(channel);
       }
     },
-    rpc(fnName: string, args: Record<string, unknown> = {}) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    rpc(fnName: string, args: Record<string, unknown> = {}): any {
       if (typeof realClient.rpc === 'function') {
-        return Promise.resolve(realClient.rpc(fnName, args))
-          .then((res: { data?: unknown; error?: { message?: string } | null }) => {
-            if (res?.error && isNetworkFetchError(res.error)) {
+        return Promise.resolve(realClient.rpc(fnName, args) as unknown)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .then((res: any) => {
+            if (res?.error && (isNetworkFetchError(res.error) || isFunctionNotFoundError(res.error, res.status))) {
               return mockClient.rpc(fnName, args);
+            }
+            if (
+              res?.data &&
+              typeof res.data === 'object' &&
+              (res.data as { success?: boolean; error?: string }).error === 'Manifest session not found'
+            ) {
+              const manifestKey = String(args.p_manifest_key || '');
+              if (manifestKey && mockStorage.getTable(MANIFESTS_TABLE).some((m) => String(m.date) === manifestKey)) {
+                return mockClient.rpc(fnName, args);
+              }
             }
             return res;
           })
           .catch((err: unknown) => {
-            if (isNetworkFetchError(err)) {
+            if (isNetworkFetchError(err) || isFunctionNotFoundError(err)) {
               return mockClient.rpc(fnName, args);
             }
             throw err;
@@ -684,6 +924,23 @@ function isNetworkFetchError(err: unknown): boolean {
     msg.includes('fetch') ||
     msg.includes('connection refused') ||
     msg.includes('abort')
+  );
+}
+
+function isFunctionNotFoundError(err: unknown, status?: number): boolean {
+  if (!err && !status) return false;
+  if (status === 404) return true;
+  const code = typeof err === 'object' && err !== null && 'code' in err ? String((err as { code: unknown }).code) : '';
+  const msg = typeof err === 'object' && err !== null && 'message' in err
+    ? String((err as { message: unknown }).message)
+    : String(err);
+  return (
+    code === 'PGRST202' ||
+    code === 'PGRST204' ||
+    code === '42883' ||
+    msg.includes('Could not find the function') ||
+    msg.includes('does not exist') ||
+    msg.includes('not found')
   );
 }
 

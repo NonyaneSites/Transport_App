@@ -5,7 +5,6 @@ import {
   normalizeManifestData,
   applyWalkInToManifest,
   reconcileManifestForSave,
-  saveVehicleToDb,
   resetManifest,
 } from './manifest';
 import {
@@ -259,6 +258,10 @@ export function useManifest(
   const broadcastChannelRef = useRef<BroadcastChannel | null>(null);
   const pendingRemoteSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingRemoteSaveManifestRef = useRef<Manifest | null>(null);
+  const vehicleAuthTokenRef = useRef<string | null>(null);
+  const pendingDraftRetryRef = useRef<{ vehicleId: string; draftState: Vehicle['draftState']; repName?: string; licensePlate?: string } | null>(null);
+  const updateVehicleDraftRef = useRef<((vehicleId: string, draftState: Vehicle['draftState'], repName?: string, licensePlate?: string, presentIds?: string[], absentIds?: string[]) => Promise<void>) | null>(null);
+  const clientIdRef = useRef<string>(`client_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
 
   useEffect(() => {
     manifestRef.current = manifest;
@@ -268,7 +271,37 @@ export function useManifest(
     activeVehicleIdRef.current = activeVehicleId;
     activeCoRepsMapRef.current.clear();
     setActiveCoReps([]);
-  }, [activeVehicleId]);
+
+    if (key && activeVehicleId) {
+      try {
+        const cached = sessionStorage.getItem(`crc_vehicle_auth_${key}_${activeVehicleId}`);
+        if (cached) {
+          vehicleAuthTokenRef.current = cached;
+        } else {
+          Promise.resolve(
+            supabase.rpc('rep_get_or_create_vehicle_session', {
+              p_manifest_key: key,
+              p_vehicle_id: activeVehicleId,
+            })
+          )
+            .then(({ data, error: rpcErr }) => {
+              if (!rpcErr && data && (data as { auth_token?: string }).auth_token) {
+                const token = (data as { auth_token: string }).auth_token;
+                vehicleAuthTokenRef.current = token;
+                try {
+                  sessionStorage.setItem(`crc_vehicle_auth_${key}_${activeVehicleId}`, token);
+                } catch {
+                  // ignore
+                }
+              }
+            })
+            .catch(() => {});
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }, [key, activeVehicleId]);
 
   // Periodically prune stale co-reps (inactive for > 120 seconds, checked every 60s, paused when hidden)
   useEffect(() => {
@@ -785,6 +818,13 @@ export function useManifest(
     };
     const handleOnline = () => {
       handleResume();
+      if (pendingDraftRetryRef.current) {
+        const retry = pendingDraftRetryRef.current;
+        pendingDraftRetryRef.current = null;
+        updateVehicleDraftRef.current?.(retry.vehicleId, retry.draftState, retry.repName, retry.licensePlate).catch((err) => {
+          console.warn('[useManifest] Error retrying pending draft save on resume:', err);
+        });
+      }
     };
     const handlePageShow = () => {
       handleResume();
@@ -985,6 +1025,7 @@ export function useManifest(
     absentIds?: string[]
   ): Promise<void> {
     if (!key) return;
+    updateVehicleDraftRef.current = updateVehicleDraft;
 
     // 1. Use the continuously synchronized manifest state (receives Supabase Realtime updates)
     let remoteManifest = manifestRef.current ?? manifest;
@@ -1153,11 +1194,42 @@ export function useManifest(
       updated_at: new Date().toISOString(),
     });
 
+    let currentToken =
+      vehicleAuthTokenRef.current ||
+      (typeof sessionStorage !== 'undefined'
+        ? sessionStorage.getItem(`crc_vehicle_auth_${key}_${vehicleId}`)
+        : null);
+
+    if (!currentToken) {
+      try {
+        const { data: authData } = await supabase.rpc('rep_get_or_create_vehicle_session', {
+          p_manifest_key: key,
+          p_vehicle_id: vehicleId,
+        });
+        if (authData && (authData as { auth_token?: string }).auth_token) {
+          currentToken = (authData as { auth_token: string }).auth_token;
+          vehicleAuthTokenRef.current = currentToken;
+          if (typeof sessionStorage !== 'undefined') {
+            try {
+              sessionStorage.setItem(`crc_vehicle_auth_${key}_${vehicleId}`, currentToken);
+            } catch {
+              // ignore
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     setIsSyncing(true);
     setSyncStatus('syncing');
+
     try {
-      // 1. Try atomic database RPC first for instant concurrency-safe execution
+      // 1. Execute atomic database RPC with vehicle-scoped authorization
       let rpcSucceeded = false;
+      let rpcErrMsg: string | null = null;
+
       try {
         const { data: rpcRes, error: rpcErr } = await supabase.rpc('rep_update_vehicle_draft', {
           p_manifest_key: key,
@@ -1165,9 +1237,13 @@ export function useManifest(
           p_draft_state: mergedDraft,
           p_rep_name: repName?.trim() || mergedDraft?.repName?.trim() || '',
           p_license_plate: licensePlate?.trim() || mergedDraft?.licensePlate?.trim() || '',
+          p_auth_token: currentToken || '',
+          p_client_timestamp: mergedDraft?.updatedAt || new Date().toISOString(),
         });
+
         if (!rpcErr && rpcRes && (rpcRes as { success?: boolean }).success) {
           rpcSucceeded = true;
+          pendingDraftRetryRef.current = null;
           const updatedTime = (rpcRes as { updated_at?: string }).updated_at;
           if (updatedTime) {
             lastSavedUpdatedAtRef.current = updatedTime;
@@ -1175,77 +1251,24 @@ export function useManifest(
           }
           setSyncStatus('synced');
           setSyncError(null);
+        } else {
+          rpcErrMsg = rpcErr?.message || (rpcRes as { error?: string })?.error || 'Database rejected vehicle update';
         }
-      } catch {
+      } catch (err: unknown) {
         rpcSucceeded = false;
+        rpcErrMsg = err instanceof Error ? err.message : String(err);
       }
 
-      // 2. If RPC not available or failed, perform conflict-safe fetch & per-vehicle merge on transport_manifests
       if (!rpcSucceeded) {
-        const { data: latestRow } = await supabase
-          .from(MANIFESTS_TABLE)
-          .select('date, signups, vehicles, updated_at')
-          .eq('date', key)
-          .maybeSingle();
-
-        const remote = latestRow ? normalizeManifestData(latestRow) : null;
-        let finalVehicles = updatedVehicles;
-        let finalSignups = updatedSignups;
-
-        if (remote && Array.isArray(remote.vehicles) && remote.vehicles.length > 0) {
-          // Strictly preserve all other vehicles exactly as recorded on the authoritative server row
-          finalVehicles = remote.vehicles.map((v) => {
-            if (v.id === vehicleId) {
-              const remoteSubmitted = Boolean(v.submitted || v.draftState?.submitted);
-              return {
-                ...v,
-                repName: mergedDraft?.repName?.trim() || repName?.trim() || v.repName,
-                licensePlate: mergedDraft?.licensePlate?.trim() || licensePlate?.trim() || v.licensePlate,
-                submitted: remoteSubmitted || v.submitted,
-                draftState: mergedDraft,
-              };
-            }
-            return v;
-          });
-
-          // Update signups only for riders belonging to this vehicle
-          const vehicleRiderSet = new Set((targetVehicle?.riders ?? []).map(String));
-          finalSignups = remote.signups.map((p) => {
-            const sId = String(p.id);
-            if (vehicleRiderSet.has(sId)) {
-              const incP = updatedSignups.find((sp) => String(sp.id) === sId);
-              return incP || p;
-            }
-            return p;
-          });
-        }
-
-        const { data: upsertData, error: upsertErr } = await supabase
-          .from(MANIFESTS_TABLE)
-          .upsert(
-            {
-              date: key,
-              signups: finalSignups,
-              vehicles: finalVehicles,
-            },
-            { onConflict: 'date' }
-          )
-          .select('updated_at')
-          .maybeSingle();
-
-        if (upsertErr) {
-          const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
-          setSyncStatus(isOffline ? 'offline' : 'failed');
-          setSyncError(isOffline ? 'Saved locally (Offline)' : upsertErr.message);
-        } else if (upsertData?.updated_at) {
-          lastSavedUpdatedAtRef.current = upsertData.updated_at;
-          lastKnownUpdatedAtRef.current = upsertData.updated_at;
-          setSyncStatus('synced');
-          setSyncError(null);
-        }
+        // CONCURRENCY-SAFE FAILURE: Never overwrite other vehicles using stale manifest data!
+        // Preserve local pending changes in memory and localStorage for safe retry.
+        pendingDraftRetryRef.current = { vehicleId, draftState: mergedDraft, repName, licensePlate };
+        const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+        setSyncStatus(isOffline ? 'offline' : 'failed');
+        setSyncError(isOffline ? 'Saved locally (Offline)' : (rpcErrMsg || 'Database update failed'));
       }
 
-      // 3. Keep backend server JSON and SSE in sync
+      // 2. Keep backend server JSON and SSE in sync
       if (isServerOnline()) {
         await updateVehicleDraftOnServer(key, vehicleId, mergedDraft || {}, repName, licensePlate, targetVehRecord, mergedManifest).catch((err) => {
           console.warn('[useManifest] Error updating vehicle draft on server:', err);
@@ -1261,8 +1284,9 @@ export function useManifest(
   }
 
   /**
-   * Appends a walk-in to the manifest. Reads the freshest copy of the row immediately before
-   * writing so a walk-in added by one rep can never be lost to a stale write from another.
+   * Appends a walk-in to the manifest atomically at the database level.
+   * Uses rep_add_walk_in RPC so simultaneous walk-ins by multiple reps serialize
+   * cleanly without overwriting passengers or duplicate assignments.
    */
   const appendWalkIn = useCallback(
     async (
@@ -1273,44 +1297,67 @@ export function useManifest(
       const activeKey = keyRef.current || key;
       if (!activeKey) throw new Error('No active manifest key');
       setIsSyncing(true);
-      try {
-        const { data: latestRow } = await supabase
-          .from(MANIFESTS_TABLE)
-          .select('date, signups, vehicles, updated_at')
-          .eq('date', activeKey)
-          .maybeSingle();
-        const remote = (latestRow ? normalizeManifestData(latestRow) : null) || { date: activeKey, signups: [], vehicles: [] };
+      setSyncStatus('syncing');
 
-        const updated = applyWalkInToManifest(remote, vehicleId, newPassenger, draftUpdate);
+      let currentToken =
+        vehicleAuthTokenRef.current ||
+        (typeof sessionStorage !== 'undefined'
+          ? sessionStorage.getItem(`crc_vehicle_auth_${activeKey}_${vehicleId}`)
+          : null);
 
-        // Persist target vehicle and any previous vehicle individually
-        for (const v of updated.vehicles) {
-          const remoteV = remote.vehicles.find((rv) => rv.id === v.id);
-          const hadRider = (remoteV?.riders || []).some((rId) => String(rId) === String(newPassenger.id));
-          const hasRider = (v.riders || []).some((rId) => String(rId) === String(newPassenger.id));
-          if (v.id === vehicleId || hadRider !== hasRider) {
-            saveVehicleToDb(updated.date, v).catch((err) => {
-              console.warn('[useManifest] Error saving vehicle individually:', err);
-            });
+      if (!currentToken) {
+        try {
+          const { data: authData } = await supabase.rpc('rep_get_or_create_vehicle_session', {
+            p_manifest_key: activeKey,
+            p_vehicle_id: vehicleId,
+          });
+          if (authData && (authData as { auth_token?: string }).auth_token) {
+            currentToken = (authData as { auth_token: string }).auth_token;
+            vehicleAuthTokenRef.current = currentToken;
+            if (typeof sessionStorage !== 'undefined') {
+              try {
+                sessionStorage.setItem(`crc_vehicle_auth_${activeKey}_${vehicleId}`, currentToken);
+              } catch {
+                // ignore
+              }
+            }
           }
+        } catch {
+          // ignore
+        }
+      }
+
+      try {
+        // Atomic walk-in addition at database level
+        const { data: rpcRes, error: rpcErr } = await supabase.rpc('rep_add_walk_in', {
+          p_manifest_key: activeKey,
+          p_vehicle_id: vehicleId,
+          p_passenger: newPassenger,
+          p_draft_update: draftUpdate || null,
+          p_auth_token: currentToken || '',
+        });
+
+        if (rpcErr || !rpcRes || !(rpcRes as { success?: boolean }).success) {
+          const errMsg = rpcErr?.message || (rpcRes as { error?: string })?.error || 'Database walk-in addition failed';
+          const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+          setSyncStatus(isOffline ? 'offline' : 'failed');
+          setSyncError(isOffline ? 'Saved locally (Offline)' : errMsg);
+          throw new Error(errMsg);
         }
 
-        const { data: saved } = await supabase
-          .from(MANIFESTS_TABLE)
-          .upsert(
-            { date: updated.date, signups: updated.signups, vehicles: updated.vehicles },
-            { onConflict: 'date' }
-          )
-          .select('updated_at')
-          .maybeSingle();
-        if (saved?.updated_at) {
-          lastSavedUpdatedAtRef.current = saved.updated_at;
-          lastKnownUpdatedAtRef.current = saved.updated_at;
-          updated.updated_at = saved.updated_at;
-        }
+        const updatedTime = (rpcRes as { updated_at?: string })?.updated_at || new Date().toISOString();
+        lastSavedUpdatedAtRef.current = updatedTime;
+        lastKnownUpdatedAtRef.current = updatedTime;
+
+        // Apply walk-in locally to current manifest state
+        const currentManifest = manifestRef.current || { date: activeKey, signups: [], vehicles: [] };
+        const updated = applyWalkInToManifest(currentManifest, vehicleId, newPassenger, draftUpdate);
+        updated.updated_at = updatedTime;
 
         setManifest((prev) => mergeIncomingManifest(prev, updated, activeVehicleIdRef.current));
         setLastSyncedAt(Date.now());
+        setSyncStatus('synced');
+        setSyncError(null);
 
         if (broadcastChannelRef.current) {
           try {
@@ -1328,12 +1375,26 @@ export function useManifest(
           payload: { date: updated.date, manifest: updated },
         });
 
+        // Also broadcast live action for immediate co-rep reflection
+        broadcastLiveAction({
+          type: 'rider_attendance',
+          vehicleId,
+          riderId: String(newPassenger.id),
+          status: 'present',
+          repName: draftUpdate?.repName || 'Rep',
+          clientId: clientIdRef.current,
+          timestamp: Date.now(),
+        });
+
         return updated;
+      } catch (err) {
+        setIsSyncing(false);
+        throw err;
       } finally {
         setIsSyncing(false);
       }
     },
-    [key, safeChannelSend]
+    [key, safeChannelSend, broadcastLiveAction]
   );
 
   return {

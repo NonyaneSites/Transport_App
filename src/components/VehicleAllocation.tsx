@@ -1197,7 +1197,8 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
       return;
     }
 
-    const repPortalUrl = `${window.location.origin}/rep`;
+    const { date: sessionDate } = parseManifestKey(localManifest.date);
+    const repPortalUrl = `${window.location.origin}/rep?date=${encodeURIComponent(sessionDate)}&service=${encodeURIComponent(service)}&vehicle=${encodeURIComponent(vehicle.id)}`;
     const message = generateWhatsAppVehicleRepMessage(localManifest, vehicle, service, repPortalUrl);
     const whatsAppUrl = `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
     try {
