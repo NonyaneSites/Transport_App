@@ -29,6 +29,7 @@ interface CrossTaxiSponsorshipModalProps {
   currentDate?: string;
   currentService?: ServiceType;
   currentServiceLabel?: string;
+  initialPayerId?: string;
 }
 
 interface SponseeCandidate {
@@ -63,11 +64,19 @@ export function CrossTaxiSponsorshipModal({
   currentDate,
   currentService,
   currentServiceLabel,
+  initialPayerId,
 }: CrossTaxiSponsorshipModalProps) {
   const effectiveFare = fare !== undefined ? fare : getFareForDate(currentDate);
   const [payerMode, setPayerMode] = useState<'select' | 'custom'>('select');
-  const [selectedPayerId, setSelectedPayerId] = useState<string>('');
+  const [selectedPayerId, setSelectedPayerId] = useState<string>(initialPayerId || '');
   const [customPayerName, setCustomPayerName] = useState('');
+
+  useEffect(() => {
+    if (isOpen && initialPayerId) {
+      setSelectedPayerId(initialPayerId);
+      setPayerMode('select');
+    }
+  }, [isOpen, initialPayerId]);
 
   // Target Service Selection: defaults to 'CURRENT', or can be a specific ServiceType or 'ALL'
   const [targetServiceFilter, setTargetServiceFilter] = useState<string>('CURRENT');
@@ -361,292 +370,379 @@ export function CrossTaxiSponsorshipModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-3 backdrop-blur-sm animate-fade-in">
-      <div className="card max-h-[92vh] w-full max-w-xl overflow-y-auto border-amber-500/40 bg-card p-4 sm:p-5 shadow-2xl space-y-4">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-line pb-3">
-          <div className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-500/20 text-amber-300">
-              <HeartHandshake className="h-4 w-4" />
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-2 sm:p-4 backdrop-blur-sm animate-fade-in">
+      <div className="card flex flex-col max-h-[92vh] w-full max-w-xl border-2 border-amber-500/50 bg-card shadow-2xl overflow-hidden rounded-2xl">
+        {/* Sticky Header */}
+        <div className="shrink-0 flex items-center justify-between border-b border-line bg-card/95 p-4 sm:p-5 pb-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/40 shrink-0">
+              <HeartHandshake className="h-5 w-5" />
             </div>
-            <div>
-              <h2 className="font-display text-sm sm:text-base font-bold text-ink flex items-center gap-2">
-                Cross-Taxi Sponsorships
+            <div className="min-w-0">
+              <h2 className="font-display text-sm sm:text-base font-bold text-ink flex items-center gap-2 flex-wrap">
+                <span>Cross-Taxi Sponsorship</span>
                 {externalSponsees.length > 0 && (
-                  <span className="rounded bg-amber-500/20 px-2 py-0.5 text-xs font-bold text-amber-300 border border-amber-500/30">
+                  <span className="rounded-full bg-amber-500/25 px-2 py-0.5 text-xs font-bold text-amber-300 border border-amber-500/40">
                     {externalSponsees.length} Active (+R{totalExternalCash})
                   </span>
                 )}
               </h2>
-              <p className="text-[11px] text-muted">
-                Collect fare cash in <span className="text-amber-300 font-semibold">{thisVehicleName}</span> for one or multiple riders in other vehicles
+              <p className="text-[11px] text-muted truncate">
+                Collect fare cash in <span className="text-amber-300 font-semibold">{thisVehicleName}</span> for riders in other vehicles
               </p>
             </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg p-1 text-muted hover:bg-card-2 hover:text-ink transition-colors"
+            className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink transition-colors shrink-0"
+            title="Close modal"
           >
             <X className="h-5 w-5" />
           </button>
         </div>
 
-        {/* Existing Sponsees List */}
-        {externalSponsees.length > 0 && (
-          <div className="space-y-2 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
-            <div className="flex items-center justify-between text-xs font-bold text-amber-300">
-              <span>Active Sponsees Paid from this Taxi:</span>
-              <span className="font-mono text-ink">Total: +R{totalExternalCash}</span>
-            </div>
-            <div className="divide-y divide-line/60 max-h-40 overflow-y-auto pr-1">
-              {externalSponsees.map((s) => (
-                <div key={s.id} className="flex items-center justify-between py-2 text-xs">
-                  <div className="min-w-0 pr-2">
-                    <div className="font-semibold text-ink flex items-center gap-1.5 flex-wrap">
-                      <span>{s.sponseeName}</span>
-                      <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-300 border border-amber-500/30 font-medium">
-                        In {s.taxiName}
-                      </span>
-                      {s.targetServiceLabel && (
-                        <span className="rounded bg-card-2 px-1.5 py-0.5 text-[9px] text-muted border border-line">
-                          {s.targetServiceLabel}
+        {/* Scrollable Content Body */}
+        <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
+          {/* Existing Sponsees List */}
+          {externalSponsees.length > 0 && (
+            <div className="space-y-2 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
+              <div className="flex items-center justify-between text-xs font-bold text-amber-300">
+                <span>Active Sponsees Paid from this Taxi:</span>
+                <span className="font-mono text-ink">Total: +R{totalExternalCash}</span>
+              </div>
+              <div className="divide-y divide-line/60 max-h-40 overflow-y-auto pr-1">
+                {externalSponsees.map((s) => (
+                  <div key={s.id} className="flex items-center justify-between py-2 text-xs">
+                    <div className="min-w-0 pr-2">
+                      <div className="font-semibold text-ink flex items-center gap-1.5 flex-wrap">
+                        <span>{s.sponseeName}</span>
+                        <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-300 border border-amber-500/30 font-medium">
+                          In {s.taxiName}
                         </span>
-                      )}
-                      <span className="font-mono font-bold text-emerald-400">R{s.amount}</span>
+                        {s.targetServiceLabel && (
+                          <span className="rounded bg-card-2 px-1.5 py-0.5 text-[9px] text-muted border border-line">
+                            {s.targetServiceLabel}
+                          </span>
+                        )}
+                        <span className="font-mono font-bold text-emerald-400">R{s.amount}</span>
+                      </div>
+                      <div className="text-[11px] text-muted">
+                        Paid by: <span className="text-ink font-medium">{s.payerName}</span>
+                        {s.note && <span> · "{s.note}"</span>}
+                      </div>
                     </div>
-                    <div className="text-[11px] text-muted">
-                      Paid by: <span className="text-ink font-medium">{s.payerName}</span>
-                      {s.note && <span> · "{s.note}"</span>}
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onRemoveSponsee(s.id)}
+                      className="rounded p-1 text-crimson-400 hover:bg-crimson-500/20 transition-colors shrink-0"
+                      title="Remove sponsorship"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => onRemoveSponsee(s.id)}
-                    className="rounded p-1 text-crimson-400 hover:bg-crimson-500/20 transition-colors shrink-0"
-                    title="Remove sponsorship"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Add Sponsorship Form */}
-        <div className="rounded-xl border border-line bg-card-2/50 p-3.5 text-xs space-y-3.5">
-          <div className="font-bold text-ink flex items-center justify-between text-xs uppercase tracking-wide">
-            <div className="flex items-center gap-1.5">
-              <Plus className="h-3.5 w-3.5 text-amber-400" />
-              <span>Record Cross Sponsorship (Multi-Person Supported)</span>
-            </div>
-            {selectedSponsees.length > 0 && (
-              <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/40">
-                {selectedSponsees.length} Selected (R{totalSelectedCash})
-              </span>
-            )}
-          </div>
-
-          {errorMsg && (
-            <div className="rounded-lg border border-crimson-500/40 bg-crimson-500/10 p-2.5 text-xs text-crimson-300 flex items-center gap-1.5 animate-fade-in">
-              <AlertCircle className="h-4 w-4 shrink-0" />
-              <span>{errorMsg}</span>
-            </div>
-          )}
-
-          {successMsg && (
-            <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-2.5 text-xs text-emerald-300 flex items-center gap-1.5 animate-fade-in">
-              <Check className="h-4 w-4 shrink-0 text-emerald-400" />
-              <span>{successMsg}</span>
-            </div>
-          )}
-
-          {/* Step 1: Who is paying? */}
-          <div className="space-y-1.5">
-            <label className="block font-semibold text-ink text-[11px]">
-              1. Who is paying? (Passenger in {thisVehicleName}):
-            </label>
-            <div className="flex gap-2 text-[11px]">
-              <button
-                type="button"
-                onClick={() => setPayerMode('select')}
-                className={`px-2 py-1 rounded text-[11px] font-medium border ${
-                  payerMode === 'select'
-                    ? 'border-amber-500/60 bg-amber-500/20 text-amber-200'
-                    : 'border-line text-muted hover:text-ink'
-                }`}
-              >
-                Select from this taxi ({thisVehicleRiders.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setPayerMode('custom')}
-                className={`px-2 py-1 rounded text-[11px] font-medium border ${
-                  payerMode === 'custom'
-                    ? 'border-amber-500/60 bg-amber-500/20 text-amber-200'
-                    : 'border-line text-muted hover:text-ink'
-                }`}
-              >
-                Enter Custom Name
-              </button>
-            </div>
-
-            {payerMode === 'select' ? (
-              <select
-                value={selectedPayerId}
-                onChange={(e) => setSelectedPayerId(e.target.value)}
-                className="input-field py-1.5 text-xs"
-              >
-                <option value="">-- Choose passenger in this vehicle --</option>
-                {thisVehicleRiders.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.fullName} {r.structure ? `(${r.structure})` : ''} - {r.stop}
-                  </option>
                 ))}
-              </select>
-            ) : (
-              <input
-                type="text"
-                value={customPayerName}
-                onChange={(e) => setCustomPayerName(e.target.value)}
-                placeholder="Enter payer name (e.g. John Dlamini)"
-                className="input-field py-1.5 text-xs"
-              />
+              </div>
+            </div>
+          )}
+
+          {/* Add Sponsorship Form */}
+          <div className="rounded-xl border border-line bg-card-2/50 p-3.5 sm:p-4 text-xs space-y-3.5">
+            <div className="font-bold text-ink flex items-center justify-between text-xs uppercase tracking-wide">
+              <div className="flex items-center gap-1.5">
+                <Plus className="h-3.5 w-3.5 text-amber-400" />
+                <span>Record New Sponsorship</span>
+              </div>
+              {selectedSponsees.length > 0 && (
+                <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/40">
+                  {selectedSponsees.length} Selected (R{totalSelectedCash})
+                </span>
+              )}
+            </div>
+
+            {errorMsg && (
+              <div className="rounded-lg border border-crimson-500/40 bg-crimson-500/10 p-2.5 text-xs text-crimson-300 flex items-center gap-1.5 animate-fade-in">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>{errorMsg}</span>
+              </div>
             )}
-          </div>
 
-          {/* Step 2: Service Selection & Search Rider(s) */}
-          <div className="space-y-2 pt-1 border-t border-line/60">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
+            {successMsg && (
+              <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-2.5 text-xs text-emerald-300 flex items-center gap-1.5 animate-fade-in font-bold">
+                <Check className="h-4 w-4 shrink-0 text-emerald-400" />
+                <span>{successMsg}</span>
+              </div>
+            )}
+
+            {/* Step 1: Who is paying? */}
+            <div className="space-y-1.5">
               <label className="block font-semibold text-ink text-[11px]">
-                2. Which service is the other passenger travelling in?
+                1. Who is paying? (Passenger in {thisVehicleName}):
               </label>
-              {currentDate && (
-                <span className="text-[10px] text-muted font-mono">{shortDate(currentDate)}</span>
-              )}
-            </div>
-
-            {/* Service selector dropdown */}
-            <div className="relative">
-              <select
-                value={targetServiceFilter}
-                onChange={(e) => {
-                  setTargetServiceFilter(e.target.value);
-                }}
-                className="input-field py-1.5 text-xs font-semibold bg-card cursor-pointer border-amber-500/40 text-amber-300"
-              >
-                <option value="CURRENT">
-                  ⭐ Current Service: {activeServiceLabel}
-                </option>
-                <option value="ALL">
-                  🌐 All Services on {currentDate || 'this date'}
-                </option>
-                <optgroup label="Specific Services Today:">
-                  {SERVICE_TYPES.map((st) => (
-                    <option key={st.value} value={st.value}>
-                      {st.label}
-                    </option>
-                  ))}
-                </optgroup>
-              </select>
-              {loadingServices && (
-                <div className="absolute right-8 top-1/2 -translate-y-1/2 flex items-center gap-1 text-[10px] text-amber-300 font-medium">
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  <span>Loading vehicles…</span>
-                </div>
-              )}
-            </div>
-
-            {/* Search Box */}
-            <div className="space-y-1.5 pt-1">
-              <div className="flex items-center justify-between">
-                <label className="block font-semibold text-ink text-[11px]">
-                  Search passenger name(s) across vehicles:
-                </label>
+              <div className="flex gap-2 text-[11px]">
                 <button
                   type="button"
-                  onClick={() => setIsAddingCustomSponsee(!isAddingCustomSponsee)}
-                  className="text-[11px] text-amber-300 hover:text-amber-200 underline font-medium"
+                  onClick={() => setPayerMode('select')}
+                  className={`px-2 py-1 rounded text-[11px] font-medium border ${
+                    payerMode === 'select'
+                      ? 'border-amber-500/60 bg-amber-500/20 text-amber-200'
+                      : 'border-line text-muted hover:text-ink'
+                  }`}
                 >
-                  {isAddingCustomSponsee ? 'Hide Custom Entry' : '+ Custom Name Sponsee'}
+                  Select from this taxi ({thisVehicleRiders.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPayerMode('custom')}
+                  className={`px-2 py-1 rounded text-[11px] font-medium border ${
+                    payerMode === 'custom'
+                      ? 'border-amber-500/60 bg-amber-500/20 text-amber-200'
+                      : 'border-line text-muted hover:text-ink'
+                  }`}
+                >
+                  Enter Custom Name
                 </button>
               </div>
 
-              {/* Custom Sponsee Input Section */}
-              {isAddingCustomSponsee && (
-                <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 space-y-2 animate-fade-in">
-                  <p className="text-[11px] text-amber-200 font-semibold">
-                    Add passenger manually if not in pre-allocated list:
-                  </p>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <input
-                      type="text"
-                      placeholder="Passenger Name (e.g. Sipho)"
-                      value={customSponseeName}
-                      onChange={(e) => setCustomSponseeName(e.target.value)}
-                      className="input-field py-1 text-xs"
-                    />
-                    <input
-                      type="text"
-                      placeholder="Vehicle / Taxi Name (e.g. Taxi 2)"
-                      value={customSponseeTaxi}
-                      onChange={(e) => setCustomSponseeTaxi(e.target.value)}
-                      className="input-field py-1 text-xs"
-                    />
-                    <input
-                      type="text"
-                      placeholder="Structure (e.g. S1)"
-                      value={customSponseeStructure}
-                      onChange={(e) => setCustomSponseeStructure(e.target.value)}
-                      className="input-field py-1 text-xs"
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleAddCustomSponsee}
-                    className="btn-amber text-xs py-1 px-3 w-full font-bold"
-                  >
-                    Add to Sponsorship List (+R{effectiveFare})
-                  </button>
-                </div>
-              )}
-
-              <div className="relative">
-                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+              {payerMode === 'select' ? (
+                <select
+                  value={selectedPayerId}
+                  onChange={(e) => setSelectedPayerId(e.target.value)}
+                  className="input-field py-1.5 text-xs font-semibold"
+                >
+                  <option value="">-- Choose passenger in this vehicle --</option>
+                  {thisVehicleRiders.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.fullName} {r.structure ? `(${r.structure})` : ''} - {r.stop}
+                    </option>
+                  ))}
+                </select>
+              ) : (
                 <input
                   type="text"
-                  value={sponseeSearchQuery}
-                  onChange={(e) => setSponseeSearchQuery(e.target.value)}
-                  placeholder="Type name or structure (e.g. Sipho, Sarah, S2)... select multiple"
-                  className="input-field py-1.5 pl-8 text-xs font-medium"
+                  value={customPayerName}
+                  onChange={(e) => setCustomPayerName(e.target.value)}
+                  placeholder="Enter payer name (e.g. John Dlamini)"
+                  className="input-field py-1.5 text-xs"
                 />
-                {sponseeSearchQuery && (
-                  <button
-                    type="button"
-                    onClick={() => setSponseeSearchQuery('')}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted hover:text-ink text-xs"
-                  >
-                    Clear
-                  </button>
+              )}
+            </div>
+
+            {/* Step 2: Service Selection & Search Rider(s) */}
+            <div className="space-y-2 pt-1 border-t border-line/60">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
+                <label className="block font-semibold text-ink text-[11px]">
+                  2. Which service is the other passenger travelling in?
+                </label>
+                {currentDate && (
+                  <span className="text-[10px] text-muted font-mono">{shortDate(currentDate)}</span>
                 )}
               </div>
+
+              {/* Service selector dropdown */}
+              <div className="relative">
+                <select
+                  value={targetServiceFilter}
+                  onChange={(e) => {
+                    setTargetServiceFilter(e.target.value);
+                  }}
+                  className="input-field py-1.5 text-xs font-semibold bg-card cursor-pointer border-amber-500/40 text-amber-300"
+                >
+                  <option value="CURRENT">
+                    ⭐ Current Service: {activeServiceLabel}
+                  </option>
+                  <option value="ALL">
+                    🌐 All Services on {currentDate || 'this date'}
+                  </option>
+                  <optgroup label="Specific Services Today:">
+                    {SERVICE_TYPES.map((st) => (
+                      <option key={st.value} value={st.value}>
+                        {st.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                </select>
+                {loadingServices && (
+                  <div className="absolute right-8 top-1/2 -translate-y-1/2 flex items-center gap-1 text-[10px] text-amber-300 font-medium">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    <span>Loading vehicles…</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Search Box */}
+              <div className="space-y-1.5 pt-1">
+                <div className="flex items-center justify-between">
+                  <label className="block font-semibold text-ink text-[11px]">
+                    Search passenger name(s) across vehicles:
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setIsAddingCustomSponsee(!isAddingCustomSponsee)}
+                    className="text-[11px] text-amber-300 hover:text-amber-200 underline font-medium"
+                  >
+                    {isAddingCustomSponsee ? 'Hide Custom Entry' : '+ Custom Name Sponsee'}
+                  </button>
+                </div>
+
+                {/* Custom Sponsee Input Section */}
+                {isAddingCustomSponsee && (
+                  <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 space-y-2 animate-fade-in">
+                    <p className="text-[11px] text-amber-200 font-semibold">
+                      Add passenger manually if not in pre-allocated list:
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <input
+                        type="text"
+                        placeholder="Passenger Name (e.g. Sipho)"
+                        value={customSponseeName}
+                        onChange={(e) => setCustomSponseeName(e.target.value)}
+                        className="input-field py-1 text-xs"
+                      />
+                      <input
+                        type="text"
+                        placeholder="Vehicle / Taxi Name (e.g. Taxi 2)"
+                        value={customSponseeTaxi}
+                        onChange={(e) => setCustomSponseeTaxi(e.target.value)}
+                        className="input-field py-1 text-xs"
+                      />
+                      <input
+                        type="text"
+                        placeholder="Structure (e.g. S1)"
+                        value={customSponseeStructure}
+                        onChange={(e) => setCustomSponseeStructure(e.target.value)}
+                        className="input-field py-1 text-xs"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleAddCustomSponsee}
+                      className="btn-amber text-xs py-1.5 px-3 w-full font-bold shadow-xs"
+                    >
+                      Add to Sponsorship List (+R{effectiveFare})
+                    </button>
+                  </div>
+                )}
+
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+                  <input
+                    type="text"
+                    value={sponseeSearchQuery}
+                    onChange={(e) => setSponseeSearchQuery(e.target.value)}
+                    placeholder="Type name or structure (e.g. Sipho, Sarah, S2)... select passenger"
+                    className="input-field py-2 pl-8 pr-16 text-xs font-medium"
+                  />
+                  {sponseeSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSponseeSearchQuery('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted hover:text-ink text-xs font-semibold px-1"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Live Search Candidate Results with Distinct Action Buttons */}
+              {sponseeSearchQuery.trim().length > 0 && (
+                <div className="rounded-xl border border-line bg-card p-2 space-y-1.5 max-h-56 overflow-y-auto shadow-inner">
+                  <div className="text-[10px] text-muted font-bold uppercase px-2 py-0.5 flex items-center justify-between">
+                    <span>Matching candidates ({searchMatches.length}):</span>
+                    <span>Tap button to select</span>
+                  </div>
+                  {searchMatches.length > 0 ? (
+                    searchMatches.map((candidate) => {
+                      const isSelected = selectedSponsees.some((s) => s.id === String(candidate.passenger.id));
+                      return (
+                        <div
+                          key={`${candidate.serviceValue}-${candidate.vehicle.id}-${candidate.passenger.id}`}
+                          className={`flex w-full items-center justify-between rounded-lg p-2 text-left text-xs transition-colors border ${
+                            isSelected
+                              ? 'bg-amber-500/20 border-amber-500/70 text-amber-200 shadow-xs'
+                              : 'hover:bg-card-2 border-line/60 bg-card'
+                          }`}
+                        >
+                          <div className="min-w-0 pr-2 flex items-center gap-2.5">
+                            <button
+                              type="button"
+                              onClick={() => toggleCandidate(candidate)}
+                              className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition-all ${
+                                isSelected
+                                  ? 'bg-amber-400 border-amber-400 text-black'
+                                  : 'border-line text-transparent hover:border-amber-400'
+                              }`}
+                              title={isSelected ? 'Remove from selection' : 'Select passenger'}
+                            >
+                              <Check className="h-3.5 w-3.5 stroke-[3]" />
+                            </button>
+                            <div>
+                              <div className="font-bold text-ink flex items-center gap-1.5 flex-wrap">
+                                <span>{candidate.passenger.fullName}</span>
+                                {candidate.passenger.structure && (
+                                  <span className="rounded bg-card-2 px-1 py-0.2 text-[9px] text-muted border border-line">
+                                    {candidate.passenger.structure}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[10px] text-muted truncate">
+                                Stop: {candidate.passenger.stop || 'Standard'}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <div className="flex flex-col items-end gap-0.5">
+                              <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/30">
+                                {candidate.vehicle.name}
+                              </span>
+                              {candidate.serviceLabel && (
+                                <span className="text-[9px] text-muted truncate max-w-[120px]">
+                                  {candidate.serviceLabel}
+                                </span>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => toggleCandidate(candidate)}
+                              className={`px-2.5 py-1 rounded-md text-xs font-bold border transition-all ${
+                                isSelected
+                                  ? 'bg-emerald-500 text-black border-emerald-400 shadow-xs'
+                                  : 'bg-amber-400 hover:bg-amber-300 text-black border-amber-400 font-extrabold shadow-xs hover:scale-105'
+                              }`}
+                            >
+                              {isSelected ? '✓ Selected' : `+ Select (R${effectiveFare})`}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="p-3 text-center text-xs text-muted space-y-1">
+                      <p className="font-semibold text-ink">No passenger found matching "{sponseeSearchQuery.trim()}"</p>
+                      <p className="text-[11px] text-muted">
+                        Use the "+ Custom Name Sponsee" button above if you need to sponsor someone not in the system yet.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Selected Sponsees Cards (Multi-Person Basket) */}
             {selectedSponsees.length > 0 && (
-              <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-3 space-y-2 animate-fade-in">
+              <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-3 space-y-2.5 animate-fade-in">
                 <div className="flex items-center justify-between text-xs font-bold text-amber-300">
                   <div className="flex items-center gap-1.5">
                     <Check className="h-4 w-4 text-emerald-400" />
                     <span>Passengers to Sponsor ({selectedSponsees.length}):</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="font-mono text-ink">Total Cash: R{totalSelectedCash}</span>
+                    <span className="font-mono text-ink font-bold">Total Cash: R{totalSelectedCash}</span>
                     <button
                       type="button"
                       onClick={() => setSelectedSponsees([])}
-                      className="text-[10px] text-crimson-300 hover:text-crimson-200 underline"
+                      className="text-[10px] text-crimson-300 hover:text-crimson-200 underline font-medium"
                     >
                       Clear all
                     </button>
@@ -657,7 +753,7 @@ export function CrossTaxiSponsorshipModal({
                   {selectedSponsees.map((item) => (
                     <div
                       key={item.id}
-                      className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-card p-2 text-xs"
+                      className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-card p-2 text-xs shadow-xs"
                     >
                       <div className="min-w-0 flex-1">
                         <div className="font-bold text-ink flex items-center gap-1.5 flex-wrap">
@@ -681,7 +777,7 @@ export function CrossTaxiSponsorshipModal({
                       {/* Custom fare per person & remove */}
                       <div className="flex items-center gap-1.5 shrink-0">
                         <div className="flex items-center gap-1">
-                          <span className="text-[10px] text-muted font-mono">R</span>
+                          <span className="text-[10px] text-muted font-mono font-bold">R</span>
                           <input
                             type="number"
                             min={0}
@@ -703,129 +799,100 @@ export function CrossTaxiSponsorshipModal({
                     </div>
                   ))}
                 </div>
-              </div>
-            )}
 
-            {/* Live Search Candidate Results with Multi-Select checkmarks */}
-            {sponseeSearchQuery.trim().length > 0 && (
-              <div className="rounded-lg border border-line bg-card p-1.5 space-y-1 max-h-52 overflow-y-auto">
-                <div className="text-[10px] text-muted font-semibold uppercase px-2 py-0.5">
-                  Click to select / unselect candidates ({searchMatches.length} matching):
-                </div>
-                {searchMatches.length > 0 ? (
-                  searchMatches.map((candidate) => {
-                    const isSelected = selectedSponsees.some((s) => s.id === String(candidate.passenger.id));
-                    return (
-                      <button
-                        key={`${candidate.serviceValue}-${candidate.vehicle.id}-${candidate.passenger.id}`}
-                        type="button"
-                        onClick={() => toggleCandidate(candidate)}
-                        className={`flex w-full items-center justify-between rounded px-2.5 py-1.5 text-left text-xs transition-colors border ${
-                          isSelected
-                            ? 'bg-amber-500/20 border-amber-500/60 text-amber-200'
-                            : 'hover:bg-card-2 border-transparent hover:border-line'
-                        }`}
-                      >
-                        <div className="min-w-0 pr-2 flex items-center gap-2">
-                          <div
-                            className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
-                              isSelected
-                                ? 'bg-amber-500 border-amber-500 text-black'
-                                : 'border-line text-transparent'
-                            }`}
-                          >
-                            <Check className="h-3 w-3 stroke-[3]" />
-                          </div>
-                          <div>
-                            <div className="font-semibold text-ink flex items-center gap-1.5 flex-wrap">
-                              <span>{candidate.passenger.fullName}</span>
-                              {candidate.passenger.structure && (
-                                <span className="rounded bg-card-2 px-1 py-0.2 text-[9px] text-muted border border-line">
-                                  {candidate.passenger.structure}
-                                </span>
-                              )}
-                            </div>
-                            <div className="text-[10px] text-muted truncate">
-                              Stop: {candidate.passenger.stop || 'Standard'}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="flex flex-col items-end gap-0.5 shrink-0">
-                          <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/30">
-                            {candidate.vehicle.name}
-                          </span>
-                          {candidate.serviceLabel && (
-                            <span className="text-[9px] text-muted truncate max-w-[130px]">
-                              {candidate.serviceLabel}
-                            </span>
-                          )}
-                        </div>
-                      </button>
-                    );
-                  })
-                ) : (
-                  <div className="p-3 text-center text-xs text-muted space-y-1">
-                    <p className="font-semibold text-ink">No passenger found matching "{sponseeSearchQuery.trim()}"</p>
-                    <p className="text-[11px] text-muted">
-                      Use the "+ Custom Name Sponsee" button above if you need to sponsor someone not in the system yet.
-                    </p>
+                {/* In-place Immediate Action Confirmation Banner */}
+                <div className="rounded-xl border-2 border-amber-500/80 bg-gradient-to-r from-amber-500/25 via-amber-500/15 to-card p-3 shadow-md flex flex-col sm:flex-row items-center justify-between gap-3 animate-fade-in">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-amber-400 text-black font-black text-sm shadow-sm ring-1 ring-amber-300">
+                      R{totalSelectedCash}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="font-black text-sm text-ink truncate flex items-center gap-2">
+                        <span>Collect R{totalSelectedCash} Cash Now</span>
+                        <span className="rounded bg-emerald-500/20 px-1.5 py-0.2 text-[10px] font-bold text-emerald-300 border border-emerald-500/30">
+                          {selectedSponsees.length} {selectedSponsees.length === 1 ? 'person' : 'people'}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-amber-200/90 font-medium truncate">
+                        {selectedSponsees.length === 1
+                          ? `Paying for ${selectedSponsees[0].fullName} in ${selectedSponsees[0].vehicleName}`
+                          : `Paying for ${selectedSponsees.map((s) => s.fullName).join(', ')}`}
+                      </div>
+                    </div>
                   </div>
-                )}
+                  <button
+                    type="button"
+                    onClick={handleAdd}
+                    disabled={isSubmitting}
+                    className="w-full sm:w-auto shrink-0 py-2 px-4 rounded-xl font-black text-xs sm:text-sm flex items-center justify-center gap-1.5 shadow-lg bg-gradient-to-r from-amber-400 to-amber-300 hover:from-amber-300 hover:to-amber-200 text-black ring-2 ring-amber-400/80 active:scale-[0.98] transition-all cursor-pointer"
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin text-black" />
+                        <span>Confirming…</span>
+                      </>
+                    ) : (
+                      <>
+                        <Check className="h-4 w-4 text-black stroke-[3]" />
+                        <span>Collect R{totalSelectedCash} & Confirm</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
             )}
-          </div>
 
-          {/* Step 3: Optional General Note */}
-          <div className="pt-1 border-t border-line/60">
-            <label className="block font-semibold text-ink text-[11px] mb-1">Optional Note for All Sponsees:</label>
-            <input
-              type="text"
-              value={sponsorNote}
-              onChange={(e) => setSponsorNote(e.target.value)}
-              placeholder="e.g. Cell leader paying for attendees / Parent paying for family"
-              className="input-field py-1.5 text-xs"
-            />
+            {/* Step 3: Optional General Note */}
+            <div className="pt-1 border-t border-line/60">
+              <label className="block font-semibold text-ink text-[11px] mb-1">Optional Note for All Sponsees:</label>
+              <input
+                type="text"
+                value={sponsorNote}
+                onChange={(e) => setSponsorNote(e.target.value)}
+                placeholder="e.g. Cell leader paying for attendees / Parent paying for family"
+                className="input-field py-1.5 text-xs"
+              />
+            </div>
           </div>
-
-          {/* Submit Button (Multi-person enabled) */}
-          <button
-            type="button"
-            onClick={handleAdd}
-            disabled={isSubmitting || selectedSponsees.length === 0}
-            className={`w-full py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm rounded-xl transition-all ${
-              selectedSponsees.length > 0 && !isSubmitting
-                ? 'btn-amber cursor-pointer hover:scale-[1.01]'
-                : 'bg-card-2 border border-line text-muted cursor-not-allowed opacity-60'
-            }`}
-          >
-            {isSubmitting ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                <span>Auto-Sponsoring {selectedSponsees.length} passenger{selectedSponsees.length > 1 ? 's' : ''}…</span>
-              </>
-            ) : selectedSponsees.length > 0 ? (
-              <>
-                <HeartHandshake className="h-4 w-4" />
-                <span>
-                  Collect +R{totalSelectedCash} & Auto-Sponsor {selectedSponsees.length}{' '}
-                  {selectedSponsees.length === 1 ? `(${selectedSponsees[0].fullName})` : `Passengers`}
-                </span>
-              </>
-            ) : (
-              <span>Select one or more passengers above to record sponsorship</span>
-            )}
-          </button>
         </div>
 
-        {/* Footer */}
-        <div className="flex justify-end pt-2 border-t border-line">
+        {/* Sticky Footer with UNMISSABLE Prominent Collect R40 Button */}
+        <div className="shrink-0 border-t-2 border-line/80 bg-card/95 p-3.5 sm:p-4 backdrop-blur-md flex flex-col sm:flex-row items-center gap-3 shadow-2xl">
           <button
             type="button"
             onClick={onClose}
-            className="btn-secondary text-xs px-4 py-1.5"
+            className="w-full sm:w-auto btn-secondary text-xs px-4 py-3 order-2 sm:order-1 font-semibold"
           >
-            Done
+            {externalSponsees.length > 0 ? 'Close / Done' : 'Cancel'}
           </button>
+
+          {selectedSponsees.length > 0 ? (
+            <button
+              type="button"
+              onClick={handleAdd}
+              disabled={isSubmitting}
+              className="w-full sm:flex-1 py-3.5 px-5 rounded-xl font-black text-sm sm:text-base flex items-center justify-center gap-2 shadow-xl bg-gradient-to-r from-amber-400 via-amber-300 to-amber-400 hover:from-amber-300 hover:to-amber-200 text-black ring-2 ring-amber-400/90 active:scale-[0.99] transition-all order-1 sm:order-2 cursor-pointer animate-pulse hover:animate-none"
+            >
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="h-5 w-5 animate-spin text-black" />
+                  <span>Recording Sponsorship…</span>
+                </>
+              ) : (
+                <>
+                  <HeartHandshake className="h-5 w-5 text-black stroke-[2.5]" />
+                  <span>
+                    Collect R{totalSelectedCash} & Confirm {selectedSponsees.length > 1 ? `${selectedSponsees.length} Sponsorships` : 'Sponsorship'}
+                  </span>
+                </>
+              )}
+            </button>
+          ) : (
+            <div className="w-full sm:flex-1 py-3 px-4 rounded-xl border border-dashed border-amber-500/40 bg-amber-500/10 text-center text-xs font-semibold text-amber-300/90 flex items-center justify-center gap-2 order-1 sm:order-2">
+              <HeartHandshake className="h-4 w-4 text-amber-400" />
+              <span>Search and select a passenger above to collect R{effectiveFare} sponsorship</span>
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -445,6 +445,17 @@ app.post('/api/rehearsal-template', (req, res) => {
   }
 });
 
+// Get specific manifest timestamp only (low mobile data / egress)
+app.get('/api/manifests/:key/timestamp', (req, res) => {
+  const filePath = getSafeManifestPath(req.params.key);
+  if (!filePath || !fs.existsSync(filePath)) {
+    res.status(404).json({ error: 'Manifest not found', date: req.params.key });
+    return;
+  }
+  const manifest = readJsonFile<{ date?: string; updated_at?: string }>(filePath, { date: req.params.key });
+  res.json({ date: req.params.key, updated_at: manifest.updated_at || null });
+});
+
 // Save/Upsert specific manifest
 app.post('/api/manifests/:key', (req, res) => {
   const filePath = getSafeManifestPath(req.params.key);
@@ -481,8 +492,17 @@ app.post('/api/manifests/:key', (req, res) => {
     updated_at?: string;
   }>(filePath, { date: key, signups: [], vehicles: [] });
 
+  const isAdminRequest = Boolean(
+    req.body?.isAdmin ||
+    req.body?.admin ||
+    req.body?.role === 'admin' ||
+    req.headers['x-admin'] ||
+    (req.headers.referer && req.headers.referer.includes('/admin'))
+  );
+
   // TASK 2: Prevent stale local/server writes from overwriting newer records
-  if (existingManifest.updated_at && manifest.updated_at) {
+  // For admin requests, allow force write so dispatch allocations stick
+  if (!isAdminRequest && existingManifest.updated_at && manifest.updated_at) {
     const diskTime = new Date(existingManifest.updated_at).getTime();
     const incomingTime = new Date(manifest.updated_at).getTime();
     if (incomingTime < diskTime) {
@@ -507,7 +527,7 @@ app.post('/api/manifests/:key', (req, res) => {
   }) => {
     const sId = String(incV.id);
     const existV = existingVehMap.get(sId);
-    if (existV?.submitted && !incV.submitted) {
+    if (existV?.submitted && !incV.submitted && !isAdminRequest) {
       return {
         ...incV,
         submitted: true,
@@ -527,21 +547,16 @@ app.post('/api/manifests/:key', (req, res) => {
     return incV;
   });
 
-  // Preserve any vehicles that were in existing disk file but missing from partial payload
-  const incomingVehIds = new Set((manifest.vehicles || []).map((v: { id: string }) => String(v.id)));
-  for (const existV of existingManifest.vehicles || []) {
-    if (!incomingVehIds.has(String(existV.id))) {
-      mergedVehicles.push(existV);
+  // Preserve any vehicles that were in existing disk file ONLY for non-admin requests
+  // For Admin requests, the admin's vehicle fleet list is authoritative (allows deleting vehicles!)
+  if (!isAdminRequest) {
+    const incomingVehIds = new Set((manifest.vehicles || []).map((v: { id: string }) => String(v.id)));
+    for (const existV of existingManifest.vehicles || []) {
+      if (!incomingVehIds.has(String(existV.id))) {
+        mergedVehicles.push(existV);
+      }
     }
   }
-
-  const isAdminRequest = Boolean(
-    req.body?.isAdmin ||
-    req.body?.admin ||
-    req.body?.role === 'admin' ||
-    req.headers['x-admin'] ||
-    (req.headers.referer && req.headers.referer.includes('/admin'))
-  );
 
   let mergedSignups = Array.isArray(manifest.signups) ? manifest.signups : (existingManifest.signups || []);
   if (!isAdminRequest && Array.isArray(manifest.signups) && Array.isArray(existingManifest.signups) && existingManifest.signups.length > 0) {
@@ -1042,6 +1057,12 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
 
   // 5. Broadcast live updates to all clients
   broadcastSse('manifest_updated', { key, manifest, timestamp: Date.now() });
+  broadcastSse('live_action', {
+    type: 'vehicle_submitted',
+    vehicleId: String(vehicleId),
+    repName: (repName || '').trim(),
+    timestamp: Date.now(),
+  });
   broadcastSse('ledger_updated', { timestamp: Date.now() });
   broadcastSse('sponsorships_updated', { timestamp: Date.now() });
 
@@ -1135,6 +1156,11 @@ app.post('/api/manifests/:key/reopen-vehicle', (req, res) => {
   }
 
   broadcastSse('manifest_updated', { key, manifest, timestamp: Date.now() });
+  broadcastSse('live_action', {
+    type: 'vehicle_reopened',
+    vehicleId: String(vehicleId),
+    timestamp: Date.now(),
+  });
   broadcastSse('ledger_updated', { timestamp: Date.now() });
   broadcastSse('sponsorships_updated', { timestamp: Date.now() });
 

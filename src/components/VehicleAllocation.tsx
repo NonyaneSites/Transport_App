@@ -120,8 +120,12 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     }
 
     if (!isLocalMutationPendingRef.current && !saveDebounceTimerRef.current) {
-      latestManifestRef.current = manifest;
-      setLocalManifest(manifest);
+      const curTime = latestManifestRef.current?.updated_at ? new Date(latestManifestRef.current.updated_at).getTime() : 0;
+      const incTime = manifest.updated_at ? new Date(manifest.updated_at).getTime() : 0;
+      if (incTime >= curTime) {
+        latestManifestRef.current = manifest;
+        setLocalManifest(manifest);
+      }
     }
   }, [manifest]);
 
@@ -237,7 +241,12 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
         console.error('Cloud manifest save error:', err);
       } finally {
         setSaving(false);
-        isLocalMutationPendingRef.current = false;
+        // Retain pending guard for 800ms after save completes so that any trailing echoes or delayed parent renders never clobber admin edits
+        setTimeout(() => {
+          if (!saveDebounceTimerRef.current) {
+            isLocalMutationPendingRef.current = false;
+          }
+        }, 800);
       }
     }, 150);
   }, [onSave]);

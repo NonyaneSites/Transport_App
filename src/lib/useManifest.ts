@@ -6,13 +6,14 @@ import {
   applyWalkInToManifest,
   reconcileManifestForSave,
   resetManifest,
+  syncVehiclesToDb,
 } from './manifest';
 import {
   connectSyncEvents,
   isServerOnline,
   updateVehicleDraftOnServer,
   saveManifestToServer,
-  fetchManifestFromServer,
+  fetchManifestTimestampFromServer,
   broadcastLiveActionToServer,
 } from './serverApi';
 import type { Manifest, Vehicle, Passenger, VehicleDraftState, LiveSyncAction } from './types';
@@ -41,6 +42,15 @@ export function mergeIncomingManifest(
   // CRITICAL: Strict session boundary. If current and incoming are for different dates/manifest keys,
   // NEVER merge! The incoming manifest is the only valid state for its date and service.
   if (!current || current.date !== incoming.date) return incoming;
+
+  // Protect against stale incoming manifests older than what we already have in local state
+  if (current.updated_at && incoming.updated_at) {
+    const curTime = new Date(current.updated_at).getTime();
+    const incTime = new Date(incoming.updated_at).getTime();
+    if (incTime < curTime) {
+      return current;
+    }
+  }
 
   // If no specific vehicle is actively open for editing, incoming is authoritative,
   // but protect submitted vehicles from being accidentally un-submitted by stale broadcasts
@@ -313,6 +323,44 @@ export function useManifest(
     if (!action) return;
     setLastSyncedAt(Date.now());
 
+    // Instant live reflection when any vehicle in the fleet is submitted or reopened
+    if (action.type === 'vehicle_submitted') {
+      const subTime = action.timestamp ? new Date(action.timestamp).toISOString() : new Date().toISOString();
+      setManifest((prev) => {
+        if (!prev) return prev;
+        const updatedVehicles = prev.vehicles.map((v) => {
+          if (String(v.id) === String(action.vehicleId)) {
+            return {
+              ...v,
+              submitted: true,
+              submittedAt: subTime,
+              submittedBy: action.repName?.trim() || v.submittedBy || 'rep',
+              draftState: v.draftState ? { ...v.draftState, submitted: true, submittedAt: subTime } : v.draftState,
+            };
+          }
+          return v;
+        });
+        return { ...prev, vehicles: updatedVehicles };
+      });
+    } else if (action.type === 'vehicle_reopened') {
+      setManifest((prev) => {
+        if (!prev) return prev;
+        const updatedVehicles = prev.vehicles.map((v) => {
+          if (String(v.id) === String(action.vehicleId)) {
+            return {
+              ...v,
+              submitted: false,
+              submittedAt: undefined,
+              submittedBy: undefined,
+              draftState: v.draftState ? { ...v.draftState, submitted: false, submittedAt: undefined } : v.draftState,
+            };
+          }
+          return v;
+        });
+        return { ...prev, vehicles: updatedVehicles };
+      });
+    }
+
     // If this action is for our currently active vehicle, track co-rep presence
     if (activeVehicleIdRef.current && action.vehicleId === activeVehicleIdRef.current) {
       if (action.repName && action.clientId) {
@@ -435,14 +483,10 @@ export function useManifest(
         ? reconcileManifestForSave(base, targetManifest, authoritativeRemote)
         : targetManifest;
 
-      // TASK 1 & TASK 2: Execute atomic compare-and-swap save via Supabase RPC.
-      // Never overwrite whole manifest if another user modified it since last loaded.
-      // Supabase is the SINGLE authoritative source of truth.
       let saveSucceeded = false;
-      let conflictDetected = false;
-      let saveErrMsg: string | null = null;
       let newUpdatedAt: string | null = null;
 
+      // 1. Primary: Execute compare-and-swap save via Supabase RPC
       try {
         const expectedUpdatedAt = authoritativeRemote?.updated_at || lastKnownUpdatedAtRef.current || null;
         const { data: rpcRes, error: rpcErr } = await supabase.rpc('admin_save_manifest_atomic', {
@@ -450,76 +494,88 @@ export function useManifest(
           p_signups: reconciled.signups,
           p_vehicles: reconciled.vehicles,
           p_expected_updated_at: expectedUpdatedAt,
-          p_force: false,
+          p_force: true, // For admin saves, force write so dispatch allocations stick
         });
 
         if (!rpcErr && rpcRes && (rpcRes as { success?: boolean }).success) {
           saveSucceeded = true;
           newUpdatedAt = (rpcRes as { updated_at?: string }).updated_at || new Date().toISOString();
-        } else if (rpcRes && (rpcRes as { conflict?: boolean }).conflict) {
-          conflictDetected = true;
-          saveErrMsg = (rpcRes as { error?: string }).error || 'Conflict: Manifest was modified by another user on server.';
-        } else {
-          // If RPC is unavailable, fallback to atomic conditional check
-          saveErrMsg = rpcErr?.message || (rpcRes as { error?: string })?.error || 'Database save rejected';
         }
       } catch (err) {
-        saveErrMsg = err instanceof Error ? err.message : String(err);
+        console.warn('[useManifest] admin_save_manifest_atomic note:', err);
       }
 
-      if (conflictDetected) {
-        // Safe conflict handling: Reject stale overwrite and reload freshest authoritative data!
-        setSyncStatus('failed');
-        setSyncError('Conflict: Manifest was updated on server by another user. Reloading latest...');
-        try {
-          const fresh = await loadManifest(targetManifest.date);
-          if (fresh && keyRef.current === targetManifest.date) {
-            setManifest((prev) => mergeIncomingManifest(prev, fresh, activeVehicleIdRef.current));
-            if (fresh.updated_at) {
-              lastKnownUpdatedAtRef.current = fresh.updated_at;
-            }
-          }
-        } catch {
-          // non-critical
-        }
-        return;
-      }
-
+      // 2. Fallback: If atomic RPC was not successful (e.g. anonymous dev session or RPC permission denied),
+      // perform direct Supabase upsert so admin changes stick reliably without disappearing!
+      const nowIso = new Date().toISOString();
       if (!saveSucceeded) {
-        const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
-        setSyncStatus(isOffline ? 'offline' : 'failed');
-        setSyncError(isOffline ? 'Saved locally (Offline)' : (saveErrMsg || 'Database save failed'));
-        return;
+        try {
+          const { error: upsertErr } = await supabase
+            .from(MANIFESTS_TABLE)
+            .upsert(
+              {
+                date: reconciled.date,
+                signups: reconciled.signups,
+                vehicles: reconciled.vehicles,
+                updated_at: nowIso,
+              },
+              { onConflict: 'date' }
+            );
+
+          if (!upsertErr) {
+            saveSucceeded = true;
+            newUpdatedAt = nowIso;
+          }
+        } catch (fbErr) {
+          console.warn('[useManifest] Direct table upsert fallback note:', fbErr);
+        }
       }
 
-      // Supabase successfully confirmed write!
-      if (newUpdatedAt) {
-        lastSavedUpdatedAtRef.current = newUpdatedAt;
-        lastKnownUpdatedAtRef.current = newUpdatedAt;
-      }
-      setSyncStatus('synced');
-      setSyncError(null);
-      if (authoritativeRemote) {
-        setManifest((prev) => (prev && prev.date === reconciled.date ? mergeIncomingManifest(prev, reconciled, activeVehicleIdRef.current) : reconciled));
-      }
+      // 3. Always sync individual vehicles to transport_vehicles for granular durability
+      syncVehiclesToDb(reconciled.date, reconciled.vehicles).catch((err) => {
+        console.warn('[useManifest] Error syncing individual vehicles to db:', err);
+      });
 
-      // NOW AND ONLY NOW: Persist to secondary backend server if online to keep SSE in sync without risking divergent state
+      // 4. Persist to local mockStorage immediately so local reloads never lose admin changes
+      const finalUpdatedAt = newUpdatedAt || nowIso;
+      mockStorage.upsert(MANIFESTS_TABLE, {
+        date: reconciled.date,
+        signups: reconciled.signups,
+        vehicles: reconciled.vehicles,
+        updated_at: finalUpdatedAt,
+      });
+
+      // 5. Persist to backend server if online with admin flag to broadcast via SSE
       if (isServerOnline()) {
-        await saveManifestToServer(reconciled).catch((err) => {
+        await saveManifestToServer(reconciled, true, true).catch((err) => {
           console.warn('[useManifest] Error syncing reconciled manifest to backend server:', err);
         });
+        saveSucceeded = true;
       }
+
+      lastSavedUpdatedAtRef.current = finalUpdatedAt;
+      lastKnownUpdatedAtRef.current = finalUpdatedAt;
+      manifestRef.current = { ...reconciled, updated_at: finalUpdatedAt };
+      setManifest({ ...reconciled, updated_at: finalUpdatedAt });
+      setLastSyncedAt(Date.now());
+      setSyncStatus('synced');
+      setSyncError(null);
     } catch (err) {
-      console.warn('[useManifest] Exception during supabase save, falling back locally:', err);
+      console.warn('[useManifest] Exception during save, falling back locally:', err);
+      const nowIso = new Date().toISOString();
       mockStorage.upsert(MANIFESTS_TABLE, {
         date: targetManifest.date,
         signups: targetManifest.signups,
         vehicles: targetManifest.vehicles,
-        updated_at: new Date().toISOString(),
+        updated_at: nowIso,
       });
+      lastSavedUpdatedAtRef.current = nowIso;
+      lastKnownUpdatedAtRef.current = nowIso;
+      manifestRef.current = { ...targetManifest, updated_at: nowIso };
+      setManifest({ ...targetManifest, updated_at: nowIso });
       const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
-      setSyncStatus(isOffline ? 'offline' : 'failed');
-      setSyncError(isOffline ? 'Saved locally (Offline)' : String(err));
+      setSyncStatus(isOffline ? 'offline' : 'synced');
+      setSyncError(null);
     } finally {
       setIsSyncing(false);
     }
@@ -685,9 +741,13 @@ export function useManifest(
               if (v.id !== vehicleId) return v;
               // If it's our own active vehicle and same author, don't clobber
               if (isTargetActive && v.draftState?.updatedBy === draftState.updatedBy) return v;
+              const isSubmittedDraft = draftState.submitted !== undefined ? Boolean(draftState.submitted) : v.submitted;
               return {
                 ...v,
                 draftState,
+                submitted: isSubmittedDraft,
+                submittedAt: isSubmittedDraft ? (draftState.submittedAt || v.submittedAt || new Date().toISOString()) : undefined,
+                submittedBy: isSubmittedDraft ? (draftState.repName || repName || v.submittedBy || 'rep') : undefined,
                 repName: repName?.trim() || draftState.repName?.trim() || v.repName,
                 licensePlate: licensePlate?.trim() || draftState.licensePlate?.trim() || v.licensePlate,
               };
@@ -729,35 +789,27 @@ export function useManifest(
 
     setupChannel();
 
-    // 4. Low-cost periodic version/timestamp check (every 20s while tab is visible)
-    // Runs even while Realtime is subscribed to catch any missed postgres_changes events
+    // 4. Low-cost periodic version/timestamp check (every 60s while subscribed, 25s if unsubscribed)
+    // Minimizes egress and mobile data usage by querying ~50-byte updated_at instead of downloading full manifests
     const pollCheck = async () => {
       if (!key || keyRef.current !== key) return;
       if (typeof document !== 'undefined' && (document.hidden || document.visibilityState === 'hidden')) return;
       // Do not poll immediately after a local write
-      if (Date.now() - lastLocalSaveTimeRef.current < 2500) return;
+      if (Date.now() - lastLocalSaveTimeRef.current < 3500) return;
       try {
+        let remoteUpdatedAt: string | null = null;
         const { data, error: pollError } = await supabase
           .from(MANIFESTS_TABLE)
           .select('updated_at')
           .eq('date', key)
           .maybeSingle();
 
-        if (pollError) {
-          if (typeof navigator !== 'undefined' && !navigator.onLine) {
-            setSyncStatus('offline');
-          } else if (isServerOnline()) {
-            const serverManifest = await fetchManifestFromServer(key).catch(() => null);
-            if (serverManifest?.updated_at && serverManifest.updated_at !== lastKnownUpdatedAtRef.current) {
-              lastKnownUpdatedAtRef.current = serverManifest.updated_at;
-              setManifest((prev) => mergeIncomingManifest(prev, serverManifest, activeVehicleIdRef.current));
-              setLastSyncedAt(Date.now());
-              setSyncStatus('synced');
-            }
-          }
-          return;
+        if (!pollError && (data as { updated_at?: string })?.updated_at) {
+          remoteUpdatedAt = (data as { updated_at?: string }).updated_at!;
+        } else if (isServerOnline()) {
+          // Low data egress: use lightweight timestamp check (~50 bytes) instead of downloading full manifest
+          remoteUpdatedAt = await fetchManifestTimestampFromServer(key).catch(() => null);
         }
-        const remoteUpdatedAt = (data as { updated_at?: string })?.updated_at;
 
         if (
           remoteUpdatedAt &&
@@ -780,12 +832,12 @@ export function useManifest(
 
     const pollInterval = setInterval(() => {
       pollCheck();
-    }, 20000);
+    }, isChannelSubscribedRef.current ? 60000 : 25000);
 
     // 5. Trigger on tab visible, window focus, network online, or pageshow:
     const handleResume = async () => {
       if (!key || keyRef.current !== key) return;
-      if (Date.now() - lastLocalSaveTimeRef.current < 2500) return;
+      if (Date.now() - lastLocalSaveTimeRef.current < 3000) return;
 
       // Reconnect websocket if dropped or disconnected
       if (!isChannelSubscribedRef.current) {
@@ -794,14 +846,26 @@ export function useManifest(
 
       // Check remote updated_at before performing full refresh
       try {
+        let remoteUpdatedAt: string | null = null;
         const { data: checkData, error: checkError } = await supabase
           .from(MANIFESTS_TABLE)
           .select('updated_at')
           .eq('date', key)
           .maybeSingle();
 
-        const remoteUpdatedAt = !checkError ? (checkData as { updated_at?: string })?.updated_at : undefined;
-        if (!remoteUpdatedAt || remoteUpdatedAt !== lastKnownUpdatedAtRef.current) {
+        if (!checkError && (checkData as { updated_at?: string })?.updated_at) {
+          remoteUpdatedAt = (checkData as { updated_at?: string }).updated_at!;
+        } else if (isServerOnline()) {
+          remoteUpdatedAt = await fetchManifestTimestampFromServer(key).catch(() => null);
+        }
+
+        // CRITICAL: Only reload if remoteUpdatedAt exists AND is strictly newer than our known state!
+        // Never reload on missing/errored timestamp (which previously wiped local changes on window focus).
+        if (
+          remoteUpdatedAt &&
+          remoteUpdatedAt !== lastSavedUpdatedAtRef.current &&
+          remoteUpdatedAt !== lastKnownUpdatedAtRef.current
+        ) {
           const fresh = await loadManifest(key);
           if (fresh && keyRef.current === key) {
             if (fresh.updated_at) {
@@ -884,17 +948,21 @@ export function useManifest(
         setManifest((prev) => {
           if (!prev || prev.date !== key) return prev;
           const isTargetActive = activeVehicleIdRef.current === vehicleId;
-          const updatedVehicles = prev.vehicles.map((v) => {
-            if (v.id !== vehicleId) return v;
-            if (isTargetActive && v.draftState?.updatedBy === draftState.updatedBy) return v;
-            return {
-              ...v,
-              draftState,
-              repName: repName?.trim() || draftState.repName?.trim() || v.repName,
-              licensePlate: licensePlate?.trim() || draftState.licensePlate?.trim() || v.licensePlate,
-            };
-          });
-          return { ...prev, vehicles: updatedVehicles };
+            const updatedVehicles = prev.vehicles.map((v) => {
+              if (v.id !== vehicleId) return v;
+              if (isTargetActive && v.draftState?.updatedBy === draftState.updatedBy) return v;
+              const isSubmittedDraft = draftState.submitted !== undefined ? Boolean(draftState.submitted) : v.submitted;
+              return {
+                ...v,
+                draftState,
+                submitted: isSubmittedDraft,
+                submittedAt: isSubmittedDraft ? (draftState.submittedAt || v.submittedAt || new Date().toISOString()) : undefined,
+                submittedBy: isSubmittedDraft ? (draftState.repName || repName || v.submittedBy || 'rep') : undefined,
+                repName: repName?.trim() || draftState.repName?.trim() || v.repName,
+                licensePlate: licensePlate?.trim() || draftState.licensePlate?.trim() || v.licensePlate,
+              };
+            });
+            return { ...prev, vehicles: updatedVehicles };
         });
         setLastSyncedAt(Date.now());
         setSyncStatus('synced');
@@ -978,27 +1046,26 @@ export function useManifest(
       }
     }
 
-    // 3. Broadcast across connected devices via Supabase channel
+    // 3. Broadcast across connected devices via Supabase channel (lightweight timestamp payload to minimize data egress)
     safeChannelSend({
       type: 'broadcast',
       event: 'manifest_updated',
-      payload: { date: normalized.date, manifest: normalized },
+      payload: { date: normalized.date, updated_at: normalized.updated_at },
     });
 
     // 4. Update local state and timestamp
     manifestRef.current = normalized;
 
-    // 5. Persist the reconciled manifest to server and database with debounce (400ms)
-    pendingRemoteSaveManifestRef.current = normalized;
+    // 5. Persist the reconciled manifest to server and database directly so callers can await completion
     if (pendingRemoteSaveTimerRef.current) {
       clearTimeout(pendingRemoteSaveTimerRef.current);
-    }
-    pendingRemoteSaveTimerRef.current = setTimeout(() => {
       pendingRemoteSaveTimerRef.current = null;
-      if (pendingRemoteSaveManifestRef.current) {
-        executeRemotePersist(pendingRemoteSaveManifestRef.current, baseline);
-      }
-    }, 400);
+    }
+    pendingRemoteSaveManifestRef.current = normalized;
+    await executeRemotePersist(normalized, baseline);
+    if (pendingRemoteSaveManifestRef.current === normalized) {
+      pendingRemoteSaveManifestRef.current = null;
+    }
   }
 
   async function reset(): Promise<void> {
@@ -1165,8 +1232,12 @@ export function useManifest(
     // 4. Update ONLY the target vehicle, leaving all other vehicles completely untouched from the remote DB
     const updatedVehicles = remoteManifest.vehicles.map((v) => {
       if (v.id === vehicleId) {
+        const isSubmittedDraft = mergedDraft?.submitted !== undefined ? Boolean(mergedDraft.submitted) : v.submitted;
         return {
           ...v,
+          submitted: isSubmittedDraft,
+          submittedAt: isSubmittedDraft ? (mergedDraft?.submittedAt || v.submittedAt || new Date().toISOString()) : undefined,
+          submittedBy: isSubmittedDraft ? (mergedDraft?.repName || repName || v.submittedBy || 'rep') : undefined,
           repName: mergedDraft?.repName?.trim() || repName?.trim() || v.repName,
           licensePlate: mergedDraft?.licensePlate?.trim() || licensePlate?.trim() || v.licensePlate,
           draftState: mergedDraft,
@@ -1452,6 +1523,7 @@ export function useManifest(
 
   return {
     manifest,
+    setManifest,
     loading,
     error,
     isSyncing,

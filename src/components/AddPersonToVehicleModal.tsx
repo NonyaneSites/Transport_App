@@ -86,12 +86,18 @@ export function AddPersonToVehicleModal({
     return Array.from(set).sort(naturalCompare);
   }, [signups, isRehearsal]);
 
-  // If newStop is empty, default to first known stop
+  // Initialize form when modal opens
   useEffect(() => {
-    if (!newStop && knownStops.length > 0) {
-      setNewStop(knownStops[0]);
+    if (isOpen) {
+      setNewName('');
+      const targetVeh = vehicles.find((v) => v.id === (initialVehicleId || targetVehicleId));
+      const defaultStop = targetVeh?.orderedStops?.[0] || (isRehearsal ? 'Braam' : 'Braam');
+      setNewStop(defaultStop);
+      setNewStructure('');
+      setNewPhone('');
+      setFormError(null);
     }
-  }, [knownStops, newStop]);
+  }, [isOpen, vehicles, initialVehicleId, targetVehicleId, isRehearsal]);
 
   // Map of passenger ID -> vehicle
   const passengerVehicleMap = useMemo(() => {
@@ -139,7 +145,7 @@ export function AddPersonToVehicleModal({
       setFormError('Please enter passenger full name');
       return;
     }
-    const stopToSave = (newStop || knownStops[0] || 'Braam').trim();
+    const stopToSave = newStop.trim();
     if (!stopToSave) {
       setFormError('Please select or enter a pickup stop');
       return;

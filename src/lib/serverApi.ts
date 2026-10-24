@@ -232,7 +232,20 @@ export async function fetchManifestFromServer(key: string): Promise<Manifest | n
   }
 }
 
-export async function saveManifestToServer(manifest: Manifest, allowQueue = true): Promise<Manifest> {
+export async function fetchManifestTimestampFromServer(key: string): Promise<string | null> {
+  if (!isServerOnline()) return null;
+  try {
+    const res = await fetch(`/api/manifests/${encodeURIComponent(key)}/timestamp`);
+    if (!res.ok || !isJsonResponse(res)) return null;
+    markServerOnline();
+    const data = await res.json();
+    return (data && typeof data.updated_at === 'string') ? data.updated_at : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveManifestToServer(manifest: Manifest, allowQueue = true, isAdmin = true): Promise<Manifest> {
   if (!isServerOnline()) {
     if (allowQueue) queueOfflineAction('save_manifest', manifest.date, manifest);
     return manifest;
@@ -240,8 +253,11 @@ export async function saveManifestToServer(manifest: Manifest, allowQueue = true
   try {
     const res = await fetch(`/api/manifests/${encodeURIComponent(manifest.date)}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(manifest),
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin': isAdmin ? 'true' : 'false',
+      },
+      body: JSON.stringify({ ...manifest, isAdmin }),
     });
     if (!res.ok || !isJsonResponse(res)) throw new Error(`HTTP ${res.status}`);
     markServerOnline();

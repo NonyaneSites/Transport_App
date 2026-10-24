@@ -295,11 +295,13 @@ export function RepPage() {
 
   const {
     manifest,
+    setManifest,
     loading,
     error,
     isSyncing,
     syncStatus,
     syncError,
+    activeCoReps,
     refresh,
     updateVehicleDraft,
     appendWalkIn,
@@ -312,6 +314,7 @@ export function RepPage() {
   const [accessCodeInput, setAccessCodeInput] = useState('');
   const [accessCodeError, setAccessCodeError] = useState<string | null>(null);
   const [claimingAuth, setClaimingAuth] = useState(false);
+  const [showFleetOverview, setShowFleetOverview] = useState(false);
 
   // Rider search, filtering, and view mode for person-by-person check-in
   const [riderSearch, setRiderSearch] = useState('');
@@ -331,6 +334,7 @@ export function RepPage() {
   const [cancellationSearch, setCancellationSearch] = useState('');
   const [showCancellationModal, setShowCancellationModal] = useState(false);
   const [showCrossTaxiModal, setShowCrossTaxiModal] = useState(false);
+  const [sponsorshipPayerId, setSponsorshipPayerId] = useState<string | undefined>(undefined);
 
   // Sync locks & conflict prevention
   const [draftRestored, setDraftRestored] = useState(false);
@@ -1131,15 +1135,17 @@ export function RepPage() {
 
   // Stats calculation
   const presentCount = useMemo(() => {
-    return riders.filter((r) => presentIds.has(r.id)).length;
+    return riders.filter((r) => presentIds.has(r.id) || presentIds.has(String(r.id))).length;
   }, [riders, presentIds]);
 
   const absentCount = useMemo(() => {
-    return riders.filter((r) => absentIds.has(r.id)).length;
+    return riders.filter((r) => absentIds.has(r.id) || absentIds.has(String(r.id))).length;
   }, [riders, absentIds]);
 
   const touchedCount = useMemo(() => {
-    return riders.filter((r) => presentIds.has(r.id) || absentIds.has(r.id)).length;
+    return riders.filter((r) =>
+      presentIds.has(r.id) || presentIds.has(String(r.id)) || absentIds.has(r.id) || absentIds.has(String(r.id))
+    ).length;
   }, [riders, presentIds, absentIds]);
 
   const untickedCount = useMemo(() => {
@@ -2601,8 +2607,18 @@ export function RepPage() {
 
   async function handleSubmit() {
     if (!manifest || !selectedVehicle) return;
-    if (!repName.trim() || !licensePlate.trim()) return;
-
+    if (!repName.trim()) {
+      setSubmitMsg('Error: Please enter your name in the vehicle section above.');
+      return;
+    }
+    if (!licensePlate.trim()) {
+      setSubmitMsg('Error: Please enter the vehicle license plate before submitting.');
+      return;
+    }
+    if (!allTouched && riders.length > 0) {
+      setSubmitMsg(`Error: Cannot submit yet. Please mark all passengers as Present or Absent (${touchedCount}/${riders.length} checked). You can use "Mark Unticked as Absent" or "All Present".`);
+      return;
+    }
     if (sponsoredMissingNotes) {
       const names = sponsoredRidersMissingInfo.map((r) => r.fullName).join(', ');
       setSubmitMsg(`Error: Cannot submit. Please write down who is sponsoring each sponsored person (${names}).`);
@@ -2915,6 +2931,9 @@ export function RepPage() {
         // storage unavailable
       }
 
+      // Update local state immediately so rep portal and fleet view reflect submission instantly
+      setManifest(submittedManifest);
+
       const sponNote = sponsoredRiders.length > 0 ? `, ${sponsoredRiders.length} sponsored` : '';
       const absenteeSummary = absentees.length > 0 ? ` ${absentees.length} absentee(s) recorded in cancellation ledger.` : '';
       const unpaidSummary = unpaidRiders.length > 0 ? ` ${unpaidRiders.length} unpaid passenger(s) entered into cancellation ledger.` : '';
@@ -2985,6 +3004,7 @@ export function RepPage() {
         clientId: clientIdRef.current,
         timestamp: Date.now(),
       });
+      setManifest((prev) => (prev ? { ...prev, vehicles: updatedVehicles } : prev));
       isUserDirtyRef.current = true;
 
       setSubmitMsg(
@@ -3470,6 +3490,112 @@ export function RepPage() {
               )}
             </div>
 
+            {/* Live Co-Rep presence indicator for reps working on the SAME vehicle */}
+            {selectedVehicle && (activeCoReps || []).filter((c) => c.clientId !== clientIdRef.current).length > 0 && (
+              <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300 animate-fade-in">
+                <span className="relative flex h-2.5 w-2.5 shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                </span>
+                <span>
+                  Co-Rep Active on {selectedVehicle.name}: <strong>{(activeCoReps || []).filter((c) => c.clientId !== clientIdRef.current).map((c) => c.repName || 'Co-rep').join(', ')}</strong> — live changes sync instantly!
+                </span>
+              </div>
+            )}
+
+            {/* Fleet Status & Other Reps Overview so all reps can see each other's work across vehicles */}
+            {manifest && manifest.vehicles.length > 0 && (
+              <div className="rounded-xl border border-line bg-card overflow-hidden shadow-xs">
+                <button
+                  type="button"
+                  onClick={() => setShowFleetOverview((prev) => !prev)}
+                  className="flex w-full items-center justify-between p-3 text-xs font-bold text-ink hover:bg-card-2/60 transition"
+                >
+                  <div className="flex items-center gap-2">
+                    <Users className="h-4 w-4 text-crimson-400" />
+                    <span>Fleet Overview: Reps & Vehicles ({manifest.vehicles.length})</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-muted">
+                    <span className="text-[11px] font-medium">
+                      {manifest.vehicles.filter((v) => v.submitted).length} of {manifest.vehicles.length} submitted
+                    </span>
+                    <ChevronDown className={`h-4 w-4 transition-transform ${showFleetOverview ? 'rotate-180' : ''}`} />
+                  </div>
+                </button>
+
+                {showFleetOverview && (
+                  <div className="border-t border-line divide-y divide-line/60 bg-card-2/30">
+                    {sortVehiclesNatural(manifest.vehicles).map((v) => {
+                      const vRiders = vehicleRiders(manifest, v);
+                      const presentCnt = v.draftState?.presentIds?.length ?? 0;
+                      const isSelected = v.id === selectedVehicleId;
+                      const assignedRep = v.repName?.trim() || v.draftState?.repName?.trim() || 'Unassigned';
+                      const plate = v.licensePlate?.trim() || v.draftState?.licensePlate?.trim();
+                      const cap = v.capacity || (v.type === 'Bus' ? 65 : 15);
+                      const extSponsors = (v.draftState?.externalSponsees || []).length;
+
+                      return (
+                        <div
+                          key={v.id}
+                          className={`p-3 flex items-center justify-between gap-3 text-xs transition ${
+                            isSelected ? 'bg-crimson-950/20 border-l-2 border-crimson-500' : 'hover:bg-card-2/50'
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-bold text-ink flex items-center gap-1">
+                                {v.type === 'Bus' ? <Bus className="h-3.5 w-3.5 text-sky-400" /> : <Car className="h-3.5 w-3.5 text-amber-400" />}
+                                {v.name}
+                              </span>
+                              {v.submitted ? (
+                                <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300 border border-emerald-500/30">
+                                  ✓ Submitted ({v.submittedBy || 'rep'})
+                                </span>
+                              ) : presentCnt > 0 ? (
+                                <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold text-amber-300 border border-amber-500/30">
+                                  In Progress ({presentCnt} checked in)
+                                </span>
+                              ) : (
+                                <span className="rounded-full bg-card-2 px-2 py-0.5 text-[10px] text-muted border border-line">
+                                  Not started
+                                </span>
+                              )}
+                              {extSponsors > 0 && (
+                                <span className="rounded-full bg-amber-500/15 px-1.5 py-0.2 text-[10px] font-semibold text-amber-200 border border-amber-500/30">
+                                  +{extSponsors} sponsor{extSponsors > 1 ? 's' : ''}
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-1 flex items-center gap-3 text-[11px] text-muted flex-wrap">
+                              <span>Rep: <strong className="text-ink-muted">{assignedRep}</strong></span>
+                              {plate && <span>Plate: <strong className="text-ink-muted">{plate}</strong></span>}
+                              <span>
+                                Riders: <strong className="text-ink-muted">{vRiders.length}</strong> / {cap} seats
+                              </span>
+                            </div>
+                          </div>
+
+                          {!isSelected ? (
+                            <button
+                              type="button"
+                              onClick={() => handleSelectVehicle(v.id)}
+                              className="shrink-0 px-2.5 py-1 text-[11px] font-semibold rounded-lg border border-line bg-card hover:bg-card-2 text-ink hover:text-crimson-400 transition"
+                            >
+                              Select
+                            </button>
+                          ) : (
+                            <span className="shrink-0 text-[11px] font-bold text-crimson-400 px-2 py-1">
+                              Current
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
             {selectedVehicle && draftRestored && (
               <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-2.5 text-xs text-success-light animate-fade-in">
                 <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
@@ -3875,24 +4001,37 @@ export function RepPage() {
                     </div>
 
                     {/* Cross-Taxi Sponsorship Button */}
-                    <div className="card border-line bg-card p-2.5 flex flex-col justify-center">
+                    <div className="card border-2 border-amber-500/50 bg-gradient-to-br from-amber-500/15 via-amber-500/5 to-card p-2.5 flex flex-col justify-center hover:border-amber-400 hover:shadow-md hover:shadow-amber-500/15 transition-all">
                       <button
                         type="button"
-                        onClick={() => setShowCrossTaxiModal(true)}
-                        className={`flex w-full items-center justify-center gap-1.5 rounded-lg border py-1.5 px-2.5 text-xs font-semibold transition-all ${
-                          externalSponsees.length > 0
-                            ? 'border-amber-500/50 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25'
-                            : 'border-line bg-card-2 text-ink hover:border-amber-500/40 hover:bg-card-2/80'
-                        }`}
+                        onClick={() => {
+                          setSponsorshipPayerId(undefined);
+                          setShowCrossTaxiModal(true);
+                        }}
+                        className="flex w-full items-center justify-between gap-2 text-left group"
                         title="Collect fare cash in this taxi for a rider travelling in another vehicle"
                       >
-                        <HeartHandshake className="h-3.5 w-3.5 text-amber-400 shrink-0" />
-                        <span className="truncate">Cross-Taxi Sponsor</span>
-                        {externalSponsees.length > 0 && (
-                          <span className="rounded bg-amber-500/25 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/40">
-                            {externalSponsees.length} (+R{externalCash})
-                          </span>
-                        )}
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-500/25 text-amber-300 ring-1 ring-amber-500/40 group-hover:scale-105 transition-transform shrink-0">
+                            <HeartHandshake className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold text-ink flex items-center gap-1.5 flex-wrap">
+                              <span>Cross-Taxi Sponsor</span>
+                              {externalSponsees.length > 0 && (
+                                <span className="rounded-full bg-amber-500/30 px-1.5 py-0.2 text-[10px] font-bold text-amber-200 border border-amber-500/40">
+                                  {externalSponsees.length} (+R{externalCash})
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[10px] text-amber-200/90 font-medium truncate">
+                              Collect R{FARE} for other taxi
+                            </p>
+                          </div>
+                        </div>
+                        <span className="rounded-lg bg-amber-400 px-2 py-1 text-[11px] font-black text-black group-hover:bg-amber-300 transition-colors shrink-0 shadow-xs">
+                          Open →
+                        </span>
                       </button>
                     </div>
                   </div>
@@ -3922,18 +4061,34 @@ export function RepPage() {
                   </div>
                 )}
 
-
-
                 {/* PASSENGER SEARCH & ATTENDANCE CHECK TOOLBAR */}
                 <div className="card space-y-3">
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
                     <div className="flex items-center gap-1.5">
                       <div className="h-4 w-1 rounded-full bg-crimson-500" />
                       <h3 className="font-display text-xs font-bold uppercase tracking-wider text-ink">
                         Passenger Attendance Check
                       </h3>
                     </div>
-                    <div className="flex items-center gap-1 bg-card-2 rounded-lg p-0.5 border border-line">
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSponsorshipPayerId(undefined);
+                          setShowCrossTaxiModal(true);
+                        }}
+                        className="flex items-center gap-1.5 rounded-lg border border-amber-500/60 bg-amber-500/20 px-2.5 py-1 text-xs font-bold text-amber-200 hover:bg-amber-500/30 hover:border-amber-400 hover:text-white transition-all shadow-xs"
+                        title="Collect fare cash here when a passenger pays for someone travelling in another vehicle"
+                      >
+                        <HeartHandshake className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+                        <span>Sponsor Other Taxi (+R{FARE})</span>
+                        {externalSponsees.length > 0 && (
+                          <span className="rounded-full bg-amber-400 px-1.5 py-0.2 text-[10px] font-black text-black">
+                            {externalSponsees.length}
+                          </span>
+                        )}
+                      </button>
+                      <div className="flex items-center gap-1 bg-card-2 rounded-lg p-0.5 border border-line">
                       <button
                         type="button"
                         onClick={() => setViewMode('stop')}
@@ -3953,6 +4108,7 @@ export function RepPage() {
                         <ArrowDownAZ className="h-3 w-3" />
                         A-Z
                       </button>
+                    </div>
                     </div>
                   </div>
 
@@ -4110,6 +4266,10 @@ export function RepPage() {
                     onOpenChangeStop={isRehearsal ? undefined : handleOpenChangeStop}
                     onOpenTransfer={isRehearsal ? undefined : handleOpenTransfer}
                     onUpgradeToFullTrip={isRehearsal ? handleUpgradeToFullTrip : undefined}
+                    onSponsorForPassenger={(p) => {
+                      setSponsorshipPayerId(String(p.id));
+                      setShowCrossTaxiModal(true);
+                    }}
                     isRehearsal={isRehearsal}
                     date={date}
                   />
@@ -4139,6 +4299,10 @@ export function RepPage() {
                     onOpenChangeStop={isRehearsal ? undefined : handleOpenChangeStop}
                     onOpenTransfer={isRehearsal ? undefined : handleOpenTransfer}
                     onUpgradeToFullTrip={isRehearsal ? handleUpgradeToFullTrip : undefined}
+                    onSponsorForPassenger={(p) => {
+                      setSponsorshipPayerId(String(p.id));
+                      setShowCrossTaxiModal(true);
+                    }}
                     isRehearsal={isRehearsal}
                     date={date}
                   />
@@ -4260,11 +4424,41 @@ export function RepPage() {
                       </div>
                     )}
 
+                    {!canSubmit && !submitting && (
+                      <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs space-y-1.5 animate-fade-in">
+                        <div className="font-semibold text-amber-300 flex items-center gap-1.5">
+                          <AlertCircle className="h-4 w-4 text-amber-400 shrink-0" />
+                          <span>Action Required Before Submitting:</span>
+                        </div>
+                        <ul className="space-y-1 text-[11px] text-amber-200/90 list-disc list-inside">
+                          {!repName.trim() && (
+                            <li>Enter your name in the vehicle section at the top</li>
+                          )}
+                          {!licensePlate.trim() && (
+                            <li>Enter the vehicle license plate at the top</li>
+                          )}
+                          {!allTouched && riders.length > 0 && (
+                            <li>
+                              Mark all {riders.length} passengers Present or Absent ({untickedCount} unticked remaining)
+                            </li>
+                          )}
+                          {sponsoredMissingNotes && (
+                            <li>
+                              Write who is paying for {sponsoredRidersMissingInfo.map((r) => r.fullName).join(', ')}
+                            </li>
+                          )}
+                        </ul>
+                      </div>
+                    )}
+
                     <button
+                      type="button"
                       onClick={handleSubmit}
-                      disabled={!canSubmit}
+                      disabled={submitting}
                       className={`w-full py-3.5 text-base font-bold shadow-md transition-all ${
-                        canSubmit ? 'btn-crimson hover:scale-[1.01] active:scale-95' : 'cursor-not-allowed rounded-xl border border-line bg-card-2 text-muted'
+                        canSubmit
+                          ? 'btn-crimson hover:scale-[1.01] active:scale-95'
+                          : 'rounded-xl border-2 border-dashed border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 active:scale-98'
                       }`}
                     >
                       {submitting ? (
@@ -4279,16 +4473,6 @@ export function RepPage() {
                         </span>
                       )}
                     </button>
-                    {!canSubmit && sponsoredMissingNotes && (
-                      <p className="text-center text-xs font-medium text-amber-400">
-                        Enter who is paying for {sponsoredRidersMissingInfo.map((r) => r.fullName).join(', ')} to enable submission.
-                      </p>
-                    )}
-                    {!canSubmit && !sponsoredMissingNotes && allTouched && (
-                      <p className="text-center text-xs text-muted">
-                        Enter your name and license plate above to enable submission.
-                      </p>
-                    )}
                   </>
                 )}
 
@@ -4504,7 +4688,10 @@ export function RepPage() {
       {selectedVehicle && (
         <CrossTaxiSponsorshipModal
           isOpen={showCrossTaxiModal}
-          onClose={() => setShowCrossTaxiModal(false)}
+          onClose={() => {
+            setShowCrossTaxiModal(false);
+            setSponsorshipPayerId(undefined);
+          }}
           thisVehicleName={selectedVehicle.name}
           thisVehicleRiders={riders}
           otherVehiclesWithRiders={otherVehiclesWithRiders}
@@ -4515,6 +4702,7 @@ export function RepPage() {
           currentDate={date}
           currentService={service}
           currentServiceLabel={serviceLabel}
+          initialPayerId={sponsorshipPayerId}
         />
       )}
 
@@ -4993,10 +5181,10 @@ function CashCalculatorCard({
               if (onOpenCrossTaxiModal) onOpenCrossTaxiModal();
               else setIsAddingSponsorship(!isAddingSponsorship);
             }}
-            className="flex items-center gap-1 text-xs font-semibold text-amber-400 hover:text-amber-300 transition-colors"
+            className="flex items-center gap-1.5 rounded-lg border border-amber-500/60 bg-amber-500/20 px-2.5 py-1 text-xs font-bold text-amber-200 hover:bg-amber-500/30 hover:border-amber-400 hover:text-white transition-all shadow-xs"
           >
-            <Plus className="h-3.5 w-3.5" />
-            <span>Sponsor Rider in Another Taxi</span>
+            <HeartHandshake className="h-3.5 w-3.5 text-amber-400" />
+            <span>+ Collect R40 & Sponsor Other Taxi</span>
           </button>
         </div>
 
@@ -5209,17 +5397,19 @@ function CashCalculatorCard({
                 type="button"
                 onClick={handleConfirmAddSponsorship}
                 disabled={isSubmittingSponsorship || !selectedSponsee}
-                className="btn-crimson py-1.5 px-3 text-xs font-bold flex items-center gap-1.5 disabled:opacity-40"
+                className="w-full sm:w-auto py-2.5 px-4 text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 rounded-xl transition-all shadow-md bg-gradient-to-r from-amber-400 to-amber-300 hover:from-amber-300 hover:to-amber-200 text-black disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
               >
                 {isSubmittingSponsorship ? (
                   <>
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <Loader2 className="h-4 w-4 animate-spin text-black" />
                     <span>Auto-Sponsoring…</span>
                   </>
                 ) : (
                   <>
-                    <Check className="h-3.5 w-3.5" />
-                    <span>Confirm & Auto-Sponsor in {selectedSponsee?.vehicleName || customTaxiName || 'Other Taxi'}</span>
+                    <Check className="h-4 w-4 text-black stroke-[3]" />
+                    <span>
+                      Collect R{sponsorAmount} & Confirm Sponsorship for {selectedSponsee?.fullName || 'Passenger'}
+                    </span>
                   </>
                 )}
               </button>
@@ -5424,7 +5614,7 @@ function CashCalculatorCard({
 function StopGroupedChecklist({
   riders, vehicleType, fare = 40, orderedStops, stopRedirects, presentIds, absentIds, absentPaidIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
   riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemoveRider, externalSponsorLocks,
-  onOpenChangeStop, onOpenTransfer, onUpgradeToFullTrip, isRehearsal,
+  onOpenChangeStop, onOpenTransfer, onUpgradeToFullTrip, onSponsorForPassenger, isRehearsal,
 }: {
   riders: Passenger[];
   vehicleType: 'Bus' | 'Taxi';
@@ -5452,6 +5642,7 @@ function StopGroupedChecklist({
   onOpenChangeStop?: (p: Passenger) => void;
   onOpenTransfer?: (p: Passenger) => void;
   onUpgradeToFullTrip?: (p: Passenger) => void;
+  onSponsorForPassenger?: (p: Passenger) => void;
   isRehearsal?: boolean;
   date?: string;
 }) {
@@ -5608,6 +5799,7 @@ function StopGroupedChecklist({
                       onOpenChangeStop={onOpenChangeStop}
                       onOpenTransfer={onOpenTransfer}
                       onUpgradeToFullTrip={onUpgradeToFullTrip}
+                      onSponsorForPassenger={onSponsorForPassenger}
                       isRehearsal={isRehearsal}
                     />
                   );
@@ -5624,7 +5816,7 @@ function StopGroupedChecklist({
 function AlphabeticalChecklist({
   riders, vehicleType, stopRedirects, presentIds, absentIds, absentPaidIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
   riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemoveRider, externalSponsorLocks,
-  onOpenChangeStop, onOpenTransfer, onUpgradeToFullTrip, isRehearsal,
+  onOpenChangeStop, onOpenTransfer, onUpgradeToFullTrip, onSponsorForPassenger, isRehearsal,
 }: {
   riders: Passenger[];
   vehicleType?: 'Bus' | 'Taxi';
@@ -5650,6 +5842,7 @@ function AlphabeticalChecklist({
   onOpenChangeStop?: (p: Passenger) => void;
   onOpenTransfer?: (p: Passenger) => void;
   onUpgradeToFullTrip?: (p: Passenger) => void;
+  onSponsorForPassenger?: (p: Passenger) => void;
   isRehearsal?: boolean;
   date?: string;
 }) {
@@ -5705,6 +5898,7 @@ function AlphabeticalChecklist({
             onOpenChangeStop={onOpenChangeStop}
             onOpenTransfer={onOpenTransfer}
             onUpgradeToFullTrip={onUpgradeToFullTrip}
+            onSponsorForPassenger={onSponsorForPassenger}
             isRehearsal={isRehearsal}
           />
         );
@@ -5716,7 +5910,7 @@ function AlphabeticalChecklist({
 const PassengerRow = React.memo(function PassengerRow({
   passenger, isPresent, isAbsent, isAbsentPaid, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, isSponsored, isUnpaid, noteText, redirectedFrom, disabled,
   outstandingDebts, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemove, externalLock,
-  onOpenChangeStop, onOpenTransfer, onUpgradeToFullTrip, isRehearsal,
+  onOpenChangeStop, onOpenTransfer, onUpgradeToFullTrip, onSponsorForPassenger, isRehearsal,
 }: {
   passenger: Passenger;
   isPresent: boolean;
@@ -5742,6 +5936,7 @@ const PassengerRow = React.memo(function PassengerRow({
   onOpenChangeStop?: (p: Passenger) => void;
   onOpenTransfer?: (p: Passenger) => void;
   onUpgradeToFullTrip?: (p: Passenger) => void;
+  onSponsorForPassenger?: (p: Passenger) => void;
   isRehearsal?: boolean;
 }) {
   const isMissingSponsorInfo = isSponsored && !noteText.trim();
@@ -6009,6 +6204,19 @@ const PassengerRow = React.memo(function PassengerRow({
           <AlertCircle className="h-3 w-3 text-crimson-400" />
           {isUnpaid ? "Didn't Pay" : "Didn't Pay"}
         </button>
+
+        {/* Sponsor a Friend in Another Taxi */}
+        {onSponsorForPassenger && !disabled && (
+          <button
+            type="button"
+            onClick={() => onSponsorForPassenger(passenger)}
+            className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-bold bg-amber-500/15 text-amber-200 border border-amber-500/40 hover:bg-amber-500/25 hover:border-amber-400 hover:text-white transition-all active:scale-95 shadow-xs"
+            title={`Record that ${passenger.fullName} is paying R40 for someone in another taxi`}
+          >
+            <HeartHandshake className="h-3 w-3 text-amber-400" />
+            <span>Sponsor Other Taxi (+R40)</span>
+          </button>
+        )}
 
         {/* Paid (Absent) Toggle - only shown when passenger is Absent */}
         {isAbsent && onToggleAbsentPaid && (
