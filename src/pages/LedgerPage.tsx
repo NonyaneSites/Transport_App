@@ -3,7 +3,7 @@ import {
   Loader2, AlertTriangle, FileSpreadsheet, Search, Filter, XCircle,
   ChevronDown, ChevronRight, Upload, CheckCircle2, FileText, Banknote, X, UserPlus, Plus,
   Pencil, Trash2, HeartHandshake, Clock, Check, CheckSquare, Square, Database, Copy,
-  ShieldCheck, BarChart3, Calendar, ArrowUpDown, Layers, Edit3,
+  ShieldCheck, BarChart3, Calendar, ArrowUpDown, Layers, Edit3, RotateCcw,
 } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
@@ -497,6 +497,42 @@ export function LedgerPage() {
     const debt = dedupedSponsorships.filter((s) => s.status === 'unaccounted_sponsorship' || s.status === 'unpaid_sponsorship').length;
     return { total, pending, confirmed, debt };
   }, [dedupedSponsorships]);
+
+  const changedStagedItems = useMemo(() => {
+    const list: Array<{
+      id: string;
+      originalStatus: SponsorshipStatus;
+      newStatus: SponsorshipStatus;
+      sponsorship: ReportedSponsorship;
+    }> = [];
+
+    for (const [id, newStatus] of Object.entries(stagedIndications)) {
+      const spon = sponsorships.find((s) => s.id === id);
+      if (spon && spon.status !== newStatus) {
+        list.push({
+          id,
+          originalStatus: spon.status,
+          newStatus,
+          sponsorship: spon,
+        });
+      }
+    }
+    return list;
+  }, [stagedIndications, sponsorships]);
+
+  const stagedCounts = useMemo(() => {
+    let actually = 0;
+    let unaccounted = 0;
+    let unpaid = 0;
+    let pending = 0;
+    for (const item of changedStagedItems) {
+      if (item.newStatus === 'actually_sponsored') actually++;
+      else if (item.newStatus === 'unaccounted_sponsorship') unaccounted++;
+      else if (item.newStatus === 'unpaid_sponsorship') unpaid++;
+      else if (item.newStatus === 'pending') pending++;
+    }
+    return { actually, unaccounted, unpaid, pending, total: changedStagedItems.length };
+  }, [changedStagedItems]);
 
   const availableSponsorshipDates = useMemo(() => {
     const map = new Map<string, string>();
@@ -1065,11 +1101,128 @@ export function LedgerPage() {
   }
 
   function handleSetStagedIndication(id: string, status: SponsorshipStatus) {
-    setStagedIndications((prev) => ({
-      ...prev,
-      [id]: status,
+    const currentItem = sponsorships.find((s) => s.id === id);
+    setStagedIndications((prev) => {
+      const next = { ...prev };
+      if (!currentItem || currentItem.status === status) {
+        delete next[id];
+      } else {
+        next[id] = status;
+      }
+      return next;
+    });
+  }
+
+  function handleRevertStaged(id: string) {
+    setStagedIndications((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }
+
+  function handleDiscardAllStaged() {
+    setStagedIndications({});
+  }
+
+  function handleStageSelected(newStatus: SponsorshipStatus) {
+    if (selectedSponIds.size === 0) return;
+    const targetIds = Array.from(selectedSponIds);
+    setStagedIndications((prev) => {
+      const next = { ...prev };
+      for (const id of targetIds) {
+        const spon = sponsorships.find((s) => s.id === id);
+        if (spon && spon.status === newStatus) {
+          delete next[id];
+        } else {
+          next[id] = newStatus;
+        }
+      }
+      return next;
+    });
+
+    const label =
+      newStatus === 'actually_sponsored'
+        ? 'Actually Sponsored (no debt)'
+        : newStatus === 'unaccounted_sponsorship'
+        ? 'Unaccounted Sponsorship (debt owing)'
+        : newStatus === 'unpaid_sponsorship'
+        ? 'Unpaid Ride (debt owing)'
+        : 'Pending Verification';
+
+    setSponsorshipNotice({
+      id: 'staged_selected',
+      text: `Staged ${targetIds.length} passenger(s) as ${label}. You can make more changes before confirming.`,
+      type: 'success',
+    });
+    setTimeout(() => setSponsorshipNotice(null), 4000);
+  }
+
+  function handleReviewStagedChanges() {
+    if (changedStagedItems.length === 0) {
+      if (selectedSponIds.size > 0) {
+        handleConfirmIndications(Array.from(selectedSponIds));
+        return;
+      }
+      setSponsorshipNotice({
+        id: 'no_changes_staged',
+        text: '⚠️ No changes staged yet. Select passengers or change statuses in the dropdown first.',
+        type: 'warn',
+      });
+      setTimeout(() => setSponsorshipNotice(null), 3500);
+      return;
+    }
+
+    const items = changedStagedItems.map((c) => ({
+      sponsorshipId: c.id,
+      status: c.newStatus,
+      sponsorship: c.sponsorship,
     }));
-    setSelectedSponIds((prev) => new Set(prev).add(id));
+    setReviewModalBatch(items);
+  }
+
+  async function handleConfirmAllStagedNow() {
+    if (changedStagedItems.length === 0) return;
+    const items = changedStagedItems.map((c) => ({
+      sponsorshipId: c.id,
+      status: c.newStatus,
+      sponsorship: c.sponsorship,
+    }));
+    await executeConfirmedBatch(items);
+  }
+
+  async function handleConfirmSingleStaged(id: string) {
+    const item = changedStagedItems.find((c) => c.id === id);
+    if (item) {
+      await executeConfirmedBatch([
+        {
+          sponsorshipId: item.id,
+          status: item.newStatus,
+          sponsorship: item.sponsorship,
+        },
+      ]);
+    } else {
+      const spon = sponsorships.find((s) => s.id === id);
+      if (spon) {
+        await executeConfirmedBatch([
+          {
+            sponsorshipId: id,
+            status: 'actually_sponsored',
+            sponsorship: spon,
+          },
+        ]);
+      }
+    }
+  }
+
+  function handleRemoveItemFromReviewBatch(id: string) {
+    setReviewModalBatch((prev) => {
+      if (!prev) return null;
+      const next = prev.filter((i) => i.sponsorshipId !== id);
+      if (next.length === 0) return null;
+      return next;
+    });
+    handleRevertStaged(id);
   }
 
   function handleConfirmIndications(
@@ -1256,43 +1409,6 @@ export function LedgerPage() {
     }
   }
 
-  // Fast mass-correction action for selected reported sponsorships
-  async function handleMassStatusChange(newStatus: SponsorshipStatus) {
-    if (selectedSponIds.size === 0) return;
-    const targetIds = Array.from(selectedSponIds);
-    setIsBatchConfirming(true);
-    try {
-      const res = await batchUpdateReportedSponsorships(targetIds, { status: newStatus });
-      if (res.success) {
-        const [refSpons, refreshedLedger] = await Promise.all([
-          listReportedSponsorships(true),
-          listLedgerEntries(true),
-        ]);
-        setSponsorships(cleanAndDeduplicateSponsorships(refSpons));
-        setEntries(refreshedLedger);
-
-        const label =
-          newStatus === 'actually_sponsored'
-            ? 'Actually Sponsored (cleared debt)'
-            : newStatus === 'unaccounted_sponsorship'
-            ? 'Unaccounted Sponsorship (added debt)'
-            : newStatus === 'unpaid_sponsorship'
-            ? 'Unpaid Sponsorship (added debt)'
-            : 'Pending Review (cleared debt)';
-
-        setSponsorshipNotice({
-          id: 'mass_status_change',
-          text: `Updated ${targetIds.length} passenger(s) to ${label}.`,
-          type: 'success',
-        });
-        setTimeout(() => setSponsorshipNotice(null), 4000);
-      }
-    } catch (err) {
-      console.error('Failed to mass update status:', err);
-    } finally {
-      setIsBatchConfirming(false);
-    }
-  }
 
   function handleOpenMassEditModal() {
     if (selectedSponIds.size === 0) return;
@@ -2512,49 +2628,49 @@ export function LedgerPage() {
                 )}
               </div>
 
-              {/* Mass Correction Action Buttons */}
+              {/* Mass Correction Action Buttons & Batch Staged Controls */}
               <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-                {selectedSponIds.size > 0 ? (
+                {selectedSponIds.size > 0 && (
                   <>
                     <button
                       type="button"
                       disabled={isBatchConfirming}
-                      onClick={() => handleMassStatusChange('actually_sponsored')}
+                      onClick={() => handleStageSelected('actually_sponsored')}
                       className="rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
-                      title="Mass mark selected items as Actually Sponsored (clears debt from ledger)"
+                      title="Stage selected items as Actually Sponsored (no debt)"
                     >
                       <Check className="h-3.5 w-3.5" />
-                      <span>Mark Sponsored</span>
+                      <span>Stage Sponsored</span>
                     </button>
 
                     <button
                       type="button"
                       disabled={isBatchConfirming}
-                      onClick={() => handleMassStatusChange('unaccounted_sponsorship')}
+                      onClick={() => handleStageSelected('unaccounted_sponsorship')}
                       className="rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
-                      title="Mass mark selected items as Unaccounted Sponsorship (adds debt to ledger)"
+                      title="Stage selected items as Unaccounted Sponsorship (records debt)"
                     >
                       <AlertTriangle className="h-3.5 w-3.5" />
-                      <span>Mark Unaccounted</span>
+                      <span>Stage Unaccounted</span>
                     </button>
 
                     <button
                       type="button"
                       disabled={isBatchConfirming}
-                      onClick={() => handleMassStatusChange('unpaid_sponsorship')}
+                      onClick={() => handleStageSelected('unpaid_sponsorship')}
                       className="rounded-lg bg-crimson-600 hover:bg-crimson-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
-                      title="Mass mark selected items as Unpaid Ride (adds debt to ledger)"
+                      title="Stage selected items as Unpaid Ride (records debt)"
                     >
                       <XCircle className="h-3.5 w-3.5" />
-                      <span>Mark Unpaid</span>
+                      <span>Stage Unpaid</span>
                     </button>
 
                     <button
                       type="button"
                       disabled={isBatchConfirming}
-                      onClick={() => handleMassStatusChange('pending')}
+                      onClick={() => handleStageSelected('pending')}
                       className="rounded-lg bg-card border border-line text-ink hover:bg-card-2 font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
-                      title="Mass reset selected items to Pending Review"
+                      title="Stage selected items back to Pending Review"
                     >
                       <Clock className="h-3.5 w-3.5 text-muted" />
                       <span>Reset Pending</span>
@@ -2582,7 +2698,46 @@ export function LedgerPage() {
                       <span>Delete</span>
                     </button>
                   </>
-                ) : (
+                )}
+
+                {/* Staged Changes Review & Confirmation Actions */}
+                {changedStagedItems.length > 0 && (
+                  <div className="flex items-center gap-1.5 sm:gap-2 pl-1 border-l border-amber-500/30">
+                    <button
+                      type="button"
+                      disabled={isBatchConfirming}
+                      onClick={handleReviewStagedChanges}
+                      className="rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-extrabold text-xs px-3 py-1.5 flex items-center gap-1.5 shadow-md transition-all active:scale-95"
+                      title="Review all unconfirmed changes before saving to database"
+                    >
+                      <ShieldCheck className="h-4 w-4" />
+                      <span>Review & Confirm ({changedStagedItems.length})</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isBatchConfirming}
+                      onClick={handleConfirmAllStagedNow}
+                      className="rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1 shadow-xs transition-all active:scale-95"
+                      title="Save all unconfirmed changes directly to the database"
+                    >
+                      <Check className="h-3.5 w-3.5" />
+                      <span className="hidden sm:inline">Save Now</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isBatchConfirming}
+                      onClick={handleDiscardAllStaged}
+                      className="rounded-md border border-line/60 bg-card px-2 py-1.5 text-xs text-muted hover:text-ink hover:bg-card-2 transition-colors"
+                      title="Discard all unconfirmed staged changes"
+                    >
+                      Discard
+                    </button>
+                  </div>
+                )}
+
+                {selectedSponIds.size === 0 && changedStagedItems.length === 0 && (
                   <button
                     type="button"
                     onClick={() => {
@@ -2755,14 +2910,19 @@ export function LedgerPage() {
                             const isUpdating = sponsorshipUpdatingId === s.id;
                             const cleanName = sanitizePassengerDisplayName(s.passenger_name);
                             const isSelected = selectedSponIds.has(s.id);
-                            const currentIndication = stagedIndications[s.id] || s.status;
+                            const hasStagedChange = stagedIndications[s.id] !== undefined && stagedIndications[s.id] !== s.status;
+                            const currentIndication = hasStagedChange ? stagedIndications[s.id]! : s.status;
                             const isPending = s.status === 'pending';
 
                             return (
                               <div
                                 key={s.id}
                                 className={`p-3.5 sm:p-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 transition-colors ${
-                                  isSelected ? 'bg-amber-500/10' : 'hover:bg-card-2/40'
+                                  hasStagedChange
+                                    ? 'bg-amber-500/15 border-l-4 border-l-amber-400'
+                                    : isSelected
+                                    ? 'bg-amber-500/10'
+                                    : 'hover:bg-card-2/40'
                                 }`}
                               >
                                 {/* Passenger Information */}
@@ -2807,6 +2967,11 @@ export function LedgerPage() {
                                           Stop: <strong className="text-ink font-medium">{s.stop}</strong>
                                         </span>
                                       )}
+                                      {hasStagedChange && (
+                                        <span className="rounded-full bg-amber-500/25 text-amber-300 border border-amber-500/40 text-[10px] font-bold px-2 py-0.5 animate-pulse">
+                                          Unconfirmed Change
+                                        </span>
+                                      )}
                                     </div>
 
                                     <div className="flex items-center gap-2 text-xs text-muted flex-wrap">
@@ -2843,7 +3008,6 @@ export function LedgerPage() {
                                         onChange={(e) => {
                                           const nextStatus = e.target.value as SponsorshipStatus;
                                           handleSetStagedIndication(s.id, nextStatus);
-                                          handleConfirmIndications([s.id], nextStatus);
                                         }}
                                         className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold border transition-all cursor-pointer ${
                                           currentIndication === 'actually_sponsored'
@@ -2869,48 +3033,67 @@ export function LedgerPage() {
                                         </option>
                                       </select>
 
-                                      {/* One-click Confirm Button for this row */}
-                                      {isPending ? (
-                                        <button
-                                          type="button"
-                                          disabled={isUpdating || isBatchConfirming}
-                                          onClick={() => {
-                                            const targetStatus = stagedIndications[s.id] || 'actually_sponsored';
-                                            handleConfirmIndications([s.id], targetStatus);
-                                          }}
-                                          className="rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1 shadow-xs transition-all active:scale-95 disabled:opacity-50"
-                                          title="Confirm indication and clear from pending queue"
-                                        >
-                                          {isUpdating ? (
-                                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                          ) : (
-                                            <>
-                                              <Check className="h-3.5 w-3.5" />
-                                              <span>Confirm</span>
-                                            </>
-                                          )}
-                                        </button>
-                                      ) : (
-                                        stagedIndications[s.id] &&
-                                        stagedIndications[s.id] !== s.status && (
+                                      {/* Controls for Staged Changes vs Direct Pending Confirm */}
+                                      {hasStagedChange ? (
+                                        <div className="flex items-center gap-1.5">
                                           <button
                                             type="button"
                                             disabled={isUpdating || isBatchConfirming}
-                                            onClick={() => {
-                                              handleConfirmIndications([s.id], stagedIndications[s.id]);
-                                            }}
-                                            className="rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                                            onClick={() => handleConfirmSingleStaged(s.id)}
+                                            className="rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-extrabold text-xs px-2.5 py-1.5 flex items-center gap-1 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                                            title="Confirm and save this change now"
                                           >
-                                            Update
+                                            {isUpdating ? (
+                                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                            ) : (
+                                              <>
+                                                <Check className="h-3.5 w-3.5" />
+                                                <span>Save</span>
+                                              </>
+                                            )}
                                           </button>
-                                        )
-                                      )}
+                                          <button
+                                            type="button"
+                                            disabled={isUpdating || isBatchConfirming}
+                                            onClick={() => handleRevertStaged(s.id)}
+                                            className="rounded-lg p-1.5 text-muted hover:text-ink hover:bg-card border border-line/60 transition-colors"
+                                            title="Discard this unconfirmed change"
+                                          >
+                                            <RotateCcw className="h-3.5 w-3.5" />
+                                          </button>
+                                        </div>
+                                      ) : isPending ? (
+                                        <button
+                                          type="button"
+                                          disabled={isUpdating || isBatchConfirming}
+                                          onClick={() => handleSetStagedIndication(s.id, 'actually_sponsored')}
+                                          className="rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 font-bold text-xs px-2.5 py-1.5 flex items-center gap-1 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                                          title="Stage as Actually Sponsored (you can stage more before confirming)"
+                                        >
+                                          <Check className="h-3.5 w-3.5" />
+                                          <span>Stage Sponsored</span>
+                                        </button>
+                                      ) : null}
                                     </div>
                                   </div>
 
                                   {/* Visual Status Indicator */}
                                   <div className="min-w-[170px]">
-                                    {s.status === 'actually_sponsored' ? (
+                                    {hasStagedChange ? (
+                                      <div className="flex items-center gap-1.5 text-xs font-bold text-amber-300">
+                                        <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                                        <span>
+                                          Unsaved:{' '}
+                                          {currentIndication === 'actually_sponsored'
+                                            ? 'Sponsored'
+                                            : currentIndication === 'unaccounted_sponsorship'
+                                            ? `Unaccounted (+R${getFareForDate(s.date)})`
+                                            : currentIndication === 'unpaid_sponsorship'
+                                            ? `Unpaid (+R${getFareForDate(s.date)})`
+                                            : 'Pending'}
+                                        </span>
+                                      </div>
+                                    ) : s.status === 'actually_sponsored' ? (
                                       <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
                                         <CheckCircle2 className="h-4 w-4 shrink-0" />
                                         <span>Actually sponsored</span>
@@ -4551,10 +4734,11 @@ export function LedgerPage() {
 
                     {/* Preview Table */}
                     <div className="border border-line rounded-lg overflow-hidden text-xs">
-                      <div className="bg-card-2 px-3 py-2 font-bold text-muted grid grid-cols-4 border-b border-line">
-                        <span className="col-span-2">Rider & Structure</span>
-                        <span>Date / Service</span>
-                        <span className="text-right">Action</span>
+                      <div className="bg-card-2 px-3 py-2 font-bold text-muted grid grid-cols-12 border-b border-line gap-2">
+                        <span className="col-span-5">Rider & Structure</span>
+                        <span className="col-span-3">Date / Service</span>
+                        <span className="col-span-3 text-right">Action</span>
+                        <span className="col-span-1 text-center">Remove</span>
                       </div>
                       <div className="max-h-52 overflow-y-auto divide-y divide-line">
                         {reviewModalBatch.map((item) => {
@@ -4565,15 +4749,15 @@ export function LedgerPage() {
                           const fare = spon ? getFareForDate(spon.date) : 40;
 
                           return (
-                            <div key={item.sponsorshipId} className="px-3 py-2 grid grid-cols-4 items-center">
-                              <div className="col-span-2">
-                                <div className="font-semibold text-ink">{riderName}</div>
-                                <div className="text-[10px] text-muted">{struct} {spon?.rep_name ? `• Rep: ${spon.rep_name}` : ''}</div>
+                            <div key={item.sponsorshipId} className="px-3 py-2 grid grid-cols-12 items-center gap-2 hover:bg-card-2/40 transition-colors">
+                              <div className="col-span-5 min-w-0">
+                                <div className="font-semibold text-ink truncate">{riderName}</div>
+                                <div className="text-[10px] text-muted truncate">{struct} {spon?.rep_name ? `• Rep: ${spon.rep_name}` : ''}</div>
                               </div>
-                              <div className="text-muted text-[11px]">
+                              <div className="col-span-3 text-muted text-[11px] truncate">
                                 {dateStr} ({spon?.service || 'PM'})
                               </div>
-                              <div className="text-right">
+                              <div className="col-span-3 text-right">
                                 {item.status === 'actually_sponsored' ? (
                                   <span className="badge bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px]">
                                     Sponsored (R0)
@@ -4582,11 +4766,25 @@ export function LedgerPage() {
                                   <span className="badge bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px]">
                                     Unaccounted (+R{fare})
                                   </span>
-                                ) : (
+                                ) : item.status === 'unpaid_sponsorship' ? (
                                   <span className="badge bg-crimson-500/20 text-crimson-300 border border-crimson-500/30 text-[10px]">
                                     Unpaid (+R{fare})
                                   </span>
+                                ) : (
+                                  <span className="badge bg-card text-muted border border-line text-[10px]">
+                                    Pending
+                                  </span>
                                 )}
+                              </div>
+                              <div className="col-span-1 text-center">
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveItemFromReviewBatch(item.sponsorshipId)}
+                                  className="p-1 rounded text-muted hover:text-crimson-400 hover:bg-crimson-500/10 transition-colors"
+                                  title="Remove this change from the confirmation batch"
+                                >
+                                  <X className="h-3.5 w-3.5 mx-auto" />
+                                </button>
                               </div>
                             </div>
                           );
@@ -4597,31 +4795,104 @@ export function LedgerPage() {
                 );
               })()}
 
-              <div className="flex items-center justify-end gap-2 border-t border-line pt-4">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 border-t border-line pt-4">
                 <button
                   type="button"
-                  onClick={() => setReviewModalBatch(null)}
+                  onClick={() => {
+                    handleDiscardAllStaged();
+                    setReviewModalBatch(null);
+                  }}
                   disabled={isBatchConfirming}
-                  className="btn-ghost text-xs py-2 px-3"
+                  className="text-xs text-crimson-400 hover:text-crimson-300 hover:underline text-left order-2 sm:order-1"
                 >
-                  Cancel
+                  Discard All Staged Changes
                 </button>
-                <button
-                  type="button"
-                  disabled={isBatchConfirming}
-                  onClick={() => executeConfirmedBatch(reviewModalBatch)}
-                  className="btn-crimson flex items-center gap-1.5 text-xs py-2 px-4 shadow-sm"
-                >
-                  {isBatchConfirming ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Check className="h-3.5 w-3.5" />
-                  )}
-                  <span>Confirm & Save to Database ({reviewModalBatch.length})</span>
-                </button>
+                <div className="flex items-center gap-2 justify-end order-1 sm:order-2">
+                  <button
+                    type="button"
+                    onClick={() => setReviewModalBatch(null)}
+                    disabled={isBatchConfirming}
+                    className="btn-ghost text-xs py-2 px-3"
+                  >
+                    Continue Editing
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isBatchConfirming}
+                    onClick={() => executeConfirmedBatch(reviewModalBatch)}
+                    className="btn-crimson flex items-center gap-1.5 text-xs py-2 px-4 shadow-sm font-semibold"
+                  >
+                    {isBatchConfirming ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Check className="h-3.5 w-3.5" />
+                    )}
+                    <span>Confirm & Save to Database ({reviewModalBatch.length})</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>
+        )}
+
+        {/* Floating Batch Confirmation Bar when multiple changes are staged */}
+        {activeTab === 'sponsorships' && changedStagedItems.length > 0 && !reviewModalBatch && (
+          <aside aria-label="Staged changes action bar" className="fixed bottom-4 sm:bottom-6 left-1/2 -translate-x-1/2 z-40 w-[95%] max-w-2xl animate-fade-in shadow-2xl rounded-2xl border border-amber-500/50 bg-card/95 backdrop-blur-md p-3 sm:p-4 text-ink flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-500/20 text-amber-300 shrink-0 font-bold text-sm">
+                {changedStagedItems.length}
+              </div>
+              <div>
+                <div className="text-xs sm:text-sm font-bold text-ink flex items-center gap-2">
+                  <span>{changedStagedItems.length} {changedStagedItems.length === 1 ? 'Change' : 'Changes'} Ready to Confirm</span>
+                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                </div>
+                <div className="text-[11px] text-muted flex items-center gap-2 flex-wrap">
+                  {stagedCounts.actually > 0 && (
+                    <span className="text-emerald-400">{stagedCounts.actually} Sponsored</span>
+                  )}
+                  {stagedCounts.unaccounted > 0 && (
+                    <span className="text-amber-400">{stagedCounts.unaccounted} Unaccounted</span>
+                  )}
+                  {stagedCounts.unpaid > 0 && (
+                    <span className="text-crimson-400">{stagedCounts.unpaid} Unpaid</span>
+                  )}
+                  {stagedCounts.pending > 0 && (
+                    <span className="text-muted">{stagedCounts.pending} Pending</span>
+                  )}
+                  <span>• Review before saving</span>
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+              <button
+                type="button"
+                disabled={isBatchConfirming}
+                onClick={handleDiscardAllStaged}
+                className="btn-ghost text-xs py-2 px-3 text-muted hover:text-ink"
+              >
+                Discard
+              </button>
+              <button
+                type="button"
+                disabled={isBatchConfirming}
+                onClick={handleConfirmAllStagedNow}
+                className="btn-secondary text-xs py-2 px-3 font-semibold"
+                title="Save directly without opening review preview"
+              >
+                Save Now
+              </button>
+              <button
+                type="button"
+                disabled={isBatchConfirming}
+                onClick={handleReviewStagedChanges}
+                className="btn-crimson flex items-center gap-1.5 text-xs py-2 px-4 font-bold shadow-md active:scale-95 transition-transform"
+              >
+                {isBatchConfirming ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+                <span>Review & Confirm ({changedStagedItems.length})</span>
+              </button>
+            </div>
+          </aside>
         )}
 
         {/* Historical Audit & Reconciliation Modal (12 Oct Baseline) */}
