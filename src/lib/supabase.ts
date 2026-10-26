@@ -1007,7 +1007,7 @@ function createResilientSupabaseClient() {
     auth: realClient.auth,
     from(tableName: string) {
       const realBuilder = realClient.from(tableName);
-      if (import.meta.env.PROD) {
+      if (import.meta?.env?.PROD) {
         return realBuilder;
       }
       const fallbackBuilder = mockClient.from(tableName);

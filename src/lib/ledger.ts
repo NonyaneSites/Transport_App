@@ -860,7 +860,7 @@ export async function insertAbsentees(
   }
 }
 
-export const LEDGER_SELECT_COLUMNS = 'id, manifest_key, date, service, passenger_name, stop, structure, vehicle_name, submitted_by, submitted_at, sponsored, sponsor_note, license_plate, rep_name, structure_debt, general_notes, status, fee, event_key, settled_at, settled_by, settlement_notes, removed_at, removed_by, removal_reason, legs, source';
+export const LEDGER_SELECT_COLUMNS = CANONICAL_LEDGER_COLUMNS.join(', ');
 
 let sessionLedgerCache: { data: LedgerEntry[]; timestamp: number } | null = null;
 const LEDGER_CACHE_TTL = 30000;
@@ -1024,6 +1024,26 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
     console.warn('[Ledger] Supabase fetch error:', err);
   }
 
+  // 1b. Mock storage / Local store (for test environments and offline persistence)
+  try {
+    const mockRows = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
+    for (const e of mockRows) {
+      if (e && e.id) {
+        const idStr = String(e.id);
+        if (settledOrRemovedIds.has(idStr)) continue;
+        const st = (e.status || '').trim();
+        if (st === 'Settled' || st === 'Paid' || st === 'Removed') {
+          settledOrRemovedIds.add(idStr);
+          continue;
+        }
+        const prev = mergedMap.get(idStr);
+        mergedMap.set(idStr, prev ? { ...prev, ...e } : e);
+      }
+    }
+  } catch {
+    /* ignore mockStorage fetch note */
+  }
+
   // 2. Secondary: Central Express Server API (for locally queued DEV entries)
   try {
     const serverEntries = await listLedgerFromServer();
@@ -1038,9 +1058,9 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
             settledOrRemovedIds.add(idStr);
             continue;
           }
-          if (!mergedMap.has(idStr)) {
-            mergedMap.set(idStr, e);
-          }
+          // The server entries are authoritative; overlay them so edits to name, structure, debt, date, etc. take precedence
+          const prev = mergedMap.get(idStr);
+          mergedMap.set(idStr, prev ? { ...prev, ...e } : e);
         }
       }
     }
@@ -1071,10 +1091,17 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
               }
             }
           } else if (spon.status === 'unaccounted_sponsorship' || spon.status === 'unpaid_sponsorship') {
+            const entryId = spon.ledger_entry_id || `ledger_sp_${spon.id || Date.now()}`;
+            if (settledOrRemovedIds.has(entryId) || (spon.ledger_entry_id && settledOrRemovedIds.has(spon.ledger_entry_id))) {
+              continue;
+            }
             const cleanName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
+            const d = normalizeDateToYMD(spon.date) || spon.date;
             const alreadyInMap = Array.from(mergedMap.values()).some((e) =>
-              (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
-              (e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanName && Boolean(e.sponsored))
+              (spon.ledger_entry_id && String(e.id) === String(spon.ledger_entry_id)) ||
+              String(e.id) === String(entryId) ||
+              (sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanName &&
+               (normalizeDateToYMD(e.date) || e.date) === d)
             );
             if (!alreadyInMap) {
               const rawNote = spon.sponsor_note ? cleanSponsorshipNote(spon.sponsor_note) : '';
@@ -1276,10 +1303,21 @@ export async function removeLedgerEntries(
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_SPONSORSHIPS_KEY) : null;
     if (raw) {
       const idSet = new Set(validIds);
+      const localLedger = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
+      const cacheRows = sessionLedgerCache?.data || [];
+      const allKnown = [...localLedger, ...cacheRows];
+      const removedNames = new Set(
+        allKnown
+          .filter((r) => idSet.has(String(r.id)))
+          .map((r) => sanitizePassengerDisplayName(r.passenger_name).toLowerCase())
+          .filter(Boolean)
+      );
+
       let audits = JSON.parse(raw) as ReportedSponsorship[];
       let changed = false;
       audits = audits.map((a) => {
-        if (a.ledger_entry_id && idSet.has(a.ledger_entry_id)) {
+        const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase();
+        if ((a.ledger_entry_id && idSet.has(a.ledger_entry_id)) || (removedNames.size > 0 && removedNames.has(aName))) {
           changed = true;
           return {
             ...a,
@@ -1424,10 +1462,21 @@ export async function settleLedgerEntries(
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_SPONSORSHIPS_KEY) : null;
     if (raw) {
       const idSet = new Set(validIds);
+      const localLedger = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
+      const cacheRows = sessionLedgerCache?.data || [];
+      const allKnown = [...localLedger, ...cacheRows];
+      const settledNames = new Set(
+        allKnown
+          .filter((r) => idSet.has(String(r.id)))
+          .map((r) => sanitizePassengerDisplayName(r.passenger_name).toLowerCase())
+          .filter(Boolean)
+      );
+
       let audits = JSON.parse(raw) as ReportedSponsorship[];
       let changed = false;
       audits = audits.map((a) => {
-        if (idSet.has(a.ledger_entry_id || '')) {
+        const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase();
+        if ((a.ledger_entry_id && idSet.has(a.ledger_entry_id)) || (settledNames.size > 0 && settledNames.has(aName))) {
           changed = true;
           return {
             ...a,
@@ -1636,10 +1685,13 @@ export async function updateDebtorWithInstances(
   }
 ): Promise<void> {
   invalidateLedgerCache();
+  invalidateSponsorshipsCache();
   const structCode = normalizeStructureCode(updates.structure);
   const cleanName = updates.name.trim();
   const debtType = updates.debtType || (updates.isSponsored ? 'unaccounted_sponsorship' : 'cancellation');
   const isSponsored = debtType !== 'cancellation';
+  const nowIso = new Date().toISOString();
+  const existingSet = new Set(existingEntryIds.map(String));
 
   let finalSponsorNote = '';
   let finalGeneralNotes = '';
@@ -1666,7 +1718,16 @@ export async function updateDebtorWithInstances(
     return Number.isFinite(rawAmt) && rawAmt > 0;
   });
 
-  // Synchronize to server
+  // Collect previous names for this debtor so linked records stay in sync
+  const localLedger = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
+  const cacheEntries = sessionLedgerCache?.data || [];
+  const allKnownEntries = [...localLedger, ...cacheEntries];
+  const origNames = Array.from(new Set([
+    ...allKnownEntries.filter((e) => existingSet.has(String(e.id))).map((e) => sanitizePassengerDisplayName(e.passenger_name).toLowerCase()),
+    cleanName.toLowerCase()
+  ])).filter(Boolean);
+
+  // Synchronize to server immediately
   try {
     await updateDebtorOnServer({
       existingEntryIds,
@@ -1683,8 +1744,59 @@ export async function updateDebtorWithInstances(
     console.debug('[Ledger] Server updateDebtor error:', err);
   }
 
+  // Synchronize local sponsorship audit storage in localStorage and mockStorage so old debts never resurrect
+  try {
+    const rawSpon = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_SPONSORSHIPS_KEY) : null;
+    if (rawSpon) {
+      let audits = JSON.parse(rawSpon) as ReportedSponsorship[];
+      if (Array.isArray(audits)) {
+        audits = audits.map((a) => {
+          const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase();
+          const matches = existingSet.has(String(a.ledger_entry_id || '')) || origNames.includes(aName);
+          if (matches) {
+            if (activeInstances.length === 0 || !isSponsored) {
+              return {
+                ...a,
+                status: 'actually_sponsored' as const,
+                status_updated_at: nowIso,
+                ledger_entry_id: null,
+                sponsor_note: !isSponsored
+                  ? (a.sponsor_note ? `${a.sponsor_note} (Converted to cancellation)` : 'Converted to cancellation')
+                  : (a.sponsor_note ? `${a.sponsor_note} (Settled)` : 'Settled'),
+              };
+            }
+            return {
+              ...a,
+              passenger_name: cleanName,
+              structure: structCode,
+              sponsor_note: finalSponsorNote,
+              status: debtType as SponsorshipStatus,
+              status_updated_at: nowIso,
+            };
+          }
+          return a;
+        });
+        localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(audits));
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: audits }));
+        }
+      }
+    }
+  } catch {
+    /* ignore localStorage error */
+  }
+
   // If no instances remain (or all debts were reduced to zero), mark all debtor entries as settled
   if (activeInstances.length === 0) {
+    addLocalSettledLedgerIds(existingEntryIds);
+    // Update mockStorage directly
+    try {
+      let mockRows = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
+      mockRows = mockRows.filter((r) => !existingSet.has(String(r.id)));
+      mockStorage.setTable(LEDGER_TABLE, mockRows as unknown as Record<string, unknown>[]);
+    } catch {
+      /* ignore */
+    }
     if (existingEntryIds.length > 0) {
       await settleLedgerEntries(existingEntryIds, 'Admin', 'Settled via debtor balance reduction to R0');
     }
@@ -1697,6 +1809,8 @@ export async function updateDebtorWithInstances(
     const { data } = await supabase.from(LEDGER_TABLE).select('*').in('id', existingEntryIds);
     if (data && data.length > 0) {
       templateEntry = data[0] as LedgerEntry;
+    } else {
+      templateEntry = allKnownEntries.find((e) => existingSet.has(String(e.id))) || null;
     }
   }
 
@@ -1760,10 +1874,51 @@ export async function updateDebtorWithInstances(
     }
   }
 
+  // Ensure mockStorage reflects updated debtor names and structures
+  try {
+    let mockRows = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
+    for (const inst of activeInstances) {
+      const validAmount = typeof inst.amount === 'number' ? inst.amount : Number(inst.amount);
+      const validDate = inst.date ? inst.date.trim() : '';
+      const validService = inst.service ? inst.service.trim() : 'PM';
+
+      if (inst.id) {
+        const idx = mockRows.findIndex((r) => String(r.id) === String(inst.id));
+        if (idx !== -1) {
+          mockRows[idx] = {
+            ...mockRows[idx],
+            date: validDate || mockRows[idx].date,
+            service: validService || mockRows[idx].service,
+            passenger_name: cleanName,
+            structure: structCode,
+            structure_debt: validAmount,
+            sponsored: isSponsored,
+            sponsor_note: finalSponsorNote,
+            general_notes: finalGeneralNotes,
+            submitted_by: 'Cancellation Admin',
+          };
+        }
+      }
+    }
+    // Filter out removed instances from mock table
+    mockRows = mockRows.filter((r) => !existingSet.has(String(r.id)) || updatedIds.has(String(r.id)));
+    mockStorage.setTable(LEDGER_TABLE, mockRows as unknown as Record<string, unknown>[]);
+  } catch {
+    /* ignore mockStorage error */
+  }
+
   // Durably remove any instances that were removed by the admin (e.g. date removed in between)
   const idsToRemove = existingEntryIds.filter((id) => !updatedIds.has(id));
   if (idsToRemove.length > 0) {
+    addLocalRemovedLedgerIds(idsToRemove);
     await removeLedgerEntries(idsToRemove, 'Admin', 'Instance removed during debtor edit');
+  }
+
+  invalidateLedgerCache();
+  invalidateSponsorshipsCache();
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
+    window.dispatchEvent(new CustomEvent('crc_sponsorships_updated'));
   }
 }
 
@@ -1873,6 +2028,34 @@ export async function updateDebtorDetails(
       const { error } = await supabase.from(LEDGER_TABLE).update(sanitizedPatch).in('id', entryIds);
       if (error) throw error;
     }
+  }
+
+  // Synchronize server and caches
+  try {
+    const instancesToSync = currentEntries.map((e) => ({
+      id: e.id,
+      date: e.date || '',
+      service: e.service || 'PM',
+      amount: parseDebtAmount(e.structure_debt, e.date),
+    }));
+    await updateDebtorOnServer({
+      existingEntryIds: entryIds,
+      updates: {
+        name: updates.name ? updates.name.trim() : (currentEntries[0]?.passenger_name || ''),
+        structure: structCode ?? currentEntries[0]?.structure ?? '',
+        isSponsored: updates.isSponsored,
+        notes: cleanSponsorshipNote(updates.notes),
+        instances: instancesToSync,
+      },
+    });
+  } catch {
+    /* ignore server error */
+  }
+  invalidateLedgerCache();
+  invalidateSponsorshipsCache();
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
+    window.dispatchEvent(new CustomEvent('crc_sponsorships_updated'));
   }
 }
 

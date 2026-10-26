@@ -6,9 +6,13 @@ import {
   CANONICAL_LEDGER_COLUMNS,
   aggregateLedgerEntries,
   cleanAndDeduplicateSponsorships,
+  updateDebtorWithInstances,
+  listLedgerEntries,
+  removeLedgerEntries,
   type LedgerEntry,
   type ReportedSponsorship,
 } from './ledger';
+import { mockStorage, LEDGER_TABLE } from './supabase';
 
 test('Cancellation Ledger: Event key generation is deterministic and unique per event', () => {
   const key1 = generateLedgerEventKey({
@@ -216,4 +220,69 @@ test('Sponsorship Deduplication: Actually sponsored and settled states are prese
   assert.strictEqual(deduplicated.length, 1);
   // Verified status must be preserved and not degraded back to 'pending'
   assert.strictEqual(deduplicated[0].status, 'actually_sponsored');
+});
+
+test('Debtor Edit Persistence: updateDebtorWithInstances persists name, structure, instances, and debt without reverting', async () => {
+  const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const initialName = `Orig Person ${uniqueSuffix}`;
+  const targetName = `Renamed Person ${uniqueSuffix}`;
+  const initialId = `test-persist-${uniqueSuffix}`;
+
+  const initialRow: LedgerEntry = {
+    id: initialId,
+    manifest_key: '2026-10-18_PM',
+    date: '2026-10-18',
+    service: 'PM',
+    passenger_name: initialName,
+    stop: 'Gate 1',
+    structure: 'S1',
+    vehicle_name: 'Taxi 1',
+    submitted_by: 'Cancellation Admin',
+    submitted_at: '2026-10-18T12:00:00Z',
+    sponsored: false,
+    sponsor_note: '',
+    license_plate: '',
+    rep_name: 'Rep',
+    structure_debt: 40,
+    general_notes: 'Initial cancellation',
+    status: 'Unpaid',
+  };
+
+  mockStorage.setTable(LEDGER_TABLE, [initialRow as unknown as Record<string, unknown>]);
+
+  // Perform debtor update: change name to targetName, structure to "S15", and add an extra date instance
+  await updateDebtorWithInstances([initialRow.id], {
+    name: targetName,
+    structure: 'S15',
+    isSponsored: false,
+    debtType: 'cancellation',
+    notes: 'Updated note',
+    instances: [
+      { id: initialRow.id, date: '2026-10-18', service: 'PM', amount: 35 },
+      { date: '2026-10-25', service: 'AM', amount: 45 },
+    ],
+  });
+
+  // Re-fetch via listLedgerEntries (simulating refresh / fresh read)
+  const refreshed = await listLedgerEntries(true);
+  const updatedRows = refreshed.filter((e) => e.passenger_name === targetName);
+
+  assert.strictEqual(updatedRows.length, 2, 'Must have exactly 2 instances for updated debtor');
+  assert.strictEqual(updatedRows[0].structure, 'S15');
+  assert.strictEqual(updatedRows[0].passenger_name, targetName);
+
+  // Must not have any entries under original name
+  const oldRows = refreshed.filter((e) => e.passenger_name === initialName);
+  assert.strictEqual(oldRows.length, 0, 'Original name must not exist after rename');
+
+  // Verify aggregated row computes correct new debt
+  const aggregated = aggregateLedgerEntries(refreshed);
+  const debtorGroup = aggregated.find((g) => g.structure === 'S15');
+  assert.ok(debtorGroup, 'Group for S15 must exist');
+  const debtorRow = debtorGroup.rows.find((r) => r.name === targetName);
+  assert.ok(debtorRow, 'Row for target debtor must exist');
+  assert.strictEqual(debtorRow.amount, 80, 'Total debt must equal 35 + 45 = 80');
+
+  // Clean up test rows
+  await removeLedgerEntries(updatedRows.map((e) => e.id));
 });
