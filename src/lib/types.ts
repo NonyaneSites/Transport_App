@@ -309,15 +309,17 @@ export type LiveSyncAction =
   | {
       type: 'vehicle_submitted';
       vehicleId: string;
-      repName: string;
-      clientId: string;
+      repName?: string;
+      clientId?: string;
+      key?: string;
       timestamp: number;
     }
   | {
       type: 'vehicle_reopened';
       vehicleId: string;
-      repName: string;
-      clientId: string;
+      repName?: string;
+      clientId?: string;
+      key?: string;
       timestamp: number;
     };
 

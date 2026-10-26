@@ -1,4 +1,5 @@
 import { supabase, MANIFESTS_TABLE, VEHICLES_TABLE, mockStorage } from './supabase';
+import { fetchManifestFromServer } from './serverApi';
 import type { Manifest, Passenger, Vehicle, VehicleDraftState } from './types';
 import { hubDisplayName } from './types';
 import { normalizePassengerText, getSubmissionTimestampEpoch } from './importer';
@@ -636,37 +637,50 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
   let manifest: Manifest | null = null;
   let loadedFromRemote = false;
 
-  // 1. Primary: Supabase table transport_manifests
+  // 1. Primary: Server disk manifest via API (authoritative source of truth for submissions & allocations)
   try {
-    const { data, error } = await supabase
-      .from(MANIFESTS_TABLE)
-      .select('date, signups, vehicles, created_at, updated_at')
-      .eq('date', key)
-      .maybeSingle();
-    if (error) {
-      console.warn('[Manifest] Failed to load remote manifest, reading local store:', error);
-    }
-    if (data) {
-      manifest = {
-        date: data.date,
-        signups: Array.isArray(data.signups) ? data.signups : [],
-        vehicles: Array.isArray(data.vehicles)
-          ? data.vehicles.map((v: Vehicle) => ({
-              ...v,
-              riders: Array.isArray(v.riders) ? v.riders : [],
-              orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
-            }))
-          : [],
-        created_at: data.created_at,
-        updated_at: data.updated_at,
-      };
+    const serverManifest = await fetchManifestFromServer(key);
+    if (serverManifest && Array.isArray(serverManifest.vehicles) && serverManifest.vehicles.length > 0) {
+      manifest = serverManifest;
       loadedFromRemote = true;
     }
   } catch (err) {
-    console.warn('[Manifest] Exception loading manifest, checking local store:', err);
+    console.warn('[Manifest] Exception fetching server manifest:', err);
   }
 
-  // 2. Fallback to local storage if not yet loaded
+  // 2. Supabase table transport_manifests (if server manifest not found or offline)
+  if (!manifest) {
+    try {
+      const { data, error } = await supabase
+        .from(MANIFESTS_TABLE)
+        .select('date, signups, vehicles, created_at, updated_at')
+        .eq('date', key)
+        .maybeSingle();
+      if (error) {
+        console.warn('[Manifest] Failed to load remote manifest, reading local store:', error);
+      }
+      if (data) {
+        manifest = {
+          date: data.date,
+          signups: Array.isArray(data.signups) ? data.signups : [],
+          vehicles: Array.isArray(data.vehicles)
+            ? data.vehicles.map((v: Vehicle) => ({
+                ...v,
+                riders: Array.isArray(v.riders) ? v.riders : [],
+                orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
+              }))
+            : [],
+          created_at: data.created_at,
+          updated_at: data.updated_at,
+        };
+        loadedFromRemote = true;
+      }
+    } catch (err) {
+      console.warn('[Manifest] Exception loading manifest, checking local store:', err);
+    }
+  }
+
+  // 3. Fallback to local storage if not yet loaded
   if (!manifest) {
     const localRow = mockStorage.getTable(MANIFESTS_TABLE).find((r) => r.date === key);
     if (localRow) {
@@ -686,13 +700,13 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
   try {
     const individualVehicles = await loadVehiclesForManifest(key, loadedFromRemote);
     if (individualVehicles.length > 0) {
-      const indMap = new Map(individualVehicles.map((v) => [v.id, v]));
+      const indMap = new Map(individualVehicles.map((v) => [String(v.id), v]));
       const mergedVehicles: Vehicle[] = [];
       const seenIds = new Set<string>();
 
       for (const v of manifest.vehicles) {
-        if (indMap.has(v.id)) {
-          const ind = indMap.get(v.id)!;
+        if (indMap.has(String(v.id))) {
+          const ind = indMap.get(String(v.id))!;
           // CRITICAL: NEVER lose submitted status! Remote or local submission must be preserved.
           const isSubmitted = Boolean(v.submitted || ind.submitted || v.draftState?.submitted || ind.draftState?.submitted);
           const submittedAt = v.submittedAt || ind.submittedAt || (isSubmitted ? new Date().toISOString() : undefined);

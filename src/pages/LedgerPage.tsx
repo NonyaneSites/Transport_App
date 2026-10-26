@@ -3,22 +3,25 @@ import {
   Loader2, AlertTriangle, FileSpreadsheet, Search, Filter, XCircle,
   ChevronDown, ChevronRight, Upload, CheckCircle2, FileText, Banknote, X, UserPlus, Plus,
   Pencil, Trash2, HeartHandshake, Clock, Check, CheckSquare, Square, Database, Copy,
-  ShieldCheck, BarChart3,
+  ShieldCheck, BarChart3, Calendar, ArrowUpDown, Layers, Edit3,
 } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
+import { supabase } from '@/lib/supabase';
 import { connectSyncEvents } from '@/lib/serverApi';
+import { prettyDate } from '@/lib/dates';
 import {
   listLedgerEntries, removeLedgerEntries, downloadLedgerExcel,
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
   recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch, parseDebtAmount, serviceCodeForEntry,
   updateDebtorWithInstances, normalizeDateToYMD, normalizeStructureCode, structureSortComparator,
-  listReportedSponsorships, verifyBatchSponsorships, groupSponsorshipsByStructure, sanitizePassengerDisplayName,
-  cleanSponsorshipNote, cleanPersonalAbsenteeNote, cleanAndDeduplicateSponsorships,
+  listReportedSponsorships, verifyBatchSponsorships, groupSponsorshipsByStructure, groupSponsorshipsByDate,
+  sanitizePassengerDisplayName, cleanSponsorshipNote, cleanPersonalAbsenteeNote, cleanAndDeduplicateSponsorships,
   deleteReportedSponsorship, batchDeleteReportedSponsorships, recordReportedSponsorshipPayment, updateReportedSponsorship,
+  batchUpdateReportedSponsorships,
   type DebtorInstanceUpdateItem,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
-  type ReportedSponsorship, type SponsorshipStatus,
+  type ReportedSponsorship, type SponsorshipStatus, type DateSponsorshipGroup, type StructureSponsorshipGroup,
 } from '@/lib/ledger';
 import { getFareForDate } from '@/lib/types';
 import { downloadCancellationDebtPdf } from '@/lib/pdfExport';
@@ -285,7 +288,11 @@ export function LedgerPage() {
   // Reported Sponsorships Audit State
   const [sponsorships, setSponsorships] = useState<ReportedSponsorship[]>([]);
   const [sponsorshipFilter, setSponsorshipFilter] = useState<'pending' | 'actually_sponsored' | 'debt' | 'all'>('pending');
+  const [sponsorshipGroupBy, setSponsorshipGroupBy] = useState<'date' | 'structure'>('date');
+  const [sponsorshipDateOrder, setSponsorshipDateOrder] = useState<'desc' | 'asc'>('desc');
+  const [sponsorshipDateFilter, setSponsorshipDateFilter] = useState<string>('all');
   const [closedSponsorshipStructures, setClosedSponsorshipStructures] = useState<Set<string>>(new Set());
+  const [closedSponsorshipDateGroups, setClosedSponsorshipDateGroups] = useState<Set<string>>(new Set());
   const [sponsorshipUpdatingId, setSponsorshipUpdatingId] = useState<string | null>(null);
   const [sponsorshipNotice, setSponsorshipNotice] = useState<{ id: string; text: string; type: 'success' | 'warn' } | null>(null);
 
@@ -301,6 +308,17 @@ export function LedgerPage() {
     sponsorship?: ReportedSponsorship;
   }> | null>(null);
   const [showReconciliationModal, setShowReconciliationModal] = useState(false);
+
+  // Mass Edit Modal State
+  const [showMassEditModal, setShowMassEditModal] = useState(false);
+  const [massEditStructure, setMassEditStructure] = useState('');
+  const [massEditDate, setMassEditDate] = useState('');
+  const [massEditService, setMassEditService] = useState('');
+  const [massEditStatus, setMassEditStatus] = useState<SponsorshipStatus | ''>('');
+  const [massEditNotes, setMassEditNotes] = useState('');
+  const [massEditDebtAmount, setMassEditDebtAmount] = useState('');
+  const [savingMassEdit, setSavingMassEdit] = useState(false);
+  const [massEditError, setMassEditError] = useState<string | null>(null);
 
   // Reported Sponsorship Payment State
   const [paySponTarget, setPaySponTarget] = useState<ReportedSponsorship | null>(null);
@@ -365,6 +383,7 @@ export function LedgerPage() {
       }
     })();
 
+    // 1. SSE and local window event listener
     const disconnectSSE = connectSyncEvents(
       undefined,
       async () => {
@@ -382,9 +401,31 @@ export function LedgerPage() {
       }
     );
 
+    // 2. Realtime Postgres changes via Supabase channel
+    const realtimeChannel = supabase
+      .channel('realtime_sponsorship_audits_sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sponsorship_audits' }, async () => {
+        if (mounted) {
+          const sponRefreshed = await listReportedSponsorships(true);
+          setSponsorships(cleanAndDeduplicateSponsorships(sponRefreshed));
+        }
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'cancellation_ledger' }, async () => {
+        if (mounted) {
+          const refreshed = await listLedgerEntries(true);
+          setEntries(refreshed);
+        }
+      })
+      .subscribe();
+
     return () => {
       mounted = false;
       disconnectSSE();
+      try {
+        supabase.removeChannel(realtimeChannel);
+      } catch {
+        /* ignore */
+      }
     };
   }, []);
 
@@ -457,6 +498,27 @@ export function LedgerPage() {
     return { total, pending, confirmed, debt };
   }, [dedupedSponsorships]);
 
+  const availableSponsorshipDates = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const s of dedupedSponsorships) {
+      const raw = s.date || s.manifest_key || '';
+      const norm = normalizeDateToYMD(raw) || raw.split('_')[0].split('T')[0];
+      if (norm && !map.has(norm)) {
+        let label = norm;
+        try {
+          const p = prettyDate(norm);
+          if (p && p !== '—') label = p;
+        } catch {
+          /* ignore */
+        }
+        map.set(norm, label);
+      }
+    }
+    return Array.from(map.entries())
+      .map(([val, label]) => ({ val, label }))
+      .sort((a, b) => b.val.localeCompare(a.val));
+  }, [dedupedSponsorships]);
+
   const filteredSponsorships = useMemo(() => {
     let list = dedupedSponsorships.map((s) => ({
       ...s,
@@ -466,6 +528,13 @@ export function LedgerPage() {
 
     if (structureFilter) {
       list = list.filter((s) => s.structure === structureFilter);
+    }
+    if (sponsorshipDateFilter && sponsorshipDateFilter !== 'all') {
+      list = list.filter((s) => {
+        const raw = s.date || s.manifest_key || '';
+        const norm = normalizeDateToYMD(raw) || raw.split('_')[0].split('T')[0];
+        return norm === sponsorshipDateFilter;
+      });
     }
     if (sponsorshipFilter === 'pending') {
       list = list.filter((s) => s.status === 'pending');
@@ -483,15 +552,24 @@ export function LedgerPage() {
         s.vehicle_name.toLowerCase().includes(q) ||
         s.sponsor_note.toLowerCase().includes(q) ||
         s.rep_name.toLowerCase().includes(q) ||
-        (s.stop || '').toLowerCase().includes(q)
+        (s.stop || '').toLowerCase().includes(q) ||
+        (s.date || '').toLowerCase().includes(q)
       );
     }
     return list;
-  }, [dedupedSponsorships, structureFilter, sponsorshipFilter, search]);
+  }, [dedupedSponsorships, structureFilter, sponsorshipDateFilter, sponsorshipFilter, search]);
+
+  const groupedSponsorshipsByStructure = useMemo(() => {
+    return groupSponsorshipsByStructure(filteredSponsorships, sponsorshipDateOrder);
+  }, [filteredSponsorships, sponsorshipDateOrder]);
+
+  const groupedSponsorshipsByDate = useMemo(() => {
+    return groupSponsorshipsByDate(filteredSponsorships, sponsorshipDateOrder);
+  }, [filteredSponsorships, sponsorshipDateOrder]);
 
   const groupedSponsorships = useMemo(() => {
-    return groupSponsorshipsByStructure(filteredSponsorships);
-  }, [filteredSponsorships]);
+    return sponsorshipGroupBy === 'date' ? groupedSponsorshipsByDate : groupedSponsorshipsByStructure;
+  }, [sponsorshipGroupBy, groupedSponsorshipsByDate, groupedSponsorshipsByStructure]);
 
   // Shared with the download (see aggregateLedgerEntries in lib/ledger) so
   // the web view and the exported "SZ Cancellation List" never drift apart.
@@ -607,7 +685,29 @@ export function LedgerPage() {
   }
 
   function collapseAllSponsorshipStructures() {
-    setClosedSponsorshipStructures(new Set(groupedSponsorships.map((g) => g.structure)));
+    setClosedSponsorshipStructures(new Set(groupedSponsorshipsByStructure.map((g) => g.structure)));
+  }
+
+  function toggleSponsorshipDateGroup(d: string) {
+    setClosedSponsorshipDateGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(d)) next.delete(d);
+      else next.add(d);
+      return next;
+    });
+  }
+
+  function isSponsorshipDateGroupOpen(d: string) {
+    if (search.trim()) return true;
+    return !closedSponsorshipDateGroups.has(d);
+  }
+
+  function expandAllSponsorshipDates() {
+    setClosedSponsorshipDateGroups(new Set());
+  }
+
+  function collapseAllSponsorshipDates() {
+    setClosedSponsorshipDateGroups(new Set(groupedSponsorshipsByDate.map((g) => g.date)));
   }
 
   function openPaymentModal(row: AggregatedLedgerRow) {
@@ -1153,6 +1253,108 @@ export function LedgerPage() {
       console.error('Failed to batch delete sponsorships:', err);
     } finally {
       setIsBatchConfirming(false);
+    }
+  }
+
+  // Fast mass-correction action for selected reported sponsorships
+  async function handleMassStatusChange(newStatus: SponsorshipStatus) {
+    if (selectedSponIds.size === 0) return;
+    const targetIds = Array.from(selectedSponIds);
+    setIsBatchConfirming(true);
+    try {
+      const res = await batchUpdateReportedSponsorships(targetIds, { status: newStatus });
+      if (res.success) {
+        const [refSpons, refreshedLedger] = await Promise.all([
+          listReportedSponsorships(true),
+          listLedgerEntries(true),
+        ]);
+        setSponsorships(cleanAndDeduplicateSponsorships(refSpons));
+        setEntries(refreshedLedger);
+
+        const label =
+          newStatus === 'actually_sponsored'
+            ? 'Actually Sponsored (cleared debt)'
+            : newStatus === 'unaccounted_sponsorship'
+            ? 'Unaccounted Sponsorship (added debt)'
+            : newStatus === 'unpaid_sponsorship'
+            ? 'Unpaid Sponsorship (added debt)'
+            : 'Pending Review (cleared debt)';
+
+        setSponsorshipNotice({
+          id: 'mass_status_change',
+          text: `Updated ${targetIds.length} passenger(s) to ${label}.`,
+          type: 'success',
+        });
+        setTimeout(() => setSponsorshipNotice(null), 4000);
+      }
+    } catch (err) {
+      console.error('Failed to mass update status:', err);
+    } finally {
+      setIsBatchConfirming(false);
+    }
+  }
+
+  function handleOpenMassEditModal() {
+    if (selectedSponIds.size === 0) return;
+    setMassEditStructure('');
+    setMassEditDate('');
+    setMassEditService('');
+    setMassEditStatus('');
+    setMassEditNotes('');
+    setMassEditDebtAmount('');
+    setMassEditError(null);
+    setShowMassEditModal(true);
+  }
+
+  function handleCloseMassEditModal() {
+    setShowMassEditModal(false);
+    setMassEditError(null);
+  }
+
+  async function handleExecuteMassEdit() {
+    if (selectedSponIds.size === 0) return;
+    const targetIds = Array.from(selectedSponIds);
+    const updates: Partial<ReportedSponsorship> & { debtAmount?: number } = {};
+
+    if (massEditStructure) updates.structure = normalizeStructureCode(massEditStructure);
+    if (massEditDate) updates.date = normalizeDateToYMD(massEditDate) || massEditDate;
+    if (massEditService) updates.service = massEditService;
+    if (massEditStatus) updates.status = massEditStatus as SponsorshipStatus;
+    if (massEditNotes.trim()) updates.sponsor_note = massEditNotes.trim();
+    if (massEditDebtAmount) {
+      const amt = Number(massEditDebtAmount);
+      if (Number.isFinite(amt) && amt > 0) updates.debtAmount = amt;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      setMassEditError('Please specify at least one field to update across selected records.');
+      return;
+    }
+
+    setSavingMassEdit(true);
+    setMassEditError(null);
+    try {
+      const res = await batchUpdateReportedSponsorships(targetIds, updates);
+      if (res.success) {
+        const [refSpons, refreshedLedger] = await Promise.all([
+          listReportedSponsorships(true),
+          listLedgerEntries(true),
+        ]);
+        setSponsorships(cleanAndDeduplicateSponsorships(refSpons));
+        setEntries(refreshedLedger);
+
+        setSponsorshipNotice({
+          id: 'mass_edit_success',
+          text: `Mass updated details across ${targetIds.length} selected passenger(s).`,
+          type: 'success',
+        });
+        setTimeout(() => setSponsorshipNotice(null), 4000);
+        handleCloseMassEditModal();
+      }
+    } catch (err) {
+      setMassEditError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingMassEdit(false);
     }
   }
 
@@ -2172,7 +2374,7 @@ export function LedgerPage() {
                     type="text"
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search passenger, rep, stop…"
+                    placeholder="Search passenger, rep, date, stop…"
                     className="w-full rounded-lg border border-line bg-card-2 pl-9 pr-8 py-1.5 text-xs text-ink placeholder:text-muted focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
                   />
                   {search && (
@@ -2187,165 +2389,217 @@ export function LedgerPage() {
                 </div>
               </div>
 
-              {/* Expand / Collapse Controls */}
-              <div className="flex items-center justify-between pt-1 border-t border-line/60 text-xs text-muted">
-                <span>
-                  {groupedSponsorships.length} structure{groupedSponsorships.length === 1 ? '' : 's'} · {filteredSponsorships.length} passenger{filteredSponsorships.length === 1 ? '' : 's'}
-                </span>
-                <div className="flex items-center gap-1.5 sm:gap-2">
+              {/* View Mode & Date Ordering Toolbar */}
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 pt-2 border-t border-line/60 text-xs">
+                {/* Group By & Ordering Controls */}
+                <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                  {/* Group By View Toggle */}
+                  <div className="flex items-center rounded-lg border border-line/70 bg-card-2 p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setSponsorshipGroupBy('date')}
+                      className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-bold transition-all ${
+                        sponsorshipGroupBy === 'date'
+                          ? 'bg-amber-500 text-black shadow-xs'
+                          : 'text-muted hover:text-ink'
+                      }`}
+                      title="Group sponsorships by Sunday service date"
+                    >
+                      <Calendar className="h-3.5 w-3.5" />
+                      <span>Group by Date</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSponsorshipGroupBy('structure')}
+                      className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-bold transition-all ${
+                        sponsorshipGroupBy === 'structure'
+                          ? 'bg-amber-500 text-black shadow-xs'
+                          : 'text-muted hover:text-ink'
+                      }`}
+                      title="Group sponsorships by cell structure (S1-S15, FTV)"
+                    >
+                      <Layers className="h-3.5 w-3.5" />
+                      <span>Group by Structure</span>
+                    </button>
+                  </div>
+
+                  {/* Date Sort Order Toggle */}
                   <button
                     type="button"
-                    onClick={expandAllSponsorshipStructures}
-                    className="rounded-md border border-line/60 bg-card-2 px-2.5 py-1 text-xs font-medium text-ink hover:bg-card transition-colors"
+                    onClick={() => setSponsorshipDateOrder((prev) => (prev === 'desc' ? 'asc' : 'desc'))}
+                    className="flex items-center gap-1.5 rounded-lg border border-line/70 bg-card-2 px-2.5 py-1.5 text-xs font-bold text-ink hover:bg-card transition-all"
+                    title={`Currently sorted ${sponsorshipDateOrder === 'desc' ? 'Newest first' : 'Oldest first'}. Click to toggle.`}
                   >
-                    Expand All
+                    <ArrowUpDown className="h-3.5 w-3.5 text-amber-400" />
+                    <span>{sponsorshipDateOrder === 'desc' ? 'Newest First' : 'Oldest First'}</span>
                   </button>
-                  <button
-                    type="button"
-                    onClick={collapseAllSponsorshipStructures}
-                    className="rounded-md border border-line/60 bg-card-2 px-2.5 py-1 text-xs font-medium text-ink hover:bg-card transition-colors"
-                  >
-                    Collapse All
-                  </button>
+
+                  {/* Date Filter Dropdown */}
+                  {availableSponsorshipDates.length > 0 && (
+                    <select
+                      value={sponsorshipDateFilter}
+                      onChange={(e) => setSponsorshipDateFilter(e.target.value)}
+                      className="rounded-lg border border-line/70 bg-card-2 px-2.5 py-1.5 text-xs font-semibold text-ink focus:border-amber-500 focus:outline-none"
+                      title="Filter sponsorships by a specific service date"
+                    >
+                      <option value="all">All Dates ({dedupedSponsorships.length})</option>
+                      {availableSponsorshipDates.map((d) => (
+                        <option key={d.val} value={d.val}>
+                          {d.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+
+                {/* Expand / Collapse and Count Summary */}
+                <div className="flex items-center justify-between sm:justify-end gap-2 text-muted">
+                  <span className="hidden md:inline">
+                    {groupedSponsorships.length} {sponsorshipGroupBy === 'date' ? 'date' : 'structure'}{groupedSponsorships.length === 1 ? '' : 's'} · {filteredSponsorships.length} passenger{filteredSponsorships.length === 1 ? '' : 's'}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={sponsorshipGroupBy === 'date' ? expandAllSponsorshipDates : expandAllSponsorshipStructures}
+                      className="rounded-md border border-line/60 bg-card-2 px-2.5 py-1 text-xs font-medium text-ink hover:bg-card transition-colors"
+                    >
+                      Expand All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={sponsorshipGroupBy === 'date' ? collapseAllSponsorshipDates : collapseAllSponsorshipStructures}
+                      className="rounded-md border border-line/60 bg-card-2 px-2.5 py-1 text-xs font-medium text-ink hover:bg-card transition-colors"
+                    >
+                      Collapse All
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
 
-            {/* Batch Confirmation Actions Toolbar */}
-            {sponsorshipStats.pending > 0 && (
-              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 shadow-xs">
-                <div className="flex items-center gap-3">
+            {/* Mass Correction Actions Toolbar */}
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 shadow-xs">
+              <div className="flex items-center gap-2.5 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const allVisibleIds = filteredSponsorships.map((s) => s.id);
+                    handleSelectAllSponsorships(allVisibleIds);
+                  }}
+                  className="flex items-center gap-2 rounded-lg border border-line/70 bg-card px-2.5 py-1.5 text-xs font-bold text-ink hover:bg-card-2 transition-colors"
+                >
+                  {filteredSponsorships.length > 0 &&
+                  filteredSponsorships.every((s) => selectedSponIds.has(s.id)) ? (
+                    <CheckSquare className="h-4 w-4 text-amber-400" />
+                  ) : (
+                    <Square className="h-4 w-4 text-muted/60" />
+                  )}
+                  <span>
+                    {selectedSponIds.size > 0
+                      ? `${selectedSponIds.size} Selected`
+                      : `Select All (${filteredSponsorships.length})`}
+                  </span>
+                </button>
+
+                {selectedSponIds.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedSponIds(new Set())}
+                    className="text-xs text-muted hover:text-ink underline"
+                  >
+                    Clear selection
+                  </button>
+                )}
+              </div>
+
+              {/* Mass Correction Action Buttons */}
+              <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                {selectedSponIds.size > 0 ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={isBatchConfirming}
+                      onClick={() => handleMassStatusChange('actually_sponsored')}
+                      className="rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                      title="Mass mark selected items as Actually Sponsored (clears debt from ledger)"
+                    >
+                      <Check className="h-3.5 w-3.5" />
+                      <span>Mark Sponsored</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isBatchConfirming}
+                      onClick={() => handleMassStatusChange('unaccounted_sponsorship')}
+                      className="rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                      title="Mass mark selected items as Unaccounted Sponsorship (adds debt to ledger)"
+                    >
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      <span>Mark Unaccounted</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isBatchConfirming}
+                      onClick={() => handleMassStatusChange('unpaid_sponsorship')}
+                      className="rounded-lg bg-crimson-600 hover:bg-crimson-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                      title="Mass mark selected items as Unpaid Ride (adds debt to ledger)"
+                    >
+                      <XCircle className="h-3.5 w-3.5" />
+                      <span>Mark Unpaid</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isBatchConfirming}
+                      onClick={() => handleMassStatusChange('pending')}
+                      className="rounded-lg bg-card border border-line text-ink hover:bg-card-2 font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                      title="Mass reset selected items to Pending Review"
+                    >
+                      <Clock className="h-3.5 w-3.5 text-muted" />
+                      <span>Reset Pending</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isBatchConfirming}
+                      onClick={handleOpenMassEditModal}
+                      className="rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                      title="Mass edit structure, service date, service, or notes for all selected records"
+                    >
+                      <Edit3 className="h-3.5 w-3.5" />
+                      <span>Mass Edit Details</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isBatchConfirming}
+                      onClick={handleBatchDeleteSpons}
+                      className="rounded-lg bg-card-2 hover:bg-crimson-900/30 text-muted hover:text-crimson-300 border border-line font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
+                      title="Remove selected reported sponsorships and clear associated debt from ledger"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      <span>Delete</span>
+                    </button>
+                  </>
+                ) : (
                   <button
                     type="button"
                     onClick={() => {
-                      const allPendingIds = filteredSponsorships
-                        .filter((s) => s.status === 'pending')
-                        .map((s) => s.id);
-                      handleSelectAllSponsorships(allPendingIds);
+                      const visiblePending = filteredSponsorships.filter((s) => s.status === 'pending').map((s) => s.id);
+                      setSelectedSponIds(new Set(visiblePending));
                     }}
-                    className="flex items-center gap-2 rounded-lg border border-line/70 bg-card px-2.5 py-1.5 text-xs font-bold text-ink hover:bg-card-2 transition-colors"
+                    className="rounded-lg border border-line bg-card hover:bg-card-2 text-ink font-bold text-xs px-3 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95"
+                    title="Select all currently visible pending sponsorships for batch review"
                   >
-                    {filteredSponsorships.filter((s) => s.status === 'pending').length > 0 &&
-                    filteredSponsorships.filter((s) => s.status === 'pending').every((s) => selectedSponIds.has(s.id)) ? (
-                      <CheckSquare className="h-4 w-4 text-amber-400" />
-                    ) : (
-                      <Square className="h-4 w-4 text-muted/60" />
-                    )}
-                    <span>
-                      {selectedSponIds.size > 0
-                        ? `${selectedSponIds.size} Indicated / Selected`
-                        : `Select All Pending (${filteredSponsorships.filter((s) => s.status === 'pending').length})`}
-                    </span>
+                    <CheckSquare className="h-3.5 w-3.5 text-muted" />
+                    <span>Select Pending ({filteredSponsorships.filter((s) => s.status === 'pending').length})</span>
                   </button>
-
-                  {selectedSponIds.size > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setSelectedSponIds(new Set())}
-                      className="text-xs text-muted hover:text-ink underline"
-                    >
-                      Clear selection
-                    </button>
-                  )}
-                </div>
-
-                {/* Confirmation Actions */}
-                <div className="flex items-center gap-2 flex-wrap">
-                  {selectedSponIds.size > 0 ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const nextStaged = { ...stagedIndications };
-                          selectedSponIds.forEach((id) => {
-                            nextStaged[id] = 'actually_sponsored';
-                          });
-                          setStagedIndications(nextStaged);
-                        }}
-                        className="rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95"
-                        title="Stage selected items as Actually Sponsored (no debt)"
-                      >
-                        <Check className="h-3.5 w-3.5" />
-                        <span>Stage Sponsored</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const nextStaged = { ...stagedIndications };
-                          selectedSponIds.forEach((id) => {
-                            nextStaged[id] = 'unaccounted_sponsorship';
-                          });
-                          setStagedIndications(nextStaged);
-                        }}
-                        className="rounded-lg bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95"
-                        title="Stage selected items as Unaccounted Sponsorship (add debt)"
-                      >
-                        <AlertTriangle className="h-3.5 w-3.5" />
-                        <span>Stage Unaccounted</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const nextStaged = { ...stagedIndications };
-                          selectedSponIds.forEach((id) => {
-                            nextStaged[id] = 'unpaid_sponsorship';
-                          });
-                          setStagedIndications(nextStaged);
-                        }}
-                        className="rounded-lg bg-crimson-600/20 hover:bg-crimson-600/30 text-crimson-300 border border-crimson-500/30 font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95"
-                        title="Stage selected items as Unpaid Ride (add debt)"
-                      >
-                        <XCircle className="h-3.5 w-3.5" />
-                        <span>Stage Unpaid</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={isBatchConfirming}
-                        onClick={() => handleConfirmIndications()}
-                        className="rounded-lg bg-crimson-600 hover:bg-crimson-500 text-white font-bold text-xs px-3.5 py-1.5 flex items-center gap-1.5 shadow-md transition-all active:scale-95 disabled:opacity-50"
-                        title="Preview classifications and confirm batch with Cancellation Admin approval"
-                      >
-                        {isBatchConfirming ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <ShieldCheck className="h-3.5 w-3.5" />
-                        )}
-                        <span>Review & Confirm ({selectedSponIds.size})</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={isBatchConfirming}
-                        onClick={handleBatchDeleteSpons}
-                        className="rounded-lg bg-card-2 hover:bg-crimson-900/30 text-muted hover:text-crimson-300 border border-line font-bold text-xs px-2.5 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95 disabled:opacity-50"
-                        title="Remove selected reported sponsorships and clear associated debt from ledger"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        <span>Delete</span>
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const visiblePending = filteredSponsorships.filter((s) => s.status === 'pending').map((s) => s.id);
-                        setSelectedSponIds(new Set(visiblePending));
-                      }}
-                      className="rounded-lg border border-line bg-card hover:bg-card-2 text-ink font-bold text-xs px-3 py-1.5 flex items-center gap-1.5 shadow-xs transition-all active:scale-95"
-                      title="Select all currently visible pending sponsorships for batch review"
-                    >
-                      <CheckSquare className="h-3.5 w-3.5 text-muted" />
-                      <span>Select Visible Pending ({filteredSponsorships.filter((s) => s.status === 'pending').length})</span>
-                    </button>
-                  )}
-                </div>
+                )}
               </div>
-            )}
+            </div>
 
-            {/* Grouped by Structure Sponsorship Cards */}
+            {/* Grouped Sponsorship Cards (by Date or Structure) */}
             {groupedSponsorships.length === 0 ? (
               <div className="flex flex-col items-center gap-3 rounded-xl border border-line bg-card py-16 text-center">
                 <HeartHandshake className="h-10 w-10 text-line" />
@@ -2354,10 +2608,14 @@ export function LedgerPage() {
                     ? 'No sponsored passengers reported in submitted attendance yet.'
                     : 'No reported sponsorships match the current search or filter.'}
                 </p>
-                {sponsorshipFilter !== 'all' && (
+                {(sponsorshipFilter !== 'all' || sponsorshipDateFilter !== 'all') && (
                   <button
                     type="button"
-                    onClick={() => setSponsorshipFilter('all')}
+                    onClick={() => {
+                      setSponsorshipFilter('all');
+                      setSponsorshipDateFilter('all');
+                      setSearch('');
+                    }}
                     className="rounded-lg border border-line px-3 py-1.5 text-xs font-bold text-ink hover:bg-card-2 transition-colors"
                   >
                     Show All Sponsorships
@@ -2366,56 +2624,83 @@ export function LedgerPage() {
               </div>
             ) : (
               <div className="space-y-3 sm:space-y-4">
-                {groupedSponsorships.map((group) => {
-                  const isOpen = isSponsorshipStructureOpen(group.structure);
-                  const isSpecial = group.structure === 'No Structure' || group.structure === 'Unidentified';
-                  const structureLabel = isSpecial ? group.structure : `Structure ${group.structure}`;
-                  const structurePendingIds = group.items.filter((i) => i.status === 'pending').map((i) => i.id);
-                  const isStructureAllSelected =
-                    structurePendingIds.length > 0 && structurePendingIds.every((id) => selectedSponIds.has(id));
+                {groupedSponsorships.map((groupUnknown) => {
+                  const isDateMode = sponsorshipGroupBy === 'date';
+                  const dateGroup = isDateMode ? (groupUnknown as DateSponsorshipGroup) : null;
+                  const structGroup = !isDateMode ? (groupUnknown as StructureSponsorshipGroup) : null;
+
+                  const groupKey = isDateMode ? dateGroup!.date : structGroup!.structure;
+                  const groupTitle = isDateMode
+                    ? dateGroup!.formattedDate
+                    : structGroup!.structure === 'No Structure' || structGroup!.structure === 'Unidentified'
+                    ? structGroup!.structure
+                    : `Structure ${structGroup!.structure}`;
+
+                  const isOpen = isDateMode
+                    ? isSponsorshipDateGroupOpen(groupKey)
+                    : isSponsorshipStructureOpen(groupKey);
+
+                  const toggleOpen = () => {
+                    if (isDateMode) {
+                      toggleSponsorshipDateGroup(groupKey);
+                    } else {
+                      toggleSponsorshipStructure(groupKey);
+                    }
+                  };
+
+                  const groupItems = isDateMode ? dateGroup!.items : structGroup!.items;
+                  const allGroupIds = groupItems.map((i) => i.id);
+                  const pendingIds = groupItems.filter((i) => i.status === 'pending').map((i) => i.id);
+                  const isAllSelected = allGroupIds.length > 0 && allGroupIds.every((id) => selectedSponIds.has(id));
 
                   return (
                     <div
-                      key={group.structure}
+                      key={groupKey}
                       className="overflow-hidden rounded-xl sm:rounded-2xl border border-line bg-card shadow-sm"
                     >
-                      {/* Structure Accordion Header */}
+                      {/* Group Accordion Header */}
                       <div
-                        onClick={() => toggleSponsorshipStructure(group.structure)}
+                        onClick={toggleOpen}
                         className="w-full flex items-center justify-between p-3.5 sm:p-4 text-left hover:bg-card-2/60 active:bg-card-2 transition-colors select-none cursor-pointer"
                       >
                         <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
-                          {structurePendingIds.length > 0 && (
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleSelectStructureSponsorships(structurePendingIds);
-                              }}
-                              title={isStructureAllSelected ? 'Deselect structure' : 'Select all pending in structure'}
-                              className="p-1 rounded text-muted hover:text-ink hover:bg-card transition-colors shrink-0"
-                            >
-                              {isStructureAllSelected ? (
-                                <CheckSquare className="h-4 w-4 text-amber-400" />
-                              ) : (
-                                <Square className="h-4 w-4 text-muted/60" />
-                              )}
-                            </button>
-                          )}
+                          {/* Select All in this Card Checkbox */}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleSelectStructureSponsorships(allGroupIds);
+                            }}
+                            title={isAllSelected ? 'Deselect group' : 'Select all passengers in this group'}
+                            className="p-1 rounded text-muted hover:text-ink hover:bg-card transition-colors shrink-0"
+                          >
+                            {isAllSelected ? (
+                              <CheckSquare className="h-4 w-4 text-amber-400" />
+                            ) : (
+                              <Square className="h-4 w-4 text-muted/60" />
+                            )}
+                          </button>
+
+                          {/* Group Icon Badge */}
                           <div className="flex h-7 w-7 sm:h-8 sm:w-8 items-center justify-center rounded-lg bg-amber-500/15 text-amber-400 font-mono font-bold text-xs sm:text-sm shrink-0">
-                            {normalizeStructureCode(group.structure).slice(0, 3)}
+                            {isDateMode ? (
+                              <Calendar className="h-4 w-4" />
+                            ) : (
+                              normalizeStructureCode(structGroup!.structure).slice(0, 3)
+                            )}
                           </div>
+
                           <div className="min-w-0">
                             <div className="flex items-center gap-2 flex-wrap">
                               <h3 className="text-sm sm:text-base font-bold text-ink">
-                                {structureLabel}
+                                {groupTitle}
                               </h3>
                               <span className="rounded-full bg-card-2 border border-line px-2 py-0.5 text-[11px] font-semibold text-muted">
-                                {group.items.length} {group.items.length === 1 ? 'passenger' : 'passengers'}
+                                {groupItems.length} {groupItems.length === 1 ? 'passenger' : 'passengers'}
                               </span>
-                              {group.pendingCount > 0 && (
+                              {pendingIds.length > 0 && (
                                 <span className="rounded-full bg-amber-500/20 border border-amber-500/40 px-2 py-0.5 text-[11px] font-bold text-amber-300 animate-pulse">
-                                  {group.pendingCount} pending audit
+                                  {pendingIds.length} pending audit
                                 </span>
                               )}
                             </div>
@@ -2423,33 +2708,33 @@ export function LedgerPage() {
                         </div>
 
                         <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-                          {/* Confirm All In Structure One-Click Action */}
-                          {group.pendingCount > 0 && (
+                          {/* Confirm Pending In Group Action */}
+                          {pendingIds.length > 0 && (
                             <button
                               type="button"
                               disabled={isBatchConfirming}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleConfirmIndications(structurePendingIds, 'actually_sponsored');
+                                handleConfirmIndications(pendingIds, 'actually_sponsored');
                               }}
                               className="rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-2.5 py-1.5 flex items-center gap-1 shadow-xs transition-all active:scale-95 disabled:opacity-50"
-                              title="Confirm all pending in this structure as Actually Sponsored and clear them from queue"
+                              title="Confirm all pending in this group as Actually Sponsored"
                             >
                               <Check className="h-3.5 w-3.5" />
-                              <span className="hidden sm:inline">Confirm Structure ({group.pendingCount})</span>
-                              <span className="sm:hidden">Confirm ({group.pendingCount})</span>
+                              <span className="hidden sm:inline">Confirm Pending ({pendingIds.length})</span>
+                              <span className="sm:hidden">Confirm ({pendingIds.length})</span>
                             </button>
                           )}
 
                           <div className="hidden sm:flex items-center gap-2 text-xs text-muted">
-                            {group.actuallySponsoredCount > 0 && (
+                            {groupItems.filter((i) => i.status === 'actually_sponsored').length > 0 && (
                               <span className="text-emerald-400 font-medium">
-                                {group.actuallySponsoredCount} confirmed
+                                {groupItems.filter((i) => i.status === 'actually_sponsored').length} confirmed
                               </span>
                             )}
-                            {group.debtCount > 0 && (
+                            {groupItems.filter((i) => i.status === 'unpaid_sponsorship' || i.status === 'unaccounted_sponsorship').length > 0 && (
                               <span className="text-crimson-400 font-medium">
-                                {group.debtCount} on ledger
+                                {groupItems.filter((i) => i.status === 'unpaid_sponsorship' || i.status === 'unaccounted_sponsorship').length} on ledger
                               </span>
                             )}
                           </div>
@@ -2466,7 +2751,7 @@ export function LedgerPage() {
                       {/* Accordion Body: Passenger Items */}
                       {isOpen && (
                         <div className="border-t border-line/70 divide-y divide-line/60 bg-card-2/20">
-                          {group.items.map((s) => {
+                          {groupItems.map((s) => {
                             const isUpdating = sponsorshipUpdatingId === s.id;
                             const cleanName = sanitizePassengerDisplayName(s.passenger_name);
                             const isSelected = selectedSponIds.has(s.id);
@@ -2482,20 +2767,20 @@ export function LedgerPage() {
                               >
                                 {/* Passenger Information */}
                                 <div className="flex items-start gap-2.5 min-w-0">
-                                  {isPending && (
-                                    <button
-                                      type="button"
-                                      onClick={() => handleToggleSelectSponsorship(s.id)}
-                                      className="p-1 mt-0.5 text-muted hover:text-ink shrink-0 rounded hover:bg-card transition-colors"
-                                      title={isSelected ? 'Deselect passenger' : 'Select passenger'}
-                                    >
-                                      {isSelected ? (
-                                        <CheckSquare className="h-4 w-4 text-amber-400" />
-                                      ) : (
-                                        <Square className="h-4 w-4 text-muted/60" />
-                                      )}
-                                    </button>
-                                  )}
+                                  {/* Selection Checkbox on ALL Rows for easy mass correction */}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleSelectSponsorship(s.id)}
+                                    className="p-1 mt-0.5 text-muted hover:text-ink shrink-0 rounded hover:bg-card transition-colors"
+                                    title={isSelected ? 'Deselect passenger' : 'Select passenger for mass action'}
+                                  >
+                                    {isSelected ? (
+                                      <CheckSquare className="h-4 w-4 text-amber-400" />
+                                    ) : (
+                                      <Square className="h-4 w-4 text-muted/60" />
+                                    )}
+                                  </button>
+
                                   <div className="space-y-1.5 min-w-0">
                                     <div className="flex items-center gap-2 flex-wrap">
                                       <span className="font-bold text-sm sm:text-base text-ink">
@@ -2511,6 +2796,12 @@ export function LedgerPage() {
                                           {s.service}
                                         </span>
                                       )}
+                                      {/* Always show date tag in Structure view */}
+                                      {!isDateMode && s.date && (
+                                        <span className="rounded bg-card-2 border border-amber-500/30 px-1.5 py-0.5 text-[10px] font-mono font-bold text-amber-300">
+                                          {s.date}
+                                        </span>
+                                      )}
                                       {s.stop && (
                                         <span className="text-xs text-muted">
                                           Stop: <strong className="text-ink font-medium">{s.stop}</strong>
@@ -2519,8 +2810,8 @@ export function LedgerPage() {
                                     </div>
 
                                     <div className="flex items-center gap-2 text-xs text-muted flex-wrap">
-                                      <span>Date: {s.date}</span>
-                                      <span>•</span>
+                                      {isDateMode && <span>Date: {s.date}</span>}
+                                      {isDateMode && <span>•</span>}
                                       <span>Vehicle: {s.vehicle_name}</span>
                                       <span>•</span>
                                       <span>Reported by: {s.rep_name || 'Transport Rep'}</span>
@@ -2535,14 +2826,14 @@ export function LedgerPage() {
                                   </div>
                                 </div>
 
-                                {/* Verification Drop Box Controls */}
+                                {/* Verification Drop Box Controls & Status */}
                                 <div className="flex flex-col sm:flex-row sm:items-center gap-2.5 sm:gap-3 shrink-0 pt-2 lg:pt-0 border-t lg:border-t-0 border-line/40">
                                   <div className="flex flex-col gap-1">
                                     <label
                                       htmlFor={`group_spon_${s.id}`}
                                       className="text-[10px] font-bold uppercase tracking-wider text-muted"
                                     >
-                                      Sponsorship Action (Drop Box)
+                                      Sponsorship Action
                                     </label>
                                     <div className="flex items-center gap-2">
                                       <select
@@ -2686,6 +2977,155 @@ export function LedgerPage() {
                 })}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Mass Edit Details Modal */}
+        {showMassEditModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 sm:p-4 animate-fade-in backdrop-blur-sm">
+            <div className="w-full max-w-lg max-h-[92vh] overflow-y-auto rounded-2xl border border-line bg-card p-4 sm:p-6 shadow-2xl">
+              <div className="flex items-center justify-between border-b border-line pb-3">
+                <div className="flex items-center gap-2">
+                  <div className="rounded-lg bg-indigo-500/15 p-2 text-indigo-400 shrink-0">
+                    <Edit3 className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-display text-base sm:text-lg font-bold text-ink">
+                      Mass Edit {selectedSponIds.size} Record{selectedSponIds.size === 1 ? '' : 's'}
+                    </h3>
+                    <p className="text-xs text-muted">
+                      Only fields you fill in will be changed. Blank fields remain untouched.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCloseMassEditModal}
+                  disabled={savingMassEdit}
+                  className="rounded-lg p-1.5 text-muted hover:bg-card-2 hover:text-ink active:bg-card-2"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {massEditError && (
+                <div className="mt-3 flex items-center gap-2 rounded-xl bg-crimson-500/10 border border-crimson-500/30 p-3 text-xs font-semibold text-crimson-300">
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-crimson-400" />
+                  <span>{massEditError}</span>
+                </div>
+              )}
+
+              <div className="mt-4 space-y-3.5 text-xs">
+                {/* Change Structure */}
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                    New Structure
+                  </label>
+                  <select
+                    value={massEditStructure}
+                    onChange={(e) => setMassEditStructure(e.target.value)}
+                    className="w-full rounded-lg border border-line bg-card-2 px-3 py-2 text-xs text-ink focus:border-amber-500 focus:outline-none"
+                  >
+                    <option value="">(Leave Unchanged)</option>
+                    {structures.map((s) => (
+                      <option key={s} value={s}>
+                        {s === 'No Structure' || s === 'Unidentified' ? s : `Structure ${s}`}
+                      </option>
+                    ))}
+                    <option value="FTV 20">FTV 20</option>
+                    <option value="Unidentified">Unidentified</option>
+                  </select>
+                </div>
+
+                {/* Change Date */}
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                    New Service Date (YYYY-MM-DD)
+                  </label>
+                  <input
+                    type="date"
+                    value={massEditDate}
+                    onChange={(e) => setMassEditDate(e.target.value)}
+                    className="w-full rounded-lg border border-line bg-card-2 px-3 py-2 text-xs text-ink focus:border-amber-500 focus:outline-none"
+                  />
+                </div>
+
+                {/* Change Service */}
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                    New Service
+                  </label>
+                  <select
+                    value={massEditService}
+                    onChange={(e) => setMassEditService(e.target.value)}
+                    className="w-full rounded-lg border border-line bg-card-2 px-3 py-2 text-xs text-ink focus:border-amber-500 focus:outline-none"
+                  >
+                    <option value="">(Leave Unchanged)</option>
+                    <option value="AM">AM</option>
+                    <option value="PM">PM</option>
+                    <option value="LM">LM (Leaders Meeting)</option>
+                    <option value="WMP">WMP (Worship/Prayer)</option>
+                    <option value="Rehe">Rehe (Rehearsal)</option>
+                  </select>
+                </div>
+
+                {/* Change Status */}
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                    New Classification Status
+                  </label>
+                  <select
+                    value={massEditStatus}
+                    onChange={(e) => setMassEditStatus(e.target.value as SponsorshipStatus | '')}
+                    className="w-full rounded-lg border border-line bg-card-2 px-3 py-2 text-xs text-ink focus:border-amber-500 focus:outline-none"
+                  >
+                    <option value="">(Leave Unchanged)</option>
+                    <option value="actually_sponsored">Actually Sponsored (No Debt)</option>
+                    <option value="unaccounted_sponsorship">Unaccounted Sponsorship (Add Debt)</option>
+                    <option value="unpaid_sponsorship">Unpaid Sponsorship (Add Debt)</option>
+                    <option value="pending">Pending Review (Clear Debt)</option>
+                  </select>
+                </div>
+
+                {/* Update Note */}
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-muted mb-1">
+                    Update Sponsor Note / Reason
+                  </label>
+                  <input
+                    type="text"
+                    value={massEditNotes}
+                    onChange={(e) => setMassEditNotes(e.target.value)}
+                    placeholder="e.g. Approved by Pastor / Checked with driver"
+                    className="w-full rounded-lg border border-line bg-card-2 px-3 py-2 text-xs text-ink focus:border-amber-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-5 flex items-center justify-end gap-2 border-t border-line pt-3">
+                <button
+                  type="button"
+                  disabled={savingMassEdit}
+                  onClick={handleCloseMassEditModal}
+                  className="rounded-lg border border-line bg-card-2 px-3.5 py-2 text-xs font-semibold text-muted hover:text-ink transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={savingMassEdit}
+                  onClick={handleExecuteMassEdit}
+                  className="rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 text-xs font-bold shadow-md transition-all active:scale-95 flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {savingMassEdit ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Check className="h-4 w-4" />
+                  )}
+                  <span>Apply to {selectedSponIds.size} Passenger{selectedSponIds.size === 1 ? '' : 's'}</span>
+                </button>
+              </div>
+            </div>
           </div>
         )}
 

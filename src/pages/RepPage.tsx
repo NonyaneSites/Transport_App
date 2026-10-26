@@ -198,11 +198,37 @@ export function RepPage() {
   const recentlyToggledSponsoredRef = useRef<Map<string, boolean>>(new Map());
   const recentlyToggledUnpaidRef = useRef<Map<string, boolean>>(new Map());
   const refreshRef = useRef<() => Promise<void> | void>();
+  const setManifestRef = useRef<React.Dispatch<React.SetStateAction<Manifest | null>>>();
 
   const handleLiveActionReceived = useCallback((action: LiveSyncAction) => {
     if (action.clientId === clientIdRef.current) return;
 
     if (action.type === 'vehicle_submitted' || action.type === 'vehicle_reopened') {
+      const isSub = action.type === 'vehicle_submitted';
+      const subTime = action.timestamp ? new Date(action.timestamp).toISOString() : new Date().toISOString();
+      setManifestRef.current?.((prev) => {
+        if (!prev) return prev;
+        const updatedVehicles = prev.vehicles.map((v) => {
+          if (String(v.id) === String(action.vehicleId)) {
+            return {
+              ...v,
+              submitted: isSub,
+              submittedAt: isSub ? subTime : undefined,
+              submittedBy: isSub ? (action.repName?.trim() || v.submittedBy || 'rep') : undefined,
+              draftState: v.draftState
+                ? {
+                    ...v.draftState,
+                    submitted: isSub,
+                    submittedAt: isSub ? subTime : undefined,
+                    repName: isSub ? (action.repName?.trim() || v.draftState.repName) : v.draftState.repName,
+                  }
+                : undefined,
+            };
+          }
+          return v;
+        });
+        return { ...prev, vehicles: updatedVehicles };
+      });
       refreshRef.current?.();
       return;
     }
@@ -305,16 +331,12 @@ export function RepPage() {
     refresh,
     updateVehicleDraft,
     appendWalkIn,
-    claimVehicleSession,
-    hasVehicleAuth,
     broadcastLiveAction,
   } = useManifest(key, selectedVehicleId, handleLiveActionReceived);
   refreshRef.current = refresh;
+  setManifestRef.current = setManifest;
 
-  const [accessCodeInput, setAccessCodeInput] = useState('');
-  const [accessCodeError, setAccessCodeError] = useState<string | null>(null);
-  const [claimingAuth, setClaimingAuth] = useState(false);
-  const [showFleetOverview, setShowFleetOverview] = useState(false);
+
 
   // Rider search, filtering, and view mode for person-by-person check-in
   const [riderSearch, setRiderSearch] = useState('');
@@ -454,7 +476,7 @@ export function RepPage() {
   const [transferModalPassenger, setTransferModalPassenger] = useState<Passenger | null>(null);
 
   const selectedVehicle = useMemo(
-    () => manifest?.vehicles.find((v) => v.id === selectedVehicleId) ?? null,
+    () => manifest?.vehicles.find((v) => String(v.id) === String(selectedVehicleId)) ?? null,
     [manifest, selectedVehicleId]
   );
 
@@ -2803,7 +2825,7 @@ export function RepPage() {
 
       // Construct the client-side submitted manifest with authoritative local state
       const updatedVehicles = manifest.vehicles.map((v) =>
-        v.id === selectedVehicle.id
+        String(v.id) === String(selectedVehicle.id)
           ? {
               ...v,
               submitted: true,
@@ -3183,7 +3205,7 @@ export function RepPage() {
     setRiderSearch('');
   };
 
-  const isSubmitted = selectedVehicle?.submitted ?? false;
+  const isSubmitted = Boolean(selectedVehicle?.submitted || selectedVehicle?.draftState?.submitted);
 
   // Filtered riders based on search text and status tab
   const filteredRiders = useMemo(() => {
@@ -3330,19 +3352,20 @@ export function RepPage() {
                   <option value="" className="bg-card-2">Choose your vehicle…</option>
                   {sortVehiclesNatural(manifest.vehicles).map((v) => {
                     const vRiders = vehicleRiders(manifest, v);
-                    if (v.type === 'Bus') {
+                      const vSub = Boolean(v.submitted || v.draftState?.submitted);
+                      if (v.type === 'Bus') {
+                        return (
+                          <option key={v.id} value={v.id} className="bg-card-2">
+                            {v.name}{vSub ? ' ✓ submitted' : ''}
+                          </option>
+                        );
+                      }
                       return (
                         <option key={v.id} value={v.id} className="bg-card-2">
-                          {v.name}{v.submitted ? ' ✓ submitted' : ''}
+                          {v.name} — Assigned Rep: {v.repName || 'Unassigned'} ({v.type}) — {vRiders.length} passengers
+                          {vSub ? ' ✓ submitted' : ''}
                         </option>
                       );
-                    }
-                    return (
-                      <option key={v.id} value={v.id} className="bg-card-2">
-                        {v.name} — Assigned Rep: {v.repName || 'Unassigned'} ({v.type}) — {vRiders.length} passengers
-                        {v.submitted ? ' ✓ submitted' : ''}
-                      </option>
-                    );
                   })}
                 </select>
               </div>
@@ -3503,99 +3526,6 @@ export function RepPage() {
               </div>
             )}
 
-            {/* Fleet Status & Other Reps Overview so all reps can see each other's work across vehicles */}
-            {manifest && manifest.vehicles.length > 0 && (
-              <div className="rounded-xl border border-line bg-card overflow-hidden shadow-xs">
-                <button
-                  type="button"
-                  onClick={() => setShowFleetOverview((prev) => !prev)}
-                  className="flex w-full items-center justify-between p-3 text-xs font-bold text-ink hover:bg-card-2/60 transition"
-                >
-                  <div className="flex items-center gap-2">
-                    <Users className="h-4 w-4 text-crimson-400" />
-                    <span>Fleet Overview: Reps & Vehicles ({manifest.vehicles.length})</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-muted">
-                    <span className="text-[11px] font-medium">
-                      {manifest.vehicles.filter((v) => v.submitted).length} of {manifest.vehicles.length} submitted
-                    </span>
-                    <ChevronDown className={`h-4 w-4 transition-transform ${showFleetOverview ? 'rotate-180' : ''}`} />
-                  </div>
-                </button>
-
-                {showFleetOverview && (
-                  <div className="border-t border-line divide-y divide-line/60 bg-card-2/30">
-                    {sortVehiclesNatural(manifest.vehicles).map((v) => {
-                      const vRiders = vehicleRiders(manifest, v);
-                      const presentCnt = v.draftState?.presentIds?.length ?? 0;
-                      const isSelected = v.id === selectedVehicleId;
-                      const assignedRep = v.repName?.trim() || v.draftState?.repName?.trim() || 'Unassigned';
-                      const plate = v.licensePlate?.trim() || v.draftState?.licensePlate?.trim();
-                      const cap = v.capacity || (v.type === 'Bus' ? 65 : 15);
-                      const extSponsors = (v.draftState?.externalSponsees || []).length;
-
-                      return (
-                        <div
-                          key={v.id}
-                          className={`p-3 flex items-center justify-between gap-3 text-xs transition ${
-                            isSelected ? 'bg-crimson-950/20 border-l-2 border-crimson-500' : 'hover:bg-card-2/50'
-                          }`}
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="font-bold text-ink flex items-center gap-1">
-                                {v.type === 'Bus' ? <Bus className="h-3.5 w-3.5 text-sky-400" /> : <Car className="h-3.5 w-3.5 text-amber-400" />}
-                                {v.name}
-                              </span>
-                              {v.submitted ? (
-                                <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300 border border-emerald-500/30">
-                                  ✓ Submitted ({v.submittedBy || 'rep'})
-                                </span>
-                              ) : presentCnt > 0 ? (
-                                <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold text-amber-300 border border-amber-500/30">
-                                  In Progress ({presentCnt} checked in)
-                                </span>
-                              ) : (
-                                <span className="rounded-full bg-card-2 px-2 py-0.5 text-[10px] text-muted border border-line">
-                                  Not started
-                                </span>
-                              )}
-                              {extSponsors > 0 && (
-                                <span className="rounded-full bg-amber-500/15 px-1.5 py-0.2 text-[10px] font-semibold text-amber-200 border border-amber-500/30">
-                                  +{extSponsors} sponsor{extSponsors > 1 ? 's' : ''}
-                                </span>
-                              )}
-                            </div>
-                            <div className="mt-1 flex items-center gap-3 text-[11px] text-muted flex-wrap">
-                              <span>Rep: <strong className="text-ink-muted">{assignedRep}</strong></span>
-                              {plate && <span>Plate: <strong className="text-ink-muted">{plate}</strong></span>}
-                              <span>
-                                Riders: <strong className="text-ink-muted">{vRiders.length}</strong> / {cap} seats
-                              </span>
-                            </div>
-                          </div>
-
-                          {!isSelected ? (
-                            <button
-                              type="button"
-                              onClick={() => handleSelectVehicle(v.id)}
-                              className="shrink-0 px-2.5 py-1 text-[11px] font-semibold rounded-lg border border-line bg-card hover:bg-card-2 text-ink hover:text-crimson-400 transition"
-                            >
-                              Select
-                            </button>
-                          ) : (
-                            <span className="shrink-0 text-[11px] font-bold text-crimson-400 px-2 py-1">
-                              Current
-                            </span>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-
             {selectedVehicle && draftRestored && (
               <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 p-2.5 text-xs text-success-light animate-fade-in">
                 <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
@@ -3647,50 +3577,6 @@ export function RepPage() {
               </div>
             )}
 
-            {selectedVehicle && !isSubmitted && !hasVehicleAuth(selectedVehicle.id) && (
-              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs text-amber-200 shadow-sm">
-                <div className="font-semibold text-amber-300 flex items-center gap-2">
-                  <Lock className="h-4 w-4" />
-                  <span>Vehicle Access Authorization Required</span>
-                </div>
-                <p className="mt-1 text-muted text-[11px]">
-                  To check in riders on {selectedVehicle.name}, please open the link sent to your WhatsApp by Dispatch, or enter your 6-character vehicle access code below:
-                </p>
-                <div className="mt-2.5 flex items-center gap-2">
-                  <input
-                    type="text"
-                    placeholder="e.g. A9X2M4"
-                    maxLength={32}
-                    value={accessCodeInput}
-                    onChange={(e) => setAccessCodeInput(e.target.value.toUpperCase())}
-                    className="w-36 rounded-lg border border-line bg-card px-2.5 py-1.5 font-mono text-xs uppercase tracking-wider text-ink focus:border-crimson-500 focus:outline-none"
-                  />
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      if (!selectedVehicle || !accessCodeInput.trim()) return;
-                      setClaimingAuth(true);
-                      setAccessCodeError(null);
-                      const res = await claimVehicleSession(selectedVehicle.id, accessCodeInput.trim());
-                      setClaimingAuth(false);
-                      if (!res.success) {
-                        setAccessCodeError(res.error || 'Invalid code');
-                      } else {
-                        setAccessCodeInput('');
-                        setAccessCodeError(null);
-                      }
-                    }}
-                    disabled={claimingAuth || !accessCodeInput.trim()}
-                    className="rounded-lg bg-crimson-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-crimson-500 disabled:opacity-50 transition"
-                  >
-                    {claimingAuth ? 'Verifying…' : 'Unlock Taxi'}
-                  </button>
-                </div>
-                {accessCodeError && (
-                  <div className="mt-1 text-[11px] text-rose-400 font-medium">⚠️ {accessCodeError}</div>
-                )}
-              </div>
-            )}
 
             {selectedVehicle && riders.length > 0 && (
               <>

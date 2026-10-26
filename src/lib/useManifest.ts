@@ -83,12 +83,32 @@ export function mergeIncomingManifest(
     };
   }
 
-  const currentActiveVehicle = current.vehicles.find((v) => v.id === activeVehicleId);
+  const currentActiveVehicle = current.vehicles.find((v) => String(v.id) === String(activeVehicleId));
   if (!currentActiveVehicle) return incoming;
+
+  const currentVehMap = new Map((current?.vehicles || []).map((v) => [String(v.id), v]));
 
   // Merge vehicles: adopt authoritative remote draftState and riders from server / admin allocation
   const mergedVehicles = incoming.vehicles.map((incV) => {
-    if (incV.id !== activeVehicleId) {
+    if (String(incV.id) !== String(activeVehicleId)) {
+      const curV = currentVehMap.get(String(incV.id));
+      const wasSubmitted = Boolean(curV?.submitted || curV?.draftState?.submitted);
+      if (wasSubmitted && !incV.submitted) {
+        return {
+          ...incV,
+          submitted: true,
+          submittedAt: curV?.submittedAt || incV.submittedAt,
+          submittedBy: curV?.submittedBy || incV.submittedBy,
+          repName: curV?.repName || incV.repName,
+          licensePlate: curV?.licensePlate || incV.licensePlate,
+          generalNotes: curV?.generalNotes || incV.generalNotes,
+          draftState: {
+            ...(typeof incV.draftState === 'object' && incV.draftState ? incV.draftState : {}),
+            ...(typeof curV?.draftState === 'object' && curV?.draftState ? curV.draftState : {}),
+            submitted: true,
+          },
+        };
+      }
       return incV;
     }
 
@@ -440,7 +460,32 @@ export function useManifest(
     try {
       const fresh = await loadManifest(key);
       if (keyRef.current === key && fresh) {
-        setManifest(fresh);
+        setManifest((prev) => {
+          if (!prev) return fresh;
+          const curVehMap = new Map(prev.vehicles.map((v) => [String(v.id), v]));
+          const safeVehicles = fresh.vehicles.map((fV) => {
+            const curV = curVehMap.get(String(fV.id));
+            const wasSubmitted = Boolean(curV?.submitted || curV?.draftState?.submitted);
+            if (wasSubmitted && !fV.submitted) {
+              return {
+                ...fV,
+                submitted: true,
+                submittedAt: curV?.submittedAt || fV.submittedAt,
+                submittedBy: curV?.submittedBy || fV.submittedBy,
+                repName: curV?.repName || fV.repName,
+                licensePlate: curV?.licensePlate || fV.licensePlate,
+                generalNotes: curV?.generalNotes || fV.generalNotes,
+                draftState: {
+                  ...(typeof fV.draftState === 'object' && fV.draftState ? fV.draftState : {}),
+                  ...(typeof curV?.draftState === 'object' && curV?.draftState ? curV.draftState : {}),
+                  submitted: true,
+                },
+              };
+            }
+            return fV;
+          });
+          return { ...fresh, vehicles: safeVehicles };
+        });
         if (fresh.updated_at) {
           lastKnownUpdatedAtRef.current = fresh.updated_at;
         }
@@ -736,9 +781,9 @@ export function useManifest(
 
           setManifest((prev) => {
             if (!prev) return prev;
-            const isTargetActive = activeVehicleIdRef.current === vehicleId;
+            const isTargetActive = String(activeVehicleIdRef.current) === String(vehicleId);
             const updatedVehicles = prev.vehicles.map((v) => {
-              if (v.id !== vehicleId) return v;
+              if (String(v.id) !== String(vehicleId)) return v;
               // If it's our own active vehicle and same author, don't clobber
               if (isTargetActive && v.draftState?.updatedBy === draftState.updatedBy) return v;
               const isSubmittedDraft = draftState.submitted !== undefined ? Boolean(draftState.submitted) : v.submitted;
@@ -947,9 +992,9 @@ export function useManifest(
         const { vehicleId, draftState, repName, licensePlate } = delta;
         setManifest((prev) => {
           if (!prev || prev.date !== key) return prev;
-          const isTargetActive = activeVehicleIdRef.current === vehicleId;
+          const isTargetActive = String(activeVehicleIdRef.current) === String(vehicleId);
             const updatedVehicles = prev.vehicles.map((v) => {
-              if (v.id !== vehicleId) return v;
+              if (String(v.id) !== String(vehicleId)) return v;
               if (isTargetActive && v.draftState?.updatedBy === draftState.updatedBy) return v;
               const isSubmittedDraft = draftState.submitted !== undefined ? Boolean(draftState.submitted) : v.submitted;
               return {

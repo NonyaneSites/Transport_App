@@ -1058,6 +1058,7 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
   // 5. Broadcast live updates to all clients
   broadcastSse('manifest_updated', { key, manifest, timestamp: Date.now() });
   broadcastSse('live_action', {
+    key,
     type: 'vehicle_submitted',
     vehicleId: String(vehicleId),
     repName: (repName || '').trim(),
@@ -1157,6 +1158,7 @@ app.post('/api/manifests/:key/reopen-vehicle', (req, res) => {
 
   broadcastSse('manifest_updated', { key, manifest, timestamp: Date.now() });
   broadcastSse('live_action', {
+    key,
     type: 'vehicle_reopened',
     vehicleId: String(vehicleId),
     timestamp: Date.now(),
@@ -2270,6 +2272,115 @@ app.post('/api/ledger/sponsorships/batch-delete', (req, res) => {
 
   broadcastSse('sponsorships_updated', { timestamp: Date.now() });
   res.json({ success: true, count: toDelete.length, ledgerChanged });
+});
+
+// Batch update reported sponsorships (mass correct structure, date, service, status, notes)
+app.post('/api/ledger/sponsorships/batch-update', (req, res) => {
+  const { ids, updates } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0 || !updates) {
+    res.status(400).json({ error: 'ids array and updates object are required' });
+    return;
+  }
+  const idSet = new Set(ids.map(String));
+  const audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
+  const ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+  let ledgerChanged = false;
+  let updatedCount = 0;
+  const now = new Date().toISOString();
+
+  for (let i = 0; i < audits.length; i++) {
+    const spon = audits[i];
+    if (!idSet.has(String(spon.id))) continue;
+
+    const origCleanName = sanitizePassengerDisplayName(String(spon.passenger_name || '')).toLowerCase();
+
+    if (updates.structure !== undefined) spon.structure = normalizeStructureCode(String(updates.structure));
+    if (updates.date !== undefined) spon.date = normalizeDateToYMD(String(updates.date)) || String(updates.date);
+    if (updates.service !== undefined) spon.service = String(updates.service);
+    if (updates.stop !== undefined) spon.stop = String(updates.stop);
+    if (updates.sponsor_note !== undefined) spon.sponsor_note = cleanSponsorshipNote(String(updates.sponsor_note));
+    if (updates.status !== undefined) {
+      spon.status = updates.status;
+      spon.status_updated_at = now;
+    }
+
+    const entryIdx = ledger.findIndex((e) =>
+      (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
+      (e.manifest_key === spon.manifest_key && sanitizePassengerDisplayName(String(e.passenger_name || '')).toLowerCase() === origCleanName && Boolean(e.sponsored))
+    );
+
+    const customDebt = updates.debtAmount !== undefined && Number(updates.debtAmount) > 0
+      ? Number(updates.debtAmount)
+      : getFareForDate(String(spon.date));
+
+    if (spon.status === 'unaccounted_sponsorship' || spon.status === 'unpaid_sponsorship') {
+      const rawNote = spon.sponsor_note ? cleanSponsorshipNote(String(spon.sponsor_note)) : '';
+      const noteText = spon.status === 'unaccounted_sponsorship'
+        ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
+        : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
+
+      if (entryIdx >= 0) {
+        ledger[entryIdx].passenger_name = spon.passenger_name;
+        ledger[entryIdx].structure = spon.structure;
+        ledger[entryIdx].date = spon.date;
+        ledger[entryIdx].service = spon.service;
+        ledger[entryIdx].stop = spon.stop || '';
+        ledger[entryIdx].structure_debt = customDebt;
+        ledger[entryIdx].sponsor_note = noteText;
+        ledger[entryIdx].general_notes = noteText;
+        ledger[entryIdx].sponsored = true;
+        ledgerChanged = true;
+      } else {
+        const newEntryId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        spon.ledger_entry_id = newEntryId;
+        ledger.unshift({
+          id: newEntryId,
+          manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+          date: normalizeDateToYMD(String(spon.date)) || String(spon.date),
+          service: spon.service || 'Service',
+          passenger_name: sanitizePassengerDisplayName(String(spon.passenger_name)),
+          stop: spon.stop || '',
+          structure: normalizeStructureCode(String(spon.structure)),
+          vehicle_name: spon.vehicle_name || '—',
+          submitted_by: 'Cancellation Admin',
+          rep_name: spon.rep_name || '',
+          license_plate: '',
+          sponsored: true,
+          sponsor_note: noteText,
+          structure_debt: customDebt,
+          general_notes: noteText,
+          source: 'reported_sponsorship_audit',
+          submitted_at: now,
+        });
+        ledgerChanged = true;
+      }
+    } else if (spon.status === 'actually_sponsored' || spon.status === 'pending') {
+      if (entryIdx >= 0) {
+        ledger.splice(entryIdx, 1);
+        spon.ledger_entry_id = null;
+        ledgerChanged = true;
+      }
+    } else if (entryIdx >= 0) {
+      ledger[entryIdx].structure = spon.structure;
+      ledger[entryIdx].date = spon.date;
+      ledger[entryIdx].service = spon.service;
+      ledgerChanged = true;
+    }
+
+    audits[i] = spon;
+    updatedCount++;
+  }
+
+  if (updatedCount > 0) {
+    atomicWriteJson(SPONSORSHIPS_FILE, audits);
+    if (ledgerChanged) {
+      atomicWriteJson(LEDGER_FILE, ledger);
+      broadcastSse('ledger_updated', { timestamp: Date.now() });
+    }
+    broadcastSse('sponsorships_updated', { timestamp: Date.now() });
+  }
+
+  res.json({ success: true, updatedCount, ledgerChanged });
 });
 
 // Record payment for a reported sponsorship

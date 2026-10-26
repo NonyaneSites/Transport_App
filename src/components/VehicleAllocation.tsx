@@ -27,6 +27,9 @@ import {
   generateWhatsAppRepManifest,
   generateTaxiRepsManifest,
   generateSimpleTaxiRepsList,
+  generateAllSundayTaxiRepsSimpleList,
+  loadSundayManifests,
+  SUNDAY_SERVICES_ORDER,
   generateWhatsAppVehicleRepMessage,
   findVehicleRepPassenger,
   normalizeWhatsAppPhone,
@@ -189,9 +192,51 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   const [copiedRoute, setCopiedRoute] = useState(false);
   const [copiedRep, setCopiedRep] = useState(false);
   const [copiedTaxiReps, setCopiedTaxiReps] = useState(false);
-  const [taxiRepsFormat, setTaxiRepsFormat] = useState<'formatted' | 'simple'>('formatted');
+  const [taxiRepsFormat, setTaxiRepsFormat] = useState<'formatted' | 'simple'>('simple');
+  const [taxiRepsScope, setTaxiRepsScope] = useState<'all_services' | 'current_service'>('all_services');
+  const [sundayEntries, setSundayEntries] = useState<Array<{ service: ServiceType; label: string; manifest: Manifest | null }>>([]);
   const [previewManifestType, setPreviewManifestType] = useState<'route' | 'rep' | 'taxi_reps' | null>(null);
   const [whatsAppNotice, setWhatsAppNotice] = useState<{ type: 'success' | 'error'; text: string; url?: string } | null>(null);
+
+  // Sync sibling Sunday manifests for date whenever localManifest date changes
+  useEffect(() => {
+    let isMounted = true;
+    const { date: sessionDate } = parseManifestKey(localManifest.date);
+    if (!sessionDate) return;
+    loadSundayManifests(sessionDate, latestManifestRef.current).then((entries) => {
+      if (isMounted) {
+        setSundayEntries(entries);
+      }
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, [localManifest.date]);
+
+  // Ensure current active service manifest is always up-to-the-second in Sunday entries
+  const effectiveSundayEntries = useMemo(() => {
+    const { service: curService } = parseManifestKey(localManifest.date);
+    if (!sundayEntries.length) {
+      return SUNDAY_SERVICES_ORDER.map((item) => ({
+        service: item.service,
+        label: item.label,
+        manifest: item.service === curService ? localManifest : null,
+      }));
+    }
+    return sundayEntries.map((entry) =>
+      entry.service === curService ? { ...entry, manifest: localManifest } : entry
+    );
+  }, [sundayEntries, localManifest]);
+
+  const previewTaxiRepsText = useMemo(() => {
+    if (taxiRepsFormat === 'simple') {
+      if (taxiRepsScope === 'all_services') {
+        return generateAllSundayTaxiRepsSimpleList(effectiveSundayEntries);
+      }
+      return generateSimpleTaxiRepsList(localManifest);
+    }
+    return generateTaxiRepsManifest(localManifest, service);
+  }, [taxiRepsFormat, taxiRepsScope, effectiveSundayEntries, localManifest, service]);
 
   // Cross-service unaccounted sponsorship transfer state
   const [transferModalOpen, setTransferModalOpen] = useState(false);
@@ -577,7 +622,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
 
   // Vehicle cards always render in natural alphanumeric order
   const sortedVehicles = sortVehiclesNatural(localManifest?.vehicles || []);
-  const submittedVehicles = sortVehiclesNatural((localManifest?.vehicles || []).filter((v) => v?.submitted));
+  const submittedVehicles = sortVehiclesNatural((localManifest?.vehicles || []).filter((v) => Boolean(v?.submitted || v?.draftState?.submitted)));
 
   function poolForVehicleType(vehicleType: 'Bus' | 'Taxi'): { key: string; count: number }[] {
     const map = passengersByPoolGroup(unassigned, vehicleType);
@@ -1165,21 +1210,29 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   }
 
   async function handleCopyTaxiReps() {
-    const text = taxiRepsFormat === 'simple' && previewManifestType === 'taxi_reps'
-      ? generateSimpleTaxiRepsList(localManifest)
-      : generateTaxiRepsManifest(localManifest, service);
+    let text = previewTaxiRepsText;
+    if (taxiRepsFormat === 'simple' && taxiRepsScope === 'all_services' && (!sundayEntries.length || sundayEntries.every((e) => !e.manifest))) {
+      const { date: sessionDate } = parseManifestKey(localManifest.date);
+      const freshlyLoaded = await loadSundayManifests(sessionDate, localManifest);
+      text = generateAllSundayTaxiRepsSimpleList(freshlyLoaded);
+    }
     await copyTextToClipboard(text);
     setCopiedTaxiReps(true);
     setMoveNotification({ text: '✓ Copied Taxi Reps to clipboard (taxis only)', timestamp: Date.now() });
     setTimeout(() => setCopiedTaxiReps(false), 2000);
   }
 
-  function handleDownloadTaxiReps() {
-    const text = taxiRepsFormat === 'simple' && previewManifestType === 'taxi_reps'
-      ? generateSimpleTaxiRepsList(localManifest)
-      : generateTaxiRepsManifest(localManifest, service);
+  async function handleDownloadTaxiReps() {
     const { date: sessionDate } = parseManifestKey(localManifest.date);
-    downloadTextFile(`taxi_reps_${sessionDate}_${service}.txt`, text);
+    let text = previewTaxiRepsText;
+    if (taxiRepsFormat === 'simple' && taxiRepsScope === 'all_services' && (!sundayEntries.length || sundayEntries.every((e) => !e.manifest))) {
+      const freshlyLoaded = await loadSundayManifests(sessionDate, localManifest);
+      text = generateAllSundayTaxiRepsSimpleList(freshlyLoaded);
+    }
+    const filename = taxiRepsFormat === 'simple' && taxiRepsScope === 'all_services'
+      ? `taxi_reps_all_services_${sessionDate}.txt`
+      : `taxi_reps_${sessionDate}_${service}.txt`;
+    downloadTextFile(filename, text);
   }
 
   async function handleWhatsAppRep(vehicle: Vehicle) {
@@ -1238,7 +1291,8 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
   }
 
   const hasAllocatedVehicles = localManifest.vehicles.length > 0 && localManifest.vehicles.some((v) => riderPassengers(v).length > 0);
-  const hasTaxis = localManifest.vehicles.some((v) => v.type === 'Taxi' || (v.type !== 'Bus' && !v.name.toLowerCase().includes('bus')));
+  const hasTaxis = localManifest.vehicles.some((v) => v.type === 'Taxi' || (v.type !== 'Bus' && !v.name.toLowerCase().includes('bus')))
+    || effectiveSundayEntries.some((e) => e.manifest?.vehicles?.some((v) => v.type === 'Taxi' || (v.type !== 'Bus' && !v.name.toLowerCase().includes('bus'))));
 
   return (
     <div className="card">
@@ -1426,25 +1480,54 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                 </div>
 
                 {previewManifestType === 'taxi_reps' && (
-                  <div className="flex items-center gap-1 bg-card-2 p-0.5 rounded-lg border border-line text-[11px]">
-                    <button
-                      type="button"
-                      onClick={() => setTaxiRepsFormat('formatted')}
-                      className={`px-2 py-0.5 rounded font-medium transition-all ${
-                        taxiRepsFormat === 'formatted' ? 'bg-sky-500/20 text-sky-300 font-semibold' : 'text-muted hover:text-ink'
-                      }`}
-                    >
-                      WhatsApp
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setTaxiRepsFormat('simple')}
-                      className={`px-2 py-0.5 rounded font-medium transition-all ${
-                        taxiRepsFormat === 'simple' ? 'bg-sky-500/20 text-sky-300 font-semibold' : 'text-muted hover:text-ink'
-                      }`}
-                    >
-                      Simple List
-                    </button>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {/* Format Selector: Simple List is default */}
+                    <div className="flex items-center gap-1 bg-card-2 p-0.5 rounded-lg border border-line text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() => setTaxiRepsFormat('simple')}
+                        className={`px-2 py-0.5 rounded font-medium transition-all ${
+                          taxiRepsFormat === 'simple' ? 'bg-sky-500/20 text-sky-300 font-semibold' : 'text-muted hover:text-ink'
+                        }`}
+                      >
+                        Simple List
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTaxiRepsFormat('formatted')}
+                        className={`px-2 py-0.5 rounded font-medium transition-all ${
+                          taxiRepsFormat === 'formatted' ? 'bg-sky-500/20 text-sky-300 font-semibold' : 'text-muted hover:text-ink'
+                        }`}
+                      >
+                        WhatsApp
+                      </button>
+                    </div>
+
+                    {/* Scope Selector: All 4 Sunday Services is default */}
+                    {taxiRepsFormat === 'simple' && (
+                      <div className="flex items-center gap-1 bg-card-2 p-0.5 rounded-lg border border-line text-[11px]">
+                        <button
+                          type="button"
+                          onClick={() => setTaxiRepsScope('all_services')}
+                          className={`px-2 py-0.5 rounded font-medium transition-all ${
+                            taxiRepsScope === 'all_services' ? 'bg-sky-500/20 text-sky-300 font-semibold' : 'text-muted hover:text-ink'
+                          }`}
+                          title="Include all 4 Sunday services: AM Serving, AM Normal, PM Serving, PM Normal"
+                        >
+                          All Sunday Services (4)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTaxiRepsScope('current_service')}
+                          className={`px-2 py-0.5 rounded font-medium transition-all ${
+                            taxiRepsScope === 'current_service' ? 'bg-sky-500/20 text-sky-300 font-semibold' : 'text-muted hover:text-ink'
+                          }`}
+                          title="Show only the current selected service"
+                        >
+                          Current Service Only
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1454,9 +1537,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                   ? generateWhatsAppRouteManifest(localManifest, service)
                   : previewManifestType === 'rep'
                   ? generateWhatsAppRepManifest(localManifest, service)
-                  : taxiRepsFormat === 'simple'
-                  ? generateSimpleTaxiRepsList(localManifest)
-                  : generateTaxiRepsManifest(localManifest, service)}
+                  : previewTaxiRepsText}
               </pre>
             </div>
 
@@ -2442,10 +2523,11 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
             const stopRiderCountMap = new Map(groups.map((g) => [g.label, g.riders.length]));
 
             // Attendance & Sponsorship metrics
-            const vPresent = vehicle.submitted
+            const isVehSubmitted = Boolean(vehicle.submitted || vehicle.draftState?.submitted);
+            const vPresent = isVehSubmitted
               ? riders.filter((r) => r.present).length
               : riders.filter((r) => r.present || vehicle.draftState?.presentIds?.some((id) => String(id) === String(r.id))).length;
-            const vAbsent = vehicle.submitted
+            const vAbsent = isVehSubmitted
               ? riders.filter((r) => !r.present).length
               : riders.filter((r) => vehicle.draftState?.absentIds?.some((id) => String(id) === String(r.id))).length;
             const vSponsored = riders.filter((r) => r.sponsored || vehicle.draftState?.sponsoredIds?.some((id) => String(id) === String(r.id))).length;
@@ -2458,7 +2540,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                 key={vehicle.id}
                 id={`vehicle-card-${vehicle.id}`}
                 className={`overflow-hidden rounded-xl border transition-all hover:border-crimson-500/30 ${
-                  vehicle.submitted ? 'border-success/30 bg-success/5' : 'border-line bg-card-2'
+                  isVehSubmitted ? 'border-success/30 bg-success/5' : 'border-line bg-card-2'
                 }`}
               >
                 <div className="flex items-center justify-between gap-3 p-4">
@@ -2474,7 +2556,7 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-semibold text-ink">{vehicle.name}</span>
-                        {vehicle.submitted && (
+                        {isVehSubmitted && (
                           <span className="badge bg-success/15 text-success-light text-[10px]">Submitted</span>
                         )}
                         {vehicle.type === 'Bus' ? (

@@ -1,4 +1,5 @@
-import { shortDate, parseManifestKey } from './dates';
+import { shortDate, parseManifestKey, manifestKey } from './dates';
+import { loadManifest } from './manifest';
 import { SERVICE_TYPES, hubDisplayName, getEffectiveStop, type Manifest, type Vehicle, type Passenger, type ServiceType } from './types';
 import { sortVehiclesNatural } from './sort';
 import { isPassengerRepOfVehicle, matchRiderToOfficialRep, detectVehicleRep, detectAllVehicleReps, getRepStructure } from './officialReps';
@@ -370,10 +371,80 @@ export function generateSimpleTaxiRepsList(manifest: Manifest): string {
     );
     const phone = repPassenger?.phone?.trim() || null;
     const structText = repStruct ? ` (${repStruct})` : (repPassenger?.structure ? ` (${repPassenger.structure})` : '');
+    const coReps = (vehicle.coReps || vehicle.draftState?.coReps || []).filter(Boolean);
+    const coRepsText = coReps.length > 0 ? ` & ${coReps.join(', ')} (Co-rep)` : '';
     const phoneText = phone ? ` - ${phone}` : '';
-    const repText = effectiveRepName ? `${effectiveRepName}${structText}${phoneText}` : '[No rep allocated]';
+    let repText = '';
+    if (effectiveRepName) {
+      repText = `${effectiveRepName}${structText}${coRepsText}${phoneText}`;
+    } else if (riders.length === 0) {
+      repText = '[Empty taxi - 0 riders]';
+    } else {
+      repText = '[No rep allocated]';
+    }
     return `${vehicle.name}: ${repText}`;
   }).join('\n');
+}
+
+export const SUNDAY_SERVICES_ORDER: { service: ServiceType; label: string; header: string }[] = [
+  { service: 'AM_Serving', label: 'AM Serving', header: 'AM SERVING TAXIS' },
+  { service: 'AM_Normal', label: 'AM Normal', header: 'AM NORMAL TAXIS' },
+  { service: 'PM_Serving', label: 'PM Serving', header: 'PM SERVING TAXIS' },
+  { service: 'PM_Normal', label: 'PM Normal', header: 'PM NORMAL TAXIS' },
+];
+
+/**
+ * Builds a plain text list of taxi reps across all 4 Sunday services:
+ * AM Serving, AM Normal, PM Serving, PM Normal.
+ * Taxis only (buses strictly excluded).
+ */
+export function generateAllSundayTaxiRepsSimpleList(
+  entries: Array<{ service: ServiceType | string; label?: string; manifest?: Manifest | null }>
+): string {
+  const sections: string[] = [];
+
+  for (const item of SUNDAY_SERVICES_ORDER) {
+    const entry = entries.find((e) => e.service === item.service);
+    const manifest = entry?.manifest;
+    let body = 'No taxis allocated';
+    if (manifest) {
+      const list = generateSimpleTaxiRepsList(manifest);
+      if (list && list !== 'No taxis found') {
+        body = list;
+      }
+    }
+    sections.push(`${item.header}\n${body}`);
+  }
+
+  return sections.join('\n\n');
+}
+
+/**
+ * Loads all 4 Sunday manifests asynchronously for a given session date,
+ * allowing an in-memory/latest currentManifest to override the active service slot.
+ */
+export async function loadSundayManifests(
+  sessionDate: string,
+  currentManifest?: Manifest | null
+): Promise<Array<{ service: ServiceType; label: string; manifest: Manifest | null }>> {
+  return Promise.all(
+    SUNDAY_SERVICES_ORDER.map(async (item) => {
+      if (currentManifest && currentManifest.date) {
+        const { date: cDate, service: cService } = parseManifestKey(currentManifest.date);
+        if (cDate === sessionDate && cService === item.service) {
+          return { service: item.service, label: item.label, manifest: currentManifest };
+        }
+      }
+      try {
+        const key = manifestKey(sessionDate, item.service);
+        const m = await loadManifest(key);
+        return { service: item.service, label: item.label, manifest: m };
+      } catch (err) {
+        console.warn(`[loadSundayManifests] Could not load ${item.service} manifest:`, err);
+        return { service: item.service, label: item.label, manifest: null };
+      }
+    })
+  );
 }
 
 export { formatRehearsalWhatsAppManifest, formatSingleTaxiRehearsalWhatsApp } from './rehearsal';

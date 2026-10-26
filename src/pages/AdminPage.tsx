@@ -11,7 +11,7 @@ import { listLedgerEntries } from '@/lib/ledger';
 import { upcomingSunday, manifestKey, prettyDate, parseManifestKey as parseKey } from '@/lib/dates';
 import { SERVICE_TYPES, type ServiceType, type Passenger, type Manifest } from '@/lib/types';
 import { isSamePassenger, getSubmissionTimestampEpoch } from '@/lib/importer';
-import { generateWhatsAppRouteManifest, generateWhatsAppRepManifest, generateTaxiRepsManifest, downloadTextFile } from '@/lib/whatsappManifest';
+import { generateWhatsAppRouteManifest, generateWhatsAppRepManifest, generateAllSundayTaxiRepsSimpleList, loadSundayManifests, downloadTextFile } from '@/lib/whatsappManifest';
 import { downloadTaxiStatsExcel, downloadTaxiStatsCSV } from '@/lib/statsExport';
 
 const AdminStatsExportModal = lazy(() =>
@@ -81,7 +81,10 @@ export function AdminPage() {
 
   const handleCopyTaxiReps = async () => {
     if (!manifest) return;
-    const text = generateTaxiRepsManifest(manifest, service);
+    const { date: sessionDate } = parseKey(date);
+    const targetDate = sessionDate || date;
+    const sundayEntries = await loadSundayManifests(targetDate, manifest);
+    const text = generateAllSundayTaxiRepsSimpleList(sundayEntries);
     try {
       await navigator.clipboard.writeText(text);
     } catch {
@@ -93,7 +96,7 @@ export function AdminPage() {
       document.body.removeChild(ta);
     }
     setCopiedTaxiReps(true);
-    setTransferSuccessNotice('Copied allocated rep of each taxi to clipboard (only taxis)!');
+    setTransferSuccessNotice('Copied Taxi Reps Simple List (AM Serving, AM Normal, PM Serving, PM Normal) to clipboard!');
     setTimeout(() => setCopiedTaxiReps(false), 2500);
   };
 

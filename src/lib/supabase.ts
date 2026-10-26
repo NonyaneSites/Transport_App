@@ -525,7 +525,7 @@ export function createMockClient() {
           expires_at: expiresAt,
           revoked: false,
           failed_attempts: 0,
-          last_updated_at: now,
+          last_updated_at: null,
         }, 'vehicle_id');
 
         // Clear failed attempts for this vehicle on re-issue

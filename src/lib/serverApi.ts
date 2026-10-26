@@ -681,6 +681,29 @@ export async function updateSponsorshipOnServer(
   }
 }
 
+// Batch update / edit reported sponsorships on server
+export async function batchUpdateSponsorshipsOnServer(
+  ids: string[],
+  updates: Partial<ReportedSponsorship> & { debtAmount?: number }
+): Promise<{ success: boolean; updatedCount: number; ledgerChanged?: boolean }> {
+  if (!isServerOnline()) return { success: false, updatedCount: 0 };
+  try {
+    const res = await fetch('/api/ledger/sponsorships/batch-update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, updates }),
+    });
+    if (!res.ok || !isJsonResponse(res)) {
+      return { success: false, updatedCount: 0 };
+    }
+    markServerOnline();
+    return (await res.json()) as { success: boolean; updatedCount: number; ledgerChanged?: boolean };
+  } catch (err) {
+    console.warn('[ServerAPI] batchUpdateSponsorships error:', err);
+    return { success: false, updatedCount: 0 };
+  }
+}
+
 // Broadcast lightweight live action to central server for instant cross-device delivery (localhost dev only)
 export async function broadcastLiveActionToServer(action: LiveSyncAction): Promise<void> {
   if (!isServerOnline()) return;
