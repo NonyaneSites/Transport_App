@@ -920,7 +920,9 @@ export function LedgerPage() {
 
       if (nonZeroInstances.length === 0 || rawDebt === 0) {
         // If all date instances were reduced to zero or removed, remove debtor completely
-        await updateDebtorWithInstances(editTarget.entryIds, {
+        const targetIds = editTarget.entryIds;
+        const targetNormName = sanitizePassengerDisplayName(editTarget.name).toLowerCase();
+        await updateDebtorWithInstances(targetIds, {
           name: editName.trim(),
           structure: targetStructure,
           isSponsored: isSpon,
@@ -928,8 +930,8 @@ export function LedgerPage() {
           notes: finalNotes,
           instances: [],
         });
-        const removedSet = new Set(editTarget.entryIds);
-        setEntries((prev) => prev.filter((e) => !removedSet.has(e.id)));
+        const removedSet = new Set(targetIds);
+        setEntries((prev) => prev.filter((e) => !removedSet.has(e.id) && sanitizePassengerDisplayName(e.passenger_name).toLowerCase() !== targetNormName));
       } else {
         await updateDebtorWithInstances(editTarget.entryIds, {
           name: editName.trim(),
@@ -941,10 +943,10 @@ export function LedgerPage() {
         });
       }
 
-      const refreshed = await listLedgerEntries();
+      const refreshed = await listLedgerEntries(true);
       setEntries(refreshed);
-      const refSpons = await listReportedSponsorships();
-      setSponsorships(refSpons);
+      const refSpons = await listReportedSponsorships(true);
+      setSponsorships(cleanAndDeduplicateSponsorships(refSpons));
       setEditSuccessMessage('Debtor dates, structure, and amount updated successfully.');
       setTimeout(() => {
         closeEditModal();
@@ -962,13 +964,15 @@ export function LedgerPage() {
     setDeletingDebtor(true);
     setEditError(null);
     try {
-      await removeLedgerEntries(editTarget.entryIds, 'Admin', 'Removed by admin');
-      const idSet = new Set(editTarget.entryIds);
-      setEntries((prev) => prev.filter((e) => !idSet.has(e.id)));
-      const refreshed = await listLedgerEntries();
+      const targetIds = editTarget.entryIds;
+      const targetNormName = sanitizePassengerDisplayName(editTarget.name).toLowerCase();
+      await removeLedgerEntries(targetIds, 'Admin', 'Removed by admin');
+      const idSet = new Set(targetIds);
+      setEntries((prev) => prev.filter((e) => !idSet.has(e.id) && sanitizePassengerDisplayName(e.passenger_name).toLowerCase() !== targetNormName));
+      const refreshed = await listLedgerEntries(true);
       setEntries(refreshed);
-      const refSpons = await listReportedSponsorships();
-      setSponsorships(refSpons);
+      const refSpons = await listReportedSponsorships(true);
+      setSponsorships(cleanAndDeduplicateSponsorships(refSpons));
       closeEditModal();
     } catch (e) {
       setEditError(e instanceof Error ? e.message : String(e));
@@ -1362,7 +1366,7 @@ export function LedgerPage() {
         next.delete(s.id);
         return next;
       });
-      const refreshed = await listLedgerEntries();
+      const refreshed = await listLedgerEntries(true);
       setEntries(refreshed);
       setSponsorshipNotice({
         id: s.id,
@@ -1394,7 +1398,7 @@ export function LedgerPage() {
       const delSet = new Set(idsToDelete);
       setSponsorships((prev) => prev.filter((item) => !delSet.has(item.id)));
       setSelectedSponIds(new Set());
-      const refreshed = await listLedgerEntries();
+      const refreshed = await listLedgerEntries(true);
       setEntries(refreshed);
       setSponsorshipNotice({
         id: 'batch_del',

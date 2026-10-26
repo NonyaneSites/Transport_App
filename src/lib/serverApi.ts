@@ -420,6 +420,25 @@ export async function deleteLedgerOnServer(id: string): Promise<boolean> {
   }
 }
 
+export async function batchDeleteLedgerOnServer(ids: string[]): Promise<number> {
+  if (!isServerOnline() || !Array.isArray(ids) || ids.length === 0) return 0;
+  try {
+    const res = await fetch('/api/ledger/batch-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    if (res.ok && isJsonResponse(res)) {
+      markServerOnline();
+      const data = await res.json();
+      return typeof data.count === 'number' ? data.count : ids.length;
+    }
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
 export async function updateLedgerOnServer(id: string, updates: Record<string, unknown>): Promise<boolean> {
   if (!isServerOnline()) return false;
   try {
