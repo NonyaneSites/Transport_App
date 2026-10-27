@@ -362,7 +362,6 @@ export async function listManifestsFromServer(): Promise<ManifestSummary[]> {
 }
 
 export async function listLedgerFromServer(): Promise<LedgerEntry[]> {
-  if (!isServerOnline()) return [];
   try {
     const res = await fetch('/api/ledger');
     if (!res.ok || !isJsonResponse(res)) return [];
@@ -534,7 +533,6 @@ export async function withdrawAbsenteesOnServer(payload: {
 
 // Fetch reported sponsorships from server
 export async function listReportedSponsorshipsFromServer(): Promise<ReportedSponsorship[]> {
-  if (!isServerOnline()) return [];
   try {
     const res = await fetch('/api/ledger/sponsorships');
     if (!res.ok || !isJsonResponse(res)) return [];

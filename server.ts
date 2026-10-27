@@ -12,6 +12,7 @@ const DATA_DIR = path.join(process.cwd(), 'data');
 const MANIFESTS_DIR = path.join(DATA_DIR, 'manifests');
 const LEDGER_FILE = path.join(DATA_DIR, 'ledger.json');
 const SPONSORSHIPS_FILE = path.join(DATA_DIR, 'sponsorship_audits.json');
+const REMOVED_SPONSORSHIPS_FILE = path.join(DATA_DIR, 'removed_sponsorship_ids.json');
 const REHEARSAL_TEMPLATE_FILE = path.join(DATA_DIR, 'rehearsal_template.json');
 const USER_ROLES_FILE = path.join(DATA_DIR, 'user_roles.json');
 
@@ -26,6 +27,7 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(MANIFESTS_DIR)) fs.mkdirSync(MANIFESTS_DIR, { recursive: true });
 if (!fs.existsSync(LEDGER_FILE)) fs.writeFileSync(LEDGER_FILE, JSON.stringify([]), 'utf-8');
 if (!fs.existsSync(SPONSORSHIPS_FILE)) fs.writeFileSync(SPONSORSHIPS_FILE, JSON.stringify([]), 'utf-8');
+if (!fs.existsSync(REMOVED_SPONSORSHIPS_FILE)) fs.writeFileSync(REMOVED_SPONSORSHIPS_FILE, JSON.stringify([]), 'utf-8');
 if (!fs.existsSync(REHEARSAL_TEMPLATE_FILE)) fs.writeFileSync(REHEARSAL_TEMPLATE_FILE, JSON.stringify([]), 'utf-8');
 if (!fs.existsSync(USER_ROLES_FILE)) fs.writeFileSync(USER_ROLES_FILE, JSON.stringify({}), 'utf-8');
 
@@ -1615,6 +1617,17 @@ app.post('/api/ledger/sponsorships', (req, res) => {
 app.get('/api/ledger/sponsorships', (req, res) => {
   let audits = readJsonFile<ServerAuditItem[]>(SPONSORSHIPS_FILE, []);
   const ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+  const removedIds = new Set<string>(readJsonFile<string[]>(REMOVED_SPONSORSHIPS_FILE, []));
+
+  // Filter out any previously removed or deleted sponsorships
+  audits = audits.filter((a) => {
+    if (removedIds.has(String(a.id))) return false;
+    const baseDate = normalizeDateToYMD(a.date || a.manifest_key);
+    const normName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (baseDate && normName && removedIds.has(`${baseDate}::${normName}`)) return false;
+    if (a.passenger_id && removedIds.has(String(a.passenger_id))) return false;
+    return true;
+  });
 
   // Sync audits with ledger so confirmed indicated debt is never missing or reset
   const syncResult = syncSponsorshipAuditsWithLedger(audits, ledger);
@@ -1653,6 +1666,9 @@ app.get('/api/ledger/sponsorships', (req, res) => {
             const baseDate = normalizeDateToYMD(m.date || key);
             const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
             const auditId = `sp_${baseDate}_${normName}`;
+            if (removedIds.has(auditId) || removedIds.has(`${baseDate}::${normName}`) || removedIds.has(sId)) {
+              continue;
+            }
             const exists = audits.some((a) => {
               const aDate = normalizeDateToYMD(a.date || a.manifest_key);
               const isSameDate = (!baseDate && !aDate) || (baseDate && aDate && baseDate === aDate) || (a.manifest_key === key);
@@ -1694,6 +1710,9 @@ app.get('/api/ledger/sponsorships', (req, res) => {
           const baseDate = normalizeDateToYMD(m.date || key);
           const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
           const auditId = `sp_${baseDate}_${normName}`;
+          if (removedIds.has(auditId) || removedIds.has(`${baseDate}::${normName}`) || (ext.sponseeId && removedIds.has(String(ext.sponseeId)))) {
+            continue;
+          }
           const matchedSignup = (m.signups || []).find((p) => p.fullName.toLowerCase() === ext.sponseeName?.toLowerCase());
           const exists = audits.some((a) => {
             const aDate = normalizeDateToYMD(a.date || a.manifest_key);
@@ -1737,6 +1756,9 @@ app.get('/api/ledger/sponsorships', (req, res) => {
           const baseDate = normalizeDateToYMD(m.date || key);
           const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
           const auditId = `sp_${baseDate}_${normName}`;
+          if (removedIds.has(auditId) || removedIds.has(`${baseDate}::${normName}`) || (s.id && removedIds.has(String(s.id)))) {
+            continue;
+          }
           const exists = audits.some((a) => {
             const aDate = normalizeDateToYMD(a.date || a.manifest_key);
             const isSameDate = (!baseDate && !aDate) || (baseDate && aDate && baseDate === aDate) || (a.manifest_key === key);
@@ -2213,6 +2235,15 @@ app.delete('/api/ledger/sponsorships/:id', (req, res) => {
     return;
   }
 
+  // Record into removed sponsorships set to prevent resurrection from manifests
+  const removedIds = new Set<string>(readJsonFile<string[]>(REMOVED_SPONSORSHIPS_FILE, []));
+  removedIds.add(id);
+  const baseDate = normalizeDateToYMD(String(spon.date || spon.manifest_key || ''));
+  const normName = sanitizePassengerDisplayName(String(spon.passenger_name || '')).toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (baseDate && normName) removedIds.add(`${baseDate}::${normName}`);
+  if (spon.passenger_id) removedIds.add(String(spon.passenger_id));
+  atomicWriteJson(REMOVED_SPONSORSHIPS_FILE, Array.from(removedIds));
+
   audits = audits.filter((a) => a.id !== id);
   atomicWriteJson(SPONSORSHIPS_FILE, audits);
 
@@ -2252,6 +2283,17 @@ app.post('/api/ledger/sponsorships/batch-delete', (req, res) => {
   const toDelete = audits.filter((a) => idSet.has(String(a.id)));
   audits = audits.filter((a) => !idSet.has(String(a.id)));
   atomicWriteJson(SPONSORSHIPS_FILE, audits);
+
+  // Record into removed sponsorships set to prevent resurrection from manifests
+  const removedIds = new Set<string>(readJsonFile<string[]>(REMOVED_SPONSORSHIPS_FILE, []));
+  for (const id of ids) removedIds.add(String(id));
+  for (const spon of toDelete) {
+    const baseDate = normalizeDateToYMD(String(spon.date || spon.manifest_key || ''));
+    const normName = sanitizePassengerDisplayName(String(spon.passenger_name || '')).toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (baseDate && normName) removedIds.add(`${baseDate}::${normName}`);
+    if (spon.passenger_id) removedIds.add(String(spon.passenger_id));
+  }
+  atomicWriteJson(REMOVED_SPONSORSHIPS_FILE, Array.from(removedIds));
 
   let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
   const beforeLen = ledger.length;

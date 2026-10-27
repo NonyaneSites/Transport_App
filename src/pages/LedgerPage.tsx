@@ -18,7 +18,7 @@ import {
   listReportedSponsorships, verifyBatchSponsorships, groupSponsorshipsByStructure, groupSponsorshipsByDate,
   sanitizePassengerDisplayName, cleanSponsorshipNote, cleanPersonalAbsenteeNote, cleanAndDeduplicateSponsorships,
   deleteReportedSponsorship, batchDeleteReportedSponsorships, recordReportedSponsorshipPayment, updateReportedSponsorship,
-  batchUpdateReportedSponsorships,
+  batchUpdateReportedSponsorships, invalidateSponsorshipsCache, invalidateLedgerCache,
   type DebtorInstanceUpdateItem,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
   type ReportedSponsorship, type SponsorshipStatus, type DateSponsorshipGroup, type StructureSponsorshipGroup,
@@ -367,12 +367,12 @@ export function LedgerPage() {
     (async () => {
       try {
         const [data, sponData] = await Promise.all([
-          listLedgerEntries(),
-          listReportedSponsorships(),
+          listLedgerEntries(true),
+          listReportedSponsorships(true),
         ]);
         if (mounted) {
           setEntries(data);
-          setSponsorships(sponData);
+          setSponsorships(cleanAndDeduplicateSponsorships(sponData));
           setLoading(false);
         }
       } catch (e) {
@@ -388,14 +388,16 @@ export function LedgerPage() {
       undefined,
       async () => {
         if (mounted) {
-          const refreshed = await listLedgerEntries();
+          invalidateLedgerCache();
+          const refreshed = await listLedgerEntries(true);
           setEntries(refreshed);
         }
       },
       undefined,
       async () => {
         if (mounted) {
-          const sponRefreshed = await listReportedSponsorships();
+          invalidateSponsorshipsCache();
+          const sponRefreshed = await listReportedSponsorships(true);
           setSponsorships(cleanAndDeduplicateSponsorships(sponRefreshed));
         }
       }
@@ -406,21 +408,52 @@ export function LedgerPage() {
       .channel('realtime_sponsorship_audits_sync')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'sponsorship_audits' }, async () => {
         if (mounted) {
+          invalidateSponsorshipsCache();
           const sponRefreshed = await listReportedSponsorships(true);
           setSponsorships(cleanAndDeduplicateSponsorships(sponRefreshed));
         }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'cancellation_ledger' }, async () => {
         if (mounted) {
+          invalidateLedgerCache();
           const refreshed = await listLedgerEntries(true);
           setEntries(refreshed);
         }
       })
       .subscribe();
 
+    // 3. Tab visibility / device focus sync (essential for mobile Safari / iPhone background resume)
+    const handleVisibilityOrFocus = async () => {
+      if (typeof document !== 'undefined' && !document.hidden && mounted) {
+        invalidateSponsorshipsCache();
+        invalidateLedgerCache();
+        try {
+          const [data, sponData] = await Promise.all([
+            listLedgerEntries(true),
+            listReportedSponsorships(true),
+          ]);
+          if (mounted) {
+            setEntries(data);
+            setSponsorships(cleanAndDeduplicateSponsorships(sponData));
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    }
+    window.addEventListener('focus', handleVisibilityOrFocus);
+
     return () => {
       mounted = false;
       disconnectSSE();
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      }
+      window.removeEventListener('focus', handleVisibilityOrFocus);
       try {
         supabase.removeChannel(realtimeChannel);
       } catch {
@@ -1269,7 +1302,7 @@ export function LedgerPage() {
       if (res.success) {
         // Authoritative re-fetch directly from server/Supabase
         const [updatedSpon, updatedLedger] = await Promise.all([
-          listReportedSponsorships(),
+          listReportedSponsorships(true),
           listLedgerEntries(true),
         ]);
 
@@ -1341,10 +1374,10 @@ export function LedgerPage() {
     setPaymentError(null);
     try {
       await recordPartialPayment(paymentTarget.entryIds, amountNum);
-      const refreshed = await listLedgerEntries();
+      const refreshed = await listLedgerEntries(true);
       setEntries(refreshed);
-      const refSpons = await listReportedSponsorships();
-      setSponsorships(refSpons);
+      const refSpons = await listReportedSponsorships(true);
+      setSponsorships(cleanAndDeduplicateSponsorships(refSpons));
       closePaymentModal();
     } catch (e) {
       setPaymentError(e instanceof Error ? e.message : String(e));
@@ -1360,13 +1393,16 @@ export function LedgerPage() {
     setSponsorshipUpdatingId(s.id);
     try {
       await deleteReportedSponsorship(s.id);
-      setSponsorships((prev) => prev.filter((item) => item.id !== s.id));
       setSelectedSponIds((prev) => {
         const next = new Set(prev);
         next.delete(s.id);
         return next;
       });
-      const refreshed = await listLedgerEntries(true);
+      const [refreshedSpons, refreshed] = await Promise.all([
+        listReportedSponsorships(true),
+        listLedgerEntries(true),
+      ]);
+      setSponsorships(cleanAndDeduplicateSponsorships(refreshedSpons));
       setEntries(refreshed);
       setSponsorshipNotice({
         id: s.id,
@@ -1395,10 +1431,12 @@ export function LedgerPage() {
     try {
       const idsToDelete = Array.from(selectedSponIds);
       await batchDeleteReportedSponsorships(idsToDelete);
-      const delSet = new Set(idsToDelete);
-      setSponsorships((prev) => prev.filter((item) => !delSet.has(item.id)));
       setSelectedSponIds(new Set());
-      const refreshed = await listLedgerEntries(true);
+      const [refreshedSpons, refreshed] = await Promise.all([
+        listReportedSponsorships(true),
+        listLedgerEntries(true),
+      ]);
+      setSponsorships(cleanAndDeduplicateSponsorships(refreshedSpons));
       setEntries(refreshed);
       setSponsorshipNotice({
         id: 'batch_del',
@@ -1505,9 +1543,9 @@ export function LedgerPage() {
     setPaySponError(null);
     try {
       await recordReportedSponsorshipPayment(paySponTarget.id, amt, paySponNotes);
-      const refSpons = await listReportedSponsorships();
-      setSponsorships(refSpons);
-      const refreshed = await listLedgerEntries();
+      const refSpons = await listReportedSponsorships(true);
+      setSponsorships(cleanAndDeduplicateSponsorships(refSpons));
+      const refreshed = await listLedgerEntries(true);
       setEntries(refreshed);
       const cleanName = sanitizePassengerDisplayName(paySponTarget.passenger_name);
       setSponsorshipNotice({
@@ -1577,9 +1615,9 @@ export function LedgerPage() {
         debtAmount: Number.isFinite(debtAmt) && debtAmt > 0 ? debtAmt : undefined,
       });
 
-      const refSpons = await listReportedSponsorships();
-      setSponsorships(refSpons);
-      const refreshed = await listLedgerEntries();
+      const refSpons = await listReportedSponsorships(true);
+      setSponsorships(cleanAndDeduplicateSponsorships(refSpons));
+      const refreshed = await listLedgerEntries(true);
       setEntries(refreshed);
       setEditSponSuccess('Reported sponsorship updated successfully.');
       setTimeout(() => {
