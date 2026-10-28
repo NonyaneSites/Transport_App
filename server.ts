@@ -2,11 +2,18 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: '10mb' }));
+
+const supabaseUrl = process.env.VITE_SUPABASE_URL || '';
+const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY || '';
+const serverSupabase: SupabaseClient | null = (supabaseUrl && supabaseAnonKey)
+  ? createClient(supabaseUrl, supabaseAnonKey)
+  : null;
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const MANIFESTS_DIR = path.join(DATA_DIR, 'manifests');
@@ -1056,6 +1063,7 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
   }
 
   atomicWriteJson(SPONSORSHIPS_FILE, audits);
+  syncSponsorshipUpsertToSupabase(audits).catch(() => {});
 
   // 5. Broadcast live updates to all clients
   broadcastSse('manifest_updated', { key, manifest, timestamp: Date.now() });
@@ -1537,6 +1545,109 @@ function syncSponsorshipAuditsWithLedger(
   return { audits, changed };
 }
 
+async function syncServerSponsorshipsWithSupabase(): Promise<ServerAuditItem[]> {
+  const localAudits = readJsonFile<ServerAuditItem[]>(SPONSORSHIPS_FILE, []);
+  if (!serverSupabase) return localAudits;
+
+  try {
+    const { data: supaRows, error } = await serverSupabase
+      .from('sponsorship_audits')
+      .select('*')
+      .order('submitted_at', { ascending: false });
+
+    if (error || !supaRows) {
+      console.warn('[Server] Supabase sponsorship sync warning:', error);
+      return localAudits;
+    }
+
+    const map = new Map<string, ServerAuditItem>();
+    for (const row of supaRows as ServerAuditItem[]) {
+      if (row && row.id) map.set(String(row.id), { ...row });
+    }
+
+    const itemsToUpsertToSupabase: ServerAuditItem[] = [];
+
+    for (const localItem of localAudits) {
+      const id = String(localItem.id);
+      if (!map.has(id)) {
+        map.set(id, localItem);
+        itemsToUpsertToSupabase.push(localItem);
+      } else {
+        const existing = map.get(id)!;
+        if (existing.status === 'pending' && localItem.status !== 'pending') {
+          existing.status = localItem.status;
+          existing.status_updated_at = localItem.status_updated_at || new Date().toISOString();
+          existing.ledger_entry_id = localItem.ledger_entry_id || existing.ledger_entry_id;
+          itemsToUpsertToSupabase.push(existing);
+        } else if (existing.status !== 'pending' && localItem.status !== 'pending') {
+          const sTime = existing.status_updated_at ? new Date(existing.status_updated_at).getTime() : 0;
+          const lTime = localItem.status_updated_at ? new Date(localItem.status_updated_at).getTime() : 0;
+          if (lTime > sTime) {
+            existing.status = localItem.status;
+            existing.status_updated_at = localItem.status_updated_at;
+            existing.ledger_entry_id = localItem.ledger_entry_id || existing.ledger_entry_id;
+            itemsToUpsertToSupabase.push(existing);
+          }
+        }
+      }
+    }
+
+    const merged = Array.from(map.values());
+    atomicWriteJson(SPONSORSHIPS_FILE, merged);
+
+    if (itemsToUpsertToSupabase.length > 0) {
+      syncSponsorshipUpsertToSupabase(itemsToUpsertToSupabase).catch(() => {});
+    }
+
+    return merged;
+  } catch (err) {
+    console.warn('[Server] syncServerSponsorshipsWithSupabase error:', err);
+    return localAudits;
+  }
+}
+
+async function syncSponsorshipUpsertToSupabase(items: ServerAuditItem | ServerAuditItem[] | Array<Record<string, unknown>>) {
+  if (!serverSupabase) return;
+  const list = Array.isArray(items) ? items : [items];
+  if (list.length === 0) return;
+  const cleanRows = list.map((r) => ({
+    id: String(r.id),
+    manifest_key: String(r.manifest_key || ''),
+    date: String(r.date || ''),
+    service: String(r.service || 'Service'),
+    passenger_id: String(r.passenger_id || ''),
+    passenger_name: String(r.passenger_name || ''),
+    structure: String(r.structure || ''),
+    stop: String(r.stop || ''),
+    vehicle_name: String(r.vehicle_name || ''),
+    rep_name: String(r.rep_name || ''),
+    sponsor_note: String(r.sponsor_note || ''),
+    status: String(r.status || 'pending'),
+    status_updated_at: r.status_updated_at ? String(r.status_updated_at) : null,
+    ledger_entry_id: String(r.ledger_entry_id || ''),
+    submitted_at: String(r.submitted_at || new Date().toISOString()),
+  }));
+  try {
+    for (let i = 0; i < cleanRows.length; i += 50) {
+      const chunk = cleanRows.slice(i, i + 50);
+      await serverSupabase.from('sponsorship_audits').upsert(chunk, { onConflict: 'id' });
+    }
+  } catch (err) {
+    console.warn('[Server] syncSponsorshipUpsertToSupabase error:', err);
+  }
+}
+
+async function syncSponsorshipDeleteFromSupabase(ids: string | string[]) {
+  if (!serverSupabase) return;
+  const list = Array.isArray(ids) ? ids.map(String) : [String(ids)];
+  if (list.length === 0) return;
+  try {
+    await serverSupabase.from('sponsorship_audits').delete().in('id', list);
+  } catch (err) {
+    console.warn('[Server] syncSponsorshipDeleteFromSupabase error:', err);
+  }
+}
+
 // Initial sync on server module execution
 try {
   const startupLedger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
@@ -1545,12 +1656,15 @@ try {
   if (initialSync.changed) {
     atomicWriteJson(SPONSORSHIPS_FILE, initialSync.audits);
   }
+  syncServerSponsorshipsWithSupabase().catch((err) => {
+    console.warn('[Server] Background Supabase sync note:', err);
+  });
 } catch (err) {
   console.warn('[Server] Initial sponsorship sync note:', err);
 }
 
 // Record reported sponsorships from attendance check-in or transfers
-app.post('/api/ledger/sponsorships', (req, res) => {
+app.post('/api/ledger/sponsorships', async (req, res) => {
   const { sponsorships } = req.body || {};
   if (Array.isArray(sponsorships) && sponsorships.length > 0) {
     const audits = readJsonFile<ServerAuditItem[]>(SPONSORSHIPS_FILE, []);
@@ -1608,14 +1722,15 @@ app.post('/api/ledger/sponsorships', (req, res) => {
     }
 
     atomicWriteJson(SPONSORSHIPS_FILE, audits);
+    syncSponsorshipUpsertToSupabase(audits).catch(() => {});
     broadcastSse('sponsorships_updated', { timestamp: Date.now() });
   }
   res.json({ success: true });
 });
 
 // List reported sponsorships for cancellation admin audit
-app.get('/api/ledger/sponsorships', (req, res) => {
-  let audits = readJsonFile<ServerAuditItem[]>(SPONSORSHIPS_FILE, []);
+app.get('/api/ledger/sponsorships', async (req, res) => {
+  let audits = await syncServerSponsorshipsWithSupabase();
   const ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
   const removedIds = new Set<string>(readJsonFile<string[]>(REMOVED_SPONSORSHIPS_FILE, []));
 
@@ -1847,6 +1962,7 @@ app.get('/api/ledger/sponsorships', (req, res) => {
 
   audits = deduped;
   atomicWriteJson(SPONSORSHIPS_FILE, audits);
+  syncSponsorshipUpsertToSupabase(audits).catch(() => {});
 
   // Sort: newest first
   audits.sort((a, b) => (b.submitted_at || '').localeCompare(a.submitted_at || ''));
@@ -2047,6 +2163,7 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
 
   audits[sponIndex] = spon;
   atomicWriteJson(SPONSORSHIPS_FILE, audits);
+  syncSponsorshipUpsertToSupabase(spon as ServerAuditItem).catch(() => {});
   if (ledgerChanged) {
     atomicWriteJson(LEDGER_FILE, ledger);
     broadcastSse('ledger_updated', { timestamp: Date.now() });
@@ -2215,6 +2332,7 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
 
   if (updatedCount > 0) {
     atomicWriteJson(SPONSORSHIPS_FILE, audits);
+    syncSponsorshipUpsertToSupabase(audits).catch(() => {});
     if (ledgerChanged) {
       atomicWriteJson(LEDGER_FILE, ledger);
       broadcastSse('ledger_updated', { timestamp: Date.now() });
@@ -2246,6 +2364,7 @@ app.delete('/api/ledger/sponsorships/:id', (req, res) => {
 
   audits = audits.filter((a) => a.id !== id);
   atomicWriteJson(SPONSORSHIPS_FILE, audits);
+  syncSponsorshipDeleteFromSupabase(id).catch(() => {});
 
   // Remove any associated debt entry from ledger
   let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
@@ -2283,6 +2402,7 @@ app.post('/api/ledger/sponsorships/batch-delete', (req, res) => {
   const toDelete = audits.filter((a) => idSet.has(String(a.id)));
   audits = audits.filter((a) => !idSet.has(String(a.id)));
   atomicWriteJson(SPONSORSHIPS_FILE, audits);
+  syncSponsorshipDeleteFromSupabase(ids).catch(() => {});
 
   // Record into removed sponsorships set to prevent resurrection from manifests
   const removedIds = new Set<string>(readJsonFile<string[]>(REMOVED_SPONSORSHIPS_FILE, []));
@@ -2418,6 +2538,7 @@ app.post('/api/ledger/sponsorships/batch-update', (req, res) => {
 
   if (updatedCount > 0) {
     atomicWriteJson(SPONSORSHIPS_FILE, audits);
+    syncSponsorshipUpsertToSupabase(audits).catch(() => {});
     if (ledgerChanged) {
       atomicWriteJson(LEDGER_FILE, ledger);
       broadcastSse('ledger_updated', { timestamp: Date.now() });
@@ -2486,6 +2607,7 @@ app.post('/api/ledger/sponsorships/:id/pay', (req, res) => {
 
   audits[sponIndex] = spon;
   atomicWriteJson(SPONSORSHIPS_FILE, audits);
+  syncSponsorshipUpsertToSupabase(spon as ServerAuditItem).catch(() => {});
 
   if (ledgerChanged) {
     atomicWriteJson(LEDGER_FILE, ledger);
@@ -2588,6 +2710,7 @@ app.patch('/api/ledger/sponsorships/:id', (req, res) => {
 
   audits[sponIndex] = spon;
   atomicWriteJson(SPONSORSHIPS_FILE, audits);
+  syncSponsorshipUpsertToSupabase(spon as ServerAuditItem).catch(() => {});
 
   if (ledgerChanged) {
     atomicWriteJson(LEDGER_FILE, ledger);

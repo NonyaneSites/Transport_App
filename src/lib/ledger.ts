@@ -3547,7 +3547,7 @@ export async function withdrawSingleSponsorshipClaim(
   }
 }
 
-const SPONSORSHIPS_SELECT_COLUMNS = 'id, manifest_key, vehicle_id, vehicle_name, date, service, passenger_name, stop, structure, rep_name, sponsor_note, amount, status, submitted_at, notes, payment_received, payment_method, payment_notes, paid_at, paid_by';
+const SPONSORSHIPS_SELECT_COLUMNS = 'id, manifest_key, date, service, passenger_id, passenger_name, structure, stop, vehicle_name, rep_name, sponsor_note, status, status_updated_at, ledger_entry_id, submitted_at';
 
 let sessionSponsorshipsCache: { data: ReportedSponsorship[]; timestamp: number } | null = null;
 const SPONSORSHIPS_CACHE_TTL = 30000;
@@ -3594,38 +3594,37 @@ export async function listReportedSponsorships(forceRefresh = false): Promise<Re
     return sessionSponsorshipsCache.data;
   }
 
-  // 1. Primary: Central Express Server API (contains canonical cross-device reported sponsorships)
+  const candidates: ReportedSponsorship[] = [];
+
+  // 1. Primary: Central Express Server API
   try {
     const serverSponsees = await listReportedSponsorshipsFromServer();
     if (serverSponsees && serverSponsees.length > 0) {
-      const cleaned = cleanAndDeduplicateSponsorships(serverSponsees);
-      try {
-        localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(cleaned));
-      } catch {
-        /* ignore storage error */
-      }
-      sessionSponsorshipsCache = { data: cleaned, timestamp: Date.now() };
-      return cleaned;
+      candidates.push(...serverSponsees);
     }
   } catch (err) {
     console.debug('[Ledger] Server fetch sponsorships note:', err);
   }
 
-  // 2. Secondary: Remote Supabase table sponsorship_audits with full pagination (when server unavailable)
+  // 2. Secondary / Authoritative DB: Remote Supabase table sponsorship_audits
   try {
     const supaRows = await fetchAllSponsorshipsFromSupabase();
     if (supaRows && supaRows.length > 0) {
-      const cleaned = cleanAndDeduplicateSponsorships(supaRows);
-      try {
-        localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(cleaned));
-      } catch {
-        /* ignore */
-      }
-      sessionSponsorshipsCache = { data: cleaned, timestamp: Date.now() };
-      return cleaned;
+      candidates.push(...supaRows);
     }
   } catch (err) {
     console.debug('[Ledger] Supabase listReportedSponsorships note:', err);
+  }
+
+  if (candidates.length > 0) {
+    const cleaned = cleanAndDeduplicateSponsorships(candidates);
+    try {
+      localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(cleaned));
+    } catch {
+      /* ignore storage error */
+    }
+    sessionSponsorshipsCache = { data: cleaned, timestamp: Date.now() };
+    return cleaned;
   }
 
   // 3. Tertiary: LocalStorage fallback cache (when completely offline)
