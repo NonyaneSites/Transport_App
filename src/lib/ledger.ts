@@ -7,6 +7,8 @@ import {
   batchDeleteLedgerOnServer,
   updateLedgerOnServer,
   updateDebtorOnServer,
+  deleteDebtorOnServer,
+  broadcastLocalSyncEvent,
   listReportedSponsorshipsFromServer,
   verifyBatchSponsorshipsOnServer,
   recordReportedSponsorshipsOnServer,
@@ -32,6 +34,9 @@ import { shortDate, prettyDate } from './dates';
 
 export type { ReportedSponsorship, SponsorshipStatus };
 export { isDreamWeekDate, DREAMWEEK_START, DREAMWEEK_END, DREAMWEEK_FARE, getPassengerFare };
+
+export const isUUID = (str?: string | null): boolean =>
+  Boolean(str && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str));
 
 /**
  * Safely parses a debt amount from numbers, numeric strings, or formatted currency strings ("R40", "R45", "40", "45", "40.00").
@@ -309,6 +314,11 @@ export function sanitizeCancellationLedgerPayload<T extends Record<string, unkno
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(row)) {
     if (allowed.has(k) && v !== undefined) {
+      // Supabase cancellation_ledger primary key is type UUID.
+      // Omit non-UUID strings (e.g. ledger_sp_...) so Supabase gen_random_uuid() generates a valid UUID without throwing 22P02.
+      if (k === 'id' && typeof v === 'string' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)) {
+        continue;
+      }
       out[k] = v;
     }
   }
@@ -1354,6 +1364,105 @@ export async function deleteLedgerEntry(id: string, actorName = 'Admin', reason 
 }
 
 /**
+ * Permanently deletes an entire debtor and all their instances across ledger and sponsorships.
+ * Guarantees persistent server tombstones, updates local stores, and broadcasts to all clients.
+ */
+export async function deleteEntireDebtor(
+  debtorName: string,
+  entryIds: string[] = [],
+  actorName = 'Admin',
+  reason = 'Debtor removed by admin'
+): Promise<{ success: boolean; count: number }> {
+  const cleanName = sanitizePassengerDisplayName(debtorName);
+  const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const lowerClean = cleanName.toLowerCase();
+  const validIds = (entryIds || []).map(String).map((s) => s.trim()).filter(Boolean);
+
+  invalidateLedgerCache();
+  invalidateSponsorshipsCache();
+  addLocalRemovedLedgerIds(validIds);
+
+  const nowIso = new Date().toISOString();
+
+  // 1. Update mockStorage
+  try {
+    const localRows = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
+    const idSet = new Set(validIds);
+    for (const r of localRows) {
+      const rName = sanitizePassengerDisplayName(r.passenger_name).toLowerCase();
+      if (idSet.has(String(r.id)) || (cleanName && rName === lowerClean)) {
+        r.status = 'Removed';
+        r.structure_debt = 0;
+        r.removed_at = nowIso;
+        r.removed_by = actorName;
+        r.removal_reason = reason;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  // 2. Call dedicated server endpoint for server-side tombstones
+  try {
+    await deleteDebtorOnServer({ name: cleanName, entryIds: validIds });
+  } catch (err) {
+    console.debug('[Ledger] deleteDebtorOnServer note:', err);
+  }
+
+  // 3. Supabase cancellation_ledger update
+  try {
+    const uuids = validIds.filter(isUUID);
+    if (uuids.length > 0) {
+      await supabase.from(LEDGER_TABLE).update({ status: 'Removed', structure_debt: 0 }).in('id', uuids);
+    }
+    if (cleanName) {
+      await supabase.from(LEDGER_TABLE).update({ status: 'Removed', structure_debt: 0 }).ilike('passenger_name', cleanName);
+    }
+  } catch (sbErr) {
+    console.debug('[Ledger] Supabase debtor removal note:', sbErr);
+  }
+
+  // 4. Also call removeLedgerEntries for extra fallback guarantees
+  if (validIds.length > 0) {
+    await removeLedgerEntries(validIds, actorName, reason);
+  }
+
+  // 5. Update local sponsorship cache
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_SPONSORSHIPS_KEY) : null;
+    if (raw) {
+      let audits = JSON.parse(raw) as ReportedSponsorship[];
+      let changed = false;
+      audits = audits.map((a) => {
+        const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase();
+        const aNorm = aName.replace(/[^a-z0-9]/g, '');
+        if (aName === lowerClean || aNorm === normName) {
+          changed = true;
+          return {
+            ...a,
+            status: 'actually_sponsored' as const,
+            status_updated_at: nowIso,
+            ledger_entry_id: null,
+            sponsor_note: a.sponsor_note ? `${a.sponsor_note} (Debtor removed: ${reason})` : `Debtor removed: ${reason}`,
+          };
+        }
+        return a;
+      });
+      if (changed) {
+        localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(audits));
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  broadcastLocalSyncEvent('ledger_updated');
+  broadcastLocalSyncEvent('sponsorships_updated');
+
+  return { success: true, count: validIds.length || 1 };
+}
+
+/**
  * Permanently settles a batch of debt records in Supabase.
  * Updates status = 'Settled', structure_debt = 0, records settlement actor and notes,
  * preserves historical baseline fee, verifies database response, and logs to financial audit trail.
@@ -1727,6 +1836,16 @@ export async function updateDebtorWithInstances(
     cleanName.toLowerCase()
   ])).filter(Boolean);
 
+  const localSpons = sessionSponsorshipsCache?.data || [];
+  for (const s of localSpons) {
+    if (existingSet.has(String(s.id)) || (s.ledger_entry_id && existingSet.has(String(s.ledger_entry_id)))) {
+      const sName = sanitizePassengerDisplayName(s.passenger_name).toLowerCase();
+      if (sName && !origNames.includes(sName)) {
+        origNames.push(sName);
+      }
+    }
+  }
+
   // Synchronize to server immediately
   try {
     await updateDebtorOnServer({
@@ -1744,7 +1863,66 @@ export async function updateDebtorWithInstances(
     console.debug('[Ledger] Server updateDebtor error:', err);
   }
 
-  // Synchronize local sponsorship audit storage in localStorage and mockStorage so old debts never resurrect
+  // 2. Synchronize Supabase sponsorship_audits table and local cache
+  // Ensures any sponsorships linked to this debtor persist new structure, name, notes, and classification
+  try {
+    const { data: supaSpons } = await supabase
+      .from(SPONSORSHIPS_TABLE)
+      .select('*');
+
+    const updatedSponsToSync: ReportedSponsorship[] = [];
+    if (Array.isArray(supaSpons)) {
+      for (const spon of supaSpons) {
+        const aName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
+        const matches = existingSet.has(String(spon.ledger_entry_id || '')) ||
+          existingSet.has(String(spon.id || '')) ||
+          origNames.includes(aName);
+
+        if (matches) {
+          if (activeInstances.length === 0) {
+            updatedSponsToSync.push({
+              ...spon,
+              status: 'actually_sponsored',
+              status_updated_at: nowIso,
+              ledger_entry_id: null,
+              sponsor_note: `${spon.sponsor_note || ''} (Settled / Cleared)`.trim(),
+            });
+          } else if (!isSponsored) {
+            // Reclassified to Regular Cancellation (normal absentee) in ledger
+            updatedSponsToSync.push({
+              ...spon,
+              passenger_name: cleanName,
+              structure: structCode,
+              status: 'actually_sponsored',
+              status_updated_at: nowIso,
+              ledger_entry_id: null,
+              sponsor_note: spon.sponsor_note ? `${spon.sponsor_note} (Reclassified as regular cancellation)` : 'Reclassified as regular cancellation',
+            });
+          } else {
+            // Unaccounted or Unpaid sponsorship
+            updatedSponsToSync.push({
+              ...spon,
+              passenger_name: cleanName,
+              structure: structCode,
+              status: debtType as SponsorshipStatus,
+              status_updated_at: nowIso,
+              sponsor_note: finalSponsorNote,
+            });
+          }
+        }
+      }
+
+      if (updatedSponsToSync.length > 0) {
+        for (let i = 0; i < updatedSponsToSync.length; i += 50) {
+          await supabase.from(SPONSORSHIPS_TABLE).upsert(updatedSponsToSync.slice(i, i + 50), { onConflict: 'id' });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Ledger] Failed to sync sponsorship_audits to Supabase during debtor edit:', err);
+  }
+
+  // Update local storage cache for sponsorships
   try {
     const rawSpon = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_SPONSORSHIPS_KEY) : null;
     if (rawSpon) {
@@ -1752,17 +1930,19 @@ export async function updateDebtorWithInstances(
       if (Array.isArray(audits)) {
         audits = audits.map((a) => {
           const aName = sanitizePassengerDisplayName(a.passenger_name).toLowerCase();
-          const matches = existingSet.has(String(a.ledger_entry_id || '')) || origNames.includes(aName);
+          const matches = existingSet.has(String(a.ledger_entry_id || '')) ||
+            existingSet.has(String(a.id || '')) ||
+            origNames.includes(aName);
           if (matches) {
             if (activeInstances.length === 0 || !isSponsored) {
               return {
                 ...a,
+                passenger_name: cleanName,
+                structure: structCode,
                 status: 'actually_sponsored' as const,
                 status_updated_at: nowIso,
                 ledger_entry_id: null,
-                sponsor_note: !isSponsored
-                  ? (a.sponsor_note ? `${a.sponsor_note} (Converted to cancellation)` : 'Converted to cancellation')
-                  : (a.sponsor_note ? `${a.sponsor_note} (Settled)` : 'Settled'),
+                sponsor_note: !isSponsored ? `${a.sponsor_note || ''} (Reclassified as regular cancellation)`.trim() : 'Settled',
               };
             }
             return {
@@ -1777,19 +1957,15 @@ export async function updateDebtorWithInstances(
           return a;
         });
         localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(audits));
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: audits }));
-        }
       }
     }
   } catch {
-    /* ignore localStorage error */
+    /* ignore */
   }
 
-  // If no instances remain (or all debts were reduced to zero), mark all debtor entries as settled
+  // 3. Settle or remove debtor completely if no instances remain
   if (activeInstances.length === 0) {
     addLocalSettledLedgerIds(existingEntryIds);
-    // Update mockStorage directly
     try {
       let mockRows = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
       mockRows = mockRows.filter((r) => !existingSet.has(String(r.id)));
@@ -1797,33 +1973,42 @@ export async function updateDebtorWithInstances(
     } catch {
       /* ignore */
     }
-    if (existingEntryIds.length > 0) {
-      await settleLedgerEntries(existingEntryIds, 'Admin', 'Settled via debtor balance reduction to R0');
+    const uuidIds = existingEntryIds.filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
+    if (uuidIds.length > 0) {
+      await settleLedgerEntries(uuidIds, 'Admin', 'Settled via debtor balance reduction to R0');
     }
+    invalidateLedgerCache();
+    invalidateSponsorshipsCache();
     return;
   }
 
-  // Fetch current entries for template fields (manifest_key, vehicle_name, etc.)
+  // 4. Update or insert rows into Supabase cancellation_ledger table
+  const isUUID = (str?: string | null) => Boolean(str && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str));
+  const validUuidIds = existingEntryIds.filter(isUUID);
+
   let templateEntry: LedgerEntry | null = null;
-  if (existingEntryIds.length > 0) {
-    const { data } = await supabase.from(LEDGER_TABLE).select('*').in('id', existingEntryIds);
-    if (data && data.length > 0) {
-      templateEntry = data[0] as LedgerEntry;
-    } else {
-      templateEntry = allKnownEntries.find((e) => existingSet.has(String(e.id))) || null;
+  if (validUuidIds.length > 0) {
+    try {
+      const { data } = await supabase.from(LEDGER_TABLE).select('*').in('id', validUuidIds);
+      if (data && data.length > 0) {
+        templateEntry = data[0] as LedgerEntry;
+      }
+    } catch {
+      /* ignore */
     }
+  }
+  if (!templateEntry) {
+    templateEntry = allKnownEntries.find((e) => existingSet.has(String(e.id))) || null;
   }
 
   const updatedIds = new Set<string>();
 
-  // Process each instance in the update payload
   for (const inst of activeInstances) {
     const validAmount = typeof inst.amount === 'number' ? inst.amount : Number(inst.amount);
     const validDate = inst.date ? inst.date.trim() : '';
     const validService = inst.service ? inst.service.trim() : 'PM';
 
-    if (inst.id && existingEntryIds.includes(inst.id)) {
-      // Existing instance: update date, service, debt amount, passenger name, structure, etc.
+    if (inst.id && isUUID(inst.id) && existingSet.has(inst.id)) {
       updatedIds.add(inst.id);
       await supabase
         .from(LEDGER_TABLE)
@@ -1834,43 +2019,113 @@ export async function updateDebtorWithInstances(
             passenger_name: cleanName,
             structure: structCode,
             structure_debt: validAmount,
+            fee: validAmount,
             sponsored: isSponsored,
-            sponsor_note: finalSponsorNote,
+            sponsor_note: isSponsored ? finalSponsorNote : '',
             general_notes: finalGeneralNotes,
             submitted_by: 'Cancellation Admin',
           })
         )
         .eq('id', inst.id);
     } else {
-      // New instance added during edit: insert fresh entry
-      const insertPayload = sanitizeCancellationLedgerPayload({
-        manifest_key: templateEntry?.manifest_key || `manual-${Date.now()}`,
-        date: validDate,
-        service: validService,
-        passenger_name: cleanName,
-        stop: templateEntry?.stop || 'Structure Stop',
-        structure: structCode,
-        vehicle_name: templateEntry?.vehicle_name || '—',
-        submitted_by: 'Cancellation Admin',
-        rep_name: templateEntry?.rep_name || '',
-        license_plate: templateEntry?.license_plate || '',
-        sponsored: isSponsored,
-        sponsor_note: finalSponsorNote,
-        structure_debt: validAmount,
-        fee: validAmount,
-        status: 'Unpaid',
-        general_notes: finalGeneralNotes,
-      });
+      // Check if a row with this passenger_name (or any origNames) and date already exists in cancellation_ledger
+      let existingMatchedUuid: string | null = null;
+      try {
+        for (const nm of origNames) {
+          const { data: matchedRows } = await supabase
+            .from(LEDGER_TABLE)
+            .select('id')
+            .ilike('passenger_name', nm)
+            .eq('date', validDate)
+            .limit(1);
 
-      const { data: newEntry } = await supabase
-        .from(LEDGER_TABLE)
-        .insert([insertPayload])
-        .select('id')
-        .single();
-
-      if (newEntry?.id) {
-        updatedIds.add(newEntry.id);
+          if (matchedRows && matchedRows.length > 0 && matchedRows[0].id) {
+            existingMatchedUuid = matchedRows[0].id;
+            break;
+          }
+        }
+      } catch {
+        /* ignore */
       }
+
+      if (existingMatchedUuid) {
+        updatedIds.add(existingMatchedUuid);
+        await supabase
+          .from(LEDGER_TABLE)
+          .update(
+            sanitizeCancellationLedgerPayload({
+              date: validDate,
+              service: validService,
+              passenger_name: cleanName,
+              structure: structCode,
+              structure_debt: validAmount,
+              fee: validAmount,
+              sponsored: isSponsored,
+              sponsor_note: isSponsored ? finalSponsorNote : '',
+              general_notes: finalGeneralNotes,
+              submitted_by: 'Cancellation Admin',
+            })
+          )
+          .eq('id', existingMatchedUuid);
+      } else {
+        const insertPayload = sanitizeCancellationLedgerPayload({
+          manifest_key: templateEntry?.manifest_key || `manual-${Date.now()}`,
+          date: validDate,
+          service: validService,
+          passenger_name: cleanName,
+          stop: templateEntry?.stop || 'Structure Stop',
+          structure: structCode,
+          vehicle_name: templateEntry?.vehicle_name || '—',
+          submitted_by: 'Cancellation Admin',
+          rep_name: templateEntry?.rep_name || '',
+          license_plate: templateEntry?.license_plate || '',
+          sponsored: isSponsored,
+          sponsor_note: isSponsored ? finalSponsorNote : '',
+          structure_debt: validAmount,
+          fee: validAmount,
+          status: 'Unpaid',
+          general_notes: finalGeneralNotes,
+        });
+
+        const { data: newEntry } = await supabase
+          .from(LEDGER_TABLE)
+          .insert([insertPayload])
+          .select('id')
+          .single();
+
+        if (newEntry?.id) {
+          updatedIds.add(newEntry.id);
+          // Link newly generated UUID back into sponsorship_audits so the link is persistent
+          try {
+            await supabase
+              .from(SPONSORSHIPS_TABLE)
+              .update({ ledger_entry_id: newEntry.id })
+              .in('passenger_name', origNames)
+              .eq('date', validDate);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
+  }
+
+  // 5. Remove any previous instances that were removed by the admin
+  const uuidToRemove = existingEntryIds.filter((id) => isUUID(id) && !updatedIds.has(id));
+  if (uuidToRemove.length > 0) {
+    addLocalRemovedLedgerIds(uuidToRemove);
+    await removeLedgerEntries(uuidToRemove, 'Admin', 'Instance removed during debtor edit');
+  }
+  const nonUuidToRemove = existingEntryIds.filter((id) => !isUUID(id) && !updatedIds.has(id));
+  if (nonUuidToRemove.length > 0) {
+    addLocalRemovedLedgerIds(nonUuidToRemove);
+    try {
+      await supabase
+        .from(SPONSORSHIPS_TABLE)
+        .update({ status: 'actually_sponsored', ledger_entry_id: null, sponsor_note: 'Settled / Removed during debtor edit' })
+        .in('id', nonUuidToRemove);
+    } catch {
+      /* ignore */
     }
   }
 
@@ -1881,7 +2136,6 @@ export async function updateDebtorWithInstances(
       const validAmount = typeof inst.amount === 'number' ? inst.amount : Number(inst.amount);
       const validDate = inst.date ? inst.date.trim() : '';
       const validService = inst.service ? inst.service.trim() : 'PM';
-
       if (inst.id) {
         const idx = mockRows.findIndex((r) => String(r.id) === String(inst.id));
         if (idx !== -1) {
@@ -1893,25 +2147,17 @@ export async function updateDebtorWithInstances(
             structure: structCode,
             structure_debt: validAmount,
             sponsored: isSponsored,
-            sponsor_note: finalSponsorNote,
+            sponsor_note: isSponsored ? finalSponsorNote : '',
             general_notes: finalGeneralNotes,
             submitted_by: 'Cancellation Admin',
           };
         }
       }
     }
-    // Filter out removed instances from mock table
     mockRows = mockRows.filter((r) => !existingSet.has(String(r.id)) || updatedIds.has(String(r.id)));
     mockStorage.setTable(LEDGER_TABLE, mockRows as unknown as Record<string, unknown>[]);
   } catch {
-    /* ignore mockStorage error */
-  }
-
-  // Durably remove any instances that were removed by the admin (e.g. date removed in between)
-  const idsToRemove = existingEntryIds.filter((id) => !updatedIds.has(id));
-  if (idsToRemove.length > 0) {
-    addLocalRemovedLedgerIds(idsToRemove);
-    await removeLedgerEntries(idsToRemove, 'Admin', 'Instance removed during debtor edit');
+    /* ignore */
   }
 
   invalidateLedgerCache();
@@ -3213,10 +3459,18 @@ export function cleanAndDeduplicateSponsorships(
       const resolvedStatusTime = (existing.status && existing.status !== 'pending'
         ? existing.status_updated_at
         : item.status_updated_at) || existing.status_updated_at || item.status_updated_at;
+      const isItemNewer = Boolean(
+        item.status_updated_at &&
+        (!existing.status_updated_at || item.status_updated_at >= existing.status_updated_at)
+      );
+      const chosenStructure = isItemNewer
+        ? (structure || existing.structure || 'No Structure')
+        : ((existing.structure && existing.structure !== 'No Structure') ? existing.structure : (structure || 'No Structure'));
+
       result[existingIdx] = {
         ...existing,
-        passenger_name: cleanName,
-        structure: (existing.structure && existing.structure !== 'No Structure') ? existing.structure : structure,
+        passenger_name: isItemNewer ? cleanName : (existing.passenger_name || cleanName),
+        structure: chosenStructure,
         stop: existing.stop || stop,
         vehicle_name: existing.vehicle_name || item.vehicle_name,
         rep_name: existing.rep_name || item.rep_name,
@@ -3794,23 +4048,22 @@ export async function verifyBatchSponsorships(
         currentLedger[existingLedgerIdx].source = 'reported_sponsorship_audit';
         ledgerChanged = true;
 
-        await supabase
-          .from(LEDGER_TABLE)
-          .update({
-            general_notes: noteText,
-            sponsor_note: noteText,
-            sponsored: true,
-            structure_debt: effectiveFee,
-            structure: normalizeStructureCode(spon.structure),
-            submitted_by: 'Cancellation Admin',
-            source: 'reported_sponsorship_audit',
-          })
-          .eq('id', existingId);
+        if (isUUID(existingId)) {
+          await supabase
+            .from(LEDGER_TABLE)
+            .update({
+              general_notes: noteText,
+              sponsor_note: noteText,
+              sponsored: true,
+              structure_debt: effectiveFee,
+              structure: normalizeStructureCode(spon.structure),
+              submitted_by: 'Cancellation Admin',
+              source: 'reported_sponsorship_audit',
+            })
+            .eq('id', existingId);
+        }
       } else {
-        const newEntryId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-        spon.ledger_entry_id = newEntryId;
-        const newEntry: LedgerEntry = {
-          id: newEntryId,
+        const insertPayload = sanitizeCancellationLedgerPayload({
           manifest_key: spon.manifest_key || `manual-${Date.now()}`,
           date: normalizeDateToYMD(spon.date) || spon.date,
           service: spon.service || 'Service',
@@ -3824,14 +4077,27 @@ export async function verifyBatchSponsorships(
           sponsored: true,
           sponsor_note: noteText,
           structure_debt: effectiveFee,
+          fee: effectiveFee,
+          status: 'Unpaid',
           general_notes: noteText,
           source: 'reported_sponsorship_audit',
           submitted_at: now,
-        };
+        });
+
+        const { data: newRow } = await supabase
+          .from(LEDGER_TABLE)
+          .insert([insertPayload])
+          .select('id')
+          .single();
+
+        const realId = newRow?.id || spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        spon.ledger_entry_id = realId;
+        const newEntry: LedgerEntry = {
+          ...insertPayload,
+          id: realId,
+        } as LedgerEntry;
         currentLedger.unshift(newEntry);
         ledgerChanged = true;
-
-        await supabase.from(LEDGER_TABLE).insert([newEntry]);
       }
     } else if (status === 'actually_sponsored' || status === 'pending') {
       // If actually sponsored or reverted to pending, clear any debt entry
@@ -3840,7 +4106,9 @@ export async function verifyBatchSponsorships(
         currentLedger = currentLedger.filter((e) => e.id !== delId);
         spon.ledger_entry_id = null;
         ledgerChanged = true;
-        await supabase.from(LEDGER_TABLE).delete().eq('id', delId);
+        if (isUUID(delId)) {
+          await supabase.from(LEDGER_TABLE).delete().eq('id', delId);
+        }
       } else {
         const beforeLen = currentLedger.length;
         const cleanSponName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
@@ -3967,10 +4235,8 @@ export async function deleteReportedSponsorship(sponsorshipId: string): Promise<
   }
 
   // 5. Broadcast updates
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: remaining }));
-    window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
-  }
+  broadcastLocalSyncEvent('sponsorships_updated', remaining);
+  broadcastLocalSyncEvent('ledger_updated');
 }
 
 /**
@@ -4018,10 +4284,8 @@ export async function batchDeleteReportedSponsorships(ids: string[]): Promise<vo
     }
   }
 
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: remaining }));
-    window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
-  }
+  broadcastLocalSyncEvent('sponsorships_updated', remaining);
+  broadcastLocalSyncEvent('ledger_updated');
 }
 
 /**
@@ -4123,7 +4387,7 @@ export async function updateReportedSponsorship(
       ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
       : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
 
-    if (spon.ledger_entry_id) {
+    if (spon.ledger_entry_id && isUUID(spon.ledger_entry_id)) {
       await updateLedgerEntry(spon.ledger_entry_id, {
         passenger_name: spon.passenger_name,
         structure: spon.structure,
@@ -4136,35 +4400,34 @@ export async function updateReportedSponsorship(
         sponsored: true,
       });
     } else {
-      const newEntryId = `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      spon.ledger_entry_id = newEntryId;
-      await supabase.from(LEDGER_TABLE).insert([
-        sanitizeCancellationLedgerPayload({
-          id: newEntryId,
-          manifest_key: spon.manifest_key || `manual-${Date.now()}`,
-          date: spon.date,
-          service: spon.service,
-          passenger_name: spon.passenger_name,
-          stop: spon.stop || '',
-          structure: spon.structure,
-          vehicle_name: spon.vehicle_name || '—',
-          submitted_by: 'Cancellation Admin',
-          rep_name: spon.rep_name || '',
-          license_plate: '',
-          sponsored: true,
-          sponsor_note: noteText,
-          structure_debt: customDebt,
-          fee: customDebt,
-          status: 'Unpaid',
-          general_notes: noteText,
-          submitted_at: new Date().toISOString(),
-        }),
-      ]);
+      const insertPayload = sanitizeCancellationLedgerPayload({
+        manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+        date: spon.date,
+        service: spon.service,
+        passenger_name: spon.passenger_name,
+        stop: spon.stop || '',
+        structure: spon.structure,
+        vehicle_name: spon.vehicle_name || '—',
+        submitted_by: 'Cancellation Admin',
+        rep_name: spon.rep_name || '',
+        license_plate: '',
+        sponsored: true,
+        sponsor_note: noteText,
+        structure_debt: customDebt,
+        fee: customDebt,
+        status: 'Unpaid',
+        general_notes: noteText,
+        submitted_at: new Date().toISOString(),
+      });
+      const { data: newRow } = await supabase.from(LEDGER_TABLE).insert([insertPayload]).select('id').single();
+      spon.ledger_entry_id = newRow?.id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     }
   } else {
     // Actually sponsored or pending -> remove any debt entry
     if (spon.ledger_entry_id) {
-      await removeLedgerEntries([spon.ledger_entry_id], 'Admin', 'Sponsorship verified as actually sponsored');
+      if (isUUID(spon.ledger_entry_id)) {
+        await removeLedgerEntries([spon.ledger_entry_id], 'Admin', 'Sponsorship verified as actually sponsored');
+      }
       spon.ledger_entry_id = null;
     }
   }
@@ -4265,27 +4528,26 @@ export async function batchUpdateReportedSponsorships(
         currentLedger[existingLedgerIdx].sponsored = true;
         ledgerChanged = true;
 
-        Promise.resolve(
-          supabase
-            .from(LEDGER_TABLE)
-            .update({
-              passenger_name: updatedSpon.passenger_name,
-              structure: updatedSpon.structure,
-              date: updatedSpon.date,
-              service: updatedSpon.service,
-              stop: updatedSpon.stop || '',
-              structure_debt: customDebt,
-              sponsor_note: noteText,
-              general_notes: noteText,
-              sponsored: true,
-            })
-            .eq('id', existId)
-        ).catch(() => {});
+        if (isUUID(existId)) {
+          Promise.resolve(
+            supabase
+              .from(LEDGER_TABLE)
+              .update({
+                passenger_name: updatedSpon.passenger_name,
+                structure: updatedSpon.structure,
+                date: updatedSpon.date,
+                service: updatedSpon.service,
+                stop: updatedSpon.stop || '',
+                structure_debt: customDebt,
+                sponsor_note: noteText,
+                general_notes: noteText,
+                sponsored: true,
+              })
+              .eq('id', existId)
+          ).catch(() => {});
+        }
       } else {
-        const newEntryId = updatedSpon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-        updatedSpon.ledger_entry_id = newEntryId;
-        const newEntry: LedgerEntry = {
-          id: newEntryId,
+        const insertPayload = sanitizeCancellationLedgerPayload({
           manifest_key: updatedSpon.manifest_key || `manual-${Date.now()}`,
           date: normalizeDateToYMD(updatedSpon.date) || updatedSpon.date,
           service: updatedSpon.service || 'Service',
@@ -4304,11 +4566,27 @@ export async function batchUpdateReportedSponsorships(
           general_notes: noteText,
           source: 'reported_sponsorship_audit',
           submitted_at: now,
-        };
+        });
+
+        Promise.resolve(
+          supabase
+            .from(LEDGER_TABLE)
+            .insert([insertPayload])
+            .select('id')
+            .single()
+        ).then(({ data: newRow }) => {
+          if (newRow?.id) {
+            updatedSpon.ledger_entry_id = newRow.id;
+          }
+        }).catch(() => {});
+
+        const realId = updatedSpon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const newEntry: LedgerEntry = {
+          ...insertPayload,
+          id: realId,
+        } as LedgerEntry;
         currentLedger.unshift(newEntry);
         ledgerChanged = true;
-
-        Promise.resolve(supabase.from(LEDGER_TABLE).insert([newEntry])).catch(() => {});
       }
     } else if (updatedSpon.status === 'actually_sponsored' || updatedSpon.status === 'pending') {
       if (existingLedgerIdx >= 0) {
@@ -4316,7 +4594,9 @@ export async function batchUpdateReportedSponsorships(
         currentLedger.splice(existingLedgerIdx, 1);
         updatedSpon.ledger_entry_id = null;
         ledgerChanged = true;
-        Promise.resolve(supabase.from(LEDGER_TABLE).delete().eq('id', delId)).catch(() => {});
+        if (isUUID(delId)) {
+          Promise.resolve(supabase.from(LEDGER_TABLE).delete().eq('id', delId)).catch(() => {});
+        }
       }
     }
   }

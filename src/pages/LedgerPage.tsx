@@ -11,7 +11,7 @@ import { supabase } from '@/lib/supabase';
 import { connectSyncEvents } from '@/lib/serverApi';
 import { prettyDate } from '@/lib/dates';
 import {
-  listLedgerEntries, removeLedgerEntries, downloadLedgerExcel,
+  listLedgerEntries, deleteEntireDebtor, downloadLedgerExcel,
   aggregateLedgerEntries, parseHistoricalCancellationWorkbook, importHistoricalCancellations,
   recordPartialPayment, addManualLedgerEntry, evaluateLedgerSearch, parseDebtAmount, serviceCodeForEntry,
   updateDebtorWithInstances, normalizeDateToYMD, normalizeStructureCode, structureSortComparator,
@@ -422,7 +422,7 @@ export function LedgerPage() {
       })
       .subscribe();
 
-    // 3. Tab visibility / device focus sync (essential for mobile Safari / iPhone background resume)
+    // 3. Tab visibility / device focus / pageshow sync (essential for mobile Safari / iPhone background resume)
     const handleVisibilityOrFocus = async () => {
       if (typeof document !== 'undefined' && !document.hidden && mounted) {
         invalidateSponsorshipsCache();
@@ -446,14 +446,35 @@ export function LedgerPage() {
       document.addEventListener('visibilitychange', handleVisibilityOrFocus);
     }
     window.addEventListener('focus', handleVisibilityOrFocus);
+    window.addEventListener('pageshow', handleVisibilityOrFocus);
+
+    // 4. Periodic background sync polling interval (keeps multiple devices 100% in sync without manual reload)
+    const syncInterval = setInterval(async () => {
+      if (typeof document !== 'undefined' && !document.hidden && mounted) {
+        try {
+          const [data, sponData] = await Promise.all([
+            listLedgerEntries(true),
+            listReportedSponsorships(true),
+          ]);
+          if (mounted) {
+            setEntries(data);
+            setSponsorships(cleanAndDeduplicateSponsorships(sponData));
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }, 6000);
 
     return () => {
       mounted = false;
+      clearInterval(syncInterval);
       disconnectSSE();
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
       }
       window.removeEventListener('focus', handleVisibilityOrFocus);
+      window.removeEventListener('pageshow', handleVisibilityOrFocus);
       try {
         supabase.removeChannel(realtimeChannel);
       } catch {
@@ -954,17 +975,12 @@ export function LedgerPage() {
       if (nonZeroInstances.length === 0 || rawDebt === 0) {
         // If all date instances were reduced to zero or removed, remove debtor completely
         const targetIds = editTarget.entryIds;
-        const targetNormName = sanitizePassengerDisplayName(editTarget.name).toLowerCase();
-        await updateDebtorWithInstances(targetIds, {
-          name: editName.trim(),
-          structure: targetStructure,
-          isSponsored: isSpon,
-          debtType: editDebtType,
-          notes: finalNotes,
-          instances: [],
-        });
+        const targetName = editTarget.name;
+        const targetNormName = sanitizePassengerDisplayName(targetName).toLowerCase();
         const removedSet = new Set(targetIds);
         setEntries((prev) => prev.filter((e) => !removedSet.has(e.id) && sanitizePassengerDisplayName(e.passenger_name).toLowerCase() !== targetNormName));
+
+        await deleteEntireDebtor(targetName, targetIds, 'Admin', 'Debt reduced to R0');
       } else {
         await updateDebtorWithInstances(editTarget.entryIds, {
           name: editName.trim(),
@@ -998,10 +1014,16 @@ export function LedgerPage() {
     setEditError(null);
     try {
       const targetIds = editTarget.entryIds;
-      const targetNormName = sanitizePassengerDisplayName(editTarget.name).toLowerCase();
-      await removeLedgerEntries(targetIds, 'Admin', 'Removed by admin');
+      const targetName = editTarget.name;
+      const targetNormName = sanitizePassengerDisplayName(targetName).toLowerCase();
       const idSet = new Set(targetIds);
+
+      // Optimistic immediate UI removal
       setEntries((prev) => prev.filter((e) => !idSet.has(e.id) && sanitizePassengerDisplayName(e.passenger_name).toLowerCase() !== targetNormName));
+
+      // Durable server deletion with persistent tombstone registration & Supabase sync
+      await deleteEntireDebtor(targetName, targetIds, 'Admin', 'Removed by admin');
+
       const refreshed = await listLedgerEntries(true);
       setEntries(refreshed);
       const refSpons = await listReportedSponsorships(true);

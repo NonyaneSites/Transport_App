@@ -738,7 +738,45 @@ export async function broadcastLiveActionToServer(action: LiveSyncAction): Promi
   }
 }
 
-// Server-Sent Events (SSE) live connection with local event sync
+export async function deleteDebtorOnServer(payload: {
+  name?: string;
+  entryIds?: string[];
+}): Promise<boolean> {
+  try {
+    const res = await fetch('/api/ledger/delete-debtor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      markServerOnline();
+    }
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Broadcasts an update immediately to all local tabs on the current device via BroadcastChannel and Window CustomEvents
+export function broadcastLocalSyncEvent(type: 'sponsorships_updated' | 'ledger_updated' | 'manifest_updated', data?: unknown): void {
+  if (typeof window === 'undefined') return;
+  if (type === 'sponsorships_updated') {
+    window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: data }));
+  } else if (type === 'ledger_updated') {
+    window.dispatchEvent(new CustomEvent('crc_ledger_updated', { detail: data }));
+  }
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bc = new BroadcastChannel('crc_live_sync_channel');
+      bc.postMessage({ type, data, timestamp: Date.now() });
+      bc.close();
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+// Server-Sent Events (SSE) live connection with resilient auto-reconnect and BroadcastChannel
 export function connectSyncEvents(
   onManifestUpdate?: (data: { key: string; manifest?: Manifest }) => void,
   onLedgerUpdate?: () => void,
@@ -750,13 +788,13 @@ export function connectSyncEvents(
     return () => {};
   }
 
-  // Local window and cross-tab storage listeners for instant updates
+  // 1. Local window listeners
   const handleSponsorshipsEvent = () => onSponsorshipsUpdate?.();
   const handleLedgerEvent = () => onLedgerUpdate?.();
   const handleStorageEvent = (e: StorageEvent) => {
-    if (e.key === 'crc_sponsorship_audits') {
+    if (e.key === 'crc_sponsorship_audits' || e.key?.includes('sponsorship')) {
       onSponsorshipsUpdate?.();
-    } else if (e.key?.includes('cancellation_ledger')) {
+    } else if (e.key?.includes('cancellation_ledger') || e.key?.includes('ledger')) {
       onLedgerUpdate?.();
     }
   };
@@ -765,39 +803,72 @@ export function connectSyncEvents(
   window.addEventListener('crc_ledger_updated', handleLedgerEvent);
   window.addEventListener('storage', handleStorageEvent);
 
-  // If running on Vercel / production or server is offline, Supabase Realtime channels and BroadcastChannel handle all synchronization.
-  // Return early to prevent any EventSource connection attempts to /api/sync/events.
-  if (!isServerOnline()) {
-    return () => {
-      window.removeEventListener('crc_sponsorships_updated', handleSponsorshipsEvent);
-      window.removeEventListener('crc_ledger_updated', handleLedgerEvent);
-      window.removeEventListener('storage', handleStorageEvent);
-    };
+  // 2. Cross-tab BroadcastChannel for 0ms same-device synchronicity
+  let broadcastChan: BroadcastChannel | null = null;
+  if (typeof BroadcastChannel !== 'undefined') {
+    try {
+      broadcastChan = new BroadcastChannel('crc_live_sync_channel');
+      broadcastChan.onmessage = (event) => {
+        const type = event?.data?.type;
+        if (type === 'sponsorships_updated') onSponsorshipsUpdate?.();
+        else if (type === 'ledger_updated') onLedgerUpdate?.();
+        else if (type === 'manifest_updated') onManifestUpdate?.(event.data);
+        else if (type === 'draft_delta') onDraftDelta?.(event.data);
+        else if (type === 'live_action') onLiveAction?.(event.data?.action);
+      };
+    } catch {
+      broadcastChan = null;
+    }
   }
 
   let es: EventSource | null = null;
   let isClosed = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectDelay = 1000;
 
-  const handleVisibility = () => {
-    if (typeof document !== 'undefined' && !document.hidden && !isClosed) {
-      if (!es && isServerOnline()) {
+  function scheduleReconnect() {
+    if (isClosed || reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (!isClosed && !es) {
         connect();
       }
+    }, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 1.5, 8000);
+  }
+
+  const handleResumeOrFocus = () => {
+    if (!isClosed) {
+      if (!es) {
+        reconnectDelay = 1000;
+        connect();
+      }
+      onLedgerUpdate?.();
+      onSponsorshipsUpdate?.();
     }
   };
 
   if (typeof document !== 'undefined') {
-    document.addEventListener('visibilitychange', handleVisibility);
+    document.addEventListener('visibilitychange', handleResumeOrFocus);
   }
+  window.addEventListener('focus', handleResumeOrFocus);
+  window.addEventListener('pageshow', handleResumeOrFocus);
+  window.addEventListener('online', handleResumeOrFocus);
 
   function connect() {
-    if (isClosed || !window.EventSource || !isServerOnline()) return;
+    if (isClosed || !window.EventSource) return;
 
     try {
+      if (es) {
+        try { es.close(); } catch { /* ignore */ }
+        es = null;
+      }
+
       es = new EventSource('/api/sync/events');
 
       es.onopen = () => {
         markServerOnline();
+        reconnectDelay = 1000;
       };
 
       es.addEventListener('manifest_updated', (e) => {
@@ -836,18 +907,14 @@ export function connectSyncEvents(
       });
 
       es.onerror = () => {
-        es?.close();
-        es = null;
-        if (!isClosed) {
-          setTimeout(() => {
-            if (!isClosed && !es && isServerOnline()) {
-              connect();
-            }
-          }, 3500);
+        if (es) {
+          try { es.close(); } catch { /* ignore */ }
+          es = null;
         }
+        scheduleReconnect();
       };
     } catch {
-      // Ignore initial setup error
+      scheduleReconnect();
     }
   }
 
@@ -855,13 +922,26 @@ export function connectSyncEvents(
 
   return () => {
     isClosed = true;
-    es?.close();
-    es = null;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    if (es) {
+      try { es.close(); } catch { /* ignore */ }
+      es = null;
+    }
+    if (broadcastChan) {
+      try { broadcastChan.close(); } catch { /* ignore */ }
+      broadcastChan = null;
+    }
     window.removeEventListener('crc_sponsorships_updated', handleSponsorshipsEvent);
     window.removeEventListener('crc_ledger_updated', handleLedgerEvent);
     window.removeEventListener('storage', handleStorageEvent);
+    window.removeEventListener('focus', handleResumeOrFocus);
+    window.removeEventListener('pageshow', handleResumeOrFocus);
+    window.removeEventListener('online', handleResumeOrFocus);
     if (typeof document !== 'undefined') {
-      document.removeEventListener('visibilitychange', handleVisibility);
+      document.removeEventListener('visibilitychange', handleResumeOrFocus);
     }
   };
 }
