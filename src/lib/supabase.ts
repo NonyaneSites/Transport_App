@@ -162,6 +162,8 @@ export class MockQueryBuilder {
   private sortCol: string | null = null;
   private sortAsc = true;
   private limitCount: number | null = null;
+  private rangeStart: number | null = null;
+  private rangeEnd: number | null = null;
   private rowsToInsertOrUpsert: TableRow[] = [];
   private onConflictKey: string = 'id';
   private updatesToApply: Record<string, unknown> = {};
@@ -186,6 +188,42 @@ export class MockQueryBuilder {
     return this;
   }
 
+  ilike(col: string, val: unknown) {
+    const pattern = String(val ?? '').toLowerCase();
+    this.filters.push((row: TableRow) => {
+      const rowVal = String(row[col] ?? '').toLowerCase();
+      if (pattern.includes('%')) {
+        const regexStr = '^' + pattern.split('%').map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$';
+        return new RegExp(regexStr, 'i').test(rowVal);
+      }
+      return rowVal === pattern;
+    });
+    return this;
+  }
+
+  like(col: string, val: unknown) {
+    const pattern = String(val ?? '');
+    this.filters.push((row: TableRow) => {
+      const rowVal = String(row[col] ?? '');
+      if (pattern.includes('%')) {
+        const regexStr = '^' + pattern.split('%').map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$';
+        return new RegExp(regexStr).test(rowVal);
+      }
+      return rowVal === pattern;
+    });
+    return this;
+  }
+
+  neq(col: string, val: unknown) {
+    this.filters.push((row: TableRow) => String(row[col] ?? '') !== String(val ?? ''));
+    return this;
+  }
+
+  is(col: string, val: unknown) {
+    this.filters.push((row: TableRow) => (val === null ? row[col] == null : row[col] === val));
+    return this;
+  }
+
   order(col: string, { ascending = true }: { ascending?: boolean } = {}) {
     this.sortCol = col;
     this.sortAsc = ascending;
@@ -194,6 +232,12 @@ export class MockQueryBuilder {
 
   limit(count: number) {
     this.limitCount = count;
+    return this;
+  }
+
+  range(from: number, to: number) {
+    this.rangeStart = from;
+    this.rangeEnd = to;
     return this;
   }
 
@@ -223,11 +267,21 @@ export class MockQueryBuilder {
 
   private execute(): { data: unknown; error: null } {
     const now = new Date().toISOString();
+    const generateUUID = (): string => {
+      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+      }
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        const v = c === 'x' ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
+      });
+    };
 
     if (this.mode === 'insert') {
       const rowsToInsert = this.rowsToInsertOrUpsert.map((r) => ({
         ...r,
-        id: r.id || `mock_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+        id: r.id || generateUUID(),
         created_at: r.created_at || now,
         updated_at: r.updated_at || now,
         submitted_at: r.submitted_at || now,
@@ -246,6 +300,7 @@ export class MockQueryBuilder {
       for (const item of this.rowsToInsertOrUpsert) {
         const fullItem = {
           ...item,
+          id: item.id || generateUUID(),
           updated_at: now,
           created_at: item.created_at || now,
         };
@@ -314,7 +369,9 @@ export class MockQueryBuilder {
         return 0;
       });
     }
-    if (this.limitCount !== null) {
+    if (this.rangeStart !== null && this.rangeEnd !== null) {
+      rows = rows.slice(this.rangeStart, this.rangeEnd + 1);
+    } else if (this.limitCount !== null) {
       rows = rows.slice(0, this.limitCount);
     }
     return { data: rows, error: null };
@@ -990,8 +1047,17 @@ export function createMockClient() {
   };
 }
 
+export const isTestEnvironment = Boolean(
+  typeof process !== 'undefined' && (
+    process.env.NODE_ENV === 'test' ||
+    process.env.TEST === 'true' ||
+    Boolean(process.env.NODE_TEST_CONTEXT) ||
+    process.argv?.some((arg) => typeof arg === 'string' && (arg.includes('--test') || arg.includes('.test.')))
+  )
+);
+
 function createResilientSupabaseClient() {
-  if (!isConfigured) {
+  if (!isConfigured || isTestEnvironment) {
     return createMockClient() as unknown as ReturnType<typeof createClient>;
   }
 

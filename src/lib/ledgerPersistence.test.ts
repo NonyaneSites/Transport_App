@@ -8,7 +8,6 @@ import {
   cleanAndDeduplicateSponsorships,
   updateDebtorWithInstances,
   listLedgerEntries,
-  removeLedgerEntries,
   type LedgerEntry,
   type ReportedSponsorship,
 } from './ledger';
@@ -223,10 +222,9 @@ test('Sponsorship Deduplication: Actually sponsored and settled states are prese
 });
 
 test('Debtor Edit Persistence: updateDebtorWithInstances persists name, structure, instances, and debt without reverting', async () => {
-  const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  const initialName = `Orig Person ${uniqueSuffix}`;
-  const targetName = `Renamed Person ${uniqueSuffix}`;
-  const initialId = `test-persist-${uniqueSuffix}`;
+  const initialName = 'Thando Khumalo';
+  const targetName = 'Thando K. Khumalo';
+  const initialId = 'mock-persist-id-1';
 
   const initialRow: LedgerEntry = {
     id: initialId,
@@ -283,6 +281,6 @@ test('Debtor Edit Persistence: updateDebtorWithInstances persists name, structur
   assert.ok(debtorRow, 'Row for target debtor must exist');
   assert.strictEqual(debtorRow.amount, 80, 'Total debt must equal 35 + 45 = 80');
 
-  // Clean up test rows
-  await removeLedgerEntries(updatedRows.map((e) => e.id));
+  // Clean up mock rows
+  mockStorage.setTable(LEDGER_TABLE, []);
 });

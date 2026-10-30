@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import { randomUUID } from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
@@ -14,6 +15,48 @@ const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY || '';
 const serverSupabase: SupabaseClient | null = (supabaseUrl && supabaseAnonKey)
   ? createClient(supabaseUrl, supabaseAnonKey)
   : null;
+
+const isUUID = (str?: string | null): boolean =>
+  Boolean(str && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str));
+
+const CANONICAL_LEDGER_COLUMNS = new Set([
+  'id',
+  'passenger_name',
+  'structure',
+  'date',
+  'service_type',
+  'fee',
+  'status',
+  'notes',
+  'sponsored_by',
+  'submitted_at',
+  'created_at',
+  'manifest_key',
+  'vehicle_name',
+  'vehicle_id',
+  'rep_name',
+  'service',
+  'stop',
+  'submitted_by',
+  'license_plate',
+  'sponsored',
+  'sponsor_note',
+  'structure_debt',
+  'general_notes',
+]);
+
+function sanitizeCancellationLedgerPayload(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (CANONICAL_LEDGER_COLUMNS.has(k) && v !== undefined) {
+      if (k === 'id' && typeof v === 'string' && !isUUID(v)) {
+        continue;
+      }
+      out[k] = v;
+    }
+  }
+  return out;
+}
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const MANIFESTS_DIR = path.join(DATA_DIR, 'manifests');
@@ -2212,7 +2255,7 @@ app.post('/api/ledger/verify-sponsorship', (req, res) => {
       spon.ledger_entry_id = ledger[existingLedgerIdx].id;
       ledgerChanged = true;
     } else {
-      const newEntryId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const newEntryId = (spon.ledger_entry_id && isUUID(spon.ledger_entry_id)) ? spon.ledger_entry_id : randomUUID();
       const newEntry = {
         id: newEntryId,
         manifest_key: spon.manifest_key || `manual-${Date.now()}`,
@@ -2379,7 +2422,7 @@ app.post('/api/ledger/verify-sponsorships-batch', (req, res) => {
         spon.ledger_entry_id = ledger[existingLedgerIdx].id;
         ledgerChanged = true;
       } else {
-        const newEntryId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const newEntryId = (spon.ledger_entry_id && isUUID(spon.ledger_entry_id)) ? spon.ledger_entry_id : randomUUID();
         ledger.unshift({
           id: newEntryId,
           manifest_key: spon.manifest_key || `manual-${Date.now()}`,
@@ -2585,7 +2628,7 @@ app.post('/api/ledger/sponsorships/batch-update', (req, res) => {
         ledger[entryIdx].sponsored = true;
         ledgerChanged = true;
       } else {
-        const newEntryId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const newEntryId = (spon.ledger_entry_id && isUUID(spon.ledger_entry_id)) ? spon.ledger_entry_id : randomUUID();
         spon.ledger_entry_id = newEntryId;
         ledger.unshift({
           id: newEntryId,
@@ -2707,8 +2750,136 @@ app.post('/api/ledger/sponsorships/:id/pay', (req, res) => {
   res.json({ success: true, sponsorship: spon, ledgerChanged });
 });
 
+// Diagnostic endpoint: Inspect cancellation_ledger table IDs and log suspicious patterns
+app.get('/api/ledger/diagnostics/ids', async (_req, res) => {
+  let rows: Array<Record<string, unknown>> = [];
+  let source = 'server_file';
+
+  if (serverSupabase) {
+    try {
+      const allRows: Array<Record<string, unknown>> = [];
+      const pageSize = 1000;
+      let from = 0;
+      while (true) {
+        const { data, error } = await serverSupabase
+          .from('cancellation_ledger')
+          .select('id, passenger_name, structure, date, service, status, structure_debt, fee, manifest_key, submitted_at')
+          .range(from, from + pageSize - 1);
+        if (error || !data || data.length === 0) break;
+        allRows.push(...data);
+        if (data.length < pageSize) break;
+        from += pageSize;
+      }
+      if (allRows.length > 0) {
+        rows = allRows;
+        source = 'supabase';
+      }
+    } catch (sbErr) {
+      console.warn('[Server Diagnostics] Supabase query note:', sbErr);
+    }
+  }
+
+  if (rows.length === 0) {
+    rows = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
+    source = 'server_file';
+  }
+
+  const isUUID = (str?: unknown): boolean =>
+    Boolean(str && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(str).trim()));
+
+  let validUuidCount = 0;
+  let syntheticLedgerSp = 0;
+  let syntheticMock = 0;
+  let syntheticTest = 0;
+  let syntheticVSpon = 0;
+  let emptyOrNull = 0;
+  let otherMalformed = 0;
+
+  const suspiciousRows: Array<Record<string, unknown>> = [];
+
+  for (const r of rows) {
+    const rawId = r?.id != null ? String(r.id).trim() : '';
+    if (isUUID(rawId)) {
+      validUuidCount++;
+    } else {
+      let pattern = 'other_malformed';
+      if (!rawId) {
+        pattern = 'empty_or_null';
+        emptyOrNull++;
+      } else if (/^ledger_sp_/i.test(rawId)) {
+        pattern = 'synthetic_ledger_sp';
+        syntheticLedgerSp++;
+      } else if (/^mock_/i.test(rawId)) {
+        pattern = 'synthetic_mock';
+        syntheticMock++;
+      } else if (/^test[-_]/i.test(rawId)) {
+        pattern = 'synthetic_test';
+        syntheticTest++;
+      } else if (/^v_spon_/i.test(rawId)) {
+        pattern = 'synthetic_v_spon';
+        syntheticVSpon++;
+      } else {
+        pattern = 'other_malformed';
+        otherMalformed++;
+      }
+
+      suspiciousRows.push({
+        id: rawId,
+        pattern,
+        passenger_name: r.passenger_name || '—',
+        structure: r.structure || '—',
+        date: r.date || '—',
+        service: r.service || '—',
+        status: r.status || 'Unpaid',
+        structure_debt: r.structure_debt,
+        fee: r.fee,
+      });
+    }
+  }
+
+  const totalRecords = rows.length;
+  const malformedCount = suspiciousRows.length;
+  const validUuidPercentage = totalRecords > 0 ? Number(((validUuidCount / totalRecords) * 100).toFixed(2)) : 100;
+
+  console.log(`\n================== CANCELLATION LEDGER ID DIAGNOSTIC ==================`);
+  console.log(`Source: ${source} | Total records: ${totalRecords}`);
+  console.log(`Valid RFC4122 UUIDs: ${validUuidCount} (${validUuidPercentage}%)`);
+  console.log(`Malformed / Suspicious IDs: ${malformedCount}`);
+  if (malformedCount > 0) {
+    console.log(`  - synthetic ledger_sp_: ${syntheticLedgerSp}`);
+    console.log(`  - synthetic mock_:      ${syntheticMock}`);
+    console.log(`  - test identifiers:     ${syntheticTest}`);
+    console.log(`  - virtual display:      ${syntheticVSpon}`);
+    console.log(`  - empty or null:        ${emptyOrNull}`);
+    console.log(`  - other malformed:      ${otherMalformed}`);
+    console.log(`Suspicious rows list:`);
+    console.table(suspiciousRows.slice(0, 50));
+  } else {
+    console.log(`🎉 100% ID Integrity: All cancellation_ledger records have valid UUIDs.`);
+  }
+  console.log(`=======================================================================\n`);
+
+  res.json({
+    timestamp: new Date().toISOString(),
+    source,
+    totalRecords,
+    validUuidCount,
+    malformedCount,
+    validUuidPercentage,
+    byPattern: {
+      syntheticLedgerSp,
+      syntheticMock,
+      syntheticTest,
+      syntheticVSpon,
+      emptyOrNull,
+      otherMalformed,
+    },
+    suspiciousRows,
+  });
+});
+
 // Update / Edit a reported sponsorship
-app.patch('/api/ledger/sponsorships/:id', (req, res) => {
+app.patch('/api/ledger/sponsorships/:id', async (req, res) => {
   const id = req.params.id;
   const updates = req.body || {};
 
@@ -2765,8 +2936,69 @@ app.patch('/api/ledger/sponsorships/:id', (req, res) => {
       ledger[entryIdx].sponsored = true;
       spon.ledger_entry_id = ledger[entryIdx].id;
       ledgerChanged = true;
+
+      if (serverSupabase && isUUID(ledger[entryIdx].id)) {
+        serverSupabase
+          .from('cancellation_ledger')
+          .update(
+            sanitizeCancellationLedgerPayload({
+              passenger_name: spon.passenger_name,
+              structure: spon.structure,
+              date: spon.date,
+              service: spon.service,
+              service_type: spon.service,
+              stop: spon.stop || '',
+              structure_debt: customDebt,
+              fee: customDebt,
+              status: 'Unpaid',
+              sponsored: true,
+              sponsored_by: spon.rep_name || '',
+              sponsor_note: noteText,
+              general_notes: noteText,
+            })
+          )
+          .eq('id', ledger[entryIdx].id)
+          .then(() => {})
+          .catch(() => {});
+      }
     } else {
-      const newEntryId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      let newEntryId = (spon.ledger_entry_id && isUUID(spon.ledger_entry_id)) ? spon.ledger_entry_id : randomUUID();
+      if (serverSupabase) {
+        try {
+          const insertPayload = sanitizeCancellationLedgerPayload({
+            manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+            date: spon.date,
+            service: spon.service,
+            service_type: spon.service,
+            passenger_name: spon.passenger_name,
+            stop: spon.stop || '',
+            structure: spon.structure,
+            vehicle_name: spon.vehicle_name || '—',
+            submitted_by: 'Cancellation Admin',
+            rep_name: spon.rep_name || '',
+            license_plate: '',
+            sponsored: true,
+            sponsored_by: spon.rep_name || '',
+            sponsor_note: noteText,
+            structure_debt: customDebt,
+            fee: customDebt,
+            status: 'Unpaid',
+            general_notes: noteText,
+            submitted_at: new Date().toISOString(),
+          });
+          const { data: newRow } = await serverSupabase
+            .from('cancellation_ledger')
+            .insert([insertPayload])
+            .select('id')
+            .single();
+          if (newRow?.id && isUUID(newRow.id)) {
+            newEntryId = newRow.id;
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+
       ledger.unshift({
         id: newEntryId,
         manifest_key: spon.manifest_key || `manual-${Date.now()}`,
@@ -2791,9 +3023,25 @@ app.patch('/api/ledger/sponsorships/:id', (req, res) => {
     }
   } else if (spon.status === 'actually_sponsored' || spon.status === 'pending') {
     if (entryIdx >= 0) {
+      if (serverSupabase && isUUID(ledger[entryIdx].id)) {
+        serverSupabase
+          .from('cancellation_ledger')
+          .update({ status: 'Settled', structure_debt: 0 })
+          .eq('id', ledger[entryIdx].id)
+          .then(() => {})
+          .catch(() => {});
+      }
       ledger.splice(entryIdx, 1);
       spon.ledger_entry_id = null;
       ledgerChanged = true;
+    } else if (spon.ledger_entry_id && isUUID(spon.ledger_entry_id) && serverSupabase) {
+      serverSupabase
+        .from('cancellation_ledger')
+        .update({ status: 'Settled', structure_debt: 0 })
+        .eq('id', spon.ledger_entry_id)
+        .then(() => {})
+        .catch(() => {});
+      spon.ledger_entry_id = null;
     }
   }
 
@@ -2842,12 +3090,13 @@ app.get('/api/ledger', (req, res) => {
          (normalizeDateToYMD(String(e.date || '')) || String(e.date || '')) === sponDate)
       );
       if (!hasEntry) {
+        const newId = (spon.ledger_entry_id && isUUID(spon.ledger_entry_id)) ? spon.ledger_entry_id : null;
+        if (!newId) continue;
         const rawNote = spon.sponsor_note ? cleanSponsorshipNote(spon.sponsor_note) : '';
         const noteText = spon.status === 'unaccounted_sponsorship'
           ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
           : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
         const auditDebt = getFareForDate(spon.date);
-        const newId = spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         ledger.unshift({
           id: newId,
           manifest_key: spon.manifest_key || `manual-${Date.now()}`,
@@ -3559,6 +3808,28 @@ app.post('/api/ledger/update-debtor', async (req, res) => {
     }
     ledger = ledger.filter((e) => !existingSet.has(String(e.id)) || updatedIds.has(String(e.id)));
 
+    // Ensure all other historical or linked records for this debtor in active/historical ledger also display updated name
+    if (cleanName) {
+      for (let i = 0; i < ledger.length; i++) {
+        const lName = sanitizePassengerDisplayName(String(ledger[i].passenger_name || '')).toLowerCase();
+        if (origNames.includes(lName) || existingSet.has(String(ledger[i].id))) {
+          ledger[i].passenger_name = cleanName;
+          if (rawStruct && rawStruct !== 'No Structure') {
+            ledger[i].structure = rawStruct;
+          }
+        }
+      }
+
+      // Untomb cleanName if it was previously tombstoned so the renamed debtor is never hidden
+      const removedKeys = getRemovedLedgerKeys();
+      const lowerClean = cleanName.toLowerCase();
+      const normClean = lowerClean.replace(/[^a-z0-9]/g, '');
+      const filteredKeys = removedKeys.filter((k) => k !== lowerClean && k !== normClean);
+      if (filteredKeys.length !== removedKeys.length) {
+        atomicWriteJson(REMOVED_LEDGER_KEYS_FILE, filteredKeys);
+      }
+    }
+
     // Synchronize linked sponsorships if debt was edited or type changed
     const primaryId = Array.from(updatedIds)[0] || null;
     for (let i = 0; i < audits.length; i++) {
@@ -3618,6 +3889,16 @@ app.post('/api/ledger/update-debtor', async (req, res) => {
               sponsor_note: isSponsored ? noteText : '',
               general_notes: noteText,
             }).eq('id', inst.id);
+          }
+        }
+      }
+
+      // Also update any other historical or linked records for this debtor across Supabase tables
+      if (cleanName) {
+        for (const prevName of origNames) {
+          if (prevName && prevName !== cleanName.toLowerCase()) {
+            serverSupabase.from('cancellation_ledger').update({ passenger_name: cleanName, structure: rawStruct }).ilike('passenger_name', prevName).catch(() => {});
+            serverSupabase.from('sponsorship_audits').update({ passenger_name: cleanName, structure: rawStruct }).ilike('passenger_name', prevName).catch(() => {});
           }
         }
       }

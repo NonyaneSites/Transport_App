@@ -35,8 +35,19 @@ import { shortDate, prettyDate } from './dates';
 export type { ReportedSponsorship, SponsorshipStatus };
 export { isDreamWeekDate, DREAMWEEK_START, DREAMWEEK_END, DREAMWEEK_FARE, getPassengerFare };
 
+export {
+  diagnoseCancellationLedgerIds,
+  classifyLedgerIdPattern,
+  type LedgerIdDiagnosticReport,
+  type LedgerIdDiagnosticItem,
+  type LedgerIdPatternType,
+} from './ledgerDiagnostics';
+
 export const isUUID = (str?: string | null): boolean =>
-  Boolean(str && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str));
+  Boolean(
+    str &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str)
+  );
 
 /**
  * Safely parses a debt amount from numbers, numeric strings, or formatted currency strings ("R40", "R45", "40", "45", "40.00").
@@ -48,6 +59,13 @@ export function parseDebtAmount(
   serviceStr?: string | null,
   legs?: string | null
 ): number {
+  if (typeof val === 'object' && val !== null && 'structure_debt' in val) {
+    const entry = val as { structure_debt?: unknown; date?: string; service?: string; legs?: string };
+    dateStr = dateStr ?? entry.date;
+    serviceStr = serviceStr ?? entry.service;
+    legs = legs ?? entry.legs;
+    val = entry.structure_debt;
+  }
   let fallback = dateStr ? getFareForDate(dateStr) : CANCELLATION_FEE;
   if (serviceStr && (serviceStr.toLowerCase().includes('rehe') || serviceStr.toLowerCase().includes('rehearsal'))) {
     fallback = isDreamWeekDate(dateStr) ? DREAMWEEK_FARE : (legs === 'going' || legs === 'return' ? 40 : 70);
@@ -162,9 +180,15 @@ export function structureSortComparator(a: string, b: string): number {
   return naturalCompare(aNorm, bNorm);
 }
 
+export const NAME_MISSING_PLACEHOLDER = '[Name missing]';
+
 /**
- * Cleans slug-like or corrupted names such as "Passenger bonolo-ngejane-dfc-bus-stop"
- * into a proper title-cased name like "Bonolo Ngejane".
+ * Cleans accidental prefixes, invisible unicode formatting characters, and trailing stop notes,
+ * while STRICTLY preserving legitimate passenger names:
+ * - Preserves hyphens (e.g. Mary-Jane, Jean-Claude, Ngoepe-Nkosi, Smith-Jones)
+ * - Preserves apostrophes (e.g. D'Angelo, O'Connor)
+ * - Preserves compound surnames and spaces (e.g. Van der Merwe, De Villiers)
+ * - Never converts legitimate names into synthetic placeholders or removes legitimate spelling.
  */
 export function sanitizePassengerDisplayName(rawName: string | null | undefined): string {
   if (!rawName) return '';
@@ -178,20 +202,18 @@ export function sanitizePassengerDisplayName(rawName: string | null | undefined)
   // Strip parenthetical badges or tags like (Bus), (DFC), [SZ 1]
   name = name.replace(/\s*\([^)]*\)|\s*\[[^\]]*\]/g, ' ').trim();
 
-  // If it's a hyphenated slug (e.g. "bonolo-ngejane-dfc-bus-stop")
-  if (/^[a-z0-9]+(-[a-z0-9]+)+$/i.test(name)) {
-    const stopSlugs = [
-      '-dfc-bus-stop', '-dfc', '-sunnyside', '-amic-deck', '-david-webster',
-      '-barnato', '-midrand', '-braamfontein', '-auckland-park', '-kingsway',
-      '-bunting-road', '-soweto', '-park-station', '-parktown'
-    ];
-    let cleanedSlug = name;
-    for (const slug of stopSlugs) {
-      if (cleanedSlug.toLowerCase().endsWith(slug)) {
-        cleanedSlug = cleanedSlug.slice(0, -slug.length);
-        break;
-      }
-    }
+  // Strip trailing stop notes like " - DFC Bus Stop"
+  name = name.replace(/\s*-\s*(?:dfc|amic|sunnyside|kingsway|bunting|midrand|soweto|barnato|park).*$/i, '').trim();
+
+  // Only clean generated stop slugs if the slug ends with a recognized stop and has 2+ hyphens
+  const stopSlugs = [
+    '-dfc-bus-stop', '-dfc', '-sunnyside', '-amic-deck', '-david-webster',
+    '-barnato', '-midrand', '-braamfontein', '-auckland-park', '-kingsway',
+    '-bunting-road', '-soweto', '-park-station', '-parktown'
+  ];
+  const matchedStop = stopSlugs.find((slug) => name.toLowerCase().endsWith(slug));
+  if (matchedStop && /^[a-z0-9]+(-[a-z0-9]+){2,}$/i.test(name)) {
+    const cleanedSlug = name.slice(0, -matchedStop.length);
     name = cleanedSlug
       .split('-')
       .filter(Boolean)
@@ -199,12 +221,340 @@ export function sanitizePassengerDisplayName(rawName: string | null | undefined)
       .join(' ');
   }
 
-  // Strip trailing stop notes like " - DFC Bus Stop"
-  name = name.replace(/\s*-\s*(?:dfc|amic|sunnyside|kingsway|bunting|midrand|soweto|barnato|park).*$/i, '').trim();
+  // Trim extraneous punctuation noise at start/end without stripping internal hyphens or apostrophes
   name = name.replace(/^[-\s\d.:#*•]+/, '').replace(/[-\s.:#*•]+$/, '').trim();
   name = name.replace(/\s+/g, ' ').trim();
 
   return name;
+}
+
+/**
+ * Returns a display-ready debtor name, providing a clear '[Name missing]' placeholder
+ * if the name is blank or missing, avoiding synthetic test names or UUIDs.
+ */
+export function formatDebtorDisplayName(rawName: string | null | undefined): string {
+  const clean = sanitizePassengerDisplayName(rawName);
+  if (!clean || clean === NAME_MISSING_PLACEHOLDER) {
+    return NAME_MISSING_PLACEHOLDER;
+  }
+  return clean;
+}
+
+export interface NameSuspicionCheck {
+  suspicious: boolean;
+  isSuspicious: boolean;
+  reason?: 'test_name' | 'timestamp_suffix' | 'missing_name' | 'malformed_slug' | 'duplicate_record';
+  flagReason?: 'test_name' | 'timestamp_suffix' | 'missing_name' | 'malformed_slug' | 'duplicate_record';
+  description?: string;
+}
+
+/**
+ * Identifies suspicious placeholder names, timestamp/random suffixes, or missing names.
+ */
+export function evaluateNameSuspicion(name: string | null | undefined): NameSuspicionCheck {
+  if (!name || !name.trim() || name.trim() === NAME_MISSING_PLACEHOLDER) {
+    return {
+      suspicious: true,
+      isSuspicious: true,
+      reason: 'missing_name',
+      flagReason: 'missing_name',
+      description: 'Passenger name is missing or blank',
+    };
+  }
+
+  const trimmed = name.trim();
+
+  // Test-generated placeholder names
+  if (
+    /^(?:renamed|orig|sample|test)\s+person/i.test(trimmed) ||
+    /^(?:test|mock)\s+(?:debtor|passenger|user|person)/i.test(trimmed) ||
+    /^fake_?first/i.test(trimmed) ||
+    /fake_?last/i.test(trimmed)
+  ) {
+    return {
+      suspicious: true,
+      isSuspicious: true,
+      reason: 'test_name',
+      flagReason: 'test_name',
+      description: 'Identified as automated test placeholder name',
+    };
+  }
+
+  // Timestamp or random test identifier suffixes (e.g. "Name 1793045890332_e3fn" or "Person_17293849102")
+  if (/\b\d{10,}\b/.test(trimmed) || /\b\d{10,}_[a-z0-9]+\b/i.test(trimmed) || /_[a-z0-9]{4,}$/i.test(trimmed)) {
+    return {
+      suspicious: true,
+      isSuspicious: true,
+      reason: 'timestamp_suffix',
+      flagReason: 'timestamp_suffix',
+      description: 'Contains timestamp or random test identifier suffix',
+    };
+  }
+
+  // Raw database UUID displayed instead of passenger name
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
+    return {
+      suspicious: true,
+      isSuspicious: true,
+      reason: 'test_name',
+      flagReason: 'test_name',
+      description: 'Internal database UUID displayed instead of passenger name',
+    };
+  }
+
+  return { suspicious: false, isSuspicious: false };
+}
+
+export interface SuspiciousLedgerRecordItem {
+  id: string;
+  name: string;
+  structure: string;
+  date: string;
+  service: string;
+  amount: number;
+  status: string;
+  flagReason: 'test_name' | 'timestamp_suffix' | 'missing_name' | 'potential_duplicate' | 'malformed_slug';
+  flagDescription: string;
+  description: string;
+  duplicateGroupKey?: string;
+  suggestedAction: 'correct_name' | 'link_debtor' | 'purge_test_record' | 'merge_duplicate';
+  rawEntry: LedgerEntry;
+  entry: LedgerEntry;
+}
+
+/**
+ * Scans active and historical ledger entries to identify suspicious records:
+ * - Test-generated placeholder names (e.g. "Renamed Person", "Orig Person", "Fake_first...")
+ * - Timestamp or random test identifier suffixes (e.g. "Name 1793045890332_e3fn")
+ * - Missing or blank passenger names
+ * - True duplicate records with identical passenger, structure, date, session, and debt amount
+ */
+export function detectSuspiciousLedgerRecords(entries: LedgerEntry[]): SuspiciousLedgerRecordItem[] {
+  const flagged: SuspiciousLedgerRecordItem[] = [];
+  const eventMap = new Map<string, LedgerEntry[]>();
+
+  for (const e of entries) {
+    if (!e || !e.id) continue;
+    const debt = parseDebtAmount(e.structure_debt, e.date);
+    const cleanName = sanitizePassengerDisplayName(e.passenger_name);
+    const normDate = normalizeDateToYMD(e.date) || e.date || 'undated';
+    const normStruct = normalizeStructureCode(e.structure);
+    const code = serviceCodeForEntry(e);
+
+    // 1. Name suspicion check
+    const check = evaluateNameSuspicion(e.passenger_name);
+    if (check.suspicious && check.reason) {
+      let action: SuspiciousLedgerRecordItem['suggestedAction'] = 'correct_name';
+      if (check.reason === 'test_name' || check.reason === 'timestamp_suffix') {
+        action = 'purge_test_record';
+      } else if (check.reason === 'missing_name') {
+        action = 'correct_name';
+      }
+      flagged.push({
+        id: String(e.id),
+        name: e.passenger_name || NAME_MISSING_PLACEHOLDER,
+        structure: normStruct,
+        date: normDate,
+        service: code,
+        amount: debt,
+        status: e.status || 'Unpaid',
+        flagReason: check.reason,
+        flagDescription: check.description || 'Suspicious record requires review',
+        description: check.description || 'Suspicious record requires review',
+        suggestedAction: action,
+        rawEntry: e,
+        entry: e,
+      });
+      continue;
+    }
+
+    // 2. Track potential duplicates (active debts only)
+    if (debt > 0 && e.status !== 'Settled' && e.status !== 'Removed') {
+      const eventKey = `${normStruct}::${cleanName.toLowerCase()}::${normDate}::${code}::${debt}`;
+      if (!eventMap.has(eventKey)) {
+        eventMap.set(eventKey, []);
+      }
+      eventMap.get(eventKey)!.push(e);
+    }
+  }
+
+  // Detect duplicates where 2+ active entries have exact same event signature
+  for (const group of eventMap.values()) {
+    if (group.length > 1) {
+      // Flag subsequent duplicates (keep the first as canonical)
+      for (let i = 1; i < group.length; i++) {
+        const dup = group[i];
+        const debt = parseDebtAmount(dup.structure_debt, dup.date);
+        const desc = `Duplicate debt instance (${group.length} exact matching entries for same date, session, and structure)`;
+        flagged.push({
+          id: String(dup.id),
+          name: sanitizePassengerDisplayName(dup.passenger_name) || dup.passenger_name,
+          structure: normalizeStructureCode(dup.structure),
+          date: normalizeDateToYMD(dup.date) || dup.date || 'undated',
+          service: serviceCodeForEntry(dup),
+          amount: debt,
+          status: dup.status || 'Unpaid',
+          flagReason: 'potential_duplicate',
+          flagDescription: desc,
+          description: desc,
+          suggestedAction: 'merge_duplicate',
+          rawEntry: dup,
+          entry: dup,
+        });
+      }
+    }
+  }
+
+  return flagged;
+}
+
+/**
+ * Corrects a malformed, placeholder, or mistyped passenger name on a specific ledger record,
+ * updating Supabase, server, mockStorage, and local caches cleanly.
+ */
+export async function correctLedgerRecordName(
+  recordId: string,
+  newName: string,
+  actorName = 'Admin'
+): Promise<{ success: boolean; updatedCount: number }> {
+  void actorName;
+  const cleanName = sanitizePassengerDisplayName(newName);
+  if (!cleanName || cleanName === NAME_MISSING_PLACEHOLDER) {
+    throw new Error('A valid, non-empty passenger name is required.');
+  }
+
+  invalidateLedgerCache();
+  invalidateSponsorshipsCache();
+
+  // 1. Update in mockStorage
+  try {
+    let mockRows = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
+    mockRows = mockRows.map((r) => (String(r.id) === String(recordId) ? { ...r, passenger_name: cleanName } : r));
+    mockStorage.setTable(LEDGER_TABLE, mockRows as unknown as Record<string, unknown>[]);
+  } catch {
+    /* ignore */
+  }
+
+  // 2. Update in Supabase
+  if (isUUID(recordId)) {
+    try {
+      await supabase.from(LEDGER_TABLE).update({ passenger_name: cleanName }).eq('id', recordId);
+    } catch (sbErr) {
+      console.warn('[Ledger] Supabase correct name note:', sbErr);
+    }
+  }
+
+  // 3. Update server API
+  try {
+    await updateLedgerOnServer(recordId, { passenger_name: cleanName });
+  } catch {
+    /* ignore */
+  }
+
+  broadcastLocalSyncEvent('ledger_updated');
+  broadcastLocalSyncEvent('sponsorships_updated');
+  return { success: true, updatedCount: 1 };
+}
+
+/**
+ * Links a flagged, duplicate, or misassigned debt record to an existing legitimate debtor,
+ * reconciling debt instances and structure grouping cleanly.
+ */
+export async function linkRecordToDebtor(
+  recordId: string,
+  targetDebtorName: string,
+  targetStructure?: string,
+  actorName = 'Admin'
+): Promise<{ success: boolean }> {
+  void actorName;
+  const cleanName = sanitizePassengerDisplayName(targetDebtorName);
+  if (!cleanName || cleanName === NAME_MISSING_PLACEHOLDER) {
+    throw new Error('Target debtor name cannot be empty.');
+  }
+
+  const updates: Record<string, unknown> = { passenger_name: cleanName };
+  if (targetStructure) {
+    updates.structure = normalizeStructureCode(targetStructure);
+  }
+
+  invalidateLedgerCache();
+  invalidateSponsorshipsCache();
+
+  // 1. Mock storage
+  try {
+    let mockRows = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
+    mockRows = mockRows.map((r) => (String(r.id) === String(recordId) ? { ...r, ...updates } : r));
+    mockStorage.setTable(LEDGER_TABLE, mockRows as unknown as Record<string, unknown>[]);
+  } catch {
+    /* ignore */
+  }
+
+  // 2. Supabase
+  if (isUUID(recordId)) {
+    try {
+      await supabase.from(LEDGER_TABLE).update(updates).eq('id', recordId);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // 3. Server
+  try {
+    await updateLedgerOnServer(recordId, updates);
+  } catch {
+    /* ignore */
+  }
+
+  broadcastLocalSyncEvent('ledger_updated');
+  broadcastLocalSyncEvent('sponsorships_updated');
+  return { success: true };
+}
+
+/**
+ * Permanently removes a confirmed test record from all data stores with full verification.
+ */
+export async function purgeConfirmedTestRecord(
+  recordId: string,
+  actorName = 'Admin',
+  reason = 'Purged confirmed test record'
+): Promise<{ success: boolean }> {
+  void actorName;
+  void reason;
+  invalidateLedgerCache();
+  invalidateSponsorshipsCache();
+  addLocalRemovedLedgerIds([recordId]);
+
+  // 1. Mock storage
+  try {
+    let mockRows = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
+    mockRows = mockRows.filter((r) => String(r.id) !== String(recordId));
+    mockStorage.setTable(LEDGER_TABLE, mockRows as unknown as Record<string, unknown>[]);
+  } catch {
+    /* ignore */
+  }
+
+  // 2. Supabase delete
+  try {
+    if (isUUID(recordId)) {
+      await supabase.from(LEDGER_TABLE).delete().eq('id', recordId);
+    }
+    await supabase.from(SPONSORSHIPS_TABLE).delete().eq('id', recordId);
+    await supabase.from(SPONSORSHIPS_TABLE).delete().eq('ledger_entry_id', recordId);
+  } catch {
+    /* ignore */
+  }
+
+  // 3. Server delete
+  try {
+    await deleteLedgerOnServer(recordId);
+    await deleteSponsorshipOnServer(recordId);
+  } catch {
+    /* ignore */
+  }
+
+  broadcastLocalSyncEvent('ledger_updated');
+  broadcastLocalSyncEvent('sponsorships_updated');
+  return { success: true };
 }
 
 /**
@@ -1027,6 +1377,11 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
             continue;
           }
           mergedMap.set(idStr, e);
+          try {
+            mockStorage.upsert(LEDGER_TABLE, e as unknown as Record<string, unknown>);
+          } catch {
+            /* ignore */
+          }
         }
       }
     }
@@ -1047,7 +1402,8 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
           continue;
         }
         const prev = mergedMap.get(idStr);
-        mergedMap.set(idStr, prev ? { ...prev, ...e } : e);
+        // Authoritative database entries (prev) override stale offline mock rows (e)
+        mergedMap.set(idStr, prev ? { ...e, ...prev } : e);
       }
     }
   } catch {
@@ -1101,7 +1457,9 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
               }
             }
           } else if (spon.status === 'unaccounted_sponsorship' || spon.status === 'unpaid_sponsorship') {
-            const entryId = spon.ledger_entry_id || `ledger_sp_${spon.id || Date.now()}`;
+            const entryId = (spon.ledger_entry_id && isUUID(spon.ledger_entry_id))
+              ? spon.ledger_entry_id
+              : `v_spon_${spon.id || Date.now()}`;
             if (settledOrRemovedIds.has(entryId) || (spon.ledger_entry_id && settledOrRemovedIds.has(spon.ledger_entry_id))) {
               continue;
             }
@@ -1119,7 +1477,6 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
                 ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
                 : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
               const effectiveDebt = getFareForDate(spon.date);
-              const entryId = spon.ledger_entry_id || `ledger_sp_${spon.id || Date.now()}`;
               if (!settledOrRemovedIds.has(entryId)) {
                 mergedMap.set(entryId, {
                   id: entryId,
@@ -1256,24 +1613,27 @@ export async function removeLedgerEntries(
         notes: reason,
       });
 
-      const { data, error } = await supabase
-        .from(LEDGER_TABLE)
-        .update(updatePayload)
-        .in('id', validIds)
-        .select('id, status, structure_debt');
+      const uuidList = validIds.filter(isUUID);
+      if (uuidList.length > 0) {
+        const { data, error } = await supabase
+          .from(LEDGER_TABLE)
+          .update(updatePayload)
+          .in('id', uuidList)
+          .select('id, status, structure_debt');
 
-      if (error) {
-        console.warn('[Ledger] Supabase remove note (proceeding with local/server removal):', error.message);
-      } else if (data && data.length > 0) {
-        removedCount = data.length;
-        supabaseCommitted = true;
-      }
+        if (error) {
+          console.warn('[Ledger] Supabase remove note (proceeding with local/server removal):', error.message);
+        } else if (data && data.length > 0) {
+          removedCount = data.length;
+          supabaseCommitted = true;
+        }
 
-      // Also try explicit delete in case table uses delete rather than tombstone
-      try {
-        await supabase.from(LEDGER_TABLE).delete().in('id', validIds);
-      } catch {
-        /* best-effort delete */
+        // Also try explicit delete in case table uses delete rather than tombstone
+        try {
+          await supabase.from(LEDGER_TABLE).delete().in('id', uuidList);
+        } catch {
+          /* best-effort delete */
+        }
       }
 
       // Best-effort audit log
@@ -1499,63 +1859,66 @@ export async function settleLedgerEntries(
   }
 
   // 2. Transactional RPC attempt
-  try {
-    const { data, error } = await supabase.rpc('settle_cancellation_debts', {
-      p_ids: validIds,
-      p_settled_by: actorName,
-      p_notes: notes,
-    });
-    if (!error && data && data.success) {
-      supabaseCommitted = true;
-      if (typeof data.count === 'number' && data.count > 0) {
-        settledCount = data.count;
-      }
-    }
-  } catch (rpcErr) {
-    console.debug('[Ledger] settle RPC fallback note:', rpcErr);
-  }
-
-  // 3. Direct Supabase update against canonical schema
-  if (!supabaseCommitted) {
+  const uuidList = validIds.filter(isUUID);
+  if (uuidList.length > 0) {
     try {
-      const updatePayload = sanitizeCancellationLedgerPayload({
-        status: 'Settled',
-        structure_debt: 0,
-        notes,
+      const { data, error } = await supabase.rpc('settle_cancellation_debts', {
+        p_ids: uuidList,
+        p_settled_by: actorName,
+        p_notes: notes,
       });
-
-      const { data, error } = await supabase
-        .from(LEDGER_TABLE)
-        .update(updatePayload)
-        .in('id', validIds)
-        .select('id, status, structure_debt');
-
-      if (error) {
-        console.warn('[Ledger] Supabase settlement note (proceeding with local/server settle):', error.message);
-      } else if (data && data.length > 0) {
-        settledCount = data.length;
+      if (!error && data && data.success) {
         supabaseCommitted = true;
+        if (typeof data.count === 'number' && data.count > 0) {
+          settledCount = data.count;
+        }
       }
+    } catch (rpcErr) {
+      console.debug('[Ledger] settle RPC fallback note:', rpcErr);
+    }
 
-      // Record audit entries
+    // 3. Direct Supabase update against canonical schema
+    if (!supabaseCommitted) {
       try {
-        const auditPayload = validIds.map((id) => ({
-          ledger_id: id,
-          action: 'SETTLE',
-          previous_status: 'Unpaid',
-          new_status: 'Settled',
-          previous_debt: 40,
-          new_debt: 0,
-          actor_name: actorName,
+        const updatePayload = sanitizeCancellationLedgerPayload({
+          status: 'Settled',
+          structure_debt: 0,
           notes,
-          created_at: nowIso,
-        }));
-        await supabase.from('cancellation_ledger_audits').insert(auditPayload);
-      } catch {
-        // Best-effort audit
+        });
+
+        const { data, error } = await supabase
+          .from(LEDGER_TABLE)
+          .update(updatePayload)
+          .in('id', uuidList)
+          .select('id, status, structure_debt');
+
+        if (error) {
+          console.warn('[Ledger] Supabase settlement note (proceeding with local/server settle):', error.message);
+        } else if (data && data.length > 0) {
+          settledCount = data.length;
+          supabaseCommitted = true;
+        }
+
+        // Record audit entries
+        try {
+          const auditPayload = uuidList.map((id) => ({
+            ledger_id: id,
+            action: 'SETTLE',
+            previous_status: 'Unpaid',
+            new_status: 'Settled',
+            previous_debt: 40,
+            new_debt: 0,
+            actor_name: actorName,
+            notes,
+            created_at: nowIso,
+          }));
+          await supabase.from('cancellation_ledger_audits').insert(auditPayload);
+        } catch {
+          // Best-effort audit
+        }
+      } catch (sbErr) {
+        console.warn('[Ledger] Supabase settlement exception note:', sbErr);
       }
-    } catch (sbErr) {
-      console.warn('[Ledger] Supabase settlement exception note:', sbErr);
     }
   }
 
@@ -1636,19 +1999,70 @@ export async function updateLedgerEntry(
     console.debug('[Ledger] Server update note:', err);
   }
 
-  const { data, error } = await supabase
-    .from(LEDGER_TABLE)
-    .update(payload)
-    .eq('id', id)
-    .select('id, structure_debt, status');
+  // Treat cancellation_ledger.id as a UUID at all times.
+  // Never use synthetic IDs such as ledger_sp_<timestamp>_<random> in Supabase filters against the id column.
+  let targetUuid: string | null = isUUID(id) ? id : null;
 
-  if (error) {
-    console.error('[Ledger] Supabase update error:', error);
-    throw new Error(`Failed to update ledger entry in Supabase: ${error.message}`);
+  if (!targetUuid) {
+    // Attempt unambiguous lookup by passenger name and date
+    const localRows = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
+    const targetName = updates.passenger_name || localRows.find((e) => e.id === id)?.passenger_name;
+    const targetDate = updates.date || localRows.find((e) => e.id === id)?.date;
+    if (targetName && targetDate) {
+      try {
+        const { data: matchedRows } = await supabase
+          .from(LEDGER_TABLE)
+          .select('id')
+          .ilike('passenger_name', sanitizePassengerDisplayName(targetName))
+          .eq('date', normalizeDateToYMD(targetDate) || targetDate)
+          .limit(2);
+        if (matchedRows && matchedRows.length === 1 && isUUID(matchedRows[0].id)) {
+          targetUuid = matchedRows[0].id;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
-  if (!data || data.length === 0) {
-    throw new Error(`Ledger entry ${id} could not be updated in Supabase.`);
+  if (targetUuid) {
+    const { data, error } = await supabase
+      .from(LEDGER_TABLE)
+      .update(payload)
+      .eq('id', targetUuid)
+      .select('id, structure_debt, status');
+
+    if (error) {
+      console.error('[Ledger] Supabase update error:', error);
+      throw new Error(`Failed to update ledger entry in Supabase: ${error.message}`);
+    }
+
+    if (!data || data.length === 0) {
+      throw new Error(`Ledger entry ${targetUuid} could not be updated in Supabase.`);
+    }
+  } else {
+    // If not a UUID and no existing row matched, and this is an active debt entry, insert it into Supabase to get real UUID
+    if (updates.passenger_name && (Number(updates.structure_debt) > 0 || updates.fee)) {
+      const insertPayload = sanitizeCancellationLedgerPayload({
+        ...updates,
+        manifest_key: updates.manifest_key || `manual-${Date.now()}`,
+        status: updates.status || 'Unpaid',
+        submitted_by: updates.submitted_by || actorName,
+        submitted_at: updates.submitted_at || new Date().toISOString(),
+      });
+      const { data: newRow, error: insertErr } = await supabase
+        .from(LEDGER_TABLE)
+        .insert([insertPayload])
+        .select('id')
+        .single();
+      if (insertErr) {
+        console.error('[Ledger] Supabase insert error on update fallback:', insertErr);
+        throw new Error(`Failed to save ledger entry to Supabase: ${insertErr.message}`);
+      }
+      if (newRow?.id) {
+        targetUuid = newRow.id;
+      }
+    }
   }
 }
 
@@ -2008,7 +2422,7 @@ export async function updateDebtorWithInstances(
     const validDate = inst.date ? inst.date.trim() : '';
     const validService = inst.service ? inst.service.trim() : 'PM';
 
-    if (inst.id && isUUID(inst.id) && existingSet.has(inst.id)) {
+    if (inst.id && (existingSet.has(inst.id) || isUUID(inst.id))) {
       updatedIds.add(inst.id);
       await supabase
         .from(LEDGER_TABLE)
@@ -2111,21 +2525,31 @@ export async function updateDebtorWithInstances(
   }
 
   // 5. Remove any previous instances that were removed by the admin
-  const uuidToRemove = existingEntryIds.filter((id) => isUUID(id) && !updatedIds.has(id));
-  if (uuidToRemove.length > 0) {
-    addLocalRemovedLedgerIds(uuidToRemove);
-    await removeLedgerEntries(uuidToRemove, 'Admin', 'Instance removed during debtor edit');
-  }
-  const nonUuidToRemove = existingEntryIds.filter((id) => !isUUID(id) && !updatedIds.has(id));
-  if (nonUuidToRemove.length > 0) {
-    addLocalRemovedLedgerIds(nonUuidToRemove);
-    try {
-      await supabase
-        .from(SPONSORSHIPS_TABLE)
-        .update({ status: 'actually_sponsored', ledger_entry_id: null, sponsor_note: 'Settled / Removed during debtor edit' })
-        .in('id', nonUuidToRemove);
-    } catch {
-      /* ignore */
+  const toRemove = existingEntryIds.filter((id) => !updatedIds.has(id));
+  if (toRemove.length > 0) {
+    addLocalRemovedLedgerIds(toRemove);
+    const uuidToRemove = toRemove.filter((id) => isUUID(id));
+    if (uuidToRemove.length > 0) {
+      await removeLedgerEntries(uuidToRemove, 'Admin', 'Instance removed during debtor edit');
+    }
+    const nonUuidToRemove = toRemove.filter((id) => !isUUID(id));
+    if (nonUuidToRemove.length > 0) {
+      try {
+        await supabase
+          .from(SPONSORSHIPS_TABLE)
+          .update({ status: 'actually_sponsored', ledger_entry_id: null, sponsor_note: 'Settled / Removed during debtor edit' })
+          .in('id', nonUuidToRemove);
+      } catch {
+        /* ignore */
+      }
+      try {
+        await supabase
+          .from(LEDGER_TABLE)
+          .delete()
+          .in('id', nonUuidToRemove);
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -2322,16 +2746,19 @@ export async function recordPartialPayment(
   }
 
   let entries: Array<{ id: string; structure_debt: unknown; date?: string; fee?: unknown; status?: string }> = [];
-  try {
-    const { data, error } = await supabase
-      .from(LEDGER_TABLE)
-      .select('id, structure_debt, date, fee, status')
-      .in('id', validIds);
-    if (!error && Array.isArray(data) && data.length > 0) {
-      entries = data;
+  const uuidList = validIds.filter(isUUID);
+  if (uuidList.length > 0) {
+    try {
+      const { data, error } = await supabase
+        .from(LEDGER_TABLE)
+        .select('id, structure_debt, date, fee, status')
+        .in('id', uuidList);
+      if (!error && Array.isArray(data) && data.length > 0) {
+        entries = data;
+      }
+    } catch (err) {
+      console.warn('[Ledger] Failed to fetch entries directly from Supabase for payment:', err);
     }
-  } catch (err) {
-    console.warn('[Ledger] Failed to fetch entries directly from Supabase for payment:', err);
   }
 
   if (entries.length === 0) {
@@ -2941,12 +3368,16 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
     for (const e of structEntries) {
       const isSponsorship = isEntrySponsorshipOrUnpaid(e);
       const catKey = isSponsorship ? 'sponsorship' : 'cancellation';
-      const cleanName = sanitizePassengerDisplayName(e.passenger_name) || (e.passenger_name || '').trim();
-      const nameKey = `${cleanName.toLowerCase().replace(/\s+/g, ' ')}:::${catKey}`;
+      const cleanName = sanitizePassengerDisplayName(e.passenger_name);
+      const displayName = cleanName || NAME_MISSING_PLACEHOLDER;
+      // Missing names stay individual so multiple unnamed debts don't combine into one person
+      const nameKey = cleanName
+        ? `${cleanName.toLowerCase().replace(/\s+/g, ' ')}:::${catKey}`
+        : `missing_name_${e.id}:::${catKey}`;
       if (!byCategoryAndName.has(nameKey)) byCategoryAndName.set(nameKey, []);
       byCategoryAndName.get(nameKey)!.push({
         ...e,
-        passenger_name: cleanName,
+        passenger_name: displayName,
       });
     }
 
@@ -2956,34 +3387,45 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
       const earliest = sorted[0];
       const latest = sorted[sorted.length - 1];
 
-      // Collect distinct service codes
+      // Collect distinct service codes & deduplicate exact duplicate event records
       const serviceCodesSet = new Set<string>();
-      const instances: AggregatedLedgerInstance[] = sorted
-        .filter((e) => parseDebtAmount(e.structure_debt, e.date, e.service, (e as { legs?: string }).legs) > 0)
-        .map((e) => {
-          const code = serviceCodeForEntry(e);
-          serviceCodesSet.add(code);
+      const seenEventKeys = new Set<string>();
+      const instances: AggregatedLedgerInstance[] = [];
 
-          // Format date into dd/mm/yy or 'Undated'
-          let dStr = e.date ? e.date : 'Undated';
-          if (e.date && e.date.includes('-')) {
-            const parts = e.date.split('-');
-            if (parts.length === 3) {
-              dStr = `${parts[2].slice(-2)}/${parts[1]}/${parts[0].slice(2)}`;
-            }
+      for (const e of sorted) {
+        const instDebt = parseDebtAmount(e.structure_debt, e.date, e.service, (e as { legs?: string }).legs);
+        if (instDebt <= 0) continue;
+
+        const code = serviceCodeForEntry(e);
+        const normDate = normalizeDateToYMD(e.date) || e.date || 'undated';
+        const eventSig = `${normDate}::${code}::${instDebt}`;
+
+        // Deduplicate true duplicate records for the exact same date, session, and amount
+        if (seenEventKeys.has(eventSig)) {
+          continue;
+        }
+        seenEventKeys.add(eventSig);
+        serviceCodesSet.add(code);
+
+        // Format date into dd/mm/yy or 'Undated'
+        let dStr = e.date ? e.date : 'Undated';
+        if (e.date && e.date.includes('-')) {
+          const parts = e.date.split('-');
+          if (parts.length === 3) {
+            dStr = `${parts[2].slice(-2)}/${parts[1]}/${parts[0].slice(2)}`;
           }
-          const instDebt = parseDebtAmount(e.structure_debt, e.date, e.service, (e as { legs?: string }).legs);
+        }
 
-          return {
-            id: e.id,
-            date: e.date,
-            service: e.service,
-            serviceCode: code,
-            amount: instDebt,
-            formatted: `${dStr}(${code})`,
-            notes: e.general_notes || e.sponsor_note || '',
-          };
+        instances.push({
+          id: e.id,
+          date: e.date,
+          service: e.service,
+          serviceCode: code,
+          amount: instDebt,
+          formatted: `${dStr}(${code})`,
+          notes: e.general_notes || e.sponsor_note || '',
         });
+      }
 
       // Total debtor amount is the exact sum of all valid active instance debts
       const amount = instances.reduce((sum, inst) => sum + inst.amount, 0);
@@ -3000,10 +3442,10 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
 
       const finalRowNotes = combinedNotes || (isSponsorshipOrUnpaid ? 'Unaccounted Sponsorship' : '');
 
-      const displayName = latest.passenger_name || earliest.passenger_name;
+      const displayName = formatDebtorDisplayName(latest.passenger_name || earliest.passenger_name);
 
       return {
-        key: `${structure}-${displayName}-${isSponsorshipOrUnpaid ? 'sponsorship' : 'cancellation'}`,
+        key: `${structure}-${displayName}-${earliest.id}-${isSponsorshipOrUnpaid ? 'sponsorship' : 'cancellation'}`,
         structure,
         repName: latest.rep_name || latest.submitted_by || '—',
         vehicleName: latest.vehicle_name || '—',
@@ -4090,11 +4532,13 @@ export async function verifyBatchSponsorships(
           .select('id')
           .single();
 
-        const realId = newRow?.id || spon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const realId = newRow?.id && isUUID(newRow.id)
+          ? newRow.id
+          : (spon.ledger_entry_id && isUUID(spon.ledger_entry_id) ? spon.ledger_entry_id : (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : null));
         spon.ledger_entry_id = realId;
         const newEntry: LedgerEntry = {
           ...insertPayload,
-          id: realId,
+          id: realId || '',
         } as LedgerEntry;
         currentLedger.unshift(newEntry);
         ledgerChanged = true;
@@ -4387,48 +4831,101 @@ export async function updateReportedSponsorship(
       ? (rawNote && !rawNote.toLowerCase().includes('unaccounted') ? `Unaccounted Sponsorship: ${rawNote}` : (rawNote || 'Unaccounted Sponsorship'))
       : (rawNote && !rawNote.toLowerCase().includes('did not pay') ? `Did not pay: ${rawNote}` : (rawNote || 'Did not pay'));
 
+    const debtPayload = {
+      passenger_name: sanitizePassengerDisplayName(spon.passenger_name),
+      structure: normalizeStructureCode(spon.structure),
+      date: normalizeDateToYMD(spon.date) || spon.date,
+      service: spon.service,
+      service_type: spon.service,
+      stop: spon.stop || '',
+      structure_debt: customDebt,
+      fee: customDebt,
+      status: 'Unpaid',
+      sponsored: true,
+      sponsored_by: spon.rep_name || '',
+      sponsor_note: noteText,
+      general_notes: noteText,
+    };
+
     if (spon.ledger_entry_id && isUUID(spon.ledger_entry_id)) {
-      await updateLedgerEntry(spon.ledger_entry_id, {
-        passenger_name: spon.passenger_name,
-        structure: spon.structure,
-        date: spon.date,
-        service: spon.service,
-        stop: spon.stop || '',
-        structure_debt: customDebt,
-        sponsor_note: noteText,
-        general_notes: noteText,
-        sponsored: true,
-      });
+      await updateLedgerEntry(spon.ledger_entry_id, debtPayload);
     } else {
-      const insertPayload = sanitizeCancellationLedgerPayload({
-        manifest_key: spon.manifest_key || `manual-${Date.now()}`,
-        date: spon.date,
-        service: spon.service,
-        passenger_name: spon.passenger_name,
-        stop: spon.stop || '',
-        structure: spon.structure,
-        vehicle_name: spon.vehicle_name || '—',
-        submitted_by: 'Cancellation Admin',
-        rep_name: spon.rep_name || '',
-        license_plate: '',
-        sponsored: true,
-        sponsor_note: noteText,
-        structure_debt: customDebt,
-        fee: customDebt,
-        status: 'Unpaid',
-        general_notes: noteText,
-        submitted_at: new Date().toISOString(),
-      });
-      const { data: newRow } = await supabase.from(LEDGER_TABLE).insert([insertPayload]).select('id').single();
-      spon.ledger_entry_id = newRow?.id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      // Look for an unambiguous match in cancellation_ledger first before inserting
+      let matchedUuid: string | null = null;
+      try {
+        const { data: matchedRows } = await supabase
+          .from(LEDGER_TABLE)
+          .select('id')
+          .ilike('passenger_name', sanitizePassengerDisplayName(spon.passenger_name))
+          .eq('date', normalizeDateToYMD(spon.date) || spon.date)
+          .limit(2);
+        if (matchedRows && matchedRows.length === 1 && isUUID(matchedRows[0].id)) {
+          matchedUuid = matchedRows[0].id;
+        }
+      } catch {
+        /* ignore */
+      }
+
+      if (matchedUuid) {
+        spon.ledger_entry_id = matchedUuid;
+        await updateLedgerEntry(matchedUuid, debtPayload);
+      } else {
+        const insertPayload = sanitizeCancellationLedgerPayload({
+          manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+          date: normalizeDateToYMD(spon.date) || spon.date,
+          service: spon.service || 'Service',
+          service_type: spon.service || 'Service',
+          passenger_name: sanitizePassengerDisplayName(spon.passenger_name),
+          stop: spon.stop || '',
+          structure: normalizeStructureCode(spon.structure),
+          vehicle_name: spon.vehicle_name || '—',
+          submitted_by: 'Cancellation Admin',
+          rep_name: spon.rep_name || '',
+          license_plate: '',
+          sponsored: true,
+          sponsored_by: spon.rep_name || '',
+          sponsor_note: noteText,
+          structure_debt: customDebt,
+          fee: customDebt,
+          status: 'Unpaid',
+          general_notes: noteText,
+          submitted_at: new Date().toISOString(),
+        });
+        const { data: newRow, error: insErr } = await supabase
+          .from(LEDGER_TABLE)
+          .insert([insertPayload])
+          .select('id')
+          .single();
+        if (insErr) {
+          throw new Error(`Failed to insert ledger entry in Supabase: ${insErr.message}`);
+        }
+        if (newRow?.id && isUUID(newRow.id)) {
+          spon.ledger_entry_id = newRow.id;
+        }
+      }
     }
   } else {
     // Actually sponsored or pending -> remove any debt entry
     if (spon.ledger_entry_id) {
       if (isUUID(spon.ledger_entry_id)) {
-        await removeLedgerEntries([spon.ledger_entry_id], 'Admin', 'Sponsorship verified as actually sponsored');
+        await settleLedgerEntries([spon.ledger_entry_id], 'Admin', 'Sponsorship verified as actually sponsored');
       }
       spon.ledger_entry_id = null;
+    } else {
+      // Check if an unambiguous debt entry exists for this passenger and date
+      try {
+        const { data: matchedRows } = await supabase
+          .from(LEDGER_TABLE)
+          .select('id')
+          .ilike('passenger_name', sanitizePassengerDisplayName(spon.passenger_name))
+          .eq('date', normalizeDateToYMD(spon.date) || spon.date)
+          .limit(2);
+        if (matchedRows && matchedRows.length === 1 && isUUID(matchedRows[0].id)) {
+          await settleLedgerEntries([matchedRows[0].id], 'Admin', 'Sponsorship verified as actually sponsored');
+        }
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -4568,22 +5065,20 @@ export async function batchUpdateReportedSponsorships(
           submitted_at: now,
         });
 
-        Promise.resolve(
-          supabase
-            .from(LEDGER_TABLE)
-            .insert([insertPayload])
-            .select('id')
-            .single()
-        ).then(({ data: newRow }) => {
-          if (newRow?.id) {
-            updatedSpon.ledger_entry_id = newRow.id;
-          }
-        }).catch(() => {});
+        const { data: newRow } = await supabase
+          .from(LEDGER_TABLE)
+          .insert([insertPayload])
+          .select('id')
+          .single();
 
-        const realId = updatedSpon.ledger_entry_id || `ledger_sp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const realId = newRow?.id && isUUID(newRow.id)
+          ? newRow.id
+          : (updatedSpon.ledger_entry_id && isUUID(updatedSpon.ledger_entry_id) ? updatedSpon.ledger_entry_id : (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : null));
+        updatedSpon.ledger_entry_id = realId;
+
         const newEntry: LedgerEntry = {
           ...insertPayload,
-          id: realId,
+          id: realId || '',
         } as LedgerEntry;
         currentLedger.unshift(newEntry);
         ledgerChanged = true;

@@ -18,10 +18,11 @@ import {
   listReportedSponsorships, verifyBatchSponsorships, groupSponsorshipsByStructure, groupSponsorshipsByDate,
   sanitizePassengerDisplayName, cleanSponsorshipNote, cleanPersonalAbsenteeNote, cleanAndDeduplicateSponsorships,
   deleteReportedSponsorship, batchDeleteReportedSponsorships, recordReportedSponsorshipPayment, updateReportedSponsorship,
-  batchUpdateReportedSponsorships, invalidateSponsorshipsCache, invalidateLedgerCache,
+  NAME_MISSING_PLACEHOLDER,
   type DebtorInstanceUpdateItem,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
   type ReportedSponsorship, type SponsorshipStatus, type DateSponsorshipGroup, type StructureSponsorshipGroup,
+  invalidateLedgerCache, invalidateSponsorshipsCache,
 } from '@/lib/ledger';
 import { getFareForDate } from '@/lib/types';
 import { downloadCancellationDebtPdf } from '@/lib/pdfExport';
@@ -279,8 +280,8 @@ export function LedgerPage() {
 
   // Top Tab State: Cancellations & Debtors vs Reported Sponsorships
   const [activeTab, setActiveTab] = useState<'cancellations' | 'sponsorships'>(() => {
-    if (typeof window !== 'undefined' && window.location.hash === '#sponsorships') {
-      return 'sponsorships';
+    if (typeof window !== 'undefined') {
+      if (window.location.hash === '#sponsorships') return 'sponsorships';
     }
     return 'cancellations';
   });
@@ -1652,6 +1653,8 @@ export function LedgerPage() {
     }
   }
 
+
+
   return (
     <div className="min-h-screen">
       <Header current="ledger" />
@@ -2071,7 +2074,14 @@ export function LedgerPage() {
                                   <div className="flex items-start justify-between gap-2">
                                     <div className="min-w-0 flex-1">
                                       <div className="font-bold text-ink text-sm leading-snug">
-                                        <HighlightMatch text={row.name} query={search} />
+                                        {row.name === NAME_MISSING_PLACEHOLDER ? (
+                                          <span className="inline-flex items-center gap-1 text-crimson-400 font-bold">
+                                            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                                            <span>{NAME_MISSING_PLACEHOLDER}</span>
+                                          </span>
+                                        ) : (
+                                          <HighlightMatch text={row.name} query={search} />
+                                        )}
                                       </div>
                                       <div className="flex items-center gap-1.5 mt-0.5">
                                         <span className="text-[11px] font-medium text-muted">
@@ -2160,9 +2170,23 @@ export function LedgerPage() {
                                     <tr key={row.key} className="transition-colors hover:bg-card-2/20">
                                       <td className="px-3.5 py-2.5 align-top">
                                         <div className="flex flex-wrap items-center gap-1.5">
-                                          <span className="font-semibold text-ink">
-                                            <HighlightMatch text={row.name} query={search} />
-                                          </span>
+                                          {row.name === NAME_MISSING_PLACEHOLDER ? (
+                                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-crimson-500/20 text-crimson-300 border border-crimson-500/40 text-xs font-semibold">
+                                              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                                              <span>{NAME_MISSING_PLACEHOLDER}</span>
+                                              <button
+                                                type="button"
+                                                onClick={() => openEditModal(row)}
+                                                className="ml-1 text-[11px] underline text-crimson-200 hover:text-white"
+                                              >
+                                                Fix Name
+                                              </button>
+                                            </span>
+                                          ) : (
+                                            <span className="font-semibold text-ink">
+                                              <HighlightMatch text={row.name} query={search} />
+                                            </span>
+                                          )}
                                         </div>
                                       </td>
                                       <td className="px-3.5 py-2.5 text-muted align-top">
@@ -2260,7 +2284,14 @@ export function LedgerPage() {
                                   <div className="flex items-start justify-between gap-2">
                                     <div className="min-w-0 flex-1">
                                       <div className="font-bold text-ink text-sm leading-snug">
-                                        <HighlightMatch text={row.name} query={search} />
+                                        {row.name === NAME_MISSING_PLACEHOLDER ? (
+                                          <span className="inline-flex items-center gap-1 text-amber-400 font-bold">
+                                            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                                            <span>{NAME_MISSING_PLACEHOLDER}</span>
+                                          </span>
+                                        ) : (
+                                          <HighlightMatch text={row.name} query={search} />
+                                        )}
                                       </div>
                                       {(() => {
                                         const raw = row.notes || '';
@@ -2357,9 +2388,23 @@ export function LedgerPage() {
                                     <tr key={row.key} className="transition-colors hover:bg-amber-500/10">
                                       <td className="px-3.5 py-2.5 align-top">
                                         <div className="flex flex-wrap items-center gap-1.5">
-                                          <span className="font-semibold text-ink">
-                                            <HighlightMatch text={row.name} query={search} />
-                                          </span>
+                                          {row.name === NAME_MISSING_PLACEHOLDER ? (
+                                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 text-xs font-semibold">
+                                              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                                              <span>{NAME_MISSING_PLACEHOLDER}</span>
+                                              <button
+                                                type="button"
+                                                onClick={() => openEditModal(row)}
+                                                className="ml-1 text-[11px] underline text-amber-200 hover:text-white"
+                                              >
+                                                Fix Name
+                                              </button>
+                                            </span>
+                                          ) : (
+                                            <span className="font-semibold text-ink">
+                                              <HighlightMatch text={row.name} query={search} />
+                                            </span>
+                                          )}
                                         </div>
                                       </td>
                                       <td className="px-3.5 py-2.5 text-muted align-top">
@@ -3226,6 +3271,10 @@ export function LedgerPage() {
             )}
           </div>
         )}
+
+
+
+
 
         {/* Mass Edit Details Modal */}
         {showMassEditModal && (
