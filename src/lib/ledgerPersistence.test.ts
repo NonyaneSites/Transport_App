@@ -284,3 +284,83 @@ test('Debtor Edit Persistence: updateDebtorWithInstances persists name, structur
   // Clean up mock rows
   mockStorage.setTable(LEDGER_TABLE, []);
 });
+
+test('Cross-Device Sync: Newer status_updated_at strictly takes precedence over older non-pending status', async () => {
+  // Device B has an older local cache where sponsorship was marked "unaccounted_sponsorship" at 10:00
+  const olderSpon: ReportedSponsorship = {
+    id: 'sp_2026-10-25_johndoe',
+    manifest_key: '2026-10-25_pm',
+    date: '2026-10-25',
+    service: 'PM',
+    passenger_name: 'John Doe',
+    structure: 'S10',
+    stop: 'Main Stop',
+    vehicle_name: 'Taxi 1',
+    rep_name: 'Rep 1',
+    sponsor_note: 'Unaccounted note',
+    status: 'unaccounted_sponsorship',
+    status_updated_at: '2026-10-25T10:00:00.000Z',
+    submitted_at: '2026-10-25T08:00:00.000Z',
+  };
+
+  // Device A settled this sponsorship or marked it "actually_sponsored" at 10:30
+  const newerSpon: ReportedSponsorship = {
+    id: 'sp_2026-10-25_johndoe',
+    manifest_key: '2026-10-25_pm',
+    date: '2026-10-25',
+    service: 'PM',
+    passenger_name: 'John Doe',
+    structure: 'S10',
+    stop: 'Main Stop',
+    vehicle_name: 'Taxi 1',
+    rep_name: 'Rep 1',
+    sponsor_note: 'Settled by Pastor',
+    status: 'actually_sponsored',
+    status_updated_at: '2026-10-25T10:30:00.000Z',
+    submitted_at: '2026-10-25T08:00:00.000Z',
+  };
+
+  // When Device B receives the newer change from server/Supabase and merges:
+  const mergedOrder1 = cleanAndDeduplicateSponsorships([olderSpon, newerSpon]);
+  assert.strictEqual(mergedOrder1.length, 1);
+  assert.strictEqual(mergedOrder1[0].status, 'actually_sponsored', 'Newer actually_sponsored must win over older unaccounted');
+  assert.strictEqual(mergedOrder1[0].sponsor_note, 'Settled by Pastor');
+
+  // Reverse input order must also produce the exact same authoritative result
+  const mergedOrder2 = cleanAndDeduplicateSponsorships([newerSpon, olderSpon]);
+  assert.strictEqual(mergedOrder2.length, 1);
+  assert.strictEqual(mergedOrder2[0].status, 'actually_sponsored', 'Order of arrival must not matter');
+});
+
+test('Cross-Device Sync: Editing structure and name updates status_updated_at and syncs cleanly', async () => {
+  const originalSpon: ReportedSponsorship = {
+    id: 'sp_2026-10-25_sarahconnor',
+    manifest_key: '2026-10-25_pm',
+    date: '2026-10-25',
+    service: 'PM',
+    passenger_name: 'Sarah Connor',
+    structure: 'S01',
+    stop: 'Stop 1',
+    vehicle_name: 'Taxi 2',
+    rep_name: 'Rep 2',
+    sponsor_note: 'Did not pay',
+    status: 'unpaid_sponsorship',
+    status_updated_at: '2026-10-25T09:00:00.000Z',
+    submitted_at: '2026-10-25T08:00:00.000Z',
+  };
+
+  // Device A reclassifies structure to S05 and corrects name spelling at 09:15
+  const updatedSpon: ReportedSponsorship = {
+    ...originalSpon,
+    passenger_name: 'Sarah O. Connor',
+    structure: 'S05',
+    status_updated_at: '2026-10-25T09:15:00.000Z',
+  };
+
+  const deduplicated = cleanAndDeduplicateSponsorships([originalSpon, updatedSpon]);
+  assert.strictEqual(deduplicated.length, 1);
+  assert.strictEqual(deduplicated[0].structure, 'S05');
+  assert.strictEqual(deduplicated[0].passenger_name, 'Sarah O. Connor');
+  assert.strictEqual(deduplicated[0].status, 'unpaid_sponsorship');
+});
+

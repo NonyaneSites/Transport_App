@@ -1656,17 +1656,24 @@ async function syncServerSponsorshipsWithSupabase(): Promise<ServerAuditItem[]> 
         itemsToUpsertToSupabase.push(localItem);
       } else {
         const existing = map.get(id)!;
-        if (existing.status === 'pending' && localItem.status !== 'pending') {
-          existing.status = localItem.status;
-          existing.status_updated_at = localItem.status_updated_at || new Date().toISOString();
-          existing.ledger_entry_id = localItem.ledger_entry_id || existing.ledger_entry_id;
-          itemsToUpsertToSupabase.push(existing);
-        } else if (existing.status !== 'pending' && localItem.status !== 'pending') {
-          const sTime = existing.status_updated_at ? new Date(existing.status_updated_at).getTime() : 0;
-          const lTime = localItem.status_updated_at ? new Date(localItem.status_updated_at).getTime() : 0;
-          if (lTime > sTime) {
+        const sTime = existing.status_updated_at ? new Date(existing.status_updated_at).getTime() : (existing.submitted_at ? new Date(existing.submitted_at).getTime() : 0);
+        const lTime = localItem.status_updated_at ? new Date(localItem.status_updated_at).getTime() : (localItem.submitted_at ? new Date(localItem.submitted_at).getTime() : 0);
+
+        if (lTime > sTime) {
+          const updatedItem: ServerAuditItem = {
+            ...existing,
+            ...localItem,
+            status: localItem.status || existing.status,
+            status_updated_at: localItem.status_updated_at || existing.status_updated_at,
+          };
+          map.set(id, updatedItem);
+          itemsToUpsertToSupabase.push(updatedItem);
+        } else if (sTime > lTime) {
+          // Supabase is newer: map.get(id) already has the authoritative row from Supabase
+        } else {
+          if (existing.status === 'pending' && localItem.status && localItem.status !== 'pending') {
             existing.status = localItem.status;
-            existing.status_updated_at = localItem.status_updated_at;
+            existing.status_updated_at = localItem.status_updated_at || new Date().toISOString();
             existing.ledger_entry_id = localItem.ledger_entry_id || existing.ledger_entry_id;
             itemsToUpsertToSupabase.push(existing);
           }
@@ -2056,31 +2063,55 @@ app.get('/api/ledger/sponsorships', async (req, res) => {
     const cleanedSponsorNote = cleanSponsorshipNote(a.sponsor_note);
 
     if (existingIdx >= 0) {
-      // PRESERVE confirmed status: if either record was indicated (not pending), the indicated status wins!
-      const existingStatus = deduped[existingIdx].status;
-      const resolvedStatus = (existingStatus && existingStatus !== 'pending')
-        ? existingStatus
-        : (a.status && a.status !== 'pending' ? a.status : 'pending');
+      const existing = deduped[existingIdx];
+      const existUpdate = existing.status_updated_at ? new Date(existing.status_updated_at).getTime() : 0;
+      const itemUpdate = a.status_updated_at ? new Date(a.status_updated_at).getTime() : 0;
+      const existSubmit = existing.submitted_at ? new Date(existing.submitted_at).getTime() : 0;
+      const itemSubmit = a.submitted_at ? new Date(a.submitted_at).getTime() : 0;
 
-      const isIncomingNewer = Boolean(
-        a.status_updated_at &&
-        (!deduped[existingIdx].status_updated_at || a.status_updated_at >= deduped[existingIdx].status_updated_at)
-      );
-      const resolvedStructure = isIncomingNewer
-        ? (normalizeStructureCode(a.structure) || deduped[existingIdx].structure || '')
-        : (deduped[existingIdx].structure || normalizeStructureCode(a.structure) || '');
+      const isIncomingNewer = itemUpdate > 0 && existUpdate > 0
+        ? itemUpdate > existUpdate
+        : (itemUpdate > 0 && existUpdate === 0)
+        ? true
+        : (existUpdate > 0 && itemUpdate === 0)
+        ? false
+        : itemSubmit > existSubmit;
+
+      let resolvedStatus = existing.status;
+      let resolvedStatusTime = existing.status_updated_at;
+
+      if (isIncomingNewer) {
+        resolvedStatus = a.status || existing.status || 'pending';
+        resolvedStatusTime = a.status_updated_at || existing.status_updated_at;
+      } else if (itemUpdate === existUpdate) {
+        if (existing.status === 'pending' && a.status && a.status !== 'pending') {
+          resolvedStatus = a.status;
+          resolvedStatusTime = a.status_updated_at || existing.status_updated_at;
+        } else if (a.status && a.status !== 'pending' && existing.status !== 'pending') {
+          resolvedStatus = a.status;
+          resolvedStatusTime = a.status_updated_at || existing.status_updated_at;
+        }
+      }
+
+      const primary = isIncomingNewer ? a : existing;
+      const secondary = isIncomingNewer ? existing : a;
 
       deduped[existingIdx] = {
-        ...deduped[existingIdx],
-        passenger_name: cleanName,
-        structure: resolvedStructure,
-        stop: deduped[existingIdx].stop || a.stop,
-        vehicle_name: deduped[existingIdx].vehicle_name || a.vehicle_name,
-        rep_name: deduped[existingIdx].rep_name || a.rep_name,
-        sponsor_note: cleanSponsorshipNote(deduped[existingIdx].sponsor_note) || cleanedSponsorNote,
+        ...secondary,
+        ...primary,
+        id: existing.id || a.id,
+        passenger_name: cleanName || primary.passenger_name || secondary.passenger_name,
+        structure: (primary.structure && primary.structure !== 'No Structure' && primary.structure !== 'Unidentified')
+          ? primary.structure
+          : (secondary.structure || primary.structure || 'No Structure'),
+        stop: (primary.stop || '').trim() || (secondary.stop || '').trim(),
+        vehicle_name: primary.vehicle_name || secondary.vehicle_name || 'Vehicle',
+        rep_name: primary.rep_name || secondary.rep_name || 'Rep',
+        sponsor_note: cleanSponsorshipNote(primary.sponsor_note) || cleanSponsorshipNote(secondary.sponsor_note) || '',
         status: resolvedStatus,
-        status_updated_at: (existingStatus !== 'pending' ? deduped[existingIdx].status_updated_at : a.status_updated_at) || deduped[existingIdx].status_updated_at || a.status_updated_at,
-        ledger_entry_id: deduped[existingIdx].ledger_entry_id || a.ledger_entry_id,
+        status_updated_at: resolvedStatusTime,
+        ledger_entry_id: primary.ledger_entry_id !== undefined ? primary.ledger_entry_id : secondary.ledger_entry_id,
+        date: baseDate || primary.date || secondary.date,
       };
     } else {
       deduped.push({
@@ -2572,7 +2603,7 @@ app.post('/api/ledger/sponsorships/batch-delete', (req, res) => {
 });
 
 // Batch update reported sponsorships (mass correct structure, date, service, status, notes)
-app.post('/api/ledger/sponsorships/batch-update', (req, res) => {
+app.post('/api/ledger/sponsorships/batch-update', async (req, res) => {
   const { ids, updates } = req.body || {};
   if (!Array.isArray(ids) || ids.length === 0 || !updates) {
     res.status(400).json({ error: 'ids array and updates object are required' });
@@ -2584,6 +2615,7 @@ app.post('/api/ledger/sponsorships/batch-update', (req, res) => {
   let ledgerChanged = false;
   let updatedCount = 0;
   const now = new Date().toISOString();
+  const modifiedSpons: Array<Record<string, unknown>> = [];
 
   for (let i = 0; i < audits.length; i++) {
     const spon = audits[i];
@@ -2598,8 +2630,9 @@ app.post('/api/ledger/sponsorships/batch-update', (req, res) => {
     if (updates.sponsor_note !== undefined) spon.sponsor_note = cleanSponsorshipNote(String(updates.sponsor_note));
     if (updates.status !== undefined) {
       spon.status = updates.status;
-      spon.status_updated_at = now;
     }
+    // Always bump status_updated_at on any change so cross-device deduplication keeps this update
+    spon.status_updated_at = now;
 
     const entryIdx = ledger.findIndex((e) =>
       (spon.ledger_entry_id && e.id === spon.ledger_entry_id) ||
@@ -2627,6 +2660,31 @@ app.post('/api/ledger/sponsorships/batch-update', (req, res) => {
         ledger[entryIdx].general_notes = noteText;
         ledger[entryIdx].sponsored = true;
         ledgerChanged = true;
+
+        if (serverSupabase && isUUID(ledger[entryIdx].id)) {
+          serverSupabase
+            .from('cancellation_ledger')
+            .update(
+              sanitizeCancellationLedgerPayload({
+                passenger_name: spon.passenger_name,
+                structure: spon.structure,
+                date: spon.date,
+                service: spon.service,
+                service_type: spon.service,
+                stop: spon.stop || '',
+                structure_debt: customDebt,
+                fee: customDebt,
+                status: 'Unpaid',
+                sponsored: true,
+                sponsored_by: spon.rep_name || '',
+                sponsor_note: noteText,
+                general_notes: noteText,
+              })
+            )
+            .eq('id', ledger[entryIdx].id)
+            .then(() => {})
+            .catch(() => {});
+        }
       } else {
         const newEntryId = (spon.ledger_entry_id && isUUID(spon.ledger_entry_id)) ? spon.ledger_entry_id : randomUUID();
         spon.ledger_entry_id = newEntryId;
@@ -2650,27 +2708,63 @@ app.post('/api/ledger/sponsorships/batch-update', (req, res) => {
           submitted_at: now,
         });
         ledgerChanged = true;
+
+        if (serverSupabase) {
+          const insertPayload = sanitizeCancellationLedgerPayload({
+            id: isUUID(newEntryId) ? newEntryId : undefined,
+            manifest_key: spon.manifest_key || `manual-${Date.now()}`,
+            date: normalizeDateToYMD(String(spon.date)) || String(spon.date),
+            service: spon.service || 'Service',
+            service_type: spon.service || 'Service',
+            passenger_name: sanitizePassengerDisplayName(String(spon.passenger_name)),
+            stop: spon.stop || '',
+            structure: normalizeStructureCode(String(spon.structure)),
+            vehicle_name: spon.vehicle_name || '—',
+            submitted_by: 'Cancellation Admin',
+            rep_name: spon.rep_name || '',
+            license_plate: '',
+            sponsored: true,
+            sponsored_by: spon.rep_name || '',
+            sponsor_note: noteText,
+            structure_debt: customDebt,
+            fee: customDebt,
+            status: 'Unpaid',
+            general_notes: noteText,
+            submitted_at: now,
+          });
+          serverSupabase.from('cancellation_ledger').insert([insertPayload]).then(() => {}).catch(() => {});
+        }
       }
     } else if (spon.status === 'actually_sponsored' || spon.status === 'pending') {
       if (entryIdx >= 0) {
+        if (serverSupabase && isUUID(ledger[entryIdx].id)) {
+          serverSupabase.from('cancellation_ledger').update({ status: 'Settled', structure_debt: 0 }).eq('id', ledger[entryIdx].id).then(() => {}).catch(() => {});
+        }
         ledger.splice(entryIdx, 1);
         spon.ledger_entry_id = null;
         ledgerChanged = true;
+      } else if (spon.ledger_entry_id && isUUID(spon.ledger_entry_id) && serverSupabase) {
+        serverSupabase.from('cancellation_ledger').update({ status: 'Settled', structure_debt: 0 }).eq('id', spon.ledger_entry_id).then(() => {}).catch(() => {});
+        spon.ledger_entry_id = null;
       }
     } else if (entryIdx >= 0) {
       ledger[entryIdx].structure = spon.structure;
       ledger[entryIdx].date = spon.date;
       ledger[entryIdx].service = spon.service;
       ledgerChanged = true;
+      if (serverSupabase && isUUID(ledger[entryIdx].id)) {
+        serverSupabase.from('cancellation_ledger').update({ structure: spon.structure, date: spon.date, service: spon.service }).eq('id', ledger[entryIdx].id).then(() => {}).catch(() => {});
+      }
     }
 
     audits[i] = spon;
+    modifiedSpons.push(spon);
     updatedCount++;
   }
 
   if (updatedCount > 0) {
     atomicWriteJson(SPONSORSHIPS_FILE, audits);
-    syncSponsorshipUpsertToSupabase(audits).catch(() => {});
+    await syncSponsorshipUpsertToSupabase(modifiedSpons).catch(() => {});
     if (ledgerChanged) {
       atomicWriteJson(LEDGER_FILE, ledger);
       broadcastSse('ledger_updated', { timestamp: Date.now() });
@@ -2682,7 +2776,7 @@ app.post('/api/ledger/sponsorships/batch-update', (req, res) => {
 });
 
 // Record payment for a reported sponsorship
-app.post('/api/ledger/sponsorships/:id/pay', (req, res) => {
+app.post('/api/ledger/sponsorships/:id/pay', async (req, res) => {
   const id = req.params.id;
   const { amount, notes } = req.body || {};
   const payAmt = Number(amount);
@@ -2715,6 +2809,7 @@ app.post('/api/ledger/sponsorships/:id/pay', (req, res) => {
 
   if (payAmt >= totalDebt || entryIdx === -1) {
     // Fully settled / paid
+    const linkedLedgerId = spon.ledger_entry_id;
     spon.status = 'actually_sponsored';
     spon.status_updated_at = now;
     spon.sponsor_note = spon.sponsor_note ? `${spon.sponsor_note} (Settled: ${payNote})` : `Settled: ${payNote}`;
@@ -2724,9 +2819,28 @@ app.post('/api/ledger/sponsorships/:id/pay', (req, res) => {
       ledger.splice(entryIdx, 1);
       ledgerChanged = true;
     }
+
+    if (serverSupabase) {
+      try {
+        if (linkedLedgerId && isUUID(String(linkedLedgerId))) {
+          await serverSupabase
+            .from('cancellation_ledger')
+            .update({ status: 'Settled', structure_debt: 0 })
+            .eq('id', linkedLedgerId);
+        } else if (cleanName && spon.date) {
+          await serverSupabase
+            .from('cancellation_ledger')
+            .update({ status: 'Settled', structure_debt: 0 })
+            .ilike('passenger_name', cleanName)
+            .eq('date', normalizeDateToYMD(String(spon.date)) || String(spon.date));
+        }
+      } catch (sbErr) {
+        console.warn('[Server] Supabase payment settle note:', sbErr);
+      }
+    }
   } else {
     // Partial payment
-    const remainingDebt = totalDebt - payAmt;
+    const remainingDebt = Math.max(0, totalDebt - payAmt);
     spon.sponsor_note = spon.sponsor_note ? `${spon.sponsor_note} (Partially paid R${payAmt}, owing R${remainingDebt})` : `Partially paid R${payAmt}, owing R${remainingDebt}`;
     spon.status_updated_at = now;
 
@@ -2735,11 +2849,30 @@ app.post('/api/ledger/sponsorships/:id/pay', (req, res) => {
       ledger[entryIdx].general_notes = `${ledger[entryIdx].general_notes || ''} (Paid R${payAmt})`;
       ledgerChanged = true;
     }
+
+    if (serverSupabase) {
+      try {
+        if (spon.ledger_entry_id && isUUID(String(spon.ledger_entry_id))) {
+          await serverSupabase
+            .from('cancellation_ledger')
+            .update({ structure_debt: remainingDebt, status: 'Partially Paid' })
+            .eq('id', spon.ledger_entry_id);
+        } else if (cleanName && spon.date) {
+          await serverSupabase
+            .from('cancellation_ledger')
+            .update({ structure_debt: remainingDebt, status: 'Partially Paid' })
+            .ilike('passenger_name', cleanName)
+            .eq('date', normalizeDateToYMD(String(spon.date)) || String(spon.date));
+        }
+      } catch (sbErr) {
+        console.warn('[Server] Supabase partial payment note:', sbErr);
+      }
+    }
   }
 
   audits[sponIndex] = spon;
   atomicWriteJson(SPONSORSHIPS_FILE, audits);
-  syncSponsorshipUpsertToSupabase(spon as ServerAuditItem).catch(() => {});
+  await syncSponsorshipUpsertToSupabase(spon as ServerAuditItem).catch(() => {});
 
   if (ledgerChanged) {
     atomicWriteJson(LEDGER_FILE, ledger);
@@ -2903,8 +3036,9 @@ app.patch('/api/ledger/sponsorships/:id', async (req, res) => {
   if (updates.sponsor_note !== undefined) spon.sponsor_note = cleanSponsorshipNote(String(updates.sponsor_note));
   if (updates.status !== undefined) {
     spon.status = updates.status;
-    spon.status_updated_at = new Date().toISOString();
   }
+  // Always bump status_updated_at so cross-device deduplication keeps this update
+  spon.status_updated_at = new Date().toISOString();
 
   const ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
   let ledgerChanged = false;
@@ -2938,7 +3072,7 @@ app.patch('/api/ledger/sponsorships/:id', async (req, res) => {
       ledgerChanged = true;
 
       if (serverSupabase && isUUID(ledger[entryIdx].id)) {
-        serverSupabase
+        await serverSupabase
           .from('cancellation_ledger')
           .update(
             sanitizeCancellationLedgerPayload({
@@ -2958,7 +3092,6 @@ app.patch('/api/ledger/sponsorships/:id', async (req, res) => {
             })
           )
           .eq('id', ledger[entryIdx].id)
-          .then(() => {})
           .catch(() => {});
       }
     } else {
@@ -3024,30 +3157,38 @@ app.patch('/api/ledger/sponsorships/:id', async (req, res) => {
   } else if (spon.status === 'actually_sponsored' || spon.status === 'pending') {
     if (entryIdx >= 0) {
       if (serverSupabase && isUUID(ledger[entryIdx].id)) {
-        serverSupabase
+        await serverSupabase
           .from('cancellation_ledger')
           .update({ status: 'Settled', structure_debt: 0 })
           .eq('id', ledger[entryIdx].id)
-          .then(() => {})
           .catch(() => {});
       }
       ledger.splice(entryIdx, 1);
       spon.ledger_entry_id = null;
       ledgerChanged = true;
     } else if (spon.ledger_entry_id && isUUID(spon.ledger_entry_id) && serverSupabase) {
-      serverSupabase
+      await serverSupabase
         .from('cancellation_ledger')
         .update({ status: 'Settled', structure_debt: 0 })
         .eq('id', spon.ledger_entry_id)
-        .then(() => {})
         .catch(() => {});
       spon.ledger_entry_id = null;
+    }
+
+    if (serverSupabase && spon.passenger_name) {
+      await serverSupabase
+        .from('cancellation_ledger')
+        .update({ status: 'Settled', structure_debt: 0 })
+        .ilike('passenger_name', sanitizePassengerDisplayName(String(spon.passenger_name)))
+        .eq('date', normalizeDateToYMD(String(spon.date)) || String(spon.date))
+        .eq('sponsored', true)
+        .catch(() => {});
     }
   }
 
   audits[sponIndex] = spon;
   atomicWriteJson(SPONSORSHIPS_FILE, audits);
-  syncSponsorshipUpsertToSupabase(spon as ServerAuditItem).catch(() => {});
+  await syncSponsorshipUpsertToSupabase(spon as ServerAuditItem).catch(() => {});
 
   if (ledgerChanged) {
     atomicWriteJson(LEDGER_FILE, ledger);
@@ -3236,7 +3377,7 @@ app.get('/api/ledger', (req, res) => {
 });
 
 // Settle / Delete Ledger Entries
-app.post('/api/ledger/settle', (req, res) => {
+app.post('/api/ledger/settle', async (req, res) => {
   const { ids } = req.body;
   if (!Array.isArray(ids) || ids.length === 0) {
     res.json({ success: true, count: 0 });
@@ -3263,6 +3404,7 @@ app.post('/api/ledger/settle', (req, res) => {
   // Synchronize with sponsorship audits so settled sponsorships do not resurrect
   const audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
   let auditChanged = false;
+  const changedAudits: Array<Record<string, unknown>> = [];
   for (const item of settledEntries) {
     const cleanName = sanitizePassengerDisplayName(item.passenger_name || '').toLowerCase();
     for (let i = 0; i < audits.length; i++) {
@@ -3274,17 +3416,40 @@ app.post('/api/ledger/settle', (req, res) => {
         audits[i] = {
           ...a,
           status: 'actually_sponsored',
-          status_updated_at: new Date().toISOString(),
+          status_updated_at: settledNow,
           ledger_entry_id: null,
           sponsor_note: a.sponsor_note ? `${a.sponsor_note} (Settled from ledger)` : 'Settled from ledger',
         };
+        changedAudits.push(audits[i]);
         auditChanged = true;
       }
     }
   }
   if (auditChanged) {
     atomicWriteJson(SPONSORSHIPS_FILE, audits);
+    await syncSponsorshipUpsertToSupabase(changedAudits).catch(() => {});
     broadcastSse('sponsorships_updated', { timestamp: Date.now() });
+  }
+
+  // Update Supabase cancellation_ledger if available
+  if (serverSupabase) {
+    try {
+      const isUUID = (str?: string | null) => Boolean(str && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str));
+      const uuids = Array.from(idSet).filter(isUUID);
+      if (uuids.length > 0) {
+        await serverSupabase.from('cancellation_ledger').update({ status: 'Settled', structure_debt: 0, settled_at: settledNow }).in('id', uuids);
+      }
+      for (const item of settledEntries) {
+        const cleanName = sanitizePassengerDisplayName(item.passenger_name || '');
+        if (cleanName && item.manifest_key) {
+          await serverSupabase.from('cancellation_ledger').update({ status: 'Settled', structure_debt: 0, settled_at: settledNow })
+            .ilike('passenger_name', cleanName)
+            .eq('manifest_key', item.manifest_key);
+        }
+      }
+    } catch (sbErr) {
+      console.warn('[Server] Supabase settle sync note:', sbErr);
+    }
   }
 
   broadcastSse('ledger_updated', { timestamp: Date.now() });
@@ -3603,20 +3768,21 @@ app.post('/api/ledger/delete-debtor', async (req, res) => {
 });
 
 // Update specific ledger entry (e.g. partial payment or fee adjustment)
-app.patch('/api/ledger/:id', (req, res) => {
+app.patch('/api/ledger/:id', async (req, res) => {
   const id = req.params.id;
   const updates = req.body || {};
   const ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
   const idx = ledger.findIndex((e) => e.id === id);
   if (idx !== -1) {
     const wasZeroDebt = updates.structure_debt !== undefined && Number(updates.structure_debt) <= 0;
+    const nowIso = new Date().toISOString();
     if (wasZeroDebt) {
       ledger[idx] = {
         ...ledger[idx],
         ...updates,
         status: 'Settled',
         structure_debt: 0,
-        settled_at: new Date().toISOString(),
+        settled_at: nowIso,
         settled_by: 'Cancellation Admin',
       };
     } else {
@@ -3627,20 +3793,35 @@ app.patch('/api/ledger/:id', (req, res) => {
     }
     atomicWriteJson(LEDGER_FILE, ledger);
 
+    // Sync to Supabase cancellation_ledger if available
+    if (serverSupabase && isUUID(id)) {
+      try {
+        if (wasZeroDebt) {
+          await serverSupabase.from('cancellation_ledger').update({ status: 'Settled', structure_debt: 0, settled_at: nowIso }).eq('id', id);
+        } else {
+          await serverSupabase.from('cancellation_ledger').update(sanitizeCancellationLedgerPayload(updates)).eq('id', id);
+        }
+      } catch (sbErr) {
+        console.warn('[Server] Supabase ledger patch note:', sbErr);
+      }
+    }
+
     // Sync sponsorship audit
     const audits = readJsonFile<Array<Record<string, unknown>>>(SPONSORSHIPS_FILE, []);
     const sponIdx = audits.findIndex((a) => String(a.ledger_entry_id) === id);
     if (sponIdx !== -1) {
       if (wasZeroDebt) {
         audits[sponIdx].status = 'actually_sponsored';
-        audits[sponIdx].status_updated_at = new Date().toISOString();
+        audits[sponIdx].status_updated_at = nowIso;
         audits[sponIdx].ledger_entry_id = null;
         audits[sponIdx].sponsor_note = `${audits[sponIdx].sponsor_note || ''} (Paid in full)`.trim();
       } else {
         if (updates.passenger_name) audits[sponIdx].passenger_name = sanitizePassengerDisplayName(String(updates.passenger_name));
         if (updates.structure) audits[sponIdx].structure = normalizeStructureCode(String(updates.structure));
+        audits[sponIdx].status_updated_at = nowIso;
       }
       atomicWriteJson(SPONSORSHIPS_FILE, audits);
+      await syncSponsorshipUpsertToSupabase(audits[sponIdx] as ServerAuditItem).catch(() => {});
       broadcastSse('sponsorships_updated', { timestamp: Date.now() });
     }
 
@@ -3858,7 +4039,7 @@ app.post('/api/ledger/update-debtor', async (req, res) => {
     }
     if (auditChanged) {
       atomicWriteJson(SPONSORSHIPS_FILE, audits);
-      syncSponsorshipUpsertToSupabase(audits).catch(() => {});
+      await syncSponsorshipUpsertToSupabase(audits).catch(() => {});
       broadcastSse('sponsorships_updated', { timestamp: Date.now() });
     }
   }
