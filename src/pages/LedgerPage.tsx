@@ -834,12 +834,23 @@ export function LedgerPage() {
       setEditDebtType('cancellation');
       setEditNotes(row.notes || '');
     }
-    // Initialize editable instances list from row.instances with normalized dates
-    const initialInstances: DebtorInstanceUpdateItem[] = row.instances.map((inst) => ({
+    // Initialize editable instances list safely from row.instances with normalized dates
+    const safeInstances = Array.isArray(row.instances) && row.instances.length > 0
+      ? row.instances
+      : [{
+          id: (Array.isArray(row.entryIds) && row.entryIds[0]) || undefined,
+          date: new Date().toISOString().slice(0, 10),
+          service: 'PM',
+          serviceCode: 'PM',
+          amount: typeof row.amount === 'number' && !isNaN(row.amount) ? row.amount : 40,
+          formatted: '',
+        }];
+
+    const initialInstances: DebtorInstanceUpdateItem[] = safeInstances.map((inst) => ({
       id: inst.id,
-      date: normalizeDateToYMD(inst.date) || inst.date || '',
+      date: normalizeDateToYMD(inst.date) || inst.date || new Date().toISOString().slice(0, 10),
       service: inst.serviceCode || inst.service || 'PM',
-      amount: inst.amount,
+      amount: typeof inst.amount === 'number' && !isNaN(inst.amount) ? inst.amount : 40,
     }));
     setEditInstances(initialInstances);
     setEditError(null);
@@ -975,7 +986,7 @@ export function LedgerPage() {
 
       if (nonZeroInstances.length === 0 || rawDebt === 0) {
         // If all date instances were reduced to zero or removed, remove debtor completely
-        const targetIds = editTarget.entryIds;
+        const targetIds = editTarget.entryIds || [];
         const targetName = editTarget.name;
         const targetNormName = sanitizePassengerDisplayName(targetName).toLowerCase();
         const removedSet = new Set(targetIds);
@@ -983,7 +994,7 @@ export function LedgerPage() {
 
         await deleteEntireDebtor(targetName, targetIds, 'Admin', 'Debt reduced to R0');
       } else {
-        await updateDebtorWithInstances(editTarget.entryIds, {
+        await updateDebtorWithInstances(editTarget.entryIds || [], {
           name: editName.trim(),
           structure: targetStructure,
           isSponsored: isSpon,
@@ -1014,7 +1025,7 @@ export function LedgerPage() {
     setDeletingDebtor(true);
     setEditError(null);
     try {
-      const targetIds = editTarget.entryIds;
+      const targetIds = editTarget.entryIds || [];
       const targetName = editTarget.name;
       const targetNormName = sanitizePassengerDisplayName(targetName).toLowerCase();
       const idSet = new Set(targetIds);

@@ -58,6 +58,25 @@ function sanitizeCancellationLedgerPayload(row: Record<string, unknown>): Record
   return out;
 }
 
+async function syncManifestToSupabase(manifest: { date?: string; signups?: unknown[]; vehicles?: unknown[]; updated_at?: string }): Promise<void> {
+  if (!serverSupabase || !manifest?.date) return;
+  try {
+    const { error } = await serverSupabase
+      .from('transport_manifests')
+      .upsert({
+        date: manifest.date,
+        signups: manifest.signups || [],
+        vehicles: manifest.vehicles || [],
+        updated_at: manifest.updated_at || new Date().toISOString(),
+      }, { onConflict: 'date' });
+    if (error) {
+      console.warn(`[Server] Supabase manifest upsert note for ${manifest.date}:`, error.message);
+    }
+  } catch (err) {
+    console.warn('[Server] Supabase manifest sync error:', err);
+  }
+}
+
 const DATA_DIR = path.join(process.cwd(), 'data');
 const MANIFESTS_DIR = path.join(DATA_DIR, 'manifests');
 const LEDGER_FILE = path.join(DATA_DIR, 'ledger.json');
@@ -481,18 +500,38 @@ app.get('/api/manifests', (req, res) => {
 });
 
 // Get specific manifest
-app.get('/api/manifests/:key', (req, res) => {
+app.get('/api/manifests/:key', async (req, res) => {
   const filePath = getSafeManifestPath(req.params.key);
-  if (!filePath || !fs.existsSync(filePath)) {
-    res.status(404).json({ error: 'Manifest not found', date: req.params.key });
-    return;
+  if (filePath && fs.existsSync(filePath)) {
+    const manifest = readJsonFile(filePath, null);
+    if (manifest) {
+      res.json(manifest);
+      return;
+    }
   }
-  const manifest = readJsonFile(filePath, null);
-  if (!manifest) {
-    res.status(404).json({ error: 'Manifest not found', date: req.params.key });
-    return;
+
+  // Fallback to Supabase if not on disk
+  if (serverSupabase) {
+    try {
+      const { data, error } = await serverSupabase
+        .from('transport_manifests')
+        .select('*')
+        .eq('date', req.params.key)
+        .maybeSingle();
+
+      if (!error && data) {
+        if (filePath) {
+          atomicWriteJson(filePath, data);
+        }
+        res.json(data);
+        return;
+      }
+    } catch (e) {
+      console.warn('[Server] Failed to fetch manifest from Supabase:', e);
+    }
   }
-  res.json(manifest);
+
+  res.status(404).json({ error: 'Manifest not found', date: req.params.key });
 });
 
 // Get Thursday rehearsal stop-time template
@@ -524,14 +563,32 @@ app.post('/api/rehearsal-template', (req, res) => {
 });
 
 // Get specific manifest timestamp only (low mobile data / egress)
-app.get('/api/manifests/:key/timestamp', (req, res) => {
+app.get('/api/manifests/:key/timestamp', async (req, res) => {
   const filePath = getSafeManifestPath(req.params.key);
-  if (!filePath || !fs.existsSync(filePath)) {
-    res.status(404).json({ error: 'Manifest not found', date: req.params.key });
+  if (filePath && fs.existsSync(filePath)) {
+    const manifest = readJsonFile<{ date?: string; updated_at?: string }>(filePath, { date: req.params.key });
+    res.json({ date: req.params.key, updated_at: manifest.updated_at || null });
     return;
   }
-  const manifest = readJsonFile<{ date?: string; updated_at?: string }>(filePath, { date: req.params.key });
-  res.json({ date: req.params.key, updated_at: manifest.updated_at || null });
+
+  if (serverSupabase) {
+    try {
+      const { data, error } = await serverSupabase
+        .from('transport_manifests')
+        .select('date, updated_at')
+        .eq('date', req.params.key)
+        .maybeSingle();
+
+      if (!error && data) {
+        res.json({ date: req.params.key, updated_at: data.updated_at || null });
+        return;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  res.status(404).json({ error: 'Manifest not found', date: req.params.key });
 });
 
 // Save/Upsert specific manifest
@@ -669,6 +726,7 @@ app.post('/api/manifests/:key', (req, res) => {
   };
 
   atomicWriteJson(filePath, toSave);
+  syncManifestToSupabase(toSave).catch(() => {});
   broadcastSse('manifest_updated', { key, manifest: toSave, timestamp: Date.now() });
 
   res.json({ success: true, manifest: toSave });
@@ -847,6 +905,7 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
 
   manifest.updated_at = nowIso;
   atomicWriteJson(filePath, manifest);
+  syncManifestToSupabase(manifest).catch(() => {});
 
   // 3. Atomically record absentees in the cancellation ledger
   let ledger = readJsonFile<Array<{
@@ -1223,6 +1282,7 @@ app.post('/api/manifests/:key/reopen-vehicle', (req, res) => {
 
   manifest.updated_at = nowIso;
   atomicWriteJson(filePath, manifest);
+  syncManifestToSupabase(manifest).catch(() => {});
 
   // Withdraw ledger entries and pending sponsorships for these riders
   if (Array.isArray(allRiderNames) && allRiderNames.length > 0) {
@@ -1322,6 +1382,7 @@ app.post('/api/manifests/:key/draft', (req, res) => {
 
   manifest.updated_at = nowIso;
   atomicWriteJson(filePath, manifest);
+  syncManifestToSupabase(manifest).catch(() => {});
 
   broadcastSse('vehicle_draft_delta', { key, vehicleId, draftState, repName, licensePlate, timestamp: Date.now() });
 

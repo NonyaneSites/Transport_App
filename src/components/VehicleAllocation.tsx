@@ -123,12 +123,8 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
     }
 
     if (!isLocalMutationPendingRef.current && !saveDebounceTimerRef.current) {
-      const curTime = latestManifestRef.current?.updated_at ? new Date(latestManifestRef.current.updated_at).getTime() : 0;
-      const incTime = manifest.updated_at ? new Date(manifest.updated_at).getTime() : 0;
-      if (incTime >= curTime) {
-        latestManifestRef.current = manifest;
-        setLocalManifest(manifest);
-      }
+      latestManifestRef.current = manifest;
+      setLocalManifest(manifest);
     }
   }, [manifest]);
 

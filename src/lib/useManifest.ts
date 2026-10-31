@@ -47,7 +47,8 @@ export function mergeIncomingManifest(
   if (current.updated_at && incoming.updated_at) {
     const curTime = new Date(current.updated_at).getTime();
     const incTime = new Date(incoming.updated_at).getTime();
-    if (incTime < curTime) {
+    // Allow small clock skew (up to 5000ms) between devices so legitimate saves aren't rejected as stale
+    if (curTime - incTime > 5000) {
       return current;
     }
   }
@@ -808,9 +809,9 @@ export function useManifest(
           if (keyRef.current !== key || !msg.payload) return;
           handleIncomingLiveAction(msg.payload as LiveSyncAction);
         })
-        .on('broadcast', { event: 'manifest_updated' }, (msg: { payload?: unknown }) => {
+        .on('broadcast', { event: 'manifest_updated' }, async (msg: { payload?: unknown }) => {
           if (keyRef.current !== key) return;
-          const typedMsg = msg.payload as { manifest?: Partial<Manifest>; updated_at?: string } | undefined;
+          const typedMsg = msg.payload as { manifest?: Partial<Manifest>; updated_at?: string; date?: string } | undefined;
           const incoming = normalizeManifestData(typedMsg?.manifest);
           if (incoming) {
             if (typedMsg?.updated_at) {
@@ -819,6 +820,21 @@ export function useManifest(
             setManifest((prev) => mergeIncomingManifest(prev, incoming, activeVehicleIdRef.current));
             setLastSyncedAt(Date.now());
             setSyncStatus('synced');
+          } else if (typedMsg?.updated_at || typedMsg?.date) {
+            // If the payload was lightweight or omitted manifest, immediately load fresh state
+            try {
+              const fresh = await loadManifest(key);
+              if (fresh && keyRef.current === key) {
+                if (fresh.updated_at) {
+                  lastKnownUpdatedAtRef.current = fresh.updated_at;
+                }
+                setManifest((prev) => mergeIncomingManifest(prev, fresh, activeVehicleIdRef.current));
+                setLastSyncedAt(Date.now());
+                setSyncStatus('synced');
+              }
+            } catch {
+              /* ignore non-blocking */
+            }
           }
         })
         .subscribe((status) => {
@@ -1091,11 +1107,11 @@ export function useManifest(
       }
     }
 
-    // 3. Broadcast across connected devices via Supabase channel (lightweight timestamp payload to minimize data egress)
+    // 3. Broadcast across connected devices via Supabase channel
     safeChannelSend({
       type: 'broadcast',
       event: 'manifest_updated',
-      payload: { date: normalized.date, updated_at: normalized.updated_at },
+      payload: { date: normalized.date, manifest: normalized, updated_at: normalized.updated_at },
     });
 
     // 4. Update local state and timestamp

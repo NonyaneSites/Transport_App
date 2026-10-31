@@ -1587,25 +1587,47 @@ export async function removeLedgerEntries(
     /* ignore mockStorage update error */
   }
 
-  // 2. Transactional RPC attempt
-  try {
-    const { data, error } = await supabase.rpc('remove_cancellation_debts', {
-      p_ids: validIds,
-      p_removed_by: actorName,
-      p_reason: reason,
-    });
-    if (!error && data && data.success) {
-      supabaseCommitted = true;
-      if (typeof data.count === 'number' && data.count > 0) {
-        removedCount = data.count;
+  // 2. Transactional RPC attempt (only with valid UUIDs)
+  const uuidList = validIds.filter(isUUID);
+  const nonUuidList = validIds.filter((id) => !isUUID(id));
+
+  if (uuidList.length > 0) {
+    try {
+      const { data, error } = await supabase.rpc('remove_cancellation_debts', {
+        p_ids: uuidList,
+        p_removed_by: actorName,
+        p_reason: reason,
+      });
+      if (!error && data && data.success) {
+        supabaseCommitted = true;
+        if (typeof data.count === 'number' && data.count > 0) {
+          removedCount = data.count;
+        }
       }
+    } catch (rpcErr) {
+      console.debug('[Ledger] remove RPC note:', rpcErr);
     }
-  } catch (rpcErr) {
-    console.debug('[Ledger] remove RPC note:', rpcErr);
+  }
+
+  // 2b. If any non-UUID items are sponsorships, update sponsorship_audits directly
+  if (nonUuidList.length > 0) {
+    try {
+      await supabase
+        .from(SPONSORSHIPS_TABLE)
+        .update({
+          status: 'actually_sponsored',
+          status_updated_at: nowIso,
+          ledger_entry_id: null,
+          sponsor_note: `Removed by ${actorName}: ${reason}`,
+        })
+        .in('id', nonUuidList);
+    } catch {
+      /* ignore */
+    }
   }
 
   // 3. Direct Supabase update against canonical schema
-  if (!supabaseCommitted) {
+  if (!supabaseCommitted && uuidList.length > 0) {
     try {
       const updatePayload = sanitizeCancellationLedgerPayload({
         status: 'Removed',
@@ -1613,32 +1635,29 @@ export async function removeLedgerEntries(
         notes: reason,
       });
 
-      const uuidList = validIds.filter(isUUID);
-      if (uuidList.length > 0) {
-        const { data, error } = await supabase
-          .from(LEDGER_TABLE)
-          .update(updatePayload)
-          .in('id', uuidList)
-          .select('id, status, structure_debt');
+      const { data, error } = await supabase
+        .from(LEDGER_TABLE)
+        .update(updatePayload)
+        .in('id', uuidList)
+        .select('id, status, structure_debt');
 
-        if (error) {
-          console.warn('[Ledger] Supabase remove note (proceeding with local/server removal):', error.message);
-        } else if (data && data.length > 0) {
-          removedCount = data.length;
-          supabaseCommitted = true;
-        }
+      if (error) {
+        console.warn('[Ledger] Supabase remove note (proceeding with local/server removal):', error.message);
+      } else if (data && data.length > 0) {
+        removedCount = data.length;
+        supabaseCommitted = true;
+      }
 
-        // Also try explicit delete in case table uses delete rather than tombstone
-        try {
-          await supabase.from(LEDGER_TABLE).delete().in('id', uuidList);
-        } catch {
-          /* best-effort delete */
-        }
+      // Also try explicit delete in case table uses delete rather than tombstone
+      try {
+        await supabase.from(LEDGER_TABLE).delete().in('id', uuidList);
+      } catch {
+        /* best-effort delete */
       }
 
       // Best-effort audit log
       try {
-        const auditPayload = validIds.map((id) => ({
+        const auditPayload = uuidList.map((id) => ({
           ledger_id: id,
           action: 'REMOVE',
           previous_status: 'Unpaid',
@@ -2506,48 +2525,10 @@ export async function updateDebtorWithInstances(
     const validDate = inst.date ? inst.date.trim() : '';
     const validService = inst.service ? inst.service.trim() : 'PM';
 
-    if (inst.id && (existingSet.has(inst.id) || isUUID(inst.id))) {
+    let didUpdateExisting = false;
+    if (inst.id && isUUID(inst.id)) {
       updatedIds.add(inst.id);
-      await supabase
-        .from(LEDGER_TABLE)
-        .update(
-          sanitizeCancellationLedgerPayload({
-            date: validDate,
-            service: validService,
-            passenger_name: cleanName,
-            structure: structCode,
-            structure_debt: validAmount,
-            fee: validAmount,
-            sponsored: isSponsored,
-            sponsor_note: isSponsored ? finalSponsorNote : '',
-            general_notes: finalGeneralNotes,
-            submitted_by: 'Cancellation Admin',
-          })
-        )
-        .eq('id', inst.id);
-    } else {
-      // Check if a row with this passenger_name (or any origNames) and date already exists in cancellation_ledger
-      let existingMatchedUuid: string | null = null;
       try {
-        for (const nm of origNames) {
-          const { data: matchedRows } = await supabase
-            .from(LEDGER_TABLE)
-            .select('id')
-            .ilike('passenger_name', nm)
-            .eq('date', validDate)
-            .limit(1);
-
-          if (matchedRows && matchedRows.length > 0 && matchedRows[0].id) {
-            existingMatchedUuid = matchedRows[0].id;
-            break;
-          }
-        }
-      } catch {
-        /* ignore */
-      }
-
-      if (existingMatchedUuid) {
-        updatedIds.add(existingMatchedUuid);
         await supabase
           .from(LEDGER_TABLE)
           .update(
@@ -2564,7 +2545,85 @@ export async function updateDebtorWithInstances(
               submitted_by: 'Cancellation Admin',
             })
           )
-          .eq('id', existingMatchedUuid);
+          .eq('id', inst.id);
+        didUpdateExisting = true;
+      } catch (err) {
+        console.warn('[Ledger] Failed to update entry in Supabase:', err);
+      }
+    } else if (inst.id && existingSet.has(inst.id)) {
+      // Non-UUID id present in existingSet (e.g. mockStorage test or text ID)
+      try {
+        const { data: updateRes } = await supabase
+          .from(LEDGER_TABLE)
+          .update(
+            sanitizeCancellationLedgerPayload({
+              date: validDate,
+              service: validService,
+              passenger_name: cleanName,
+              structure: structCode,
+              structure_debt: validAmount,
+              fee: validAmount,
+              sponsored: isSponsored,
+              sponsor_note: isSponsored ? finalSponsorNote : '',
+              general_notes: finalGeneralNotes,
+              submitted_by: 'Cancellation Admin',
+            })
+          )
+          .eq('id', inst.id)
+          .select('id');
+        if (updateRes && updateRes.length > 0) {
+          updatedIds.add(inst.id);
+          didUpdateExisting = true;
+        }
+      } catch {
+        // Postgres rejected non-UUID syntax on id column
+      }
+    }
+
+    if (!didUpdateExisting) {
+      // Check if a row with this passenger_name (or any origNames) and date already exists in cancellation_ledger
+      let existingMatchedUuid: string | null = null;
+      try {
+        for (const nm of origNames) {
+          const { data: matchedRows } = await supabase
+            .from(LEDGER_TABLE)
+            .select('id')
+            .ilike('passenger_name', nm)
+            .eq('date', validDate)
+            .limit(1);
+
+          if (matchedRows && matchedRows.length > 0 && matchedRows[0].id && (isUUID(matchedRows[0].id) || existingSet.has(matchedRows[0].id))) {
+            existingMatchedUuid = matchedRows[0].id;
+            break;
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+
+      if (existingMatchedUuid) {
+        updatedIds.add(existingMatchedUuid);
+        try {
+          await supabase
+            .from(LEDGER_TABLE)
+            .update(
+              sanitizeCancellationLedgerPayload({
+                date: validDate,
+                service: validService,
+                passenger_name: cleanName,
+                structure: structCode,
+                structure_debt: validAmount,
+                fee: validAmount,
+                sponsored: isSponsored,
+                sponsor_note: isSponsored ? finalSponsorNote : '',
+                general_notes: finalGeneralNotes,
+                submitted_by: 'Cancellation Admin',
+              })
+            )
+            .eq('id', existingMatchedUuid);
+        } catch (err) {
+          console.warn('[Ledger] Failed to update matched UUID row in Supabase:', err);
+        }
       } else {
         const insertPayload = sanitizeCancellationLedgerPayload({
           manifest_key: templateEntry?.manifest_key || `manual-${Date.now()}`,
@@ -2585,25 +2644,34 @@ export async function updateDebtorWithInstances(
           general_notes: finalGeneralNotes,
         });
 
-        const { data: newEntry } = await supabase
-          .from(LEDGER_TABLE)
-          .insert([insertPayload])
-          .select('id')
-          .single();
+        try {
+          const { data: newEntry } = await supabase
+            .from(LEDGER_TABLE)
+            .insert([insertPayload])
+            .select('id')
+            .maybeSingle();
 
-        if (newEntry?.id) {
-          updatedIds.add(newEntry.id);
-          // Link newly generated UUID back into sponsorship_audits so the link is persistent
-          try {
-            await supabase
-              .from(SPONSORSHIPS_TABLE)
-              .update({ ledger_entry_id: newEntry.id })
-              .in('passenger_name', origNames)
-              .eq('date', validDate);
-          } catch {
-            /* ignore */
+          if (newEntry?.id && isUUID(newEntry.id)) {
+            updatedIds.add(newEntry.id);
+            // Link newly generated UUID back into sponsorship_audits so the link is persistent
+            try {
+              await supabase
+                .from(SPONSORSHIPS_TABLE)
+                .update({ ledger_entry_id: newEntry.id })
+                .in('passenger_name', origNames)
+                .eq('date', validDate);
+            } catch {
+              /* ignore */
+            }
           }
+        } catch (insertErr) {
+          console.warn('[Ledger] Failed to insert new ledger entry in Supabase:', insertErr);
         }
+      }
+
+      // If inst.id is a sponsorship ID, also mark updatedIds with inst.id so it isn't removed
+      if (inst.id) {
+        updatedIds.add(inst.id);
       }
     }
   }
@@ -2622,14 +2690,6 @@ export async function updateDebtorWithInstances(
         await supabase
           .from(SPONSORSHIPS_TABLE)
           .update({ status: 'actually_sponsored', ledger_entry_id: null, sponsor_note: 'Settled / Removed during debtor edit' })
-          .in('id', nonUuidToRemove);
-      } catch {
-        /* ignore */
-      }
-      try {
-        await supabase
-          .from(LEDGER_TABLE)
-          .delete()
           .in('id', nonUuidToRemove);
       } catch {
         /* ignore */
