@@ -3355,15 +3355,22 @@ app.get('/api/ledger', async (req, res) => {
     ledger_entry_id?: string | null;
   }>>(SPONSORSHIPS_FILE, []);
 
+  // Index ledger identities once instead of rescanning the entire ledger for
+  // each audit row. This keeps reconciliation linear as history grows.
+  const ledgerIds = new Set(ledger.map((entry) => String(entry.id || '')));
+  const ledgerPersonDateKeys = new Set(ledger.map((entry) => {
+    const name = sanitizePassengerDisplayName(String(entry.passenger_name || '')).toLowerCase();
+    const date = normalizeDateToYMD(String(entry.date || '')) || String(entry.date || '');
+    return `${name}:::${date}`;
+  }));
+
   for (const spon of audits) {
     if (spon.status === 'unaccounted_sponsorship' || spon.status === 'unpaid_sponsorship') {
       const cleanSponName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
       const sponDate = normalizeDateToYMD(spon.date) || spon.date;
-      const hasEntry = ledger.some((e) =>
-        (spon.ledger_entry_id && String(e.id) === String(spon.ledger_entry_id)) ||
-        (sanitizePassengerDisplayName(String(e.passenger_name || '')).toLowerCase() === cleanSponName &&
-         (normalizeDateToYMD(String(e.date || '')) || String(e.date || '')) === sponDate)
-      );
+      const personDateKey = `${cleanSponName}:::${sponDate}`;
+      const hasEntry = (spon.ledger_entry_id && ledgerIds.has(String(spon.ledger_entry_id))) ||
+        ledgerPersonDateKeys.has(personDateKey);
       if (!hasEntry) {
         const newId = (spon.ledger_entry_id && isUUID(spon.ledger_entry_id)) ? spon.ledger_entry_id : null;
         if (!newId) continue;
@@ -3391,6 +3398,8 @@ app.get('/api/ledger', async (req, res) => {
           source: 'reported_sponsorship_audit',
           submitted_at: spon.submitted_at || new Date().toISOString(),
         });
+        ledgerIds.add(String(newId));
+        ledgerPersonDateKeys.add(personDateKey);
         dirty = true;
       }
     }
