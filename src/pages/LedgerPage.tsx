@@ -243,6 +243,7 @@ export function LedgerPage() {
   const [structureFilter, setStructureFilter] = useState('');
   const [serviceFilter, setServiceFilter] = useState('');
   const [openStructures, setOpenStructures] = useState<Set<string>>(new Set());
+  const [showAllLedgerRows, setShowAllLedgerRows] = useState(false);
 
   // Partial Payment Modal State
   const [paymentTarget, setPaymentTarget] = useState<AggregatedLedgerRow | null>(null);
@@ -2038,9 +2039,16 @@ export function LedgerPage() {
             {/* Expand / Collapse All Controls */}
             <div className="mb-3 flex items-center justify-between px-1 text-xs text-muted">
               <span>
-                {groupedByStructure.length} structure{groupedByStructure.length === 1 ? '' : 's'} · {search.trim() ? `${groupedByStructure.length} matching` : `${openStructures.size} open`}
+                {groupedByStructure.length} structure{groupedByStructure.length === 1 ? '' : 's'} · {search.trim() ? `${groupedByStructure.length} matching` : `${openStructures.size} open`}{!showAllLedgerRows && !search.trim() ? ' · showing first 50 rows per section' : ''}
               </span>
               <div className="flex items-center gap-1.5 sm:gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAllLedgerRows((value) => !value)}
+                  className="rounded-md border border-line/60 bg-card px-2.5 py-1 text-xs font-medium text-ink hover:bg-card-2 active:bg-card-2 transition-colors"
+                >
+                  {showAllLedgerRows ? 'Show Fewer Rows' : 'Show All Rows'}
+                </button>
                 <button
                   type="button"
                   onClick={expandAllStructures}
@@ -2064,9 +2072,15 @@ export function LedgerPage() {
                 const isOpen = Boolean(search.trim()) || openStructures.has(structure);
                 const isSpecialStructure = structure === 'No Structure' || structure === 'Unidentified' || structure.toLowerCase().startsWith('ftv');
                 const structureLabel = isSpecialStructure ? structure : `Structure ${structure}`;
+                // Keep expanded structures responsive by rendering a bounded first
+                // page of debtor rows. Searching and the explicit Show All control
+                // still expose every matching/remaining row.
+                const revealAllRows = showAllLedgerRows || Boolean(search.trim());
+                const visibleCancellationRows = revealAllRows ? cancellationRows : cancellationRows.slice(0, 50);
+                const visibleSponsorshipRows = revealAllRows ? sponsorshipRows : sponsorshipRows.slice(0, 50);
 
                 return (
-                  <div key={structure} className="overflow-hidden rounded-xl sm:rounded-2xl border border-line bg-card shadow-sm">
+                  <div key={structure} className="ledger-structure-card overflow-hidden rounded-xl sm:rounded-2xl border border-line bg-card shadow-sm">
                     <button
                       onClick={() => toggleStructure(structure)}
                       className="flex w-full items-center justify-between gap-2 border-b border-line/60 bg-card-2/60 px-3.5 py-3 sm:px-4 sm:py-3.5 text-left transition-colors hover:bg-card-2 active:bg-card-2"
@@ -2102,8 +2116,8 @@ export function LedgerPage() {
 
                             {/* Mobile Card Layout for Cancellations */}
                             <div className="block sm:hidden divide-y divide-line/40">
-                              {cancellationRows.map((row) => (
-                                <div key={`m-${row.key}`} className="p-3 space-y-2.5 transition-colors hover:bg-card-2/20">
+                              {visibleCancellationRows.map((row) => (
+                                <div key={`m-${row.key}`} className="ledger-deferred-row p-3 space-y-2.5 transition-colors hover:bg-card-2/20">
                                   {/* Top row: Name & Amount */}
                                   <div className="flex items-start justify-between gap-2">
                                     <div className="min-w-0 flex-1">
@@ -2199,9 +2213,9 @@ export function LedgerPage() {
                                     <th className="px-3.5 py-2.5 text-right font-display text-xs font-bold uppercase tracking-wider">Actions</th>
                                   </tr>
                                 </thead>
-                                <tbody className="divide-y divide-line/40">
-                                  {cancellationRows.map((row) => (
-                                    <tr key={row.key} className="transition-colors hover:bg-card-2/20">
+                                <tbody className="ledger-table-body divide-y divide-line/40">
+                                  {visibleCancellationRows.map((row) => (
+                                    <tr key={row.key} className="ledger-deferred-row transition-colors hover:bg-card-2/20">
                                       <td className="px-3.5 py-2.5 align-top">
                                         <div className="flex flex-wrap items-center gap-1.5">
                                           {row.name === NAME_MISSING_PLACEHOLDER ? (
@@ -2312,8 +2326,8 @@ export function LedgerPage() {
 
                             {/* Mobile Card Layout for Sponsorships */}
                             <div className="block sm:hidden divide-y divide-amber-500/15">
-                              {sponsorshipRows.map((row) => (
-                                <div key={`m-sp-${row.key}`} className="p-3 space-y-2.5 transition-colors hover:bg-amber-500/10">
+                              {visibleSponsorshipRows.map((row) => (
+                                <div key={`m-sp-${row.key}`} className="ledger-deferred-row p-3 space-y-2.5 transition-colors hover:bg-amber-500/10">
                                   {/* Top row: Name & Amount */}
                                   <div className="flex items-start justify-between gap-2">
                                     <div className="min-w-0 flex-1">
@@ -2418,8 +2432,8 @@ export function LedgerPage() {
                                   </tr>
                                 </thead>
                                 <tbody className="divide-y divide-amber-500/15">
-                                  {sponsorshipRows.map((row) => (
-                                    <tr key={row.key} className="transition-colors hover:bg-amber-500/10">
+                                  {visibleSponsorshipRows.map((row) => (
+                                    <tr key={row.key} className="ledger-deferred-row transition-colors hover:bg-amber-500/10">
                                       <td className="px-3.5 py-2.5 align-top">
                                         <div className="flex flex-wrap items-center gap-1.5">
                                           {row.name === NAME_MISSING_PLACEHOLDER ? (
@@ -2954,7 +2968,7 @@ export function LedgerPage() {
                   return (
                     <div
                       key={groupKey}
-                      className="overflow-hidden rounded-xl sm:rounded-2xl border border-line bg-card shadow-sm"
+                      className="ledger-structure-card overflow-hidden rounded-xl sm:rounded-2xl border border-line bg-card shadow-sm"
                     >
                       {/* Group Accordion Header */}
                       <div
