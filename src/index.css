@@ -66,3 +66,20 @@ body {
     @apply bg-card-2 text-ink font-semibold border border-line-bright;
   }
 }
+
+/* Keep long ledger histories from forcing the browser to lay out every
+   off-screen passenger row at once. Content remains in the DOM and fully
+   interactive when brought into view. */
+.ledger-structure-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 280px;
+}
+.ledger-deferred-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 88px;
+}
+
+.ledger-table-body {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 1200px;
+}
