@@ -1250,12 +1250,11 @@ export async function fetchAllLedgerFromSupabase(): Promise<LedgerEntry[]> {
     }
 
     const data = res.data;
-    if (res.error || !data || data.length === 0) {
-      if (res.error) {
-        console.warn('[Ledger] Supabase query failed:', res.error);
-      }
-      break;
+    if (res.error) {
+      console.warn('[Ledger] Supabase query failed:', res.error);
+      throw res.error;
     }
+    if (!data || data.length === 0) break;
     allRows.push(...(data as unknown as LedgerEntry[]));
     if (data.length < pageSize) {
       break;
@@ -1361,11 +1360,12 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
   ]);
   let supabaseLoaded = false;
 
-  // 1. Authoritative Primary: Supabase with full pagination
+  // 1. Authoritative Primary: Supabase with full pagination. An empty successful
+  // response is still authoritative; never resurrect stale local rows in that case.
   try {
     const supabaseEntries = await fetchAllLedgerFromSupabase();
-    if (Array.isArray(supabaseEntries) && supabaseEntries.length > 0) {
-      supabaseLoaded = true;
+    supabaseLoaded = true;
+    if (Array.isArray(supabaseEntries)) {
       for (const e of supabaseEntries) {
         if (e && e.id) {
           const idStr = String(e.id);
@@ -1434,8 +1434,10 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
     console.debug('[Ledger] Server fetch note:', err);
   }
 
-  // 3. Reconcile any confirmed unaccounted or unpaid sponsorships from local storage audits
-  try {
+  // 3. Reconcile local sponsorship audits only while the remote ledger is
+  // unavailable. Local browser data is a fallback, never an authority over a
+  // successfully loaded Supabase ledger (including a valid empty result).
+  if (!supabaseLoaded) try {
     const localSponRaw = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_SPONSORSHIPS_KEY) : null;
     if (localSponRaw) {
       const audits = JSON.parse(localSponRaw) as ReportedSponsorship[];
@@ -4439,9 +4441,8 @@ export async function fetchAllSponsorshipsFromSupabase(): Promise<ReportedSponso
       .order('submitted_at', { ascending: false })
       .range(from, from + pageSize - 1);
 
-    if (error || !data || data.length === 0) {
-      break;
-    }
+    if (error) throw error;
+    if (!data || data.length === 0) break;
     allRows.push(...(data as ReportedSponsorship[]));
     if (data.length < pageSize) {
       break;
