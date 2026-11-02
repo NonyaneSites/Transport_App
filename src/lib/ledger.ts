@@ -1374,12 +1374,25 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
             continue;
           }
           mergedMap.set(idStr, e);
-          try {
-            mockStorage.upsert(LEDGER_TABLE, e as unknown as Record<string, unknown>);
-          } catch {
-            /* ignore */
-          }
         }
+      }
+      // Persist the refreshed snapshot once. Calling mockStorage.upsert for each
+      // row serializes the entire growing ledger to localStorage every time,
+      // turning a few thousand rows into thousands of large synchronous writes.
+      try {
+        const cachedById = new Map<string, Record<string, unknown>>();
+        for (const cached of mockStorage.getTable(LEDGER_TABLE)) {
+          if (cached?.id) cachedById.set(String(cached.id), cached);
+        }
+        for (const remote of supabaseEntries) {
+          if (!remote?.id) continue;
+          const status = String(remote.status || '').trim();
+          if (status === 'Settled' || status === 'Paid' || status === 'Removed') continue;
+          cachedById.set(String(remote.id), remote as unknown as Record<string, unknown>);
+        }
+        mockStorage.setTable(LEDGER_TABLE, Array.from(cachedById.values()));
+      } catch {
+        /* Local persistence is only a fallback; remote data remains available. */
       }
     }
   } catch (err) {
@@ -1410,9 +1423,11 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
     }
   }
 
-  // 2. Secondary: Central Express Server API (for locally queued DEV entries)
+  // 2. Secondary: Central Express Server API is only a fallback when the
+  // primary Supabase read did not return a ledger. When Supabase is populated,
+  // the server endpoint would download the same complete ledger a second time.
   try {
-    const serverEntries = await listLedgerFromServer();
+    const serverEntries = supabaseLoaded ? [] : await listLedgerFromServer();
     if (Array.isArray(serverEntries) && serverEntries.length > 0) {
       for (const e of serverEntries) {
         if (e && e.id) {
