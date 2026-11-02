@@ -399,8 +399,32 @@ export function LedgerPage() {
             listReportedSponsorships(true),
           ]);
           if (mounted) {
-            setEntries(data);
-            setSponsorships(cleanAndDeduplicateSponsorships(sponData));
+            // Avoid invalidating expensive debtor grouping when a refresh
+            // returns the same records and values.
+            setEntries((previous) => {
+              if (previous.length !== data.length) return data;
+              const unchanged = previous.every((entry, index) => {
+                const next = data[index];
+                return entry.id === next.id && entry.passenger_name === next.passenger_name &&
+                  entry.structure === next.structure && entry.date === next.date &&
+                  entry.service === next.service && entry.structure_debt === next.structure_debt &&
+                  entry.status === next.status && entry.general_notes === next.general_notes &&
+                  entry.sponsor_note === next.sponsor_note && entry.sponsored === next.sponsored;
+              });
+              return unchanged ? previous : data;
+            });
+            const cleanedSponsorships = cleanAndDeduplicateSponsorships(sponData);
+            setSponsorships((previous) => {
+              if (previous.length !== cleanedSponsorships.length) return cleanedSponsorships;
+              const unchanged = previous.every((item, index) => {
+                const next = cleanedSponsorships[index];
+                return item.id === next.id && item.status === next.status &&
+                  item.passenger_name === next.passenger_name && item.structure === next.structure &&
+                  item.date === next.date && item.service === next.service &&
+                  item.sponsor_note === next.sponsor_note && item.ledger_entry_id === next.ledger_entry_id;
+              });
+              return unchanged ? previous : cleanedSponsorships;
+            });
             setError(null);
             setLoading(false);
           }
@@ -519,7 +543,7 @@ export function LedgerPage() {
   const isFiltered = Boolean(search.trim() || structureFilter || serviceFilter);
 
   // All debtor groups across all entries (unfiltered)
-  const allGroups = useMemo(() => aggregateLedgerEntries(entries), [entries]);
+  const allGroups = useMemo(() => activeTab === 'cancellations' ? aggregateLedgerEntries(entries) : [], [entries, activeTab]);
 
   // Total unique debtor rows across all structures
   const totalDebtorsCount = useMemo(() => {
@@ -531,9 +555,10 @@ export function LedgerPage() {
     return allGroups.reduce((sum, g) => sum + g.totalDebt, 0);
   }, [allGroups]);
 
-  const dedupedSponsorships = useMemo(() => {
-    return cleanAndDeduplicateSponsorships(sponsorships);
-  }, [sponsorships]);
+  // Every path that updates sponsorship state already normalizes and
+  // deduplicates it. Re-running the O(n²) cleanup here duplicated that work
+  // on every sponsorship refresh and render.
+  const dedupedSponsorships = sponsorships;
 
   const sponsorshipStats = useMemo(() => {
     const total = dedupedSponsorships.length;
@@ -551,8 +576,9 @@ export function LedgerPage() {
       sponsorship: ReportedSponsorship;
     }> = [];
 
+    const sponsorshipById = new Map(sponsorships.map((s) => [s.id, s]));
     for (const [id, newStatus] of Object.entries(stagedIndications)) {
-      const spon = sponsorships.find((s) => s.id === id);
+      const spon = sponsorshipById.get(id);
       if (spon && spon.status !== newStatus) {
         list.push({
           id,
@@ -601,8 +627,6 @@ export function LedgerPage() {
   }, [dedupedSponsorships]);
 
   const filteredSponsorships = useMemo(() => {
-    // The sponsorship tab is intentionally lazy: don't scan, clone and filter
-    // thousands of audit rows while the user is working in the cancellation ledger.
     if (activeTab !== 'sponsorships') return [];
     let list = dedupedSponsorships.map((s) => ({
       ...s,
@@ -643,8 +667,6 @@ export function LedgerPage() {
     return list;
   }, [activeTab, dedupedSponsorships, structureFilter, sponsorshipDateFilter, sponsorshipFilter, search]);
 
-  // Only build the selected grouping while the sponsorship tab is visible.
-  // Previously both full grouping strategies were calculated on every Ledger render.
   const groupedSponsorshipsByStructure = useMemo(() => {
     if (activeTab !== 'sponsorships' || sponsorshipGroupBy !== 'structure') return [];
     return groupSponsorshipsByStructure(filteredSponsorships, sponsorshipDateOrder);
@@ -655,17 +677,19 @@ export function LedgerPage() {
     return groupSponsorshipsByDate(filteredSponsorships, sponsorshipDateOrder);
   }, [activeTab, sponsorshipGroupBy, filteredSponsorships, sponsorshipDateOrder]);
 
-  const groupedSponsorships = sponsorshipGroupBy === 'date'
-    ? groupedSponsorshipsByDate
-    : groupedSponsorshipsByStructure;
+  const groupedSponsorships = useMemo(() => {
+    return sponsorshipGroupBy === 'date' ? groupedSponsorshipsByDate : groupedSponsorshipsByStructure;
+  }, [sponsorshipGroupBy, groupedSponsorshipsByDate, groupedSponsorshipsByStructure]);
 
   // Shared with the download (see aggregateLedgerEntries in lib/ledger) so
   // the web view and the exported "SZ Cancellation List" never drift apart.
   const groupedByStructure = useMemo(() => {
-    // Avoid the expensive full debtor aggregation while the sponsorship tab is open.
     if (activeTab !== 'cancellations') return [];
-    const groups = aggregateLedgerEntries(filtered);
     const q = search.trim();
+    const hasFilters = Boolean(q || structureFilter || serviceFilter);
+    // Reuse the headline aggregation for the unfiltered view instead of
+    // processing and grouping the complete ledger twice.
+    const groups = hasFilters ? aggregateLedgerEntries(filtered) : allGroups;
     if (!q) return groups;
 
     // When searching, sort the aggregated rows within each structure by search score
@@ -701,7 +725,7 @@ export function LedgerPage() {
         sponsorshipRows: sortRows(g.sponsorshipRows),
       };
     });
-  }, [activeTab, filtered, search]);
+  }, [activeTab, allGroups, filtered, search, structureFilter, serviceFilter]);
 
   // Filtered debtor count and debt
   const filteredDebtorsCount = useMemo(() => {
