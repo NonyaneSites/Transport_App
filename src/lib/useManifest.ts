@@ -569,58 +569,41 @@ export function useManifest(
 
       let saveSucceeded = false;
       let newUpdatedAt: string | null = null;
-
-      // 1. Primary: Execute compare-and-swap save via Supabase RPC
-      try {
-        const expectedUpdatedAt = authoritativeRemote?.updated_at || lastKnownUpdatedAtRef.current || null;
-        const { data: rpcRes, error: rpcErr } = await supabase.rpc('admin_save_manifest_atomic', {
-          p_manifest_key: reconciled.date,
-          p_signups: reconciled.signups,
-          p_vehicles: reconciled.vehicles,
-          p_expected_updated_at: expectedUpdatedAt,
-          p_force: true, // For admin saves, force write so dispatch allocations stick
-        });
-
-        if (!rpcErr && rpcRes && (rpcRes as { success?: boolean }).success) {
-          saveSucceeded = true;
-          newUpdatedAt = (rpcRes as { updated_at?: string }).updated_at || new Date().toISOString();
-        }
-      } catch (err) {
-        console.warn('[useManifest] admin_save_manifest_atomic note:', err);
-      }
-
-      // 2. Fallback: If atomic RPC was not successful (e.g. anonymous dev session or RPC permission denied),
-      // perform direct Supabase upsert so admin changes stick reliably without disappearing!
+      let saveErrorMsg: string | null = null;
       const nowIso = new Date().toISOString();
-      if (!saveSucceeded) {
-        try {
-          const { error: upsertErr } = await supabase
-            .from(MANIFESTS_TABLE)
-            .upsert(
-              {
-                date: reconciled.date,
-                signups: reconciled.signups,
-                vehicles: reconciled.vehicles,
-                updated_at: nowIso,
-              },
-              { onConflict: 'date' }
-            );
 
-          if (!upsertErr) {
-            saveSucceeded = true;
-            newUpdatedAt = nowIso;
-          }
-        } catch (fbErr) {
-          console.warn('[useManifest] Direct table upsert fallback note:', fbErr);
+      // 1. Authoritative primary: Direct Supabase upsert to transport_manifests table
+      try {
+        const { error: upsertErr } = await supabase
+          .from(MANIFESTS_TABLE)
+          .upsert(
+            {
+              date: reconciled.date,
+              signups: reconciled.signups,
+              vehicles: reconciled.vehicles,
+              updated_at: nowIso,
+            },
+            { onConflict: 'date' }
+          );
+
+        if (!upsertErr) {
+          saveSucceeded = true;
+          newUpdatedAt = nowIso;
+        } else {
+          saveErrorMsg = upsertErr.message;
+          console.warn('[useManifest] Supabase manifest upsert error:', upsertErr.message);
         }
+      } catch (fbErr) {
+        saveErrorMsg = fbErr instanceof Error ? fbErr.message : String(fbErr);
+        console.warn('[useManifest] Supabase manifest upsert exception:', fbErr);
       }
 
-      // 3. Always sync individual vehicles to transport_vehicles for granular durability
+      // 2. Always sync individual vehicles to transport_vehicles for granular durability
       syncVehiclesToDb(reconciled.date, reconciled.vehicles).catch((err) => {
         console.warn('[useManifest] Error syncing individual vehicles to db:', err);
       });
 
-      // 4. Persist to local mockStorage immediately so local reloads never lose admin changes
+      // 3. Persist to local mockStorage cache for fast local access
       const finalUpdatedAt = newUpdatedAt || nowIso;
       mockStorage.upsert(MANIFESTS_TABLE, {
         date: reconciled.date,
@@ -629,12 +612,30 @@ export function useManifest(
         updated_at: finalUpdatedAt,
       });
 
-      // 5. Persist to backend server if online with admin flag to broadcast via SSE
+      // 4. Persist to backend server if online with admin flag to broadcast via SSE
       if (isServerOnline()) {
         await saveManifestToServer(reconciled, true, true).catch((err) => {
           console.warn('[useManifest] Error syncing reconciled manifest to backend server:', err);
         });
-        saveSucceeded = true;
+      }
+
+      // 5. Broadcast to other devices via Supabase Realtime and local BroadcastChannel
+      if (saveSucceeded) {
+        try {
+          safeChannelSend({
+            type: 'broadcast',
+            event: 'manifest_updated',
+            payload: { manifest: reconciled, updated_at: finalUpdatedAt, date: reconciled.date },
+          });
+          if (broadcastChannelRef.current) {
+            broadcastChannelRef.current.postMessage({
+              key: reconciled.date,
+              manifest: { ...reconciled, updated_at: finalUpdatedAt },
+            });
+          }
+        } catch {
+          // Non-critical broadcast failure
+        }
       }
 
       lastSavedUpdatedAtRef.current = finalUpdatedAt;
@@ -642,10 +643,16 @@ export function useManifest(
       manifestRef.current = { ...reconciled, updated_at: finalUpdatedAt };
       setManifest({ ...reconciled, updated_at: finalUpdatedAt });
       setLastSyncedAt(Date.now());
-      setSyncStatus('synced');
-      setSyncError(null);
+
+      if (saveSucceeded) {
+        setSyncStatus('synced');
+        setSyncError(null);
+      } else {
+        setSyncStatus('failed');
+        setSyncError(saveErrorMsg || 'Failed to save manifest to central database. Please retry.');
+      }
     } catch (err) {
-      console.warn('[useManifest] Exception during save, falling back locally:', err);
+      console.warn('[useManifest] Exception during save:', err);
       const nowIso = new Date().toISOString();
       mockStorage.upsert(MANIFESTS_TABLE, {
         date: targetManifest.date,
@@ -658,12 +665,12 @@ export function useManifest(
       manifestRef.current = { ...targetManifest, updated_at: nowIso };
       setManifest({ ...targetManifest, updated_at: nowIso });
       const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
-      setSyncStatus(isOffline ? 'offline' : 'synced');
-      setSyncError(null);
+      setSyncStatus(isOffline ? 'offline' : 'failed');
+      setSyncError(err instanceof Error ? err.message : 'Database write error');
     } finally {
       setIsSyncing(false);
     }
-  }, []);
+  }, [safeChannelSend]);
 
   useEffect(() => {
     if (!key) {

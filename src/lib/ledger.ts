@@ -205,20 +205,16 @@ export function sanitizePassengerDisplayName(rawName: string | null | undefined)
   // Strip trailing stop notes like " - DFC Bus Stop"
   name = name.replace(/\s*-\s*(?:dfc|amic|sunnyside|kingsway|bunting|midrand|soweto|barnato|park).*$/i, '').trim();
 
-  // Only clean generated stop slugs if the slug ends with a recognized stop and has 2+ hyphens
-  const stopSlugs = [
-    '-dfc-bus-stop', '-dfc', '-sunnyside', '-amic-deck', '-david-webster',
-    '-barnato', '-midrand', '-braamfontein', '-auckland-park', '-kingsway',
-    '-bunting-road', '-soweto', '-park-station', '-parktown'
-  ];
-  const matchedStop = stopSlugs.find((slug) => name.toLowerCase().endsWith(slug));
-  if (matchedStop && /^[a-z0-9]+(-[a-z0-9]+){2,}$/i.test(name)) {
-    const cleanedSlug = name.slice(0, -matchedStop.length);
-    name = cleanedSlug
-      .split('-')
-      .filter(Boolean)
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
-      .join(' ');
+  // Clean generated stop slugs (e.g. lufuno-pearl-moyo-campus-central--eoh, john-doe-dfc, etc.)
+  // Only trigger on lowercase slug strings with hyphens/underscores (preserves Title Case names like "Lisa-Marie Denga")
+  if (/^[a-z0-9]+(?:[-_]{1,2}[a-z0-9]+)+$/.test(name)) {
+    let s = name;
+    // Strip trailing stop and building slugs
+    s = s.replace(/[-_]{1,2}(?:eoh|campus[-_]central|dfc(?:[-_]bus[-_]stop)?|amic(?:[-_]deck)?|david[-_]webster|barnato|midrand|braamfontein|auckland[-_]park|kingsway|bunting(?:[-_]road)?|soweto|park(?:[-_]station)?|parktown|sunnyside|noswal|apex|yale|wits|uj|res|hall|junction).*/i, '');
+    const parts = s.split(/[-_]+/).filter(Boolean);
+    if (parts.length > 0) {
+      name = parts.map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()).join(' ');
+    }
   }
 
   // Trim extraneous punctuation noise at start/end without stripping internal hyphens or apostrophes
@@ -1363,17 +1359,18 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
     ...Array.from(getLocalRemovedLedgerIds()),
     ...Array.from(getLocalSettledLedgerIds()),
   ]);
+  let supabaseLoaded = false;
 
   // 1. Authoritative Primary: Supabase with full pagination
   try {
     const supabaseEntries = await fetchAllLedgerFromSupabase();
     if (Array.isArray(supabaseEntries) && supabaseEntries.length > 0) {
+      supabaseLoaded = true;
       for (const e of supabaseEntries) {
         if (e && e.id) {
           const idStr = String(e.id);
           const st = (e.status || '').trim();
-          if (st === 'Settled' || st === 'Paid' || st === 'Removed' || settledOrRemovedIds.has(idStr)) {
-            settledOrRemovedIds.add(idStr);
+          if (st === 'Settled' || st === 'Paid' || st === 'Removed') {
             continue;
           }
           mergedMap.set(idStr, e);
@@ -1389,25 +1386,28 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
     console.warn('[Ledger] Supabase fetch error:', err);
   }
 
-  // 1b. Mock storage / Local store (for test environments and offline persistence)
-  try {
-    const mockRows = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
-    for (const e of mockRows) {
-      if (e && e.id) {
-        const idStr = String(e.id);
-        if (settledOrRemovedIds.has(idStr)) continue;
-        const st = (e.status || '').trim();
-        if (st === 'Settled' || st === 'Paid' || st === 'Removed') {
-          settledOrRemovedIds.add(idStr);
-          continue;
+  // 1b. Mock storage / Local store (for test environments and offline persistence when remote unavailable)
+  if (!supabaseLoaded) {
+    try {
+      const settledOrRemovedIds = new Set<string>([
+        ...Array.from(getLocalRemovedLedgerIds()),
+        ...Array.from(getLocalSettledLedgerIds()),
+      ]);
+      const mockRows = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
+      for (const e of mockRows) {
+        if (e && e.id) {
+          const idStr = String(e.id);
+          if (settledOrRemovedIds.has(idStr)) continue;
+          const st = (e.status || '').trim();
+          if (st === 'Settled' || st === 'Paid' || st === 'Removed') {
+            continue;
+          }
+          mergedMap.set(idStr, e);
         }
-        const prev = mergedMap.get(idStr);
-        // Authoritative database entries (prev) override stale offline mock rows (e)
-        mergedMap.set(idStr, prev ? { ...e, ...prev } : e);
       }
+    } catch {
+      /* ignore mockStorage fetch note */
     }
-  } catch {
-    /* ignore mockStorage fetch note */
   }
 
   // 2. Secondary: Central Express Server API (for locally queued DEV entries)
@@ -1564,70 +1564,15 @@ export async function removeLedgerEntries(
   const validIds = (ids || []).map(String).map((s) => s.trim()).filter(Boolean);
   if (validIds.length === 0) return { success: true, count: 0 };
   invalidateLedgerCache();
-  addLocalRemovedLedgerIds(validIds);
 
   const nowIso = new Date().toISOString();
   let removedCount = validIds.length;
-  let supabaseCommitted = false;
 
-  // 1. Update mockStorage immediately so in-memory client state reflects removal
-  try {
-    const localRows = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
-    const idSet = new Set(validIds);
-    for (const r of localRows) {
-      if (idSet.has(String(r.id))) {
-        r.status = 'Removed';
-        r.structure_debt = 0;
-        r.removed_at = nowIso;
-        r.removed_by = actorName;
-        r.removal_reason = reason;
-      }
-    }
-  } catch {
-    /* ignore mockStorage update error */
-  }
-
-  // 2. Transactional RPC attempt (only with valid UUIDs)
   const uuidList = validIds.filter(isUUID);
   const nonUuidList = validIds.filter((id) => !isUUID(id));
 
+  // 1. Direct authoritative Supabase update against canonical cancellation_ledger schema
   if (uuidList.length > 0) {
-    try {
-      const { data, error } = await supabase.rpc('remove_cancellation_debts', {
-        p_ids: uuidList,
-        p_removed_by: actorName,
-        p_reason: reason,
-      });
-      if (!error && data && data.success) {
-        supabaseCommitted = true;
-        if (typeof data.count === 'number' && data.count > 0) {
-          removedCount = data.count;
-        }
-      }
-    } catch (rpcErr) {
-      console.debug('[Ledger] remove RPC note:', rpcErr);
-    }
-  }
-
-  // 2b. If any non-UUID items are sponsorships, update sponsorship_audits directly
-  if (nonUuidList.length > 0) {
-    try {
-      await supabase
-        .from(SPONSORSHIPS_TABLE)
-        .update({
-          status: 'actually_sponsored',
-          status_updated_at: nowIso,
-          ledger_entry_id: null,
-          sponsor_note: `Removed by ${actorName}: ${reason}`,
-        })
-        .in('id', nonUuidList);
-    } catch {
-      /* ignore */
-    }
-  }
-
-  // 3. Direct Supabase update against canonical schema
-  if (!supabaseCommitted && uuidList.length > 0) {
     try {
       const updatePayload = sanitizeCancellationLedgerPayload({
         status: 'Removed',
@@ -1642,17 +1587,11 @@ export async function removeLedgerEntries(
         .select('id, status, structure_debt');
 
       if (error) {
-        console.warn('[Ledger] Supabase remove note (proceeding with local/server removal):', error.message);
-      } else if (data && data.length > 0) {
-        removedCount = data.length;
-        supabaseCommitted = true;
+        console.error('[Ledger] Supabase remove failed:', error.message);
+        throw new Error(`Database error removing records: ${error.message}`);
       }
-
-      // Also try explicit delete in case table uses delete rather than tombstone
-      try {
-        await supabase.from(LEDGER_TABLE).delete().in('id', uuidList);
-      } catch {
-        /* best-effort delete */
+      if (data && data.length > 0) {
+        removedCount = data.length;
       }
 
       // Best-effort audit log
@@ -1673,8 +1612,60 @@ export async function removeLedgerEntries(
         // Best-effort audit table
       }
     } catch (sbErr) {
-      console.warn('[Ledger] Supabase remove exception note:', sbErr);
+      if (sbErr instanceof Error && sbErr.message.startsWith('Database error removing records:')) {
+        throw sbErr;
+      }
+      console.warn('[Ledger] Supabase remove exception:', sbErr);
+      throw sbErr;
     }
+  }
+
+  // 2. If any non-UUID items are sponsorships, update sponsorship_audits directly in Supabase
+  if (nonUuidList.length > 0) {
+    try {
+      const { error: sponErr } = await supabase
+        .from(SPONSORSHIPS_TABLE)
+        .update({
+          status: 'actually_sponsored',
+          status_updated_at: nowIso,
+          ledger_entry_id: null,
+          sponsor_note: `Removed by ${actorName}: ${reason}`,
+        })
+        .in('id', nonUuidList);
+      if (sponErr) {
+        console.warn('[Ledger] Supabase sponsorship removal error:', sponErr.message);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // 3. Update local caches only after remote confirmation
+  addLocalRemovedLedgerIds(validIds);
+  try {
+    const localRows = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
+    const idSet = new Set(validIds);
+    for (const r of localRows) {
+      if (idSet.has(String(r.id))) {
+        r.status = 'Removed';
+        r.structure_debt = 0;
+        r.removed_at = nowIso;
+        r.removed_by = actorName;
+        r.removal_reason = reason;
+      }
+    }
+  } catch {
+    /* ignore mockStorage update error */
+  }
+
+  // 4. Synchronize central server API if available
+  try {
+    await batchDeleteLedgerOnServer(validIds);
+    for (const id of validIds) {
+      await deleteLedgerOnServer(id);
+    }
+  } catch (err) {
+    console.debug('[Ledger] Server delete note:', err);
   }
 
   // 4. Synchronize central server API
@@ -1886,13 +1877,62 @@ export async function settleLedgerEntries(
   const validIds = (ids || []).map(String).map((s) => s.trim()).filter(Boolean);
   if (validIds.length === 0) return { success: true, count: 0 };
   invalidateLedgerCache();
-  addLocalSettledLedgerIds(validIds);
 
   const nowIso = new Date().toISOString();
   let settledCount = validIds.length;
-  let supabaseCommitted = false;
+  const uuidList = validIds.filter(isUUID);
 
-  // 1. Update mockStorage immediately
+  // 1. Direct authoritative Supabase update against canonical schema
+  if (uuidList.length > 0) {
+    try {
+      const updatePayload = sanitizeCancellationLedgerPayload({
+        status: 'Settled',
+        structure_debt: 0,
+        notes,
+      });
+
+      const { data, error } = await supabase
+        .from(LEDGER_TABLE)
+        .update(updatePayload)
+        .in('id', uuidList)
+        .select('id, status, structure_debt');
+
+      if (error) {
+        console.error('[Ledger] Supabase settlement error:', error.message);
+        throw new Error(`Database error settling records: ${error.message}`);
+      }
+      if (data && data.length > 0) {
+        settledCount = data.length;
+      }
+
+      // Record audit entries
+      try {
+        const auditPayload = uuidList.map((id) => ({
+          ledger_id: id,
+          action: 'SETTLE',
+          previous_status: 'Unpaid',
+          new_status: 'Settled',
+          previous_debt: 40,
+          new_debt: 0,
+          actor_name: actorName,
+          notes,
+          created_at: nowIso,
+        }));
+        await supabase.from('cancellation_ledger_audits').insert(auditPayload);
+      } catch {
+        // Best-effort audit
+      }
+    } catch (sbErr) {
+      if (sbErr instanceof Error && sbErr.message.startsWith('Database error settling records:')) {
+        throw sbErr;
+      }
+      console.warn('[Ledger] Supabase settlement exception:', sbErr);
+      throw sbErr;
+    }
+  }
+
+  // 2. Update local caches only after confirmed commit
+  addLocalSettledLedgerIds(validIds);
   try {
     const localRows = (mockStorage.getTable(LEDGER_TABLE) as unknown as LedgerEntry[]) || [];
     const idSet = new Set(validIds);
@@ -1907,70 +1947,6 @@ export async function settleLedgerEntries(
     }
   } catch {
     /* ignore */
-  }
-
-  // 2. Transactional RPC attempt
-  const uuidList = validIds.filter(isUUID);
-  if (uuidList.length > 0) {
-    try {
-      const { data, error } = await supabase.rpc('settle_cancellation_debts', {
-        p_ids: uuidList,
-        p_settled_by: actorName,
-        p_notes: notes,
-      });
-      if (!error && data && data.success) {
-        supabaseCommitted = true;
-        if (typeof data.count === 'number' && data.count > 0) {
-          settledCount = data.count;
-        }
-      }
-    } catch (rpcErr) {
-      console.debug('[Ledger] settle RPC fallback note:', rpcErr);
-    }
-
-    // 3. Direct Supabase update against canonical schema
-    if (!supabaseCommitted) {
-      try {
-        const updatePayload = sanitizeCancellationLedgerPayload({
-          status: 'Settled',
-          structure_debt: 0,
-          notes,
-        });
-
-        const { data, error } = await supabase
-          .from(LEDGER_TABLE)
-          .update(updatePayload)
-          .in('id', uuidList)
-          .select('id, status, structure_debt');
-
-        if (error) {
-          console.warn('[Ledger] Supabase settlement note (proceeding with local/server settle):', error.message);
-        } else if (data && data.length > 0) {
-          settledCount = data.length;
-          supabaseCommitted = true;
-        }
-
-        // Record audit entries
-        try {
-          const auditPayload = uuidList.map((id) => ({
-            ledger_id: id,
-            action: 'SETTLE',
-            previous_status: 'Unpaid',
-            new_status: 'Settled',
-            previous_debt: 40,
-            new_debt: 0,
-            actor_name: actorName,
-            notes,
-            created_at: nowIso,
-          }));
-          await supabase.from('cancellation_ledger_audits').insert(auditPayload);
-        } catch {
-          // Best-effort audit
-        }
-      } catch (sbErr) {
-        console.warn('[Ledger] Supabase settlement exception note:', sbErr);
-      }
-    }
   }
 
   // 4. Synchronize server (if DEV / server available)
@@ -3386,6 +3362,7 @@ export interface AggregatedLedgerInstance {
   amount: number;
   formatted: string; // e.g. "23/08/26(PM)"
   notes: string;
+  duplicateIds?: string[];
 }
 
 export interface AggregatedLedgerRow {
@@ -3531,10 +3508,12 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
       const earliest = sorted[0];
       const latest = sorted[sorted.length - 1];
 
-      // Collect distinct service codes & deduplicate exact duplicate event records
+      // Collect distinct service codes & recognize repeated entries for the same service occurrence
       const serviceCodesSet = new Set<string>();
-      const seenEventKeys = new Set<string>();
-      const instances: AggregatedLedgerInstance[] = [];
+      const occurrenceMap = new Map<string, {
+        instance: AggregatedLedgerInstance;
+        allIds: string[];
+      }>();
 
       for (const e of sorted) {
         const instDebt = parseDebtAmount(e.structure_debt, e.date, e.service, (e as { legs?: string }).legs);
@@ -3542,13 +3521,25 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
 
         const code = serviceCodeForEntry(e);
         const normDate = normalizeDateToYMD(e.date) || e.date || 'undated';
-        const eventSig = `${normDate}::${code}::${instDebt}`;
+        // Unique occurrence identity: date + service session (e.g. 2026-10-25::am)
+        const occKey = `${normDate}::${code.toLowerCase()}`;
 
-        // Deduplicate true duplicate records for the exact same date, session, and amount
-        if (seenEventKeys.has(eventSig)) {
+        if (occurrenceMap.has(occKey)) {
+          // Repeated entry for the same person, date, and service occurrence
+          const existingOcc = occurrenceMap.get(occKey)!;
+          if (e.id && !existingOcc.allIds.includes(e.id)) {
+            existingOcc.allIds.push(e.id);
+          }
+          // If this entry has a higher outstanding balance or more descriptive note, preserve the best details
+          if (instDebt > existingOcc.instance.amount) {
+            existingOcc.instance.amount = instDebt;
+          }
+          if ((e.general_notes || e.sponsor_note) && !existingOcc.instance.notes) {
+            existingOcc.instance.notes = e.general_notes || e.sponsor_note || '';
+          }
           continue;
         }
-        seenEventKeys.add(eventSig);
+
         serviceCodesSet.add(code);
 
         // Format date into dd/mm/yy or 'Undated'
@@ -3560,7 +3551,7 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
           }
         }
 
-        instances.push({
+        const newInst: AggregatedLedgerInstance = {
           id: e.id,
           date: e.date,
           service: e.service,
@@ -3568,11 +3559,26 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
           amount: instDebt,
           formatted: `${dStr}(${code})`,
           notes: e.general_notes || e.sponsor_note || '',
+          duplicateIds: [e.id],
+        };
+
+        occurrenceMap.set(occKey, {
+          instance: newInst,
+          allIds: [e.id],
         });
       }
 
-      // Total debtor amount is the exact sum of all valid active instance debts
+      const instances = Array.from(occurrenceMap.values()).map((o) => {
+        o.instance.duplicateIds = o.allIds;
+        return o.instance;
+      });
+
+      // Total debtor amount is the exact sum of all recognized unique service occurrence debts
       const amount = instances.reduce((sum, inst) => sum + inst.amount, 0);
+
+      const allRowEntryIds = Array.from(
+        new Set(Array.from(occurrenceMap.values()).flatMap((o) => o.allIds))
+      );
 
       const serviceCodes = Array.from(serviceCodesSet);
       const formattedServices = serviceCodes.length > 0 ? `(${serviceCodes.join(', ')})` : '';
@@ -3600,7 +3606,7 @@ export function aggregateLedgerEntries(entries: LedgerEntry[]): AggregatedLedger
         latestDate: earliest.date || latest.date,
         formattedDateList,
         amount,
-        entryIds: instances.map((ins) => ins.id),
+        entryIds: allRowEntryIds,
         instances,
         isSponsorshipOrUnpaid,
         notes: finalRowNotes,
@@ -5131,10 +5137,10 @@ export async function updateReportedSponsorship(
     }
   }
 
-  try {
-    await supabase.from(SPONSORSHIPS_TABLE).upsert([spon], { onConflict: 'id' });
-  } catch (sbErr) {
-    console.warn('[Ledger] Failed to upsert updated sponsorship to Supabase:', sbErr);
+  const { error: sbErr } = await supabase.from(SPONSORSHIPS_TABLE).upsert([spon], { onConflict: 'id' });
+  if (sbErr) {
+    console.error('[Ledger] Failed to upsert updated sponsorship to Supabase:', sbErr.message);
+    throw new Error(`Failed to save updated sponsorship to database: ${sbErr.message}`);
   }
 
   broadcastLocalSyncEvent('sponsorships_updated', currentAudits);
@@ -5231,8 +5237,8 @@ export async function batchUpdateReportedSponsorships(
         ledgerChanged = true;
 
         if (isUUID(existId)) {
-          Promise.resolve(
-            supabase
+          try {
+            await supabase
               .from(LEDGER_TABLE)
               .update({
                 passenger_name: updatedSpon.passenger_name,
@@ -5245,8 +5251,10 @@ export async function batchUpdateReportedSponsorships(
                 general_notes: noteText,
                 sponsored: true,
               })
-              .eq('id', existId)
-          ).catch(() => {});
+              .eq('id', existId);
+          } catch (err) {
+            console.warn('[Ledger] Failed to update linked ledger entry:', err);
+          }
         }
       } else {
         const insertPayload = sanitizeCancellationLedgerPayload({
@@ -5270,15 +5278,19 @@ export async function batchUpdateReportedSponsorships(
           submitted_at: now,
         });
 
-        const { data: newRow } = await supabase
+        const { data: newRow, error: insErr } = await supabase
           .from(LEDGER_TABLE)
           .insert([insertPayload])
           .select('id')
           .single();
 
+        if (insErr) {
+          console.error('[Ledger] Failed to insert debt entry in batch update:', insErr.message);
+        }
+
         const realId = newRow?.id && isUUID(newRow.id)
           ? newRow.id
-          : (updatedSpon.ledger_entry_id && isUUID(updatedSpon.ledger_entry_id) ? updatedSpon.ledger_entry_id : (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : null));
+          : (updatedSpon.ledger_entry_id && isUUID(updatedSpon.ledger_entry_id) ? updatedSpon.ledger_entry_id : null);
         updatedSpon.ledger_entry_id = realId;
 
         const newEntry: LedgerEntry = {
@@ -5295,7 +5307,11 @@ export async function batchUpdateReportedSponsorships(
         updatedSpon.ledger_entry_id = null;
         ledgerChanged = true;
         if (isUUID(delId)) {
-          Promise.resolve(supabase.from(LEDGER_TABLE).delete().eq('id', delId)).catch(() => {});
+          try {
+            await supabase.from(LEDGER_TABLE).delete().eq('id', delId);
+          } catch {
+            /* ignore */
+          }
         }
       }
     }
@@ -5303,10 +5319,10 @@ export async function batchUpdateReportedSponsorships(
 
   // 3. Persist to Supabase
   if (updatedSpons.length > 0) {
-    try {
-      await supabase.from(SPONSORSHIPS_TABLE).upsert(updatedSpons, { onConflict: 'id' });
-    } catch (err) {
-      console.warn('[Ledger] Failed to upsert batch updated sponsorships to Supabase:', err);
+    const { error: batchErr } = await supabase.from(SPONSORSHIPS_TABLE).upsert(updatedSpons, { onConflict: 'id' });
+    if (batchErr) {
+      console.error('[Ledger] Failed to upsert batch updated sponsorships to Supabase:', batchErr.message);
+      throw new Error(`Failed to save batch sponsorships in database: ${batchErr.message}`);
     }
   }
 

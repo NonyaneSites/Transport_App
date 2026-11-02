@@ -1056,9 +1056,11 @@ export const isTestEnvironment = Boolean(
   )
 );
 
-function createResilientSupabaseClient() {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function createResilientSupabaseClient(): SupabaseClient<any, string, any> {
   if (!isConfigured || isTestEnvironment) {
-    return createMockClient() as unknown as ReturnType<typeof createClient>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return createMockClient() as unknown as SupabaseClient<any, string, any>;
   }
 
   const realClient = createClient(supabaseUrl!, supabaseAnonKey!, {
@@ -1066,174 +1068,10 @@ function createResilientSupabaseClient() {
     realtime: { params: { eventsPerSecond: 10 } },
   });
 
-  const mockClient = createMockClient();
-
-  return {
-    ...realClient,
-    auth: realClient.auth,
-    from(tableName: string) {
-      const realBuilder = realClient.from(tableName);
-      if (import.meta?.env?.PROD) {
-        return realBuilder;
-      }
-      const fallbackBuilder = mockClient.from(tableName);
-
-      // Wrap with a proxy that executes on real Supabase, but seamlessly
-      // falls back to mockStorage on network fetch failures (DEV only).
-      const proxy = new Proxy(realBuilder, {
-        get(target, prop, receiver) {
-          const original = Reflect.get(target, prop, receiver);
-
-          if (prop === 'then') {
-            return (
-              onfulfilled?: ((val: unknown) => unknown) | null,
-              onrejected?: ((reason: unknown) => unknown) | null
-            ) => {
-              return (target as unknown as Promise<{ data?: unknown; error?: { message?: string } | null }>)
-                .then((res: { data?: unknown; error?: { message?: string } | null }) => {
-                  if (res?.error && isNetworkFetchError(res.error)) {
-                    console.warn(`[Transport Storage] Remote sync unavailable (${res.error.message}), using local storage.`);
-                    return fallbackBuilder.then(onfulfilled, onrejected);
-                  }
-                  // On successful remote select/read, upsert rows to local storage for offline resilience without wiping others
-                  if (res?.data && Array.isArray(res.data)) {
-                    try {
-                      for (const row of res.data) {
-                        mockStorage.upsert(tableName, row as TableRow);
-                      }
-                    } catch {
-                      // ignore
-                    }
-                  }
-                  return onfulfilled ? onfulfilled(res) : res;
-                })
-                .catch((err: unknown) => {
-                  if (isNetworkFetchError(err)) {
-                    console.warn('[Transport Storage] Remote fetch failed, falling back to local storage.');
-                    return fallbackBuilder.then(onfulfilled, onrejected);
-                  }
-                  if (onrejected) return onrejected(err);
-                  throw err;
-                });
-            };
-          }
-
-          if (prop === 'maybeSingle' || prop === 'single') {
-            return async () => {
-              try {
-                const res = await (target as unknown as Record<string, () => Promise<{ data?: unknown; error?: { message?: string } | null }>>)[prop]?.();
-                if (res?.error && isNetworkFetchError(res.error)) {
-                  return fallbackBuilder[prop as 'maybeSingle' | 'single']();
-                }
-                return res;
-              } catch (err) {
-                if (isNetworkFetchError(err)) {
-                  return fallbackBuilder[prop as 'maybeSingle' | 'single']();
-                }
-                throw err;
-              }
-            };
-          }
-
-          if (typeof original === 'function') {
-            return (...args: unknown[]) => {
-              const result = original.apply(target, args);
-              // If the returned object is another query builder, keep chaining
-              if (result && typeof result === 'object') {
-                if (typeof (fallbackBuilder as unknown as Record<string, unknown>)[prop as string] === 'function') {
-                  ((fallbackBuilder as unknown as Record<string, (...a: unknown[]) => unknown>)[prop as string])(...args);
-                }
-              }
-              return result;
-            };
-          }
-
-          return original;
-        },
-      });
-
-      return proxy;
-    },
-    channel(channelName: string) {
-      try {
-        const realChannel = realClient.channel(channelName);
-        return realChannel;
-      } catch {
-        return mockClient.channel(channelName);
-      }
-    },
-    removeChannel(channel: { unsubscribe?: () => void } | null) {
-      try {
-        realClient.removeChannel(channel as Parameters<typeof realClient.removeChannel>[0]);
-      } catch {
-        mockClient.removeChannel(channel);
-      }
-    },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    rpc(fnName: string, args: Record<string, unknown> = {}): any {
-      if (typeof realClient.rpc === 'function') {
-        return Promise.resolve(realClient.rpc(fnName, args) as unknown)
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          .then((res: any) => {
-            if (res?.error && (isNetworkFetchError(res.error) || isFunctionNotFoundError(res.error, res.status))) {
-              return mockClient.rpc(fnName, args);
-            }
-            if (
-              res?.data &&
-              typeof res.data === 'object' &&
-              (res.data as { success?: boolean; error?: string }).error === 'Manifest session not found'
-            ) {
-              const manifestKey = String(args.p_manifest_key || '');
-              if (manifestKey && mockStorage.getTable(MANIFESTS_TABLE).some((m) => String(m.date) === manifestKey)) {
-                return mockClient.rpc(fnName, args);
-              }
-            }
-            return res;
-          })
-          .catch((err: unknown) => {
-            if (isNetworkFetchError(err) || isFunctionNotFoundError(err)) {
-              return mockClient.rpc(fnName, args);
-            }
-            throw err;
-          });
-      }
-      return mockClient.rpc(fnName, args);
-    },
-  } as unknown as ReturnType<typeof createClient>;
-}
-
-function isNetworkFetchError(err: unknown): boolean {
-  if (!err) return false;
-  const msg = typeof err === 'object' && err !== null && 'message' in err
-    ? String((err as { message: unknown }).message)
-    : String(err);
-  return (
-    msg.includes('Failed to fetch') ||
-    msg.includes('NetworkError') ||
-    msg.includes('network') ||
-    msg.includes('fetch') ||
-    msg.includes('connection refused') ||
-    msg.includes('abort')
-  );
-}
-
-function isFunctionNotFoundError(err: unknown, status?: number): boolean {
-  if (!err && !status) return false;
-  if (status === 404) return true;
-  const code = typeof err === 'object' && err !== null && 'code' in err ? String((err as { code: unknown }).code) : '';
-  const msg = typeof err === 'object' && err !== null && 'message' in err
-    ? String((err as { message: unknown }).message)
-    : String(err);
-  return (
-    code === 'PGRST202' ||
-    code === 'PGRST204' ||
-    code === '42883' ||
-    msg.includes('Could not find the function') ||
-    msg.includes('does not exist') ||
-    msg.includes('not found')
-  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return realClient as unknown as SupabaseClient<any, string, any>;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export const supabase: SupabaseClient<any, string, any> = createResilientSupabaseClient() as unknown as SupabaseClient<any, string, any>;
+export const supabase: SupabaseClient<any, string, any> = createResilientSupabaseClient();
 
