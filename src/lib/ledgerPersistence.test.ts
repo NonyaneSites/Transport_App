@@ -364,3 +364,65 @@ test('Cross-Device Sync: Editing structure and name updates status_updated_at an
   assert.strictEqual(deduplicated[0].status, 'unpaid_sponsorship');
 });
 
+test('Cross-Device Manifest Sync: Clock skew within 30 seconds does not reject incoming remote manifest', async () => {
+  const { mergeIncomingManifest } = await import('./useManifest');
+  const currentManifest: Manifest = {
+    date: '2026-10-25_AM_Serving',
+    signups: [{ id: 'p1', fullName: 'Alice Smith', stop: 'Stop A', assignedTo: 'v1' }],
+    vehicles: [{ id: 'v1', name: 'Taxi 1', type: 'Taxi', riders: ['p1'] }],
+    updated_at: '2026-10-25T10:00:15.000Z',
+  };
+
+  // Device B saved a change from an admin console where device clock is 10 seconds behind
+  const incomingFromDeviceB: Manifest = {
+    date: '2026-10-25_AM_Serving',
+    signups: [
+      { id: 'p1', fullName: 'Alice Smith', stop: 'Stop A', assignedTo: 'v2' },
+      { id: 'p2', fullName: 'Bob Jones', stop: 'Stop B', assignedTo: 'v2' },
+    ],
+    vehicles: [
+      { id: 'v1', name: 'Taxi 1', type: 'Taxi', riders: [] },
+      { id: 'v2', name: 'Taxi 2', type: 'Taxi', riders: ['p1', 'p2'] },
+    ],
+    updated_at: '2026-10-25T10:00:08.000Z',
+  };
+
+  // When activeVehicleId is undefined (Admin view), the incoming fleet allocation must be adopted
+  const merged = mergeIncomingManifest(currentManifest, incomingFromDeviceB, undefined);
+  assert.ok(merged, 'Must return valid manifest');
+  assert.strictEqual(merged.vehicles.length, 2, 'Must adopt the updated vehicle fleet');
+  const v2 = merged.vehicles.find((v) => v.id === 'v2');
+  assert.ok(v2, 'Taxi 2 must exist in merged manifest');
+  assert.strictEqual(v2.riders.length, 2, 'Taxi 2 must have riders p1 and p2');
+});
+
+test('Ledger Persistence: Supabase cancellation ledger records override stale cache entries', async () => {
+  const testId = '44444444-4444-4444-4444-444444444444';
+  const supabaseRow: LedgerEntry = {
+    id: testId,
+    manifest_key: '2026-10-25_PM',
+    date: '2026-10-25',
+    service: 'PM',
+    passenger_name: 'Authoritative Passenger',
+    structure: 'S08',
+    structure_debt: 40,
+    status: 'Unpaid',
+    fee: 40,
+    sponsored: false,
+    submitted_at: '2026-10-25T10:00:00Z',
+  };
+
+  // Seed Supabase table
+  mockStorage.setTable(LEDGER_TABLE, [supabaseRow as unknown as Record<string, unknown>]);
+
+  const entries = await listLedgerEntries(true);
+  const found = entries.find((e) => String(e.id) === testId);
+  assert.ok(found, 'Must find Supabase entry');
+  assert.strictEqual(found.passenger_name, 'Authoritative Passenger');
+  assert.strictEqual(found.structure, 'S08');
+
+  // Clean up
+  mockStorage.setTable(LEDGER_TABLE, []);
+});
+
+

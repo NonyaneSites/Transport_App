@@ -18,6 +18,7 @@ import {
   listReportedSponsorships, verifyBatchSponsorships, groupSponsorshipsByStructure, groupSponsorshipsByDate,
   sanitizePassengerDisplayName, cleanSponsorshipNote, cleanPersonalAbsenteeNote, cleanAndDeduplicateSponsorships,
   deleteReportedSponsorship, batchDeleteReportedSponsorships, recordReportedSponsorshipPayment, updateReportedSponsorship,
+  batchUpdateReportedSponsorships,
   NAME_MISSING_PLACEHOLDER,
   type DebtorInstanceUpdateItem,
   type LedgerEntry, type AggregatedLedgerRow, type HistoricalImportResult,
@@ -365,6 +366,28 @@ export function LedgerPage() {
 
   useEffect(() => {
     let mounted = true;
+
+    // Fast initial render from cache so the ledger UI loads immediately without waiting for roundtrips
+    try {
+      const cachedSpons = typeof localStorage !== 'undefined' ? localStorage.getItem('crc_sponsorship_audits') : null;
+      if (cachedSpons) {
+        const parsed = JSON.parse(cachedSpons);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setSponsorships(cleanAndDeduplicateSponsorships(parsed));
+          setLoading(false);
+        }
+      }
+    } catch {
+      /* ignore cache read */
+    }
+
+    // Safety timeout: Guarantee that loading is NEVER stuck indefinitely on mobile or slow networks
+    const safetyTimer = setTimeout(() => {
+      if (mounted) {
+        setLoading(false);
+      }
+    }, 2000);
+
     (async () => {
       try {
         const [data, sponData] = await Promise.all([
@@ -381,6 +404,8 @@ export function LedgerPage() {
           setError(e instanceof Error ? e.message : String(e));
           setLoading(false);
         }
+      } finally {
+        clearTimeout(safetyTimer);
       }
     })();
 

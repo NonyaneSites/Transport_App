@@ -47,15 +47,19 @@ export function mergeIncomingManifest(
   if (current.updated_at && incoming.updated_at) {
     const curTime = new Date(current.updated_at).getTime();
     const incTime = new Date(incoming.updated_at).getTime();
-    // Allow small clock skew (up to 5000ms) between devices so legitimate saves aren't rejected as stale
-    if (curTime - incTime > 5000) {
+    // Allow small clock skew (up to 30000ms) between devices so legitimate saves aren't rejected as stale
+    if (curTime - incTime > 30000) {
       return current;
     }
   }
 
-  // If no specific vehicle is actively open for editing, incoming is authoritative,
-  // but protect submitted vehicles from being accidentally un-submitted by stale broadcasts
+  // If no specific vehicle is actively open for editing, incoming is authoritative
   if (!activeVehicleId) {
+    const curTime = current?.updated_at ? new Date(current.updated_at).getTime() : 0;
+    const incTime = incoming.updated_at ? new Date(incoming.updated_at).getTime() : 0;
+    if (incTime >= curTime) {
+      return incoming;
+    }
     const currentVehMap = new Map((current?.vehicles || []).map((v) => [String(v.id), v]));
     const safeVehicles = incoming.vehicles.map((incV) => {
       const curV = currentVehMap.get(String(incV.id));
@@ -242,6 +246,7 @@ export function useManifest(
   onLiveAction?: (action: LiveSyncAction) => void
 ): {
   manifest: Manifest | null;
+  setManifest: React.Dispatch<React.SetStateAction<Manifest | null>>;
   loading: boolean;
   error: string | null;
   isSyncing: boolean;
@@ -525,9 +530,42 @@ export function useManifest(
 
       // Reconcile our intended save on top of authoritative remote
       const base = baselineSnapshot ?? manifestRef.current;
-      const reconciled = authoritativeRemote
-        ? reconcileManifestForSave(base, targetManifest, authoritativeRemote)
-        : targetManifest;
+      const isAdminSession = !activeVehicleIdRef.current || (typeof window !== 'undefined' && window.location.pathname.startsWith('/admin'));
+      let reconciled: Manifest;
+
+      if (isAdminSession) {
+        if (!authoritativeRemote) {
+          reconciled = targetManifest;
+        } else {
+          // Admin save is authoritative for vehicles fleet and signups allocations.
+          // Only preserve live rep attendance/check-in flags for vehicles that still exist in targetManifest.
+          const remoteVehMap = new Map((authoritativeRemote.vehicles || []).map((v) => [String(v.id), v]));
+          const safeVehicles = targetManifest.vehicles.map((adminV) => {
+            const remV = remoteVehMap.get(String(adminV.id));
+            if (!remV) return adminV;
+            const isSubmitted = Boolean(adminV.submitted || remV.submitted || adminV.draftState?.submitted || remV.draftState?.submitted);
+            return {
+              ...adminV,
+              submitted: isSubmitted,
+              submittedAt: adminV.submittedAt || remV.submittedAt,
+              submittedBy: adminV.submittedBy || remV.submittedBy,
+              draftState: adminV.draftState || remV.draftState ? {
+                ...(remV.draftState || {}),
+                ...(adminV.draftState || {}),
+                submitted: isSubmitted,
+              } : undefined,
+            };
+          });
+          reconciled = {
+            ...targetManifest,
+            vehicles: safeVehicles,
+          };
+        }
+      } else {
+        reconciled = authoritativeRemote
+          ? reconcileManifestForSave(base, targetManifest, authoritativeRemote)
+          : targetManifest;
+      }
 
       let saveSucceeded = false;
       let newUpdatedAt: string | null = null;

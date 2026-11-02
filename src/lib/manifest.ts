@@ -637,47 +637,53 @@ export async function loadManifest(key: string): Promise<Manifest | null> {
   let manifest: Manifest | null = null;
   let loadedFromRemote = false;
 
-  // 1. Primary: Server disk manifest via API (authoritative source of truth for submissions & allocations)
+  // 1. Primary Cloud Store: Supabase table transport_manifests (canonical cloud database)
   try {
-    const serverManifest = await fetchManifestFromServer(key);
-    if (serverManifest && Array.isArray(serverManifest.vehicles) && serverManifest.vehicles.length > 0) {
-      manifest = serverManifest;
+    const { data, error } = await supabase
+      .from(MANIFESTS_TABLE)
+      .select('date, signups, vehicles, created_at, updated_at')
+      .eq('date', key)
+      .maybeSingle();
+    if (error) {
+      console.warn('[Manifest] Failed to load remote manifest from Supabase:', error);
+    }
+    if (data) {
+      manifest = {
+        date: data.date,
+        signups: Array.isArray(data.signups) ? data.signups : [],
+        vehicles: Array.isArray(data.vehicles)
+          ? data.vehicles.map((v: Vehicle) => ({
+              ...v,
+              riders: Array.isArray(v.riders) ? v.riders : [],
+              orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
+            }))
+          : [],
+        created_at: data.created_at,
+        updated_at: data.updated_at,
+      };
       loadedFromRemote = true;
     }
   } catch (err) {
-    console.warn('[Manifest] Exception fetching server manifest:', err);
+    console.warn('[Manifest] Exception loading manifest from Supabase:', err);
   }
 
-  // 2. Supabase table transport_manifests (if server manifest not found or offline)
-  if (!manifest) {
-    try {
-      const { data, error } = await supabase
-        .from(MANIFESTS_TABLE)
-        .select('date, signups, vehicles, created_at, updated_at')
-        .eq('date', key)
-        .maybeSingle();
-      if (error) {
-        console.warn('[Manifest] Failed to load remote manifest, reading local store:', error);
-      }
-      if (data) {
-        manifest = {
-          date: data.date,
-          signups: Array.isArray(data.signups) ? data.signups : [],
-          vehicles: Array.isArray(data.vehicles)
-            ? data.vehicles.map((v: Vehicle) => ({
-                ...v,
-                riders: Array.isArray(v.riders) ? v.riders : [],
-                orderedStops: Array.isArray(v.orderedStops) ? v.orderedStops : [],
-              }))
-            : [],
-          created_at: data.created_at,
-          updated_at: data.updated_at,
-        };
+  // 2. Server API: fetch server manifest; if server has newer updated_at or Supabase had no row, adopt server
+  try {
+    const serverManifest = await fetchManifestFromServer(key);
+    if (serverManifest && Array.isArray(serverManifest.vehicles) && serverManifest.vehicles.length > 0) {
+      if (!manifest) {
+        manifest = serverManifest;
         loadedFromRemote = true;
+      } else {
+        const sTime = serverManifest.updated_at ? new Date(serverManifest.updated_at).getTime() : 0;
+        const mTime = manifest.updated_at ? new Date(manifest.updated_at).getTime() : 0;
+        if (sTime > mTime) {
+          manifest = serverManifest;
+        }
       }
-    } catch (err) {
-      console.warn('[Manifest] Exception loading manifest, checking local store:', err);
     }
+  } catch (err) {
+    console.warn('[Manifest] Exception fetching server manifest:', err);
   }
 
   // 3. Fallback to local storage if not yet loaded

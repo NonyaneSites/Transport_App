@@ -147,7 +147,19 @@ function readJsonFile<T>(filePath: string, fallback: T): T {
 // SSE clients for live synchronization
 const sseClients = new Set<express.Response>();
 
+let cachedSupabaseLedgerRows: Array<Record<string, unknown>> | null = null;
+let cachedSupabaseLedgerTime = 0;
+const SUPABASE_LEDGER_SYNC_TTL = 30000; // 30 seconds
+
+function invalidateServerSupabaseLedgerCache(): void {
+  cachedSupabaseLedgerRows = null;
+  cachedSupabaseLedgerTime = 0;
+}
+
 function broadcastSse(event: string, data: unknown) {
+  if (event === 'ledger_updated' || event === 'sponsorships_updated') {
+    invalidateServerSupabaseLedgerCache();
+  }
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of sseClients) {
     try {
@@ -502,15 +514,11 @@ app.get('/api/manifests', (req, res) => {
 // Get specific manifest
 app.get('/api/manifests/:key', async (req, res) => {
   const filePath = getSafeManifestPath(req.params.key);
-  if (filePath && fs.existsSync(filePath)) {
-    const manifest = readJsonFile(filePath, null);
-    if (manifest) {
-      res.json(manifest);
-      return;
-    }
-  }
+  const diskManifest = (filePath && fs.existsSync(filePath))
+    ? readJsonFile<Record<string, unknown>>(filePath, null)
+    : null;
 
-  // Fallback to Supabase if not on disk
+  // Supabase transport_manifests is the canonical cloud database shared across all devices
   if (serverSupabase) {
     try {
       const { data, error } = await serverSupabase
@@ -520,15 +528,25 @@ app.get('/api/manifests/:key', async (req, res) => {
         .maybeSingle();
 
       if (!error && data) {
-        if (filePath) {
-          atomicWriteJson(filePath, data);
+        const diskTime = diskManifest?.updated_at ? new Date(String(diskManifest.updated_at)).getTime() : 0;
+        const supaTime = data.updated_at ? new Date(String(data.updated_at)).getTime() : 0;
+
+        if (!diskManifest || supaTime >= diskTime) {
+          if (filePath) {
+            atomicWriteJson(filePath, data);
+          }
+          res.json(data);
+          return;
         }
-        res.json(data);
-        return;
       }
     } catch (e) {
       console.warn('[Server] Failed to fetch manifest from Supabase:', e);
     }
+  }
+
+  if (diskManifest) {
+    res.json(diskManifest);
+    return;
   }
 
   res.status(404).json({ error: 'Manifest not found', date: req.params.key });
@@ -565,11 +583,9 @@ app.post('/api/rehearsal-template', (req, res) => {
 // Get specific manifest timestamp only (low mobile data / egress)
 app.get('/api/manifests/:key/timestamp', async (req, res) => {
   const filePath = getSafeManifestPath(req.params.key);
-  if (filePath && fs.existsSync(filePath)) {
-    const manifest = readJsonFile<{ date?: string; updated_at?: string }>(filePath, { date: req.params.key });
-    res.json({ date: req.params.key, updated_at: manifest.updated_at || null });
-    return;
-  }
+  const diskManifest = (filePath && fs.existsSync(filePath))
+    ? readJsonFile<{ date?: string; updated_at?: string }>(filePath, { date: req.params.key })
+    : null;
 
   if (serverSupabase) {
     try {
@@ -580,12 +596,21 @@ app.get('/api/manifests/:key/timestamp', async (req, res) => {
         .maybeSingle();
 
       if (!error && data) {
-        res.json({ date: req.params.key, updated_at: data.updated_at || null });
-        return;
+        const diskTime = diskManifest?.updated_at ? new Date(String(diskManifest.updated_at)).getTime() : 0;
+        const supaTime = data.updated_at ? new Date(String(data.updated_at)).getTime() : 0;
+        if (!diskManifest || supaTime >= diskTime) {
+          res.json({ date: req.params.key, updated_at: data.updated_at || null });
+          return;
+        }
       }
     } catch {
       /* ignore */
     }
+  }
+
+  if (diskManifest) {
+    res.json({ date: req.params.key, updated_at: diskManifest.updated_at || null });
+    return;
   }
 
   res.status(404).json({ error: 'Manifest not found', date: req.params.key });
@@ -3261,9 +3286,57 @@ app.patch('/api/ledger/sponsorships/:id', async (req, res) => {
 });
 
 // List all ledger entries
-app.get('/api/ledger', (req, res) => {
+app.get('/api/ledger', async (req, res) => {
   let ledger = readJsonFile<Array<Record<string, unknown>>>(LEDGER_FILE, []);
   let dirty = false;
+
+  // 1. Sync canonical cancellation_ledger rows from Supabase if online (with 30s in-memory TTL)
+  if (serverSupabase) {
+    try {
+      const now = Date.now();
+      let allRows: Array<Record<string, unknown>> = [];
+
+      if (cachedSupabaseLedgerRows && (now - cachedSupabaseLedgerTime < SUPABASE_LEDGER_SYNC_TTL)) {
+        allRows = cachedSupabaseLedgerRows;
+      } else {
+        const pageSize = 1000;
+        let from = 0;
+        while (true) {
+          const { data, error } = await serverSupabase
+            .from('cancellation_ledger')
+            .select('*')
+            .range(from, from + pageSize - 1);
+          if (error || !data || data.length === 0) break;
+          allRows.push(...data);
+          if (data.length < pageSize) break;
+          from += pageSize;
+        }
+
+        if (allRows.length > 0) {
+          cachedSupabaseLedgerRows = allRows;
+          cachedSupabaseLedgerTime = now;
+        }
+      }
+
+      if (allRows.length > 0) {
+        const ledgerMap = new Map<string, Record<string, unknown>>();
+        for (const e of ledger) {
+          if (e && e.id) ledgerMap.set(String(e.id), e);
+        }
+        for (const r of allRows) {
+          if (r && r.id) {
+            const idStr = String(r.id);
+            const prev = ledgerMap.get(idStr);
+            ledgerMap.set(idStr, prev ? { ...prev, ...r } : r);
+          }
+        }
+        ledger = Array.from(ledgerMap.values());
+        dirty = true;
+      }
+    } catch (sbErr) {
+      console.warn('[Server] Supabase cancellation_ledger sync note:', sbErr);
+    }
+  }
 
   // Reconcile any confirmed unaccounted sponsorships or unpaid sponsorships from audits
   const audits = readJsonFile<Array<{

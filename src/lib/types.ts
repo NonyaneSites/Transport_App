@@ -143,6 +143,7 @@ export interface VehicleDraftState {
    */
   externalSponsees?: ExternalSponsee[];
   submitted?: boolean;
+  submittedAt?: string;
   recentlyEditedRiders?: Record<string, number>;
   updatedAt?: string;
   updatedBy?: string;

@@ -358,7 +358,7 @@ export function detectSuspiciousLedgerRecords(entries: LedgerEntry[]): Suspiciou
         service: code,
         amount: debt,
         status: e.status || 'Unpaid',
-        flagReason: check.reason,
+        flagReason: check.reason as SuspiciousLedgerRecordItem['flagReason'],
         flagDescription: check.description || 'Suspicious record requires review',
         description: check.description || 'Suspicious record requires review',
         suggestedAction: action,
@@ -1260,7 +1260,7 @@ export async function fetchAllLedgerFromSupabase(): Promise<LedgerEntry[]> {
       }
       break;
     }
-    allRows.push(...(data as LedgerEntry[]));
+    allRows.push(...(data as unknown as LedgerEntry[]));
     if (data.length < pageSize) {
       break;
     }
@@ -1424,9 +1424,9 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
             settledOrRemovedIds.add(idStr);
             continue;
           }
-          // The server entries are authoritative; overlay them so edits to name, structure, debt, date, etc. take precedence
+          // Supabase database entries are authoritative; do NOT let stale server disk entries overwrite fresh Supabase fields!
           const prev = mergedMap.get(idStr);
-          mergedMap.set(idStr, prev ? { ...prev, ...e } : e);
+          mergedMap.set(idStr, prev ? { ...e, ...prev } : e);
         }
       }
     }
@@ -2285,7 +2285,7 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
     .single();
 
   if (error) throw error;
-  return data as LedgerEntry;
+  return data as unknown as LedgerEntry;
 }
 
 export interface DebtorInstanceUpdateItem {
