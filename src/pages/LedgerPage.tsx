@@ -366,8 +366,12 @@ export function LedgerPage() {
 
   useEffect(() => {
     let mounted = true;
+    let refreshInFlight: Promise<void> | null = null;
+    let refreshQueued = false;
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
-    // Fast initial render from cache so the ledger UI loads immediately without waiting for roundtrips
+    // Cached sponsorships are only a fast first paint. A successful remote
+    // refresh below replaces this snapshot with the shared data.
     try {
       const cachedSpons = typeof localStorage !== 'undefined' ? localStorage.getItem('crc_sponsorship_audits') : null;
       if (cachedSpons) {
@@ -378,81 +382,17 @@ export function LedgerPage() {
         }
       }
     } catch {
-      /* ignore cache read */
+      /* ignore invalid browser cache */
     }
 
-    // Safety timeout: Guarantee that loading is NEVER stuck indefinitely on mobile or slow networks
-    const safetyTimer = setTimeout(() => {
-      if (mounted) {
-        setLoading(false);
+    const refresh = async (showError = false) => {
+      if (!mounted) return;
+      if (refreshInFlight) {
+        refreshQueued = true;
+        await refreshInFlight;
+        return;
       }
-    }, 2000);
-
-    (async () => {
-      try {
-        const [data, sponData] = await Promise.all([
-          listLedgerEntries(true),
-          listReportedSponsorships(true),
-        ]);
-        if (mounted) {
-          setEntries(data);
-          setSponsorships(cleanAndDeduplicateSponsorships(sponData));
-          setLoading(false);
-        }
-      } catch (e) {
-        if (mounted) {
-          setError(e instanceof Error ? e.message : String(e));
-          setLoading(false);
-        }
-      } finally {
-        clearTimeout(safetyTimer);
-      }
-    })();
-
-    // 1. SSE and local window event listener
-    const disconnectSSE = connectSyncEvents(
-      undefined,
-      async () => {
-        if (mounted) {
-          invalidateLedgerCache();
-          const refreshed = await listLedgerEntries(true);
-          setEntries(refreshed);
-        }
-      },
-      undefined,
-      async () => {
-        if (mounted) {
-          invalidateSponsorshipsCache();
-          const sponRefreshed = await listReportedSponsorships(true);
-          setSponsorships(cleanAndDeduplicateSponsorships(sponRefreshed));
-        }
-      }
-    );
-
-    // 2. Realtime Postgres changes via Supabase channel
-    const realtimeChannel = supabase
-      .channel('realtime_sponsorship_audits_sync')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sponsorship_audits' }, async () => {
-        if (mounted) {
-          invalidateSponsorshipsCache();
-          const sponRefreshed = await listReportedSponsorships(true);
-          setSponsorships(cleanAndDeduplicateSponsorships(sponRefreshed));
-        }
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'cancellation_ledger' }, async () => {
-        if (mounted) {
-          invalidateLedgerCache();
-          const refreshed = await listLedgerEntries(true);
-          setEntries(refreshed);
-        }
-      })
-      .subscribe();
-
-    // 3. Tab visibility / device focus / pageshow sync (essential for mobile Safari / iPhone background resume)
-    const handleVisibilityOrFocus = async () => {
-      if (typeof document !== 'undefined' && !document.hidden && mounted) {
-        invalidateSponsorshipsCache();
-        invalidateLedgerCache();
+      refreshInFlight = (async () => {
         try {
           const [data, sponData] = await Promise.all([
             listLedgerEntries(true),
@@ -461,51 +401,76 @@ export function LedgerPage() {
           if (mounted) {
             setEntries(data);
             setSponsorships(cleanAndDeduplicateSponsorships(sponData));
+            setError(null);
+            setLoading(false);
           }
-        } catch {
-          /* ignore */
+        } catch (e) {
+          if (mounted && showError) setError(e instanceof Error ? e.message : String(e));
+          if (mounted) setLoading(false);
         }
+      })();
+      await refreshInFlight;
+      refreshInFlight = null;
+      if (refreshQueued && mounted) {
+        refreshQueued = false;
+        await refresh();
       }
     };
 
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', handleVisibilityOrFocus);
-    }
+    // Coalesce bursts of Realtime/SSE events into one refresh. This prevents a
+    // batch insert from triggering many simultaneous full-ledger downloads.
+    const scheduleRefresh = () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        void refresh();
+      }, 350);
+    };
+
+    const safetyTimer = setTimeout(() => {
+      if (mounted) setLoading(false);
+    }, 2000);
+    void refresh(true).finally(() => clearTimeout(safetyTimer));
+
+    const disconnectSSE = connectSyncEvents(
+      undefined,
+      () => { if (mounted) { invalidateLedgerCache(); scheduleRefresh(); } },
+      undefined,
+      () => { if (mounted) { invalidateSponsorshipsCache(); scheduleRefresh(); } }
+    );
+
+    const realtimeChannel = supabase
+      .channel('realtime_sponsorship_audits_sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sponsorship_audits' }, () => {
+        if (mounted) { invalidateSponsorshipsCache(); scheduleRefresh(); }
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'cancellation_ledger' }, () => {
+        if (mounted) { invalidateLedgerCache(); scheduleRefresh(); }
+      })
+      .subscribe();
+
+    // Refresh when returning to the tab/device. Realtime remains the primary
+    // cross-device mechanism; do not poll and redownload the entire ledger.
+    const handleVisibilityOrFocus = () => {
+      if (typeof document !== 'undefined' && !document.hidden && mounted) {
+        invalidateSponsorshipsCache();
+        invalidateLedgerCache();
+        scheduleRefresh();
+      }
+    };
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', handleVisibilityOrFocus);
     window.addEventListener('focus', handleVisibilityOrFocus);
     window.addEventListener('pageshow', handleVisibilityOrFocus);
 
-    // 4. Periodic background sync polling interval (keeps multiple devices 100% in sync without manual reload)
-    const syncInterval = setInterval(async () => {
-      if (typeof document !== 'undefined' && !document.hidden && mounted) {
-        try {
-          const [data, sponData] = await Promise.all([
-            listLedgerEntries(true),
-            listReportedSponsorships(true),
-          ]);
-          if (mounted) {
-            setEntries(data);
-            setSponsorships(cleanAndDeduplicateSponsorships(sponData));
-          }
-        } catch {
-          /* ignore */
-        }
-      }
-    }, 6000);
-
     return () => {
       mounted = false;
-      clearInterval(syncInterval);
+      clearTimeout(safetyTimer);
+      if (refreshTimer) clearTimeout(refreshTimer);
       disconnectSSE();
-      if (typeof document !== 'undefined') {
-        document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
-      }
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
       window.removeEventListener('focus', handleVisibilityOrFocus);
       window.removeEventListener('pageshow', handleVisibilityOrFocus);
-      try {
-        supabase.removeChannel(realtimeChannel);
-      } catch {
-        /* ignore */
-      }
+      try { supabase.removeChannel(realtimeChannel); } catch { /* ignore */ }
     };
   }, []);
 
@@ -636,6 +601,9 @@ export function LedgerPage() {
   }, [dedupedSponsorships]);
 
   const filteredSponsorships = useMemo(() => {
+    // The sponsorship tab is intentionally lazy: don't scan, clone and filter
+    // thousands of audit rows while the user is working in the cancellation ledger.
+    if (activeTab !== 'sponsorships') return [];
     let list = dedupedSponsorships.map((s) => ({
       ...s,
       passenger_name: sanitizePassengerDisplayName(s.passenger_name),
@@ -673,23 +641,29 @@ export function LedgerPage() {
       );
     }
     return list;
-  }, [dedupedSponsorships, structureFilter, sponsorshipDateFilter, sponsorshipFilter, search]);
+  }, [activeTab, dedupedSponsorships, structureFilter, sponsorshipDateFilter, sponsorshipFilter, search]);
 
+  // Only build the selected grouping while the sponsorship tab is visible.
+  // Previously both full grouping strategies were calculated on every Ledger render.
   const groupedSponsorshipsByStructure = useMemo(() => {
+    if (activeTab !== 'sponsorships' || sponsorshipGroupBy !== 'structure') return [];
     return groupSponsorshipsByStructure(filteredSponsorships, sponsorshipDateOrder);
-  }, [filteredSponsorships, sponsorshipDateOrder]);
+  }, [activeTab, sponsorshipGroupBy, filteredSponsorships, sponsorshipDateOrder]);
 
   const groupedSponsorshipsByDate = useMemo(() => {
+    if (activeTab !== 'sponsorships' || sponsorshipGroupBy !== 'date') return [];
     return groupSponsorshipsByDate(filteredSponsorships, sponsorshipDateOrder);
-  }, [filteredSponsorships, sponsorshipDateOrder]);
+  }, [activeTab, sponsorshipGroupBy, filteredSponsorships, sponsorshipDateOrder]);
 
-  const groupedSponsorships = useMemo(() => {
-    return sponsorshipGroupBy === 'date' ? groupedSponsorshipsByDate : groupedSponsorshipsByStructure;
-  }, [sponsorshipGroupBy, groupedSponsorshipsByDate, groupedSponsorshipsByStructure]);
+  const groupedSponsorships = sponsorshipGroupBy === 'date'
+    ? groupedSponsorshipsByDate
+    : groupedSponsorshipsByStructure;
 
   // Shared with the download (see aggregateLedgerEntries in lib/ledger) so
   // the web view and the exported "SZ Cancellation List" never drift apart.
   const groupedByStructure = useMemo(() => {
+    // Avoid the expensive full debtor aggregation while the sponsorship tab is open.
+    if (activeTab !== 'cancellations') return [];
     const groups = aggregateLedgerEntries(filtered);
     const q = search.trim();
     if (!q) return groups;
@@ -727,7 +701,7 @@ export function LedgerPage() {
         sponsorshipRows: sortRows(g.sponsorshipRows),
       };
     });
-  }, [filtered, search]);
+  }, [activeTab, filtered, search]);
 
   // Filtered debtor count and debt
   const filteredDebtorsCount = useMemo(() => {
