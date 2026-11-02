@@ -1250,11 +1250,12 @@ export async function fetchAllLedgerFromSupabase(): Promise<LedgerEntry[]> {
     }
 
     const data = res.data;
-    if (res.error) {
-      console.warn('[Ledger] Supabase query failed:', res.error);
-      throw res.error;
+    if (res.error || !data || data.length === 0) {
+      if (res.error) {
+        console.warn('[Ledger] Supabase query failed:', res.error);
+      }
+      break;
     }
-    if (!data || data.length === 0) break;
     allRows.push(...(data as unknown as LedgerEntry[]));
     if (data.length < pageSize) {
       break;
@@ -1360,12 +1361,11 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
   ]);
   let supabaseLoaded = false;
 
-  // 1. Authoritative Primary: Supabase with full pagination. An empty successful
-  // response is still authoritative; never resurrect stale local rows in that case.
+  // 1. Authoritative Primary: Supabase with full pagination
   try {
     const supabaseEntries = await fetchAllLedgerFromSupabase();
-    supabaseLoaded = true;
-    if (Array.isArray(supabaseEntries)) {
+    if (Array.isArray(supabaseEntries) && supabaseEntries.length > 0) {
+      supabaseLoaded = true;
       for (const e of supabaseEntries) {
         if (e && e.id) {
           const idStr = String(e.id);
@@ -1434,28 +1434,57 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
     console.debug('[Ledger] Server fetch note:', err);
   }
 
-  // 3. Reconcile local sponsorship audits only while the remote ledger is
-  // unavailable. Local browser data is a fallback, never an authority over a
-  // successfully loaded Supabase ledger (including a valid empty result).
-  if (!supabaseLoaded) try {
+  // 3. Reconcile any confirmed unaccounted or unpaid sponsorships from local storage audits
+  try {
     const localSponRaw = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_SPONSORSHIPS_KEY) : null;
     if (localSponRaw) {
       const audits = JSON.parse(localSponRaw) as ReportedSponsorship[];
       if (Array.isArray(audits)) {
+        // Build lookup indexes once. The former implementation rescanned every
+        // ledger entry for every sponsorship audit (O(audits × ledger rows)).
+        const idsByPersonDate = new Map<string, string[]>();
+        const ledgerIds = new Set<string>(mergedMap.keys());
+        const personDateKeys = new Set<string>();
+        const personDateCounts = new Map<string, number>();
+        const personDateById = new Map<string, string>();
+        for (const [id, entry] of mergedMap.entries()) {
+          const name = sanitizePassengerDisplayName(entry.passenger_name).toLowerCase();
+          const date = normalizeDateToYMD(entry.date) || entry.date || '';
+          const key = `${name}:::${date}`;
+          if (name) {
+            personDateKeys.add(key);
+            personDateCounts.set(key, (personDateCounts.get(key) || 0) + 1);
+            personDateById.set(id, key);
+            if (entry.sponsored) {
+              const ids = idsByPersonDate.get(key) || [];
+              ids.push(id);
+              idsByPersonDate.set(key, ids);
+            }
+          }
+        }
+
         for (const spon of audits) {
           if (spon.status === 'actually_sponsored') {
-            if (spon.ledger_entry_id && mergedMap.has(spon.ledger_entry_id)) {
-              mergedMap.delete(spon.ledger_entry_id);
+            if (spon.ledger_entry_id && mergedMap.delete(spon.ledger_entry_id)) {
+              ledgerIds.delete(spon.ledger_entry_id);
+              const exactKey = personDateById.get(spon.ledger_entry_id);
+              personDateById.delete(spon.ledger_entry_id);
+              if (exactKey) {
+                const remaining = (personDateCounts.get(exactKey) || 1) - 1;
+                if (remaining > 0) personDateCounts.set(exactKey, remaining);
+                else { personDateCounts.delete(exactKey); personDateKeys.delete(exactKey); }
+              }
             }
             const cleanName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
             const d = normalizeDateToYMD(spon.date) || spon.date;
-            for (const [id, e] of mergedMap.entries()) {
-              if (
-                e.sponsored &&
-                sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanName &&
-                (normalizeDateToYMD(e.date) || e.date) === d
-              ) {
-                mergedMap.delete(id);
+            const key = `${cleanName}:::${d}`;
+            for (const id of idsByPersonDate.get(key) || []) {
+              if (mergedMap.delete(id)) {
+                ledgerIds.delete(id);
+                personDateById.delete(id);
+                const remaining = (personDateCounts.get(key) || 1) - 1;
+                if (remaining > 0) personDateCounts.set(key, remaining);
+                else { personDateCounts.delete(key); personDateKeys.delete(key); }
               }
             }
           } else if (spon.status === 'unaccounted_sponsorship' || spon.status === 'unpaid_sponsorship') {
@@ -1467,12 +1496,9 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
             }
             const cleanName = sanitizePassengerDisplayName(spon.passenger_name).toLowerCase();
             const d = normalizeDateToYMD(spon.date) || spon.date;
-            const alreadyInMap = Array.from(mergedMap.values()).some((e) =>
-              (spon.ledger_entry_id && String(e.id) === String(spon.ledger_entry_id)) ||
-              String(e.id) === String(entryId) ||
-              (sanitizePassengerDisplayName(e.passenger_name).toLowerCase() === cleanName &&
-               (normalizeDateToYMD(e.date) || e.date) === d)
-            );
+            const personDateKey = `${cleanName}:::${d}`;
+            const alreadyInMap = (spon.ledger_entry_id && ledgerIds.has(String(spon.ledger_entry_id))) ||
+              ledgerIds.has(String(entryId)) || personDateKeys.has(personDateKey);
             if (!alreadyInMap) {
               const rawNote = spon.sponsor_note ? cleanSponsorshipNote(spon.sponsor_note) : '';
               const noteText = spon.status === 'unaccounted_sponsorship'
@@ -1501,6 +1527,10 @@ export async function listLedgerEntries(forceRefresh = false): Promise<LedgerEnt
                   source: 'reported_sponsorship_audit',
                   submitted_at: spon.submitted_at || new Date().toISOString(),
                 });
+                ledgerIds.add(String(entryId));
+                personDateKeys.add(personDateKey);
+                personDateCounts.set(personDateKey, (personDateCounts.get(personDateKey) || 0) + 1);
+                personDateById.set(String(entryId), personDateKey);
               }
             }
           }
@@ -4441,8 +4471,9 @@ export async function fetchAllSponsorshipsFromSupabase(): Promise<ReportedSponso
       .order('submitted_at', { ascending: false })
       .range(from, from + pageSize - 1);
 
-    if (error) throw error;
-    if (!data || data.length === 0) break;
+    if (error || !data || data.length === 0) {
+      break;
+    }
     allRows.push(...(data as ReportedSponsorship[]));
     if (data.length < pageSize) {
       break;
