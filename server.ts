@@ -1238,6 +1238,8 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
     type: 'vehicle_submitted',
     vehicleId: String(vehicleId),
     repName: (repName || '').trim(),
+    licensePlate: (licensePlate || '').trim(),
+    draftState: (draftState as unknown),
     timestamp: Date.now(),
   });
   broadcastSse('ledger_updated', { timestamp: Date.now() });
@@ -1419,6 +1421,15 @@ app.post('/api/sync/live-action', (req, res) => {
   const action = req.body;
   if (action && typeof action === 'object') {
     broadcastSse('live_action', action);
+  }
+  res.json({ success: true });
+});
+
+// Broadcast generic sync events (ledger_updated, sponsorships_updated, manifest_updated)
+app.post('/api/sync/broadcast', (req, res) => {
+  const { type, data } = req.body || {};
+  if (type && typeof type === 'string') {
+    broadcastSse(type, data || { timestamp: Date.now() });
   }
   res.json({ success: true });
 });

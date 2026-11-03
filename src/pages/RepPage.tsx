@@ -199,6 +199,13 @@ export function RepPage() {
   const recentlyToggledUnpaidRef = useRef<Map<string, boolean>>(new Map());
   const refreshRef = useRef<() => Promise<void> | void>();
   const setManifestRef = useRef<React.Dispatch<React.SetStateAction<Manifest | null>>>();
+  const pendingSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastAppliedDraftAtRef = useRef<string | null>(null);
+  const isApplyingDraftRef = useRef(false);
+  const isUserDirtyRef = useRef(false);
+  const lastLocalEditTimeRef = useRef<number>(0);
+  const initializedKeyRef = useRef<string>('');
+  const prevVehicleSubmittedRef = useRef<boolean | undefined>(undefined);
 
   const handleLiveActionReceived = useCallback((action: LiveSyncAction) => {
     if (action.clientId === clientIdRef.current) return;
@@ -206,23 +213,60 @@ export function RepPage() {
     if (action.type === 'vehicle_submitted' || action.type === 'vehicle_reopened') {
       const isSub = action.type === 'vehicle_submitted';
       const subTime = action.timestamp ? new Date(action.timestamp).toISOString() : new Date().toISOString();
+
+      // If the action is for the vehicle this device is viewing/repping
+      if (String(action.vehicleId) === String(selectedVehicleId)) {
+        if (pendingSyncTimerRef.current) {
+          clearTimeout(pendingSyncTimerRef.current);
+          pendingSyncTimerRef.current = null;
+        }
+        isUserDirtyRef.current = false;
+
+        if (action.draftState) {
+          const ds = action.draftState;
+          if (Array.isArray(ds.presentIds)) setPresentIds(new Set(ds.presentIds.map(String)));
+          if (Array.isArray(ds.absentIds)) setAbsentIds(new Set(ds.absentIds.map(String)));
+          if (Array.isArray(ds.sponsoredIds)) setSponsoredIds(new Set(ds.sponsoredIds.map(String)));
+          if (Array.isArray(ds.unpaidIds)) setUnpaidIds(new Set(ds.unpaidIds.map(String)));
+          if (Array.isArray(ds.absentPaidIds)) setAbsentPaidIds(new Set(ds.absentPaidIds.map(String)));
+          if (ds.notes) setNotes(ds.notes);
+          if (ds.repName) setRepName(ds.repName);
+          if (ds.licensePlate) setLicensePlate(ds.licensePlate);
+          if (ds.generalNotes) setGeneralNotes(ds.generalNotes);
+          if (Array.isArray(ds.coReps)) setCoReps(ds.coReps);
+        } else {
+          if (action.repName) setRepName(action.repName);
+          if (action.licensePlate) setLicensePlate(action.licensePlate);
+        }
+
+        if (isSub) {
+          const submitter = action.repName?.trim() || 'A co-rep';
+          setSubmitMsg(`Attendance submitted by ${submitter}! Vehicle is locked and synced.`);
+        }
+      }
+
       setManifestRef.current?.((prev) => {
         if (!prev) return prev;
         const updatedVehicles = prev.vehicles.map((v) => {
           if (String(v.id) === String(action.vehicleId)) {
+            const nextDraft = action.draftState || (v.draftState
+              ? {
+                  ...v.draftState,
+                  submitted: isSub,
+                  submittedAt: isSub ? subTime : undefined,
+                  repName: isSub ? (action.repName?.trim() || v.draftState.repName) : v.draftState.repName,
+                  licensePlate: action.licensePlate?.trim() || v.draftState.licensePlate,
+                }
+              : undefined);
+
             return {
               ...v,
               submitted: isSub,
               submittedAt: isSub ? subTime : undefined,
               submittedBy: isSub ? (action.repName?.trim() || v.submittedBy || 'rep') : undefined,
-              draftState: v.draftState
-                ? {
-                    ...v.draftState,
-                    submitted: isSub,
-                    submittedAt: isSub ? subTime : undefined,
-                    repName: isSub ? (action.repName?.trim() || v.draftState.repName) : v.draftState.repName,
-                  }
-                : undefined,
+              repName: action.repName?.trim() || v.repName,
+              licensePlate: action.licensePlate?.trim() || v.licensePlate,
+              draftState: nextDraft,
             };
           }
           return v;
@@ -234,7 +278,32 @@ export function RepPage() {
     }
 
     if (action.vehicleId === selectedVehicleId) {
-      if (action.type === 'rider_attendance') {
+      if (action.type === 'batch_attendance') {
+        const { riderIds, status } = action;
+        if (status === 'present') {
+          setPresentIds((prev) => {
+            const next = new Set(prev);
+            riderIds.forEach((id) => next.add(String(id)));
+            return next;
+          });
+          setAbsentIds((prev) => {
+            const next = new Set(prev);
+            riderIds.forEach((id) => next.delete(String(id)));
+            return next;
+          });
+        } else if (status === 'absent') {
+          setAbsentIds((prev) => {
+            const next = new Set(prev);
+            riderIds.forEach((id) => next.add(String(id)));
+            return next;
+          });
+          setPresentIds((prev) => {
+            const next = new Set(prev);
+            riderIds.forEach((id) => next.delete(String(id)));
+            return next;
+          });
+        }
+      } else if (action.type === 'rider_attendance') {
         const { riderId, status } = action;
         const now = Date.now();
         const lastEdit = recentlyEditedRidersRef.current.get(riderId) ?? 0;
@@ -360,13 +429,6 @@ export function RepPage() {
 
   // Sync locks & conflict prevention
   const [draftRestored, setDraftRestored] = useState(false);
-  const pendingSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastAppliedDraftAtRef = useRef<string | null>(null);
-  const isApplyingDraftRef = useRef(false);
-  const isUserDirtyRef = useRef(false);
-  const lastLocalEditTimeRef = useRef<number>(0);
-  const initializedKeyRef = useRef<string>('');
-  const prevVehicleSubmittedRef = useRef<boolean | undefined>(undefined);
 
   // Periodic presence heartbeat: keeps co-reps aware of each other (slow 60s interval, pauses when hidden)
   useEffect(() => {
@@ -2143,10 +2205,22 @@ export function RepPage() {
       return next;
     });
 
+    if (selectedVehicleId) {
+      broadcastLiveAction({
+        type: 'batch_attendance',
+        vehicleId: selectedVehicleId,
+        riderIds: untickedRiderIds,
+        status: 'absent',
+        repName: repName.trim() || undefined,
+        clientId: clientIdRef.current,
+        timestamp: now,
+      });
+    }
+
     setBatchActionMsg(`Marked ${untickedRiderIds.length} unticked passenger(s) as Absent.`);
     const t = setTimeout(() => setBatchActionMsg(null), 3500);
     return () => clearTimeout(t);
-  }, [riders, presentIds, absentIds]);
+  }, [riders, presentIds, absentIds, selectedVehicleId, repName, broadcastLiveAction]);
 
   // Attendance Check: Mark all unticked riders as Present
   const handleMarkUntickedAsPresent = useCallback(() => {
@@ -2169,10 +2243,22 @@ export function RepPage() {
       return next;
     });
 
+    if (selectedVehicleId) {
+      broadcastLiveAction({
+        type: 'batch_attendance',
+        vehicleId: selectedVehicleId,
+        riderIds: untickedRiderIds,
+        status: 'present',
+        repName: repName.trim() || undefined,
+        clientId: clientIdRef.current,
+        timestamp: now,
+      });
+    }
+
     setBatchActionMsg(`Marked ${untickedRiderIds.length} unticked passenger(s) as Present.`);
     const t = setTimeout(() => setBatchActionMsg(null), 3500);
     return () => clearTimeout(t);
-  }, [riders, presentIds, absentIds]);
+  }, [riders, presentIds, absentIds, selectedVehicleId, repName, broadcastLiveAction]);
 
   const addCoRep = () => {
     isUserDirtyRef.current = true;
@@ -2733,6 +2819,7 @@ export function RepPage() {
         }
       });
 
+      const nowIso = new Date().toISOString();
       const finalizedDraft: VehicleDraftState = {
         presentIds: Array.from(presentIds),
         absentIds: Array.from(new Set([...absentIds, ...absentees.map((a) => a.id)])),
@@ -2748,7 +2835,10 @@ export function RepPage() {
         settledLedgerIds: Array.from(collectedCancellationIds),
         manualCancellations,
         externalSponsees,
-        updatedAt: new Date().toISOString(),
+        submitted: true,
+        submittedAt: nowIso,
+        submittedBy: repName.trim(),
+        updatedAt: nowIso,
         updatedBy: clientIdRef.current,
       };
 
@@ -2886,6 +2976,8 @@ export function RepPage() {
         type: 'vehicle_submitted',
         vehicleId: selectedVehicle.id,
         repName: repName.trim(),
+        licensePlate: licensePlate.trim(),
+        draftState: finalizedDraft,
         clientId: clientIdRef.current,
         timestamp: Date.now(),
       });

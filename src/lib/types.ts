@@ -308,9 +308,20 @@ export type LiveSyncAction =
       timestamp: number;
     }
   | {
+      type: 'batch_attendance';
+      vehicleId: string;
+      riderIds: string[];
+      status: 'present' | 'absent' | 'unticked';
+      repName?: string;
+      clientId?: string;
+      timestamp: number;
+    }
+  | {
       type: 'vehicle_submitted';
       vehicleId: string;
       repName?: string;
+      licensePlate?: string;
+      draftState?: VehicleDraftState;
       clientId?: string;
       key?: string;
       timestamp: number;

@@ -1,5 +1,6 @@
 import type { Manifest, Vehicle, VehicleDraftState, LiveSyncAction } from '@/lib/types';
 import type { LedgerEntry, AbsenteeInput } from '@/lib/ledger';
+import { supabase } from '@/lib/supabase';
 
 export interface SubmitVehiclePayload {
   vehicleId: string;
@@ -760,7 +761,8 @@ export async function deleteDebtorOnServer(payload: {
   }
 }
 
-// Broadcasts an update immediately to all local tabs on the current device via BroadcastChannel and Window CustomEvents
+// Broadcasts an update immediately to all local tabs on the current device via BroadcastChannel and Window CustomEvents,
+// and to all remote devices via Supabase Realtime broadcast channel and backend server SSE.
 export function broadcastLocalSyncEvent(type: 'sponsorships_updated' | 'ledger_updated' | 'manifest_updated', data?: unknown): void {
   if (typeof window === 'undefined') return;
   if (type === 'sponsorships_updated') {
@@ -776,6 +778,27 @@ export function broadcastLocalSyncEvent(type: 'sponsorships_updated' | 'ledger_u
     }
   } catch {
     /* ignore */
+  }
+
+  // Cross-device sync via Supabase Realtime channel
+  try {
+    const ch = supabase.channel('realtime_sponsorship_audits_sync');
+    ch.send({
+      type: 'broadcast',
+      event: type,
+      payload: { timestamp: Date.now(), data },
+    }).catch(() => {});
+  } catch {
+    /* ignore */
+  }
+
+  // Secondary sync via Express backend SSE if online
+  if (isServerOnline()) {
+    fetch('/api/sync/broadcast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, data }),
+    }).catch(() => {});
   }
 }
 

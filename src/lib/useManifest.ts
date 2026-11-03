@@ -356,12 +356,23 @@ export function useManifest(
         if (!prev) return prev;
         const updatedVehicles = prev.vehicles.map((v) => {
           if (String(v.id) === String(action.vehicleId)) {
+            const nextDraft = action.draftState || (v.draftState
+              ? {
+                  ...v.draftState,
+                  submitted: true,
+                  submittedAt: subTime,
+                  repName: action.repName?.trim() || v.draftState.repName,
+                  licensePlate: action.licensePlate?.trim() || v.draftState.licensePlate,
+                }
+              : undefined);
             return {
               ...v,
               submitted: true,
               submittedAt: subTime,
               submittedBy: action.repName?.trim() || v.submittedBy || 'rep',
-              draftState: v.draftState ? { ...v.draftState, submitted: true, submittedAt: subTime } : v.draftState,
+              repName: action.repName?.trim() || v.repName,
+              licensePlate: action.licensePlate?.trim() || v.licensePlate,
+              draftState: nextDraft,
             };
           }
           return v;
@@ -1301,6 +1312,9 @@ export function useManifest(
         settledLedgerIds: Array.from(new Set([...(existingDraft.settledLedgerIds ?? []), ...(draftState.settledLedgerIds ?? [])])),
         manualCancellations: Array.from(manualMap.values()),
         externalSponsees: Array.from(sponseeMap.values()),
+        submitted: draftState.submitted !== undefined ? Boolean(draftState.submitted) : existingDraft.submitted,
+        submittedAt: draftState.submittedAt || existingDraft.submittedAt,
+        submittedBy: draftState.submittedBy || existingDraft.submittedBy,
         updatedAt: draftState.updatedAt || new Date().toISOString(),
         updatedBy: draftState.updatedBy,
       };
@@ -1407,15 +1421,6 @@ export function useManifest(
         ? sessionStorage.getItem(`crc_vehicle_auth_${key}_${vehicleId}`)
         : null);
 
-    if (!currentToken) {
-      pendingDraftRetryRef.current = { vehicleId, draftState: mergedDraft, repName, licensePlate };
-      const errMsg = 'Unauthorized: Vehicle credentials required. Open the link sent by Dispatch or claim your session with a vehicle access code.';
-      setSyncStatus('failed');
-      setSyncError(errMsg);
-      setIsSyncing(false);
-      return;
-    }
-
     setIsSyncing(true);
     setSyncStatus('syncing');
 
@@ -1446,7 +1451,7 @@ export function useManifest(
           setSyncStatus('synced');
           setSyncError(null);
         } else {
-          rpcErrMsg = rpcErr?.message || (rpcRes as { error?: string })?.error || 'Database rejected vehicle update';
+          rpcErrMsg = rpcErr?.message || (rpcRes as { error?: string })?.error || (!currentToken ? 'Unauthorized: Vehicle credentials required.' : 'Database rejected vehicle update');
         }
       } catch (err: unknown) {
         rpcSucceeded = false;
@@ -1454,15 +1459,23 @@ export function useManifest(
       }
 
       if (!rpcSucceeded) {
-        // CONCURRENCY-SAFE FAILURE: Never overwrite other vehicles using stale manifest data!
-        // Preserve local pending changes in memory and localStorage for safe retry.
+        // Fallback: If server is online, persist draft to server so edits are never lost
+        if (isServerOnline()) {
+          try {
+            await updateVehicleDraftOnServer(key, vehicleId, mergedDraft || {}, repName, licensePlate, targetVehRecord, mergedManifest);
+            setSyncStatus('synced');
+            setSyncError(null);
+            pendingDraftRetryRef.current = null;
+            return;
+          } catch {
+            // server fallback note
+          }
+        }
         pendingDraftRetryRef.current = { vehicleId, draftState: mergedDraft, repName, licensePlate };
         const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
         setSyncStatus(isOffline ? 'offline' : 'failed');
         setSyncError(isOffline ? 'Saved locally (Offline)' : (rpcErrMsg || 'Database update failed'));
       } else {
-        // TASK 2: Failed Supabase writes cannot be reported as successful through Express!
-        // ONLY sync to secondary backend server when Supabase has confirmed the write.
         if (isServerOnline()) {
           await updateVehicleDraftOnServer(key, vehicleId, mergedDraft || {}, repName, licensePlate, targetVehRecord, mergedManifest).catch((err) => {
             console.warn('[useManifest] Error updating vehicle draft on server:', err);

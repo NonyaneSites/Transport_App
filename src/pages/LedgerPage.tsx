@@ -472,6 +472,12 @@ export function LedgerPage() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'cancellation_ledger' }, () => {
         if (mounted) { invalidateLedgerCache(); scheduleRefresh(); }
       })
+      .on('broadcast', { event: 'ledger_updated' }, () => {
+        if (mounted) { invalidateLedgerCache(); scheduleRefresh(); }
+      })
+      .on('broadcast', { event: 'sponsorships_updated' }, () => {
+        if (mounted) { invalidateSponsorshipsCache(); scheduleRefresh(); }
+      })
       .subscribe();
 
     // Refresh when returning to the tab/device. Realtime remains the primary

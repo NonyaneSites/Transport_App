@@ -1214,6 +1214,7 @@ export async function insertAbsentees(
     const { error } = await supabase.from(LEDGER_TABLE).insert(rowsToInsert);
     if (error) throw error;
   }
+  broadcastLocalSyncEvent('ledger_updated');
 }
 
 export const LEDGER_SELECT_COLUMNS = CANONICAL_LEDGER_COLUMNS.join(', ');
@@ -1291,6 +1292,7 @@ export async function withdrawAbsentees(
 
       if (idsToDelete.length > 0) {
         await supabase.from(LEDGER_TABLE).delete().in('id', idsToDelete);
+        broadcastLocalSyncEvent('ledger_updated');
       }
     }
   } catch (err) {
@@ -1768,9 +1770,9 @@ export async function removeLedgerEntries(
   }
 
   invalidateLedgerCache();
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
-  }
+  invalidateSponsorshipsCache();
+  broadcastLocalSyncEvent('ledger_updated');
+  broadcastLocalSyncEvent('sponsorships_updated');
 
   return { success: true, count: removedCount };
 }
@@ -2098,9 +2100,9 @@ export async function settleLedgerEntries(
   }
 
   invalidateLedgerCache();
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
-  }
+  invalidateSponsorshipsCache();
+  broadcastLocalSyncEvent('ledger_updated');
+  broadcastLocalSyncEvent('sponsorships_updated');
 
   return { success: true, count: settledCount };
 }
@@ -2190,6 +2192,7 @@ export async function updateLedgerEntry(
       }
     }
   }
+  broadcastLocalSyncEvent('ledger_updated');
 }
 
 export interface ManualLedgerEntryInput {
@@ -2308,6 +2311,7 @@ export async function addManualLedgerEntry(input: ManualLedgerEntryInput): Promi
     .single();
 
   if (error) throw error;
+  broadcastLocalSyncEvent('ledger_updated');
   return data as unknown as LedgerEntry;
 }
 
@@ -2753,10 +2757,8 @@ export async function updateDebtorWithInstances(
 
   invalidateLedgerCache();
   invalidateSponsorshipsCache();
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
-    window.dispatchEvent(new CustomEvent('crc_sponsorships_updated'));
-  }
+  broadcastLocalSyncEvent('ledger_updated');
+  broadcastLocalSyncEvent('sponsorships_updated');
 }
 
 /**
@@ -2890,10 +2892,8 @@ export async function updateDebtorDetails(
   }
   invalidateLedgerCache();
   invalidateSponsorshipsCache();
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
-    window.dispatchEvent(new CustomEvent('crc_sponsorships_updated'));
-  }
+  broadcastLocalSyncEvent('ledger_updated');
+  broadcastLocalSyncEvent('sponsorships_updated');
 }
 
 /**
@@ -2998,6 +2998,8 @@ export async function recordPartialPayment(
   }
 
   invalidateLedgerCache();
+  broadcastLocalSyncEvent('ledger_updated');
+  broadcastLocalSyncEvent('sponsorships_updated');
   return { success: true, settledCount, updatedCount };
 }
 
@@ -4277,9 +4279,7 @@ export async function recordReportedSponsorships(
     localList = cleanAndDeduplicateSponsorships(localList);
     localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(localList));
 
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: localList }));
-    }
+    broadcastLocalSyncEvent('sponsorships_updated', localList);
   } catch (err) {
     console.warn('[Ledger] Failed to update local sponsorships cache:', err);
   }
@@ -4329,9 +4329,7 @@ export async function withdrawReportedSponsorships(
 
       const cleaned = cleanAndDeduplicateSponsorships(filtered);
       localStorage.setItem(LOCAL_SPONSORSHIPS_KEY, JSON.stringify(cleaned));
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: cleaned }));
-      }
+      broadcastLocalSyncEvent('sponsorships_updated', cleaned);
     }
   } catch {
     /* ignore */
@@ -5380,12 +5378,10 @@ export async function batchUpdateReportedSponsorships(
     /* ignore */
   }
 
-  // 5. Fire window events
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('crc_sponsorships_updated', { detail: currentAudits }));
-    if (ledgerChanged) {
-      window.dispatchEvent(new CustomEvent('crc_ledger_updated'));
-    }
+  // 5. Fire sync events
+  broadcastLocalSyncEvent('sponsorships_updated', currentAudits);
+  if (ledgerChanged) {
+    broadcastLocalSyncEvent('ledger_updated');
   }
 
   return { success: true, updatedCount, ledgerUpdated: ledgerChanged };
