@@ -1277,7 +1277,7 @@ app.post('/api/manifests/:key/reopen-vehicle', (req, res) => {
   const nowIso = new Date().toISOString();
 
   manifest.vehicles = (manifest.vehicles || []).map((v) => {
-    if (v.id === vehicleId) {
+    if (String(v.id) === String(vehicleId)) {
       return {
         ...v,
         submitted: false,
@@ -1290,7 +1290,7 @@ app.post('/api/manifests/:key/reopen-vehicle', (req, res) => {
   });
 
   // Revoke submitted attendance flags for riders in this vehicle
-  const targetVehicle = (manifest.vehicles || []).find((v) => v.id === vehicleId);
+  const targetVehicle = (manifest.vehicles || []).find((v) => String(v.id) === String(vehicleId));
   const targetRiderIds = new Set(((targetVehicle as { riders?: string[] })?.riders || []).map(String));
   if (Array.isArray(manifest.signups)) {
     manifest.signups = manifest.signups.map((s) => {

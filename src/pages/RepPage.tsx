@@ -240,11 +240,16 @@ export function RepPage() {
         if (isSub) {
           const submitter = action.repName?.trim() || 'A co-rep';
           setSubmitMsg(`Attendance submitted by ${submitter}! Vehicle is locked and synced.`);
+        } else {
+          setSubmitMsg(null);
         }
       }
 
       setManifestRef.current?.((prev) => {
         if (!prev) return prev;
+        const targetVeh = prev.vehicles.find((v) => String(v.id) === String(action.vehicleId));
+        const targetRidersSet = new Set((targetVeh?.riders || []).map(String));
+
         const updatedVehicles = prev.vehicles.map((v) => {
           if (String(v.id) === String(action.vehicleId)) {
             const nextDraft = action.draftState || (v.draftState
@@ -269,13 +274,23 @@ export function RepPage() {
           }
           return v;
         });
-        return { ...prev, vehicles: updatedVehicles };
+
+        const updatedSignups = isSub
+          ? prev.signups
+          : prev.signups.map((p) => {
+              if (targetRidersSet.has(String(p.id))) {
+                return { ...p, present: undefined };
+              }
+              return p;
+            });
+
+        return { ...prev, vehicles: updatedVehicles, signups: updatedSignups };
       });
       refreshRef.current?.();
       return;
     }
 
-    if (action.vehicleId === selectedVehicleId) {
+    if (String(action.vehicleId) === String(selectedVehicleId)) {
       if (action.type === 'batch_attendance') {
         const { riderIds, status } = action;
         if (status === 'present') {
@@ -333,6 +348,19 @@ export function RepPage() {
             });
           }
         }
+        setManifestRef.current?.((prev) => {
+          if (!prev) return prev;
+          const updatedSignups = prev.signups.map((p) => {
+            if (String(p.id) === String(riderId)) {
+              return {
+                ...p,
+                present: status === 'present' ? true : status === 'absent' ? false : undefined,
+              };
+            }
+            return p;
+          });
+          return { ...prev, signups: updatedSignups };
+        });
       } else if (action.type === 'rider_sponsored') {
         const { riderId, sponsored } = action;
         const sId = String(riderId);
@@ -344,8 +372,19 @@ export function RepPage() {
           } else {
             next.delete(sId);
             next.delete(riderId);
+            next.delete(String(riderId));
           }
           return next;
+        });
+        setManifestRef.current?.((prev) => {
+          if (!prev) return prev;
+          const updatedSignups = prev.signups.map((p) => {
+            if (String(p.id) === sId) {
+              return { ...p, sponsored, sponsorNote: sponsored ? p.sponsorNote : '' };
+            }
+            return p;
+          });
+          return { ...prev, signups: updatedSignups };
         });
       } else if (action.type === 'rider_unpaid') {
         const { riderId, unpaid } = action;
@@ -358,8 +397,19 @@ export function RepPage() {
           } else {
             next.delete(sId);
             next.delete(riderId);
+            next.delete(String(riderId));
           }
           return next;
+        });
+        setManifestRef.current?.((prev) => {
+          if (!prev) return prev;
+          const updatedSignups = prev.signups.map((p) => {
+            if (String(p.id) === sId) {
+              return { ...p, didNotPay: unpaid, unpaidNote: unpaid ? p.unpaidNote : '' };
+            }
+            return p;
+          });
+          return { ...prev, signups: updatedSignups };
         });
       } else if (action.type === 'rider_absent_paid') {
         const { riderId, absentPaid } = action;
@@ -372,6 +422,16 @@ export function RepPage() {
       } else if (action.type === 'rider_note') {
         const { riderId, note } = action;
         setNotes((prev) => ({ ...prev, [riderId]: note }));
+        setManifestRef.current?.((prev) => {
+          if (!prev) return prev;
+          const updatedSignups = prev.signups.map((p) => {
+            if (String(p.id) === String(riderId)) {
+              return { ...p, sponsorNote: note || p.sponsorNote, unpaidNote: note || p.unpaidNote };
+            }
+            return p;
+          });
+          return { ...prev, signups: updatedSignups };
+        });
       } else if (action.type === 'metadata_change') {
         if (action.repName && !repNameFocusedRef.current) {
           setRepName(action.repName);
@@ -1600,7 +1660,8 @@ export function RepPage() {
     };
 
     manifestRef.current = nextManifest;
-    const targetVehRecord = updatedVehicles.find((v) => v.id === selectedVehicle.id);
+    setManifest(nextManifest);
+    const targetVehRecord = updatedVehicles.find((v) => String(v.id) === String(selectedVehicle.id));
     if (targetVehRecord?.draftState) {
       await updateVehicleDraft(selectedVehicle.id, targetVehRecord.draftState, repName, licensePlate);
     }
@@ -1661,11 +1722,11 @@ export function RepPage() {
     const sponseeId = targetEntry?.sponseeId;
     const targetVehId = targetEntry?.targetVehicleId;
     const taxiName = targetEntry?.taxiName;
-    const targetVeh = manifest.vehicles.find((v) => targetVehId ? v.id === targetVehId : taxiName ? v.name.toLowerCase() === taxiName.toLowerCase() : false);
+    const targetVeh = manifest.vehicles.find((v) => targetVehId ? String(v.id) === String(targetVehId) : taxiName ? v.name.toLowerCase() === taxiName.toLowerCase() : false);
     const resolvedTargetVehId = targetVeh?.id || targetVehId;
 
     const updatedVehicles = manifest.vehicles.map((v) => {
-      if (v.id === selectedVehicle.id) {
+      if (String(v.id) === String(selectedVehicle.id)) {
         return {
           ...v,
           draftState: {
@@ -1680,7 +1741,7 @@ export function RepPage() {
         };
       }
 
-      const isTarget = targetVehId ? v.id === targetVehId : taxiName ? v.name.toLowerCase() === taxiName.toLowerCase() : false;
+      const isTarget = targetVehId ? String(v.id) === String(targetVehId) : taxiName ? v.name.toLowerCase() === taxiName.toLowerCase() : false;
       if (isTarget && sponseeId && v.draftState?.sponsoredIds) {
         const sSponId = String(sponseeId);
         const nextSponsored = v.draftState.sponsoredIds.filter((sid) => String(sid) !== sSponId);
@@ -1717,7 +1778,8 @@ export function RepPage() {
     };
 
     manifestRef.current = nextManifest;
-    const targetVehRecord = updatedVehicles.find((v) => v.id === selectedVehicle.id);
+    setManifest(nextManifest);
+    const targetVehRecord = updatedVehicles.find((v) => String(v.id) === String(selectedVehicle.id));
     if (targetVehRecord?.draftState) {
       await updateVehicleDraft(selectedVehicle.id, targetVehRecord.draftState, repName, licensePlate);
     }
@@ -1735,7 +1797,7 @@ export function RepPage() {
     }
     setBatchActionMsg(`✓ Removed cross-vehicle sponsorship${targetEntry?.sponseeName ? ` for ${targetEntry.sponseeName}` : ''}.`);
     setTimeout(() => setBatchActionMsg(null), 4000);
-  }, [manifest, selectedVehicle, externalSponsees, baseCash, pastCancellationCash, FARE, broadcastLiveAction, repName, licensePlate, updateVehicleDraft]);
+  }, [manifest, selectedVehicle, externalSponsees, baseCash, pastCancellationCash, FARE, broadcastLiveAction, repName, licensePlate, updateVehicleDraft, setManifest]);
 
   // Conflict-Safe Debounced Background Sync & Instant Local Cache
   useEffect(() => {
@@ -1978,19 +2040,33 @@ export function RepPage() {
     recentlyEditedRidersRef.current.set(passengerId, now);
     isUserDirtyRef.current = true;
 
-    let nextVal = false;
+    const targetRider = riders.find((r) => String(r.id) === sId || String(r.id) === String(passengerId));
+    const isCurrentlySponsored = sponsoredIds.has(sId) || sponsoredIds.has(passengerId) || Boolean(targetRider?.sponsored);
+    const nextVal = !isCurrentlySponsored;
+
     setSponsoredIds((prev) => {
       const next = new Set(prev);
-      const isCurrentlySponsored = prev.has(sId) || prev.has(passengerId);
-      nextVal = !isCurrentlySponsored;
       if (nextVal) {
         next.add(sId);
+        next.add(String(passengerId));
       } else {
         next.delete(sId);
         next.delete(passengerId);
         next.delete(String(passengerId));
       }
       return next;
+    });
+
+    // Update manifest signups so child rows and checks reflect the change immediately
+    setManifestRef.current?.((prev) => {
+      if (!prev) return prev;
+      const updatedSignups = prev.signups.map((p) => {
+        if (String(p.id) === sId || String(p.id) === String(passengerId)) {
+          return { ...p, sponsored: nextVal, sponsorNote: nextVal ? p.sponsorNote : '' };
+        }
+        return p;
+      });
+      return { ...prev, signups: updatedSignups };
     });
 
     recentlyToggledSponsoredRef.current.set(sId, nextVal);
@@ -2028,7 +2104,6 @@ export function RepPage() {
         timestamp: now,
       });
 
-      const targetRider = riders.find((r) => String(r.id) === sId || String(r.id) === String(passengerId));
       if (targetRider) {
         if (nextVal) {
           recordSingleSponsorshipClaim({
@@ -2049,7 +2124,7 @@ export function RepPage() {
         }
       }
     }
-  }, [selectedVehicleId, selectedVehicle, date, service, serviceLabel, manifest, notes, repName, broadcastLiveAction, externalSponsorLocks, riders, removeExternalSponsee]);
+  }, [selectedVehicleId, selectedVehicle, date, service, serviceLabel, manifest, notes, repName, broadcastLiveAction, externalSponsorLocks, riders, removeExternalSponsee, sponsoredIds]);
 
   const handleToggleUnpaid = useCallback((passengerId: string) => {
     const sId = String(passengerId);
@@ -2059,20 +2134,33 @@ export function RepPage() {
     recentlyEditedRidersRef.current.set(passengerId, now);
     isUserDirtyRef.current = true;
 
-    let nextVal = false;
+    const targetRider = riders.find((r) => String(r.id) === sId || String(r.id) === String(passengerId));
+    const isCurrentlyUnpaid = unpaidIds.has(sId) || unpaidIds.has(passengerId) || Boolean(targetRider?.didNotPay);
+    const nextVal = !isCurrentlyUnpaid;
+
     setUnpaidIds((prev) => {
       const next = new Set(prev);
-      const isCurrentlyUnpaid = prev.has(sId) || prev.has(passengerId);
-      nextVal = !isCurrentlyUnpaid;
       if (nextVal) {
         next.add(sId);
-        next.add(passengerId);
+        next.add(String(passengerId));
       } else {
         next.delete(sId);
         next.delete(passengerId);
         next.delete(String(passengerId));
       }
       return next;
+    });
+
+    // Update manifest signups so child rows and checks reflect the change immediately
+    setManifestRef.current?.((prev) => {
+      if (!prev) return prev;
+      const updatedSignups = prev.signups.map((p) => {
+        if (String(p.id) === sId || String(p.id) === String(passengerId)) {
+          return { ...p, didNotPay: nextVal, unpaidNote: nextVal ? p.unpaidNote : '' };
+        }
+        return p;
+      });
+      return { ...prev, signups: updatedSignups };
     });
 
     recentlyToggledUnpaidRef.current.set(sId, nextVal);
@@ -2117,9 +2205,8 @@ export function RepPage() {
         clientId: clientIdRef.current,
         timestamp: now,
       });
-      // Persistence happens via the debounced updateVehicleDraft sync (safe merge against server).
     }
-  }, [selectedVehicleId, repName, broadcastLiveAction]);
+  }, [selectedVehicleId, repName, broadcastLiveAction, riders, unpaidIds]);
 
   const handleToggleAbsentPaid = useCallback((passengerId: string) => {
     const sId = String(passengerId);
@@ -2889,7 +2976,9 @@ export function RepPage() {
         finalizedDraft,
         repName.trim(),
         licensePlate.trim()
-      );
+      ).catch((err) => {
+        console.warn('[RepPage] updateVehicleDraft during submit warning:', err);
+      });
       broadcastLiveAction({
         type: 'vehicle_submitted',
         vehicleId: selectedVehicle.id,
@@ -2986,69 +3075,92 @@ export function RepPage() {
     if (!manifest || !selectedVehicle) return;
     setSubmitting(true);
     setSubmitMsg(null);
-    try {
-      const vehicleRiderNames = riders.map((r) => r.fullName);
-      await reopenVehicleOnServer(key, {
-        vehicleId: selectedVehicle.id,
-        allRiderNames: vehicleRiderNames,
-      }).catch(() => {});
 
-      await withdrawAbsentees(key, vehicleRiderNames);
-      await withdrawReportedSponsorships(key, vehicleRiderNames).catch(() => {});
+    const vehicleRiderNames = riders.map((r) => r.fullName);
+    const targetRidersSet = new Set(riders.map((r) => String(r.id)));
 
-      // Mark local storage draft as unsubmitted
-      const draftStorageKey = `crc_rep_draft_${key}_${selectedVehicle.id}`;
-      try {
-        const rawDraft = localStorage.getItem(draftStorageKey);
-        if (rawDraft) {
-          const draftObj = JSON.parse(rawDraft);
-          draftObj.submitted = false;
-          draftObj.submittedAt = undefined;
-          localStorage.setItem(draftStorageKey, JSON.stringify(draftObj));
-        }
-      } catch {
-        /* ignore */
+    // 1. Instant local optimistic update
+    const updatedVehicles = manifest.vehicles.map((v) =>
+      String(v.id) === String(selectedVehicle.id)
+        ? {
+            ...v,
+            submitted: false,
+            submittedAt: undefined,
+            submittedBy: undefined,
+            draftState: v.draftState ? { ...v.draftState, submitted: false, submittedAt: undefined } : undefined,
+          }
+        : v
+    );
+
+    const updatedSignups = manifest.signups.map((p) => {
+      if (targetRidersSet.has(String(p.id))) {
+        return { ...p, present: undefined };
       }
+      return p;
+    });
 
-      const updatedVehicles = manifest.vehicles.map((v) =>
-        String(v.id) === String(selectedVehicle.id)
-          ? {
-              ...v,
-              submitted: false,
-              submittedAt: undefined,
-              submittedBy: undefined,
-              draftState: v.draftState ? { ...v.draftState, submitted: false, submittedAt: undefined } : undefined,
-            }
-          : v
-      );
-      // TASK 1: Reopen vehicle draft atomically via vehicle-scoped updateVehicleDraft
-      const reopenedTargetV = updatedVehicles.find((v) => String(v.id) === String(selectedVehicle.id));
-      const reopenedDraft = reopenedTargetV?.draftState || { ...(selectedVehicle.draftState || {}), submitted: false, submittedAt: undefined };
+    const nextManifest: Manifest = {
+      ...manifest,
+      vehicles: updatedVehicles,
+      signups: updatedSignups,
+    };
+
+    setManifest(nextManifest);
+    manifestRef.current = nextManifest;
+    isUserDirtyRef.current = true;
+    setSubmitMsg(
+      `✓ Attendance reopened for editing. Unconfirmed absentees, stats, and reported sponsorships have been revoked from the system until you submit again.`
+    );
+
+    // 2. Instant broadcast to everyone else
+    broadcastLiveAction({
+      type: 'vehicle_reopened',
+      vehicleId: selectedVehicle.id,
+      repName: repName.trim(),
+      clientId: clientIdRef.current,
+      timestamp: Date.now(),
+    });
+
+    // Mark local storage draft as unsubmitted
+    const draftStorageKey = `crc_rep_draft_${key}_${selectedVehicle.id}`;
+    try {
+      const rawDraft = localStorage.getItem(draftStorageKey);
+      if (rawDraft) {
+        const draftObj = JSON.parse(rawDraft);
+        draftObj.submitted = false;
+        draftObj.submittedAt = undefined;
+        localStorage.setItem(draftStorageKey, JSON.stringify(draftObj));
+      }
+    } catch {
+      /* ignore */
+    }
+
+    // 3. Persist to database & server in background
+    const reopenedTargetV = updatedVehicles.find((v) => String(v.id) === String(selectedVehicle.id));
+    const reopenedDraft = reopenedTargetV?.draftState || { ...(selectedVehicle.draftState || {}), submitted: false, submittedAt: undefined };
+
+    try {
+      if (reopenedTargetV) {
+        await saveVehicleToDb(key, reopenedTargetV).catch(() => {});
+      }
+      await upsertManifest(nextManifest).catch(() => {});
+
       await updateVehicleDraft(
         selectedVehicle.id,
         reopenedDraft,
         repName.trim(),
         licensePlate.trim()
-      );
-      if (reopenedTargetV) {
-        saveVehicleToDb(key, reopenedTargetV).catch(() => {});
-      }
-      upsertManifest({ ...manifest, vehicles: updatedVehicles }).catch(() => {});
-      broadcastLiveAction({
-        type: 'vehicle_reopened',
-        vehicleId: selectedVehicle.id,
-        repName: repName.trim(),
-        clientId: clientIdRef.current,
-        timestamp: Date.now(),
-      });
-      setManifest((prev) => (prev ? { ...prev, vehicles: updatedVehicles } : prev));
-      isUserDirtyRef.current = true;
+      ).catch(() => {});
 
-      setSubmitMsg(
-        `✓ Attendance reopened for editing. Unconfirmed absentees, stats, and reported sponsorships have been revoked from the system until you submit again.`
-      );
+      await reopenVehicleOnServer(key, {
+        vehicleId: selectedVehicle.id,
+        allRiderNames: vehicleRiderNames,
+      }).catch(() => {});
+
+      await withdrawAbsentees(key, vehicleRiderNames).catch(() => {});
+      await withdrawReportedSponsorships(key, vehicleRiderNames).catch(() => {});
     } catch (e) {
-      setSubmitMsg(`Error reopening: ${e instanceof Error ? e.message : String(e)}`);
+      console.warn('[RepPage] Background error during reopen persistence:', e);
     } finally {
       setSubmitting(false);
     }
@@ -5625,7 +5737,6 @@ function StopGroupedChecklist({
                       isSponsored={
                         sponsoredIds.has(p.id) ||
                         sponsoredIds.has(String(p.id)) ||
-                        Boolean(p.sponsored) ||
                         Boolean(lock)
                       }
                       isUnpaid={unpaidIds.has(p.id) || unpaidIds.has(String(p.id))}
@@ -5718,7 +5829,6 @@ function AlphabeticalChecklist({
             isSponsored={
               sponsoredIds.has(p.id) ||
               sponsoredIds.has(String(p.id)) ||
-              Boolean(p.sponsored) ||
               Boolean(lock)
             }
             isUnpaid={unpaidIds.has(p.id) || unpaidIds.has(String(p.id))}
@@ -5888,7 +5998,7 @@ const PassengerRow = React.memo(function PassengerRow({
                 Paid (Absent)
               </span>
             )}
-            {(isSponsored || externalLock || Boolean(passenger.sponsored)) && (
+            {(isSponsored || externalLock) && (
               <span
                 className="inline-flex items-center gap-1 rounded bg-amber-500/25 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/50 shadow-xs"
                 title={

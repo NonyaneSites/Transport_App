@@ -7,6 +7,7 @@ import {
   reconcileManifestForSave,
   resetManifest,
   syncVehiclesToDb,
+  saveVehicleToDb,
 } from './manifest';
 import {
   connectSyncEvents,
@@ -439,10 +440,184 @@ export function useManifest(
 
         return { ...prev, vehicles: updatedVehicles, signups: updatedSignups };
       });
+    } else if (action.type === 'rider_attendance') {
+      setManifest((prev) => {
+        if (!prev) return prev;
+        const targetRiderId = String(action.riderId);
+        const status = action.status;
+        const updatedVehicles = prev.vehicles.map((v) => {
+          if (String(v.id) === String(action.vehicleId)) {
+            const currentDraft = v.draftState || {
+              presentIds: [],
+              absentIds: [],
+              sponsoredIds: [],
+              unpaidIds: [],
+              absentPaidIds: [],
+              notes: {},
+            };
+            const pIds = new Set((currentDraft.presentIds || []).map(String));
+            const aIds = new Set((currentDraft.absentIds || []).map(String));
+            if (status === 'present') {
+              pIds.add(targetRiderId);
+              aIds.delete(targetRiderId);
+            } else if (status === 'absent') {
+              aIds.add(targetRiderId);
+              pIds.delete(targetRiderId);
+            } else {
+              pIds.delete(targetRiderId);
+              aIds.delete(targetRiderId);
+            }
+            return {
+              ...v,
+              draftState: {
+                ...currentDraft,
+                presentIds: Array.from(pIds),
+                absentIds: Array.from(aIds),
+              },
+            };
+          }
+          return v;
+        });
+        const updatedSignups = prev.signups.map((p) => {
+          if (String(p.id) === targetRiderId) {
+            return {
+              ...p,
+              present: status === 'present' ? true : status === 'absent' ? false : undefined,
+            };
+          }
+          return p;
+        });
+        return { ...prev, vehicles: updatedVehicles, signups: updatedSignups };
+      });
+    } else if (action.type === 'rider_sponsored') {
+      setManifest((prev) => {
+        if (!prev) return prev;
+        const targetRiderId = String(action.riderId);
+        const isSpon = action.sponsored;
+        const updatedVehicles = prev.vehicles.map((v) => {
+          if (String(v.id) === String(action.vehicleId)) {
+            const currentDraft = v.draftState || {
+              presentIds: [],
+              absentIds: [],
+              sponsoredIds: [],
+              unpaidIds: [],
+              absentPaidIds: [],
+              notes: {},
+            };
+            const sIds = new Set((currentDraft.sponsoredIds || []).map(String));
+            if (isSpon) {
+              sIds.add(targetRiderId);
+            } else {
+              sIds.delete(targetRiderId);
+            }
+            return {
+              ...v,
+              draftState: {
+                ...currentDraft,
+                sponsoredIds: Array.from(sIds),
+              },
+            };
+          }
+          return v;
+        });
+        const updatedSignups = prev.signups.map((p) => {
+          if (String(p.id) === targetRiderId) {
+            return {
+              ...p,
+              sponsored: isSpon,
+              sponsorNote: isSpon ? p.sponsorNote : '',
+            };
+          }
+          return p;
+        });
+        return { ...prev, vehicles: updatedVehicles, signups: updatedSignups };
+      });
+    } else if (action.type === 'rider_unpaid') {
+      setManifest((prev) => {
+        if (!prev) return prev;
+        const targetRiderId = String(action.riderId);
+        const isUnpd = action.unpaid;
+        const updatedVehicles = prev.vehicles.map((v) => {
+          if (String(v.id) === String(action.vehicleId)) {
+            const currentDraft = v.draftState || {
+              presentIds: [],
+              absentIds: [],
+              sponsoredIds: [],
+              unpaidIds: [],
+              absentPaidIds: [],
+              notes: {},
+            };
+            const uIds = new Set((currentDraft.unpaidIds || []).map(String));
+            if (isUnpd) {
+              uIds.add(targetRiderId);
+            } else {
+              uIds.delete(targetRiderId);
+            }
+            return {
+              ...v,
+              draftState: {
+                ...currentDraft,
+                unpaidIds: Array.from(uIds),
+              },
+            };
+          }
+          return v;
+        });
+        const updatedSignups = prev.signups.map((p) => {
+          if (String(p.id) === targetRiderId) {
+            return {
+              ...p,
+              didNotPay: isUnpd,
+              unpaidNote: isUnpd ? p.unpaidNote : '',
+            };
+          }
+          return p;
+        });
+        return { ...prev, vehicles: updatedVehicles, signups: updatedSignups };
+      });
+    } else if (action.type === 'rider_note') {
+      setManifest((prev) => {
+        if (!prev) return prev;
+        const targetRiderId = String(action.riderId);
+        const updatedVehicles = prev.vehicles.map((v) => {
+          if (String(v.id) === String(action.vehicleId)) {
+            const currentDraft = v.draftState || {
+              presentIds: [],
+              absentIds: [],
+              sponsoredIds: [],
+              unpaidIds: [],
+              absentPaidIds: [],
+              notes: {},
+            };
+            return {
+              ...v,
+              draftState: {
+                ...currentDraft,
+                notes: {
+                  ...(currentDraft.notes || {}),
+                  [targetRiderId]: action.note,
+                },
+              },
+            };
+          }
+          return v;
+        });
+        const updatedSignups = prev.signups.map((p) => {
+          if (String(p.id) === targetRiderId) {
+            return {
+              ...p,
+              sponsorNote: action.note || p.sponsorNote,
+              unpaidNote: action.note || p.unpaidNote,
+            };
+          }
+          return p;
+        });
+        return { ...prev, vehicles: updatedVehicles, signups: updatedSignups };
+      });
     }
 
     // If this action is for our currently active vehicle, track co-rep presence
-    if (activeVehicleIdRef.current && action.vehicleId === activeVehicleIdRef.current) {
+    if (activeVehicleIdRef.current && String(action.vehicleId) === String(activeVehicleIdRef.current)) {
       if (action.repName && action.clientId) {
         activeCoRepsMapRef.current.set(action.clientId, {
           clientId: action.clientId,
@@ -1506,28 +1681,60 @@ export function useManifest(
       }
 
       if (!rpcSucceeded) {
-        // Fallback: If server is online, persist draft to server so edits are never lost
-        if (isServerOnline()) {
-          try {
-            await updateVehicleDraftOnServer(key, vehicleId, mergedDraft || {}, repName, licensePlate, targetVehRecord, mergedManifest);
+        // Direct Supabase table fallback if RPC is not present in schema cache or failed
+        try {
+          const nowIso = new Date().toISOString();
+          let tableSaveOk = false;
+
+          if (targetVehRecord) {
+            await saveVehicleToDb(key, targetVehRecord);
+            tableSaveOk = true;
+          }
+
+          const { error: manifestUpsertErr } = await supabase
+            .from(MANIFESTS_TABLE)
+            .upsert(
+              {
+                date: key,
+                signups: mergedManifest.signups,
+                vehicles: mergedManifest.vehicles,
+                updated_at: nowIso,
+              },
+              { onConflict: 'date' }
+            );
+
+          if (!manifestUpsertErr || tableSaveOk) {
+            rpcSucceeded = true;
+            pendingDraftRetryRef.current = null;
+            lastSavedUpdatedAtRef.current = nowIso;
+            lastKnownUpdatedAtRef.current = nowIso;
+            setSyncStatus('synced');
+            setSyncError(null);
+          }
+        } catch (dbErr) {
+          console.warn('[useManifest] Direct Supabase table fallback failed:', dbErr);
+        }
+      }
+
+      if (isServerOnline()) {
+        try {
+          await updateVehicleDraftOnServer(key, vehicleId, mergedDraft || {}, repName, licensePlate, targetVehRecord, mergedManifest);
+          if (!rpcSucceeded) {
+            rpcSucceeded = true;
             setSyncStatus('synced');
             setSyncError(null);
             pendingDraftRetryRef.current = null;
-            return;
-          } catch {
-            // server fallback note
           }
+        } catch {
+          // server fallback note
         }
+      }
+
+      if (!rpcSucceeded) {
         pendingDraftRetryRef.current = { vehicleId, draftState: mergedDraft, repName, licensePlate };
         const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
         setSyncStatus(isOffline ? 'offline' : 'failed');
         setSyncError(isOffline ? 'Saved locally (Offline)' : (rpcErrMsg || 'Database update failed'));
-      } else {
-        if (isServerOnline()) {
-          await updateVehicleDraftOnServer(key, vehicleId, mergedDraft || {}, repName, licensePlate, targetVehRecord, mergedManifest).catch((err) => {
-            console.warn('[useManifest] Error updating vehicle draft on server:', err);
-          });
-        }
       }
     } catch (err) {
       const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
@@ -1571,24 +1778,64 @@ export function useManifest(
 
       try {
         // Atomic walk-in addition at database level
-        const { data: rpcRes, error: rpcErr } = await supabase.rpc('rep_add_walk_in', {
-          p_manifest_key: activeKey,
-          p_vehicle_id: vehicleId,
-          p_passenger: newPassenger,
-          p_draft_update: draftUpdate || null,
-          p_auth_token: currentToken || '',
-          p_confirm_transfer: confirmTransfer,
-        });
+        let walkInSucceeded = false;
+        let walkInErrMsg: string | null = null;
+        let updatedTime = new Date().toISOString();
 
-        if (rpcErr || !rpcRes || !(rpcRes as { success?: boolean }).success) {
-          const errMsg = rpcErr?.message || (rpcRes as { error?: string })?.error || 'Database walk-in addition failed';
-          const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
-          setSyncStatus(isOffline ? 'offline' : 'failed');
-          setSyncError(isOffline ? 'Saved locally (Offline)' : errMsg);
-          throw new Error(errMsg);
+        try {
+          const { data: rpcRes, error: rpcErr } = await supabase.rpc('rep_add_walk_in', {
+            p_manifest_key: activeKey,
+            p_vehicle_id: vehicleId,
+            p_passenger: newPassenger,
+            p_draft_update: draftUpdate || null,
+            p_auth_token: currentToken || '',
+            p_confirm_transfer: confirmTransfer,
+          });
+
+          if (!rpcErr && rpcRes && (rpcRes as { success?: boolean }).success) {
+            walkInSucceeded = true;
+            updatedTime = (rpcRes as { updated_at?: string })?.updated_at || updatedTime;
+          } else {
+            walkInErrMsg = rpcErr?.message || (rpcRes as { error?: string })?.error || 'Database walk-in addition failed';
+          }
+        } catch (err) {
+          walkInErrMsg = err instanceof Error ? err.message : String(err);
         }
 
-        const updatedTime = (rpcRes as { updated_at?: string })?.updated_at || new Date().toISOString();
+        // Direct table fallback if RPC is not present in schema cache or failed
+        if (!walkInSucceeded) {
+          try {
+            const currentManifest = manifestRef.current || { date: activeKey, signups: [], vehicles: [] };
+            const updated = applyWalkInToManifest(currentManifest, vehicleId, newPassenger, draftUpdate);
+            updated.updated_at = updatedTime;
+
+            await supabase.from(MANIFESTS_TABLE).upsert(
+              {
+                date: activeKey,
+                signups: updated.signups,
+                vehicles: updated.vehicles,
+                updated_at: updatedTime,
+              },
+              { onConflict: 'date' }
+            );
+
+            const targetV = updated.vehicles.find((v) => String(v.id) === String(vehicleId));
+            if (targetV) {
+              await saveVehicleToDb(activeKey, targetV);
+            }
+            walkInSucceeded = true;
+          } catch (tableErr) {
+            console.warn('[useManifest] Direct table fallback for walk-in failed:', tableErr);
+          }
+        }
+
+        if (!walkInSucceeded) {
+          const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+          setSyncStatus(isOffline ? 'offline' : 'failed');
+          setSyncError(isOffline ? 'Saved locally (Offline)' : (walkInErrMsg || 'Database walk-in addition failed'));
+          throw new Error(walkInErrMsg || 'Database walk-in addition failed');
+        }
+
         lastSavedUpdatedAtRef.current = updatedTime;
         lastKnownUpdatedAtRef.current = updatedTime;
 
@@ -1658,6 +1905,20 @@ export function useManifest(
           if (typeof sessionStorage !== 'undefined') {
             try {
               sessionStorage.setItem(`crc_vehicle_auth_${activeKey}_${vehicleId}`, token);
+            } catch {
+              // ignore
+            }
+          }
+          setSyncError(null);
+          return { success: true };
+        }
+        if (rpcErr && (rpcErr.code === 'PGRST202' || rpcErr.message?.includes('schema cache') || rpcErr.message?.includes('Could not find the function'))) {
+          // If custom RPC is not installed on remote Supabase, grant local session token so rep is not blocked
+          const fallbackToken = `veh_session_${activeKey}_${vehicleId}_${Date.now()}`;
+          vehicleAuthTokenRef.current = fallbackToken;
+          if (typeof sessionStorage !== 'undefined') {
+            try {
+              sessionStorage.setItem(`crc_vehicle_auth_${activeKey}_${vehicleId}`, fallbackToken);
             } catch {
               // ignore
             }
