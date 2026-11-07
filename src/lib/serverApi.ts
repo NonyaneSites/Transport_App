@@ -1,6 +1,6 @@
-import type { Manifest, Vehicle, VehicleDraftState, LiveSyncAction } from '@/lib/types';
-import type { LedgerEntry, AbsenteeInput } from '@/lib/ledger';
-import { supabase } from '@/lib/supabase';
+import type { Manifest, Vehicle, VehicleDraftState, LiveSyncAction } from './types';
+import type { LedgerEntry, AbsenteeInput } from './ledger';
+import { supabase } from './supabase';
 
 export interface SubmitVehiclePayload {
   vehicleId: string;

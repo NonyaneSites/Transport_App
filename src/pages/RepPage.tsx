@@ -47,12 +47,10 @@ import { isServerOnline, submitVehicleToServer, reopenVehicleOnServer } from '@/
 import { extractVehicleStats } from '@/lib/statsExport';
 import { syncVehicleStatsToGoogleSheet, sheetDateLabel } from '@/lib/googleSheetsSync';
 import { detectVehicleRep, getRepStructure, matchRiderToOfficialRep } from '@/lib/officialReps';
-import { ChangeStopModal } from '@/components/ChangeStopModal';
 
 const RepStatsCopyCard = React.lazy(() => import('@/components/RepStatsCopyCard').then((m) => ({ default: m.RepStatsCopyCard })));
 const CancellationSearchModal = React.lazy(() => import('@/components/CancellationSearchModal').then((m) => ({ default: m.CancellationSearchModal })));
 const CrossTaxiSponsorshipModal = React.lazy(() => import('@/components/CrossTaxiSponsorshipModal').then((m) => ({ default: m.CrossTaxiSponsorshipModal })));
-const RepTransferPassengerModal = React.lazy(() => import('@/components/RepTransferPassengerModal').then((m) => ({ default: m.RepTransferPassengerModal })));
 import {
   transferPassengerAcrossServices,
   crossCheckPassengerAcrossDate,
@@ -532,10 +530,6 @@ export function RepPage() {
   const { date: parsedDate, service: parsedServiceLabel } = parseManifestKey(key);
 
   const [walkInLegs, setWalkInLegs] = useState<'both' | 'going' | 'return'>('both');
-  const [changeStopModalOpen, setChangeStopModalOpen] = useState(false);
-  const [changeStopPassenger, setChangeStopPassenger] = useState<Passenger | null>(null);
-  const [transferModalOpen, setTransferModalOpen] = useState(false);
-  const [transferModalPassenger, setTransferModalPassenger] = useState<Passenger | null>(null);
 
   const selectedVehicle = useMemo(
     () => manifest?.vehicles.find((v) => String(v.id) === String(selectedVehicleId)) ?? null,
@@ -2557,17 +2551,7 @@ export function RepPage() {
     }
   }
 
-  function handleOpenChangeStop(p: Passenger) {
-    if (isRehearsal) return; // Reps cannot change pickup stop on Thursday rehearsal
-    setChangeStopPassenger(p);
-    setChangeStopModalOpen(true);
-  }
 
-  function handleOpenTransfer(p: Passenger) {
-    if (isRehearsal) return; // Reps cannot transfer passengers on Thursday rehearsal
-    setTransferModalPassenger(p);
-    setTransferModalOpen(true);
-  }
 
   async function handleUpgradeToFullTrip(passenger: Passenger) {
     if (!manifest || !isRehearsal) return;
@@ -2591,73 +2575,7 @@ export function RepPage() {
     setTimeout(() => setBatchActionMsg(null), 4000);
   }
 
-  async function handleChangeStopConfirm(passengerId: string, newStop: string) {
-    if (!manifest || isRehearsal) return;
-    const pIdStr = String(passengerId);
-    const existingP = manifest.signups.find((p) => String(p.id) === pIdStr);
-    if (!existingP) return;
 
-
-
-    if (!selectedVehicle) return;
-    const curDraft = selectedVehicle.draftState || {};
-    const nextNotes = { ...(curDraft.notes || {}), [pIdStr]: `Stop updated: ${newStop}` };
-    await updateVehicleDraft(selectedVehicle.id, { ...curDraft, notes: nextNotes }, repName, licensePlate);
-    setBatchActionMsg(`✓ Updated stop for ${existingP.fullName}`);
-    setTimeout(() => setBatchActionMsg(null), 4000);
-  }
-
-  async function handleRepTransferConfirm(
-    passenger: Passenger,
-    targetVehicleId: string,
-    markPresent: boolean
-  ) {
-    if (!manifest || isRehearsal) return;
-    const pIdStr = String(passenger.id);
-
-    // 1. Update vehicles
-    const updatedVehicles = manifest.vehicles.map((v) => {
-      const isSource = (v.riders || []).some((id) => String(id) === pIdStr);
-      const isTarget = v.id === targetVehicleId;
-
-      if (isSource && !isTarget) {
-        const nextRiders = (v.riders || []).filter((id) => String(id) !== pIdStr);
-        const cleanedDraft = v.draftState
-          ? {
-              ...v.draftState,
-              presentIds: (v.draftState.presentIds || []).filter((id) => String(id) !== pIdStr),
-              absentIds: (v.draftState.absentIds || []).filter((id) => String(id) !== pIdStr),
-            }
-          : undefined;
-        return { ...v, riders: nextRiders, draftState: cleanedDraft };
-      }
-
-      if (isTarget) {
-        const ridersList = Array.isArray(v.riders) ? v.riders : [];
-        const nextRiders = ridersList.some((id) => String(id) === pIdStr) ? ridersList : [...ridersList, passenger.id];
-        const curDraft = v.draftState || {};
-        const nextPresent = markPresent && !curDraft.presentIds?.includes(passenger.id)
-          ? [...(curDraft.presentIds || []), passenger.id]
-          : curDraft.presentIds || [];
-        const nextDraft: VehicleDraftState = {
-          ...curDraft,
-          presentIds: nextPresent,
-          absentIds: (curDraft.absentIds || []).filter((id) => String(id) !== pIdStr),
-        };
-        return { ...v, riders: nextRiders, draftState: nextDraft };
-      }
-
-      return v;
-    });
-
-    if (!selectedVehicle) return;
-    const sourceVeh = updatedVehicles.find((v) => v.id === selectedVehicle.id);
-    if (sourceVeh?.draftState) {
-      await updateVehicleDraft(selectedVehicle.id, sourceVeh.draftState, repName, licensePlate);
-    }
-    setBatchActionMsg(`✓ Moved ${passenger.fullName} to ${targetVehicleId === 'unassigned' ? 'Unassigned Pool' : 'destination vehicle'}`);
-    setTimeout(() => setBatchActionMsg(null), 4000);
-  }
 
   async function confirmTransfer() {
     if (!transferPrompt || transferring || !selectedVehicle || isRehearsal) return;
@@ -4049,23 +3967,6 @@ export function RepPage() {
                       </h3>
                     </div>
                     <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSponsorshipPayerId(undefined);
-                          setShowCrossTaxiModal(true);
-                        }}
-                        className="flex items-center gap-1.5 rounded-lg border border-amber-500/60 bg-amber-500/20 px-2.5 py-1 text-xs font-bold text-amber-200 hover:bg-amber-500/30 hover:border-amber-400 hover:text-white transition-all shadow-xs"
-                        title="Collect fare cash here when a passenger pays for someone travelling in another vehicle"
-                      >
-                        <HeartHandshake className="h-3.5 w-3.5 text-amber-400 shrink-0" />
-                        <span>Sponsor Other Taxi (+R{FARE})</span>
-                        {externalSponsees.length > 0 && (
-                          <span className="rounded-full bg-amber-400 px-1.5 py-0.2 text-[10px] font-black text-black">
-                            {externalSponsees.length}
-                          </span>
-                        )}
-                      </button>
                       <div className="flex items-center gap-1 bg-card-2 rounded-lg p-0.5 border border-line">
                       <button
                         type="button"
@@ -4241,13 +4142,7 @@ export function RepPage() {
                     onRemoveRider={handleRemoveRiderFromVehicle}
                     canRemoveRider={canRemoveRider}
                     externalSponsorLocks={externalSponsorLocks}
-                    onOpenChangeStop={isRehearsal ? undefined : handleOpenChangeStop}
-                    onOpenTransfer={isRehearsal ? undefined : handleOpenTransfer}
                     onUpgradeToFullTrip={isRehearsal ? handleUpgradeToFullTrip : undefined}
-                    onSponsorForPassenger={(p) => {
-                      setSponsorshipPayerId(String(p.id));
-                      setShowCrossTaxiModal(true);
-                    }}
                     isRehearsal={isRehearsal}
                     date={date}
                   />
@@ -4274,13 +4169,7 @@ export function RepPage() {
                     onRemoveRider={handleRemoveRiderFromVehicle}
                     canRemoveRider={canRemoveRider}
                     externalSponsorLocks={externalSponsorLocks}
-                    onOpenChangeStop={isRehearsal ? undefined : handleOpenChangeStop}
-                    onOpenTransfer={isRehearsal ? undefined : handleOpenTransfer}
                     onUpgradeToFullTrip={isRehearsal ? handleUpgradeToFullTrip : undefined}
-                    onSponsorForPassenger={(p) => {
-                      setSponsorshipPayerId(String(p.id));
-                      setShowCrossTaxiModal(true);
-                    }}
                     isRehearsal={isRehearsal}
                     date={date}
                   />
@@ -4684,34 +4573,7 @@ export function RepPage() {
         />
       )}
 
-      {/* Change Pickup Stop Modal (Only for normal/Sunday transport) */}
-      {!isRehearsal && (
-        <ChangeStopModal
-          isOpen={changeStopModalOpen}
-          onClose={() => {
-            setChangeStopModalOpen(false);
-            setChangeStopPassenger(null);
-          }}
-          passenger={changeStopPassenger}
-          existingStops={selectedVehicle?.orderedStops || []}
-          onConfirm={handleChangeStopConfirm}
-        />
-      )}
 
-      {/* Transfer Passenger Modal (Only for normal/Sunday transport) */}
-      {!isRehearsal && (
-        <RepTransferPassengerModal
-          isOpen={transferModalOpen}
-          onClose={() => {
-            setTransferModalOpen(false);
-            setTransferModalPassenger(null);
-          }}
-          passenger={transferModalPassenger}
-          currentVehicle={selectedVehicle}
-          allVehicles={manifest?.vehicles || []}
-          onTransfer={handleRepTransferConfirm}
-        />
-      )}
     </div>
   );
 }
@@ -5592,7 +5454,7 @@ function CashCalculatorCard({
 function StopGroupedChecklist({
   riders, vehicleType, fare = 40, orderedStops, stopRedirects, presentIds, absentIds, absentPaidIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
   riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemoveRider, externalSponsorLocks,
-  onOpenChangeStop, onOpenTransfer, onUpgradeToFullTrip, onSponsorForPassenger, isRehearsal,
+  onUpgradeToFullTrip, isRehearsal,
 }: {
   riders: Passenger[];
   vehicleType: 'Bus' | 'Taxi';
@@ -5617,10 +5479,7 @@ function StopGroupedChecklist({
   onRemoveRider?: (id: string) => void;
   canRemoveRider?: (passenger: Passenger) => boolean;
   externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean; note?: string; fullNoteText: string }>;
-  onOpenChangeStop?: (p: Passenger) => void;
-  onOpenTransfer?: (p: Passenger) => void;
   onUpgradeToFullTrip?: (p: Passenger) => void;
-  onSponsorForPassenger?: (p: Passenger) => void;
   isRehearsal?: boolean;
   date?: string;
 }) {
@@ -5774,10 +5633,7 @@ function StopGroupedChecklist({
                       onRemoveRider={onRemoveRider}
                       canRemove={canRemoveRider ? canRemoveRider(p) : false}
                       externalLock={lock}
-                      onOpenChangeStop={onOpenChangeStop}
-                      onOpenTransfer={onOpenTransfer}
                       onUpgradeToFullTrip={onUpgradeToFullTrip}
-                      onSponsorForPassenger={onSponsorForPassenger}
                       isRehearsal={isRehearsal}
                     />
                   );
@@ -5794,7 +5650,7 @@ function StopGroupedChecklist({
 function AlphabeticalChecklist({
   riders, vehicleType, stopRedirects, presentIds, absentIds, absentPaidIds, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, sponsoredIds, unpaidIds, notes, disabled,
   riderDebtsMap, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemoveRider, externalSponsorLocks,
-  onOpenChangeStop, onOpenTransfer, onUpgradeToFullTrip, onSponsorForPassenger, isRehearsal,
+  onUpgradeToFullTrip, isRehearsal,
 }: {
   riders: Passenger[];
   vehicleType?: 'Bus' | 'Taxi';
@@ -5817,10 +5673,7 @@ function AlphabeticalChecklist({
   onRemoveRider?: (id: string) => void;
   canRemoveRider?: (passenger: Passenger) => boolean;
   externalSponsorLocks?: Map<string, { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean; note?: string; fullNoteText: string }>;
-  onOpenChangeStop?: (p: Passenger) => void;
-  onOpenTransfer?: (p: Passenger) => void;
   onUpgradeToFullTrip?: (p: Passenger) => void;
-  onSponsorForPassenger?: (p: Passenger) => void;
   isRehearsal?: boolean;
   date?: string;
 }) {
@@ -5873,10 +5726,7 @@ function AlphabeticalChecklist({
             onRemoveRider={onRemoveRider}
             canRemove={canRemoveRider ? canRemoveRider(p) : false}
             externalLock={lock}
-            onOpenChangeStop={onOpenChangeStop}
-            onOpenTransfer={onOpenTransfer}
             onUpgradeToFullTrip={onUpgradeToFullTrip}
-            onSponsorForPassenger={onSponsorForPassenger}
             isRehearsal={isRehearsal}
           />
         );
@@ -5888,7 +5738,7 @@ function AlphabeticalChecklist({
 const PassengerRow = React.memo(function PassengerRow({
   passenger, isPresent, isAbsent, isAbsentPaid, touched, onSetPresent, onToggleSponsored, onToggleUnpaid, onToggleAbsentPaid, onSetNote, isSponsored, isUnpaid, noteText, redirectedFrom, disabled,
   outstandingDebts, collectedCancellationIds, onToggleCancellation, onRemoveRider, canRemove, externalLock,
-  onOpenChangeStop, onOpenTransfer, onUpgradeToFullTrip, onSponsorForPassenger, isRehearsal,
+  onUpgradeToFullTrip, isRehearsal,
 }: {
   passenger: Passenger;
   isPresent: boolean;
@@ -5911,10 +5761,7 @@ const PassengerRow = React.memo(function PassengerRow({
   onRemoveRider?: (id: string) => void;
   canRemove?: boolean;
   externalLock?: { fromVehicleId: string; fromVehicleName: string; payerName: string; externalSponseeId: string; canRemove: boolean; note?: string; fullNoteText: string };
-  onOpenChangeStop?: (p: Passenger) => void;
-  onOpenTransfer?: (p: Passenger) => void;
   onUpgradeToFullTrip?: (p: Passenger) => void;
-  onSponsorForPassenger?: (p: Passenger) => void;
   isRehearsal?: boolean;
 }) {
   const isMissingSponsorInfo = isSponsored && !noteText.trim();
@@ -6183,18 +6030,7 @@ const PassengerRow = React.memo(function PassengerRow({
           {isUnpaid ? "Didn't Pay" : "Didn't Pay"}
         </button>
 
-        {/* Sponsor a Friend in Another Taxi */}
-        {onSponsorForPassenger && !disabled && (
-          <button
-            type="button"
-            onClick={() => onSponsorForPassenger(passenger)}
-            className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-bold bg-amber-500/15 text-amber-200 border border-amber-500/40 hover:bg-amber-500/25 hover:border-amber-400 hover:text-white transition-all active:scale-95 shadow-xs"
-            title={`Record that ${passenger.fullName} is paying R40 for someone in another taxi`}
-          >
-            <HeartHandshake className="h-3 w-3 text-amber-400" />
-            <span>Sponsor Other Taxi (+R40)</span>
-          </button>
-        )}
+
 
         {/* Paid (Absent) Toggle - only shown when passenger is Absent */}
         {isAbsent && onToggleAbsentPaid && (
@@ -6275,31 +6111,7 @@ const PassengerRow = React.memo(function PassengerRow({
           </button>
         )}
 
-        {/* Change Stop Button (Only for normal/Sunday transport, NOT rehearsal) */}
-        {!isRehearsal && onOpenChangeStop && !disabled && (
-          <button
-            type="button"
-            onClick={() => onOpenChangeStop(passenger)}
-            className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium bg-card-2/60 text-muted border border-line hover:text-ink hover:border-line-bright transition-all active:scale-95"
-            title="Change pickup stop"
-          >
-            <MapPin className="h-3 w-3 text-crimson-400" />
-            <span>Change stop</span>
-          </button>
-        )}
 
-        {/* Transfer Button (Only for normal/Sunday transport, NOT rehearsal) */}
-        {!isRehearsal && onOpenTransfer && !disabled && (
-          <button
-            type="button"
-            onClick={() => onOpenTransfer(passenger)}
-            className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium bg-card-2/60 text-muted border border-line hover:text-ink hover:border-line-bright transition-all active:scale-95"
-            title="Transfer passenger to another vehicle"
-          >
-            <ArrowRightLeft className="h-3 w-3 text-amber-400" />
-            <span>Transfer</span>
-          </button>
-        )}
 
         {/* Only allow removing walk-ins created by this rep */}
         {canRemove && onRemoveRider && !disabled && (
