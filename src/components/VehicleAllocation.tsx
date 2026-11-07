@@ -2520,12 +2520,13 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
 
             // Attendance & Sponsorship metrics
             const isVehSubmitted = Boolean(vehicle.submitted || vehicle.draftState?.submitted);
-            const vPresent = isVehSubmitted
-              ? riders.filter((r) => r.present).length
-              : riders.filter((r) => r.present || vehicle.draftState?.presentIds?.some((id) => String(id) === String(r.id))).length;
+            const draftPresentIds = new Set((vehicle.draftState?.presentIds || []).map(String));
+            const draftAbsentIds = new Set((vehicle.draftState?.absentIds || []).map(String));
+            const isRiderPresent = (r: Passenger) => Boolean(r.present || draftPresentIds.has(String(r.id)) || draftPresentIds.has(r.id));
+            const vPresent = riders.filter(isRiderPresent).length;
             const vAbsent = isVehSubmitted
-              ? riders.filter((r) => !r.present).length
-              : riders.filter((r) => vehicle.draftState?.absentIds?.some((id) => String(id) === String(r.id))).length;
+              ? Math.max(0, riders.length - vPresent)
+              : riders.filter((r) => draftAbsentIds.has(String(r.id)) || draftAbsentIds.has(r.id)).length;
             const vSponsored = riders.filter((r) => r.sponsored || vehicle.draftState?.sponsoredIds?.some((id) => String(id) === String(r.id))).length;
             const vUnpaid = riders.filter((r) => r.didNotPay || vehicle.draftState?.unpaidIds?.some((id) => String(id) === String(r.id))).length;
             const vRiderNotesCount = vehicle.draftState?.notes ? Object.keys(vehicle.draftState.notes).length : 0;
@@ -3391,8 +3392,10 @@ export function VehicleAllocation({ manifest, service, onSave }: Props) {
             <div className="divide-y divide-line/60 border-t border-success/20 animate-fade-in">
               {submittedVehicles.map((v) => {
                 const vRiders = riderPassengers(v);
-                const presentRiders = vRiders.filter((r) => r.present);
-                const absentRiders = vRiders.filter((r) => !r.present);
+                const draftPresentIds = new Set((v.draftState?.presentIds || []).map(String));
+                const isRiderPresent = (r: Passenger) => Boolean(r.present || draftPresentIds.has(String(r.id)) || draftPresentIds.has(r.id));
+                const presentRiders = vRiders.filter(isRiderPresent);
+                const absentRiders = vRiders.filter((r) => !isRiderPresent(r));
                 const sponsoredRiders = vRiders.filter((r) => r.sponsored || v.draftState?.sponsoredIds?.some((id) => String(id) === String(r.id)));
                 const unpaidRiders = vRiders.filter((r) => r.didNotPay || v.draftState?.unpaidIds?.some((id) => String(id) === String(r.id)));
                 const draftNotes = v.draftState?.notes || {};

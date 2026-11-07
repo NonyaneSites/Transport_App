@@ -26,7 +26,7 @@ import {
 } from '@/lib/types';
 import { hubDisplayName, getEffectiveStop, getPassengerStatusBadge } from '@/lib/types';
 import { sortVehiclesNatural, naturalCompare } from '@/lib/sort';
-import { vehicleRiders, saveVehicleToDb, loadManifest } from '@/lib/manifest';
+import { vehicleRiders, saveVehicleToDb, loadManifest, upsertManifest } from '@/lib/manifest';
 import {
   insertAbsentees,
   withdrawAbsentees,
@@ -2899,10 +2899,11 @@ export function RepPage() {
         clientId: clientIdRef.current,
         timestamp: Date.now(),
       });
-      const submittedVehicle = submittedManifest.vehicles.find((v) => v.id === selectedVehicle.id);
+      const submittedVehicle = submittedManifest.vehicles.find((v) => String(v.id) === String(selectedVehicle.id));
       if (submittedVehicle) {
         saveVehicleToDb(key, submittedVehicle).catch(() => {});
       }
+      upsertManifest(submittedManifest).catch(() => {});
 
       // Auto-sync this vehicle's stats to the live Google Sheet (no-ops
       // silently if VITE_GOOGLE_SHEETS_WEBHOOK_URL isn't configured).
@@ -3010,7 +3011,7 @@ export function RepPage() {
       }
 
       const updatedVehicles = manifest.vehicles.map((v) =>
-        v.id === selectedVehicle.id
+        String(v.id) === String(selectedVehicle.id)
           ? {
               ...v,
               submitted: false,
@@ -3021,7 +3022,7 @@ export function RepPage() {
           : v
       );
       // TASK 1: Reopen vehicle draft atomically via vehicle-scoped updateVehicleDraft
-      const reopenedTargetV = updatedVehicles.find((v) => v.id === selectedVehicle.id);
+      const reopenedTargetV = updatedVehicles.find((v) => String(v.id) === String(selectedVehicle.id));
       const reopenedDraft = reopenedTargetV?.draftState || { ...(selectedVehicle.draftState || {}), submitted: false, submittedAt: undefined };
       await updateVehicleDraft(
         selectedVehicle.id,
@@ -3029,6 +3030,10 @@ export function RepPage() {
         repName.trim(),
         licensePlate.trim()
       );
+      if (reopenedTargetV) {
+        saveVehicleToDb(key, reopenedTargetV).catch(() => {});
+      }
+      upsertManifest({ ...manifest, vehicles: updatedVehicles }).catch(() => {});
       broadcastLiveAction({
         type: 'vehicle_reopened',
         vehicleId: selectedVehicle.id,

@@ -86,10 +86,10 @@ export function extractVehicleStats(
   dateStr?: string | null
 ): ExtractedVehicleStats {
   const rawRiders = (vehicle?.riders || [])
-    .map(passengerLookup)
+    .map((id) => passengerLookup(id) || passengerLookup(String(id)))
     .filter((p): p is Passenger => Boolean(p));
 
-  const isSubmitted = Boolean(vehicle?.submitted);
+  const isSubmitted = Boolean(vehicle?.submitted || vehicle?.draftState?.submitted);
   const hasDraft = Boolean(vehicle?.draftState && (vehicle?.draftState?.presentIds?.length || vehicle?.draftState?.absentIds?.length));
 
   let status: 'Submitted' | 'Draft in Progress' | 'Unmarked' = 'Unmarked';
@@ -107,11 +107,13 @@ export function extractVehicleStats(
   const notesMap = vehicle?.draftState?.notes || {};
 
   if (isSubmitted) {
-    // When submitted, presence and sponsored flags are persisted directly on signups
-    presentRiders = rawRiders.filter((p) => p.present);
-    absentRiders = rawRiders.filter((p) => !p.present);
-    sponsoredRiders = rawRiders.filter((p) => p.sponsored);
-    ftvRiders = presentRiders.filter((p) => isAutoFirstTimeVisitor(p, notesMap[p.id]));
+    // When submitted, presence and sponsored flags are persisted on signups or draftState
+    const draftPresent = new Set((vehicle?.draftState?.presentIds || []).map(String));
+    const draftSponsored = new Set((vehicle?.draftState?.sponsoredIds || []).map(String));
+    presentRiders = rawRiders.filter((p) => Boolean(p.present || draftPresent.has(String(p.id)) || draftPresent.has(p.id)));
+    absentRiders = rawRiders.filter((p) => !presentRiders.includes(p));
+    sponsoredRiders = rawRiders.filter((p) => Boolean(p.sponsored || draftSponsored.has(String(p.id)) || draftSponsored.has(p.id)));
+    ftvRiders = presentRiders.filter((p) => isAutoFirstTimeVisitor(p, notesMap[p.id] || notesMap[String(p.id)]));
   } else {
     // Unsubmitted or Reopened for editing:
     // All attendance, sponsorship, and fare stats are revoked from the app until the rep resubmits.

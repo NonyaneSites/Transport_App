@@ -354,6 +354,15 @@ export function useManifest(
       const subTime = action.timestamp ? new Date(action.timestamp).toISOString() : new Date().toISOString();
       setManifest((prev) => {
         if (!prev) return prev;
+        const targetVeh = prev.vehicles.find((v) => String(v.id) === String(action.vehicleId));
+        const targetRidersSet = new Set((targetVeh?.riders || []).map(String));
+
+        const pIds = new Set((action.draftState?.presentIds || []).map(String));
+        const aIds = new Set((action.draftState?.absentIds || []).map(String));
+        const sIds = new Set((action.draftState?.sponsoredIds || []).map(String));
+        const uIds = new Set((action.draftState?.unpaidIds || []).map(String));
+        const draftNotes = action.draftState?.notes || {};
+
         const updatedVehicles = prev.vehicles.map((v) => {
           if (String(v.id) === String(action.vehicleId)) {
             const nextDraft = action.draftState || (v.draftState
@@ -377,11 +386,34 @@ export function useManifest(
           }
           return v;
         });
-        return { ...prev, vehicles: updatedVehicles };
+
+        // Also update signups so passenger.present, sponsored, etc. are immediately set in-memory for the admin view
+        const updatedSignups = prev.signups.map((p) => {
+          const sId = String(p.id);
+          if (!targetRidersSet.has(sId)) return p;
+          const isPres = pIds.has(sId);
+          const isAbs = aIds.has(sId);
+          const isSpon = sIds.has(sId) || Boolean(p.sponsored);
+          const isUnpd = uIds.has(sId);
+          const note = draftNotes[p.id] ?? draftNotes[sId] ?? p.sponsorNote ?? '';
+          return {
+            ...p,
+            present: isPres ? true : isAbs ? false : p.present,
+            sponsored: isSpon,
+            sponsorNote: note || p.sponsorNote,
+            didNotPay: isUnpd,
+            unpaidNote: isUnpd ? (draftNotes[p.id] ?? draftNotes[sId] ?? p.unpaidNote) : p.unpaidNote,
+          };
+        });
+
+        return { ...prev, vehicles: updatedVehicles, signups: updatedSignups };
       });
     } else if (action.type === 'vehicle_reopened') {
       setManifest((prev) => {
         if (!prev) return prev;
+        const targetVeh = prev.vehicles.find((v) => String(v.id) === String(action.vehicleId));
+        const targetRidersSet = new Set((targetVeh?.riders || []).map(String));
+
         const updatedVehicles = prev.vehicles.map((v) => {
           if (String(v.id) === String(action.vehicleId)) {
             return {
@@ -394,7 +426,18 @@ export function useManifest(
           }
           return v;
         });
-        return { ...prev, vehicles: updatedVehicles };
+
+        // Reset the submitted present state on signups for this reopened vehicle
+        const updatedSignups = prev.signups.map((p) => {
+          const sId = String(p.id);
+          if (!targetRidersSet.has(sId)) return p;
+          return {
+            ...p,
+            present: undefined,
+          };
+        });
+
+        return { ...prev, vehicles: updatedVehicles, signups: updatedSignups };
       });
     }
 
@@ -713,11 +756,15 @@ export function useManifest(
               if (!prev || prev.date !== key) return prev;
               const isTargetActive = activeVehicleIdRef.current === vehicleId;
               const updatedVehicles = prev.vehicles.map((v) => {
-                if (v.id !== vehicleId) return v;
+                if (String(v.id) !== String(vehicleId)) return v;
                 if (isTargetActive && v.draftState?.updatedBy === draftState.updatedBy) return v;
+                const isSubmittedDraft = draftState.submitted !== undefined ? Boolean(draftState.submitted) : v.submitted;
                 return {
                   ...v,
                   draftState,
+                  submitted: isSubmittedDraft,
+                  submittedAt: isSubmittedDraft ? (draftState.submittedAt || v.submittedAt || new Date().toISOString()) : undefined,
+                  submittedBy: isSubmittedDraft ? (draftState.repName || repName || v.submittedBy || 'rep') : undefined,
                   repName: repName?.trim() || draftState.repName?.trim() || v.repName,
                   licensePlate: licensePlate?.trim() || draftState.licensePlate?.trim() || v.licensePlate,
                 };

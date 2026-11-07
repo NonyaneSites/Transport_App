@@ -232,24 +232,25 @@ export function AdminAttendanceNotesSection({
       if (!v.submitted && !v.draftState?.submitted) continue;
 
       const draft = v.draftState;
-      const aIds = new Set<string>(draft?.absentIds || []);
-      const pIds = new Set<string>(draft?.presentIds || []);
+      const aIds = new Set<string>((draft?.absentIds || []).map(String));
+      const pIds = new Set<string>((draft?.presentIds || []).map(String));
       const notesMap = draft?.notes || {};
       const repName = getVehicleDisplayRep(v);
 
       for (const riderId of v.riders || []) {
-        const p = passengerMap.get(riderId);
+        const p = passengerMap.get(String(riderId)) || passengerMap.get(riderId);
         if (!p) continue;
 
+        const sId = String(p.id);
         // Is marked absent in draft or submitted as not present
-        const isAbsent = aIds.has(p.id) || (!p.present && !pIds.has(p.id));
-        if (isAbsent && !seen.has(p.id)) {
-          seen.add(p.id);
+        const isAbsent = aIds.has(sId) || aIds.has(p.id) || (!p.present && !pIds.has(sId) && !pIds.has(p.id));
+        if (isAbsent && !seen.has(sId)) {
+          seen.add(sId);
           list.push({
             passenger: p,
             vehicle: v,
             repName,
-            note: notesMap[p.id] || p.sponsorNote || undefined,
+            note: notesMap[p.id] || notesMap[sId] || p.sponsorNote || undefined,
           });
         }
       }
@@ -263,19 +264,20 @@ export function AdminAttendanceNotesSection({
     const seen = new Set<string>();
 
     for (const v of manifest.vehicles || []) {
-      if (!v.submitted) continue;
+      if (!v.submitted && !v.draftState?.submitted) continue;
 
       const draft = v.draftState;
       const notesMap = draft?.notes || {};
       const repName = getVehicleDisplayRep(v);
 
       for (const riderId of v.riders || []) {
-        const p = passengerMap.get(riderId);
+        const p = passengerMap.get(String(riderId)) || passengerMap.get(riderId);
         if (!p) continue;
 
-        const note = (notesMap[p.id] || p.sponsorNote || '').trim();
-        if (note && !seen.has(p.id)) {
-          seen.add(p.id);
+        const sId = String(p.id);
+        const note = (notesMap[p.id] || notesMap[sId] || p.sponsorNote || '').trim();
+        if (note && !seen.has(sId)) {
+          seen.add(sId);
           list.push({
             passenger: p,
             vehicle: v,
@@ -293,7 +295,7 @@ export function AdminAttendanceNotesSection({
     const list: VehicleGeneralNoteItem[] = [];
 
     for (const v of manifest.vehicles || []) {
-      if (!v.submitted) continue;
+      if (!v.submitted && !v.draftState?.submitted) continue;
 
       const note = (v.generalNotes || v.draftState?.generalNotes || '').trim();
       if (note) {
@@ -301,7 +303,7 @@ export function AdminAttendanceNotesSection({
           vehicle: v,
           repName: getVehicleDisplayRep(v),
           note,
-          submittedAt: v.submittedAt,
+          submittedAt: v.submittedAt || v.draftState?.submittedAt,
         });
       }
     }
@@ -321,7 +323,7 @@ export function AdminAttendanceNotesSection({
     }[] = [];
 
     for (const v of manifest.vehicles || []) {
-      if (!v.submitted) continue;
+      if (!v.submitted && !v.draftState?.submitted) continue;
 
       const items = v.draftState?.manualCancellations || [];
       const repName = getVehicleDisplayRep(v);
@@ -1270,23 +1272,31 @@ export function AdminAttendanceNotesSection({
                   </thead>
                   <tbody className="divide-y divide-line/60">
                     {sortVehiclesNatural(manifest.vehicles || []).map((v) => {
-                      const riders = (v.riders || []).map((id) => passengerMap.get(id)).filter(Boolean) as Passenger[];
+                      const riders = (v.riders || []).map((id) => passengerMap.get(String(id)) || passengerMap.get(id)).filter(Boolean) as Passenger[];
                       const draft = v.draftState;
+                      const isVehSubmitted = Boolean(v.submitted || draft?.submitted);
                       const pIds = new Set<string>((draft?.presentIds || []).map(String));
                       const aIds = new Set<string>((draft?.absentIds || []).map(String));
                       const sIds = new Set<string>((draft?.sponsoredIds || []).map(String));
                       const uIds = new Set<string>((draft?.unpaidIds || []).map(String));
 
-                      const presentCount = v.submitted
-                        ? riders.filter((r) => r.present).length
-                        : riders.filter((r) => r.present || pIds.has(String(r.id))).length;
+                      const isRiderPresent = (r: Passenger) => {
+                        const sId = String(r.id);
+                        return Boolean(pIds.has(sId) || pIds.has(r.id) || r.present);
+                      };
 
-                      const absentCount = v.submitted
-                        ? riders.filter((r) => !r.present).length
-                        : riders.filter((r) => aIds.has(String(r.id))).length;
+                      const isRiderAbsent = (r: Passenger) => {
+                        const sId = String(r.id);
+                        return Boolean(aIds.has(sId) || aIds.has(r.id) || (isVehSubmitted && !isRiderPresent(r)));
+                      };
 
-                      const sponsoredCount = riders.filter((r) => r.sponsored || sIds.has(String(r.id))).length;
-                      const unpaidCount = riders.filter((r) => r.didNotPay || uIds.has(String(r.id))).length;
+                      const presentCount = riders.filter(isRiderPresent).length;
+                      const absentCount = isVehSubmitted
+                        ? Math.max(0, riders.length - presentCount)
+                        : riders.filter(isRiderAbsent).length;
+
+                      const sponsoredCount = riders.filter((r) => r.sponsored || sIds.has(String(r.id)) || sIds.has(r.id)).length;
+                      const unpaidCount = riders.filter((r) => r.didNotPay || uIds.has(String(r.id)) || uIds.has(r.id)).length;
                       const repName = getVehicleDisplayRep(v);
                       const notesCount = (draft?.notes ? Object.keys(draft.notes).length : 0) + (v.generalNotes ? 1 : 0);
 
@@ -1301,7 +1311,7 @@ export function AdminAttendanceNotesSection({
                             ) : repName}
                           </td>
                           <td className="px-3 py-2.5 text-center whitespace-nowrap">
-                            {v.submitted ? (
+                            {isVehSubmitted ? (
                               <span className="badge bg-success/20 text-success-light text-[10px] font-bold border border-success/30">
                                 Submitted
                               </span>
