@@ -3,7 +3,7 @@ import {
   Bus, Car, CheckCircle2, XCircle, Loader2, Users, AlertTriangle,
   Smartphone, ChevronDown, ChevronRight, MapPin, Send,
   HeartHandshake, StickyNote, UserPlus, Users2, X, Wallet, Plus, Search, Banknote,
-  Sparkles, ArrowDownAZ, RotateCcw, Check, AlertCircle, Calendar, Pencil, UserMinus,
+  Sparkles, ArrowDownAZ, RotateCcw, Check, AlertCircle, Calendar, Pencil, Trash2,
   Lock, ArrowRightLeft, ArrowUpRight,
 } from 'lucide-react';
 import { ServiceDateSelector } from '@/components/ServiceDateSelector';
@@ -178,6 +178,8 @@ export function RepPage() {
       return new Set();
     }
   });
+
+  const [riderPendingRemoval, setRiderPendingRemoval] = useState<Passenger | null>(null);
 
   useEffect(() => {
     try {
@@ -3169,69 +3171,61 @@ export function RepPage() {
   const canRemoveRider = useCallback(
     (passenger: Passenger) => {
       const isWalkIn =
-        passenger.id.startsWith('walkin-') ||
+        String(passenger.id).startsWith('walkin-') ||
         passenger.stop === 'Walk-In' ||
         passenger.walkIn === true;
-      if (!isWalkIn) return false;
-
-      const isMyWalkIn =
-        myCreatedWalkInIds.has(passenger.id) ||
-        (!!passenger.createdClientId && passenger.createdClientId === clientIdRef.current) ||
-        (!!passenger.createdBy &&
-          !!repName.trim() &&
-          passenger.createdBy.trim().toLowerCase() === repName.trim().toLowerCase());
-
-      return isMyWalkIn;
+      return Boolean(isWalkIn);
     },
-    [myCreatedWalkInIds, repName]
+    []
   );
 
   const handleRemoveRiderFromVehicle = useCallback(
-    async (passengerId: string) => {
+    (passengerId: string) => {
       if (!manifest || !selectedVehicle) return;
       const targetPassenger = manifest.signups.find((p) => String(p.id) === String(passengerId));
       if (!targetPassenger) return;
 
       const isWalkIn =
-        targetPassenger.id.startsWith('walkin-') ||
+        String(targetPassenger.id).startsWith('walkin-') ||
         targetPassenger.stop === 'Walk-In' ||
         targetPassenger.walkIn === true;
 
       if (!isWalkIn) {
-        setBatchActionMsg('⚠️ Reps can only remove walk-ins they created. Scheduled signups cannot be removed.');
+        setBatchActionMsg('⚠️ Scheduled passengers cannot be removed. Only walk-in passengers can be removed.');
         setTimeout(() => setBatchActionMsg(null), 5000);
         return;
       }
 
-      const isMyWalkIn =
-        myCreatedWalkInIds.has(targetPassenger.id) ||
-        (!!targetPassenger.createdClientId && targetPassenger.createdClientId === clientIdRef.current) ||
-        (!!targetPassenger.createdBy &&
-          !!repName.trim() &&
-          targetPassenger.createdBy.trim().toLowerCase() === repName.trim().toLowerCase());
+      setRiderPendingRemoval(targetPassenger);
+    },
+    [manifest, selectedVehicle]
+  );
 
-      if (!isMyWalkIn) {
-        setBatchActionMsg('⚠️ You can only remove walk-ins that you created.');
-        setTimeout(() => setBatchActionMsg(null), 5000);
-        return;
-      }
+  const confirmRemoveRider = useCallback(
+    async (passengerId: string) => {
+      if (!manifest || !selectedVehicle) return;
+      const targetPassenger = manifest.signups.find((p) => String(p.id) === String(passengerId));
+      setRiderPendingRemoval(null);
+      if (!targetPassenger) return;
+
+      const sId = String(passengerId);
 
       // 1. Delete the walk-in from signups
-      const updatedSignups = manifest.signups.filter((p) => String(p.id) !== String(passengerId));
+      const updatedSignups = manifest.signups.filter((p) => String(p.id) !== sId);
 
       // 2. Remove from current vehicle's riders and clean draftState
       const updatedVehicles = manifest.vehicles.map((v) => {
-        if (v.id !== selectedVehicle.id) return v;
-        const nextRiders = v.riders.filter((id) => String(id) !== String(passengerId));
+        if (String(v.id) !== String(selectedVehicle.id)) return v;
+        const nextRiders = (v.riders || []).filter((id) => String(id) !== sId);
         const cleanedDraft = v.draftState
           ? {
               ...v.draftState,
-              presentIds: v.draftState.presentIds?.filter((id) => String(id) !== String(passengerId)),
-              absentIds: v.draftState.absentIds?.filter((id) => String(id) !== String(passengerId)),
-              sponsoredIds: v.draftState.sponsoredIds?.filter((id) => String(id) !== String(passengerId)),
-              unpaidIds: v.draftState.unpaidIds?.filter((id) => String(id) !== String(passengerId)),
+              presentIds: v.draftState.presentIds?.filter((id) => String(id) !== sId),
+              absentIds: v.draftState.absentIds?.filter((id) => String(id) !== sId),
+              sponsoredIds: v.draftState.sponsoredIds?.filter((id) => String(id) !== sId),
+              unpaidIds: v.draftState.unpaidIds?.filter((id) => String(id) !== sId),
               notes: Object.fromEntries(
-                Object.entries(v.draftState.notes || {}).filter(([k]) => String(k) !== String(passengerId))
+                Object.entries(v.draftState.notes || {}).filter(([k]) => String(k) !== sId)
               ),
             }
           : undefined;
@@ -3242,46 +3236,73 @@ export function RepPage() {
       setPresentIds((prev) => {
         const next = new Set(prev);
         next.delete(passengerId);
+        next.delete(sId);
         return next;
       });
       setAbsentIds((prev) => {
         const next = new Set(prev);
         next.delete(passengerId);
+        next.delete(sId);
         return next;
       });
       setSponsoredIds((prev) => {
         const next = new Set(prev);
         next.delete(passengerId);
+        next.delete(sId);
         return next;
       });
       setUnpaidIds((prev) => {
         const next = new Set(prev);
         next.delete(passengerId);
+        next.delete(sId);
         return next;
       });
       setNotes((prev) => {
         const next = { ...prev };
         delete next[passengerId];
+        delete next[sId];
         return next;
       });
       setMyCreatedWalkInIds((prev) => {
         const next = new Set(prev);
         next.delete(passengerId);
+        next.delete(sId);
         return next;
       });
 
       isUserDirtyRef.current = true;
       const newManifest = { ...manifest, signups: updatedSignups, vehicles: updatedVehicles };
       manifestRef.current = newManifest;
-      const targetCleanedV = updatedVehicles.find((v) => v.id === selectedVehicle.id);
-      if (targetCleanedV?.draftState) {
-        await updateVehicleDraft(selectedVehicle.id, targetCleanedV.draftState, repName, licensePlate);
+
+      // 4. Update React state immediately so UI updates
+      setManifest(newManifest);
+
+      // 5. Persist to database
+      const targetCleanedV = updatedVehicles.find((v) => String(v.id) === String(selectedVehicle.id));
+      if (targetCleanedV) {
+        saveVehicleToDb(key, targetCleanedV).catch(() => {});
       }
+      upsertManifest(newManifest).catch(() => {});
+
+      if (targetCleanedV?.draftState) {
+        await updateVehicleDraft(selectedVehicle.id, targetCleanedV.draftState, repName, licensePlate).catch(() => {});
+      }
+
+      // 6. Broadcast removal
+      broadcastLiveAction({
+        type: 'rider_attendance',
+        vehicleId: selectedVehicle.id,
+        riderId: sId,
+        status: 'unticked',
+        repName: repName.trim() || 'Co-rep',
+        clientId: clientIdRef.current,
+        timestamp: Date.now(),
+      });
 
       setBatchActionMsg(`✓ Removed walk-in "${targetPassenger.fullName}".`);
       setTimeout(() => setBatchActionMsg(null), 5000);
     },
-    [manifest, selectedVehicle, myCreatedWalkInIds, repName, licensePlate, updateVehicleDraft]
+    [manifest, selectedVehicle, repName, licensePlate, updateVehicleDraft, key, broadcastLiveAction, setManifest]
   );
 
   const handleSelectVehicle = (newVehicleId: string) => {
@@ -4648,6 +4669,53 @@ export function RepPage() {
                   Add as New Walk-In Anyway
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Warning confirmation modal for removing walk-in */}
+      {riderPendingRemoval && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-xs animate-fade-in"
+          onClick={() => setRiderPendingRemoval(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-line bg-card p-6 shadow-2xl animate-slide-up space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3.5">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-crimson-500/15 border border-crimson-500/30 text-crimson-400">
+                <AlertTriangle className="h-6 w-6" />
+              </div>
+              <div className="flex-1 min-w-0 space-y-1">
+                <h3 className="text-base font-bold text-ink">Remove Walk-In Passenger?</h3>
+                <p className="text-xs text-muted leading-relaxed">
+                  Are you sure you want to remove <span className="font-semibold text-ink">{riderPendingRemoval.fullName}</span>
+                  {riderPendingRemoval.structure ? ` (${riderPendingRemoval.structure})` : ''} from this vehicle?
+                </p>
+                <div className="mt-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-[11px] text-amber-200">
+                  ⚠️ This will permanently remove this walk-in from the vehicle and the trip manifest on all devices.
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-line">
+              <button
+                type="button"
+                onClick={() => setRiderPendingRemoval(null)}
+                className="rounded-xl px-4 py-2 text-xs font-semibold text-muted hover:text-ink hover:bg-card-2 border border-line transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => confirmRemoveRider(riderPendingRemoval.id)}
+                className="flex items-center gap-1.5 rounded-xl bg-crimson-500 hover:bg-crimson-600 px-4 py-2 text-xs font-bold text-white shadow-xs transition-all active:scale-95"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>Remove Walk-In</span>
+              </button>
             </div>
           </div>
         </div>
@@ -6228,15 +6296,15 @@ const PassengerRow = React.memo(function PassengerRow({
 
 
 
-        {/* Only allow removing walk-ins created by this rep */}
+        {/* Remove walk-in button */}
         {canRemove && onRemoveRider && !disabled && (
           <button
             type="button"
             onClick={() => onRemoveRider(passenger.id)}
-            className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-amber-300 hover:text-amber-200 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 transition-all active:scale-95"
-            title="Remove walk-in created by you"
+            className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-crimson-300 hover:text-crimson-200 bg-crimson-500/15 hover:bg-crimson-500/25 border border-crimson-500/30 transition-all active:scale-95 shadow-xs"
+            title="Remove walk-in passenger"
           >
-            <UserMinus className="h-3 w-3 text-amber-400" />
+            <Trash2 className="h-3 w-3 text-crimson-400" />
             <span className="hidden sm:inline">Remove Walk-in</span>
             <span className="sm:hidden">Remove</span>
           </button>
