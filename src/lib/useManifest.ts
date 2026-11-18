@@ -30,6 +30,238 @@ export type ManifestSyncStatus = 'synced' | 'syncing' | 'failed' | 'offline';
 export { normalizeManifestData };
 
 /**
+ * Conflict-safe per-rider merge of two VehicleDraftState objects.
+ * - Uses per-rider `recentlyEditedRiders` timestamps when available so concurrent taps
+ *   on different riders (or toggling sponsored/unpaid OFF) never clobber or resurrect each other.
+ * - Supports bidirectional submitted/reopened transitions using timestamps.
+ */
+export function mergeVehicleDraftStates(
+  curDraft: VehicleDraftState | undefined,
+  incDraft: VehicleDraftState | undefined,
+  activeRiderStrSet?: Set<string>
+): VehicleDraftState {
+  const curDraftTime = curDraft?.updatedAt ? new Date(curDraft.updatedAt).getTime() : 0;
+  const incDraftTime = incDraft?.updatedAt ? new Date(incDraft.updatedAt).getTime() : 0;
+  const incIsNewer = incDraftTime >= curDraftTime;
+
+  const curPSet = new Set((curDraft?.presentIds || []).map(String));
+  const incPSet = new Set((incDraft?.presentIds || []).map(String));
+  const curASet = new Set((curDraft?.absentIds || []).map(String));
+  const incASet = new Set((incDraft?.absentIds || []).map(String));
+  const curSponSet = new Set((curDraft?.sponsoredIds || []).map(String));
+  const incSponSet = new Set((incDraft?.sponsoredIds || []).map(String));
+  const curUnpSet = new Set((curDraft?.unpaidIds || []).map(String));
+  const incUnpSet = new Set((incDraft?.unpaidIds || []).map(String));
+  const curAbsPaidSet = new Set((curDraft?.absentPaidIds || []).map(String));
+  const incAbsPaidSet = new Set((incDraft?.absentPaidIds || []).map(String));
+
+  const curEdits: Record<string, number> = {};
+  for (const [k, v] of Object.entries(curDraft?.recentlyEditedRiders || {})) {
+    const sk = String(k);
+    if (typeof v === 'number' && v > (curEdits[sk] || 0)) curEdits[sk] = v;
+  }
+  const incEdits: Record<string, number> = {};
+  for (const [k, v] of Object.entries(incDraft?.recentlyEditedRiders || {})) {
+    const sk = String(k);
+    if (typeof v === 'number' && v > (incEdits[sk] || 0)) incEdits[sk] = v;
+  }
+
+  const allAttendanceIds = new Set<string>([
+    ...curPSet,
+    ...incPSet,
+    ...curASet,
+    ...incASet,
+    ...Object.keys(curEdits),
+    ...Object.keys(incEdits),
+  ]);
+  const mergedPresent: string[] = [];
+  const mergedAbsent: string[] = [];
+
+  for (const sId of allAttendanceIds) {
+    if (activeRiderStrSet && !activeRiderStrSet.has(sId)) continue;
+    const curEdit = curEdits[sId] ?? 0;
+    const incEdit = incEdits[sId] ?? 0;
+
+    if (curEdit > incEdit) {
+      if (curPSet.has(sId)) mergedPresent.push(sId);
+      else if (curASet.has(sId)) mergedAbsent.push(sId);
+    } else if (incEdit > curEdit) {
+      if (incPSet.has(sId)) mergedPresent.push(sId);
+      else if (incASet.has(sId)) mergedAbsent.push(sId);
+    } else {
+      // No differentiating per-rider timestamp: preserve disjoint co-rep check-ins, resolve conflicts via incIsNewer
+      const inCurP = curPSet.has(sId);
+      const inIncP = incPSet.has(sId);
+      const inCurA = curASet.has(sId);
+      const inIncA = incASet.has(sId);
+
+      if (incIsNewer) {
+        if (inIncP || (inCurP && !inIncA)) mergedPresent.push(sId);
+        else if (inIncA || (inCurA && !inIncP)) mergedAbsent.push(sId);
+      } else {
+        if (inCurP || (inIncP && !inCurA)) mergedPresent.push(sId);
+        else if (inCurA || (inIncA && !inCurP)) mergedAbsent.push(sId);
+      }
+    }
+  }
+
+  const mergeToggleFlag = (curSet: Set<string>, incSet: Set<string>, hasIncArray: boolean, hasCurArray: boolean): string[] => {
+    const ids = new Set<string>([...curSet, ...incSet]);
+    const out: string[] = [];
+    for (const sId of ids) {
+      if (activeRiderStrSet && !activeRiderStrSet.has(sId)) continue;
+      const curEdit = curEdits[sId] ?? 0;
+      const incEdit = incEdits[sId] ?? 0;
+      let keep = false;
+      if (curEdit > incEdit) {
+        keep = curSet.has(sId);
+      } else if (incEdit > curEdit) {
+        keep = incSet.has(sId);
+      } else if (hasIncArray && hasCurArray) {
+        keep = incIsNewer ? incSet.has(sId) : curSet.has(sId);
+      } else if (hasIncArray) {
+        keep = incSet.has(sId) || (!incIsNewer && curSet.has(sId));
+      } else {
+        keep = curSet.has(sId) || incSet.has(sId);
+      }
+      if (keep) out.push(sId);
+    }
+    return out;
+  };
+
+  const mergedSponsored = mergeToggleFlag(
+    curSponSet,
+    incSponSet,
+    Array.isArray(incDraft?.sponsoredIds),
+    Array.isArray(curDraft?.sponsoredIds)
+  );
+  const mergedUnpaid = mergeToggleFlag(
+    curUnpSet,
+    incUnpSet,
+    Array.isArray(incDraft?.unpaidIds),
+    Array.isArray(curDraft?.unpaidIds)
+  );
+  const mergedAbsentPaid = mergeToggleFlag(
+    curAbsPaidSet,
+    incAbsPaidSet,
+    Array.isArray(incDraft?.absentPaidIds),
+    Array.isArray(curDraft?.absentPaidIds)
+  );
+
+  // Merge notes per rider preferring most recent edit timestamp
+  const rawNotes: Record<string, string> = {};
+  const allNoteKeys = new Set([
+    ...Object.keys(curDraft?.notes || {}),
+    ...Object.keys(incDraft?.notes || {}),
+  ]);
+  for (const k of allNoteKeys) {
+    const sk = String(k);
+    if (activeRiderStrSet && !activeRiderStrSet.has(sk)) continue;
+    const curVal = curDraft?.notes?.[k] ?? curDraft?.notes?.[sk];
+    const incVal = incDraft?.notes?.[k] ?? incDraft?.notes?.[sk];
+    const curEdit = curEdits[sk] ?? 0;
+    const incEdit = incEdits[sk] ?? 0;
+    const chosen =
+      curEdit > incEdit
+        ? (curVal ?? incVal ?? '')
+        : incEdit > curEdit
+        ? (incVal ?? curVal ?? '')
+        : incIsNewer
+        ? (incVal ?? curVal ?? '')
+        : (curVal ?? incVal ?? '');
+    if (chosen) rawNotes[sk] = chosen;
+  }
+
+  const mergedEdits: Record<string, number> = {};
+  for (const k of new Set([...Object.keys(curEdits), ...Object.keys(incEdits)])) {
+    mergedEdits[k] = Math.max(curEdits[k] || 0, incEdits[k] || 0);
+  }
+
+  const finalRepName =
+    (incIsNewer ? incDraft?.repName : curDraft?.repName) ||
+    curDraft?.repName ||
+    incDraft?.repName;
+
+  const finalPlate =
+    (incIsNewer ? incDraft?.licensePlate : curDraft?.licensePlate) ||
+    curDraft?.licensePlate ||
+    incDraft?.licensePlate;
+
+  const finalGeneralNotes =
+    (incIsNewer ? incDraft?.generalNotes : curDraft?.generalNotes) ??
+    curDraft?.generalNotes ??
+    incDraft?.generalNotes;
+
+  const manualMap = new Map<string, { id: string; passengerName: string; structure?: string; amount: number; note?: string }>();
+  (curDraft?.manualCancellations ?? []).forEach((c) => manualMap.set(c.id, c));
+  (incDraft?.manualCancellations ?? []).forEach((c) => manualMap.set(c.id, c));
+
+  const sponseeMap = new Map<string, NonNullable<VehicleDraftState['externalSponsees']>[number]>();
+  (incIsNewer ? (curDraft?.externalSponsees ?? []) : (incDraft?.externalSponsees ?? [])).forEach((s) =>
+    sponseeMap.set(s.id, s)
+  );
+  (incIsNewer ? (incDraft?.externalSponsees ?? []) : (curDraft?.externalSponsees ?? [])).forEach((s) =>
+    sponseeMap.set(s.id, s)
+  );
+
+  // Bidirectional submitted state: allow newer reopened draft (submitted: false) to unlock
+  const incReopened = incDraft?.submitted === false && incDraftTime >= curDraftTime;
+  const curReopened = curDraft?.submitted === false && curDraftTime > incDraftTime;
+  const mergedSubmitted = incReopened || curReopened
+    ? false
+    : incIsNewer
+    ? Boolean(incDraft?.submitted ?? curDraft?.submitted)
+    : Boolean(curDraft?.submitted ?? incDraft?.submitted);
+
+  const latestTimestamp = incIsNewer
+    ? (incDraft?.updatedAt || curDraft?.updatedAt || new Date().toISOString())
+    : (curDraft?.updatedAt || incDraft?.updatedAt || new Date().toISOString());
+
+  return {
+    ...(incIsNewer ? curDraft : incDraft),
+    ...(incIsNewer ? incDraft : curDraft),
+    presentIds: mergedPresent,
+    absentIds: mergedAbsent,
+    sponsoredIds: mergedSponsored,
+    unpaidIds: mergedUnpaid,
+    absentPaidIds: mergedAbsentPaid,
+    notes: rawNotes,
+    repName: finalRepName,
+    licensePlate: finalPlate,
+    generalNotes: finalGeneralNotes,
+    coReps: Array.from(new Set([...(curDraft?.coReps ?? []), ...(incDraft?.coReps ?? [])])).filter(Boolean),
+    settledLedgerIds: Array.from(new Set([...(curDraft?.settledLedgerIds ?? []), ...(incDraft?.settledLedgerIds ?? [])])),
+    manualCancellations: Array.from(manualMap.values()),
+    externalSponsees: Array.from(sponseeMap.values()),
+    recentlyEditedRiders: mergedEdits,
+    submitted: mergedSubmitted,
+    submittedAt: mergedSubmitted ? (incDraft?.submittedAt || curDraft?.submittedAt) : undefined,
+    submittedBy: mergedSubmitted ? (incDraft?.submittedBy || curDraft?.submittedBy) : undefined,
+    updatedAt: latestTimestamp,
+    updatedBy: incIsNewer ? (incDraft?.updatedBy || curDraft?.updatedBy) : (curDraft?.updatedBy || incDraft?.updatedBy),
+  };
+}
+
+/**
+ * Resolves whether an incoming unsubmitted vehicle should stay locked or unlock cleanly.
+ */
+function shouldKeepLocalSubmitted(curV: Vehicle | undefined, incV: Vehicle, curManifestTime: number, incManifestTime: number): boolean {
+  const wasSubmitted = Boolean(curV?.submitted || curV?.draftState?.submitted);
+  if (!wasSubmitted || incV.submitted) return false;
+  // If incoming explicitly carries an unsubmitted draftState that is at least as new, allow reopen
+  const curDraftTime = curV?.draftState?.updatedAt ? new Date(curV.draftState.updatedAt).getTime() : 0;
+  const incDraftTime = incV.draftState?.updatedAt ? new Date(incV.draftState.updatedAt).getTime() : 0;
+  if (incV.draftState?.submitted === false && incDraftTime >= curDraftTime) {
+    return false;
+  }
+  if (incManifestTime >= curManifestTime && curDraftTime === 0) {
+    return false;
+  }
+  const curSubTime = curV?.submittedAt ? new Date(curV.submittedAt).getTime() : curDraftTime;
+  return curManifestTime > incManifestTime && curSubTime > incDraftTime;
+}
+
+/**
  * Intelligently merges an incoming manifest (from Supabase Realtime, broadcast, or poll)
  * with the locally active state so concurrent edits on other vehicles update seamlessly,
  * while the local rep's active vehicle working state is NEVER blown away.
@@ -44,28 +276,26 @@ export function mergeIncomingManifest(
   // NEVER merge! The incoming manifest is the only valid state for its date and service.
   if (!current || current.date !== incoming.date) return incoming;
 
+  const curTime = current.updated_at ? new Date(current.updated_at).getTime() : 0;
+  const incTime = incoming.updated_at ? new Date(incoming.updated_at).getTime() : 0;
+
   // Protect against stale incoming manifests older than what we already have in local state
   if (current.updated_at && incoming.updated_at) {
-    const curTime = new Date(current.updated_at).getTime();
-    const incTime = new Date(incoming.updated_at).getTime();
     // Allow small clock skew (up to 30000ms) between devices so legitimate saves aren't rejected as stale
     if (curTime - incTime > 30000) {
       return current;
     }
   }
 
-  // If no specific vehicle is actively open for editing, incoming is authoritative
+  // If no specific vehicle is actively open for editing, incoming is authoritative when >= curTime
   if (!activeVehicleId) {
-    const curTime = current?.updated_at ? new Date(current.updated_at).getTime() : 0;
-    const incTime = incoming.updated_at ? new Date(incoming.updated_at).getTime() : 0;
     if (incTime >= curTime) {
       return incoming;
     }
     const currentVehMap = new Map((current?.vehicles || []).map((v) => [String(v.id), v]));
     const safeVehicles = incoming.vehicles.map((incV) => {
       const curV = currentVehMap.get(String(incV.id));
-      const wasSubmitted = Boolean(curV?.submitted || curV?.draftState?.submitted);
-      if (wasSubmitted && !incV.submitted) {
+      if (shouldKeepLocalSubmitted(curV, incV, curTime, incTime)) {
         return {
           ...incV,
           submitted: true,
@@ -98,8 +328,7 @@ export function mergeIncomingManifest(
   const mergedVehicles = incoming.vehicles.map((incV) => {
     if (String(incV.id) !== String(activeVehicleId)) {
       const curV = currentVehMap.get(String(incV.id));
-      const wasSubmitted = Boolean(curV?.submitted || curV?.draftState?.submitted);
-      if (wasSubmitted && !incV.submitted) {
+      if (shouldKeepLocalSubmitted(curV, incV, curTime, incTime)) {
         return {
           ...incV,
           submitted: true,
@@ -125,92 +354,55 @@ export function mergeIncomingManifest(
 
     const incDraft = incV.draftState;
     const curDraft = currentActiveVehicle.draftState;
+    const curDraftTime = curDraft?.updatedAt ? new Date(curDraft.updatedAt).getTime() : 0;
+    const incDraftTime = incDraft?.updatedAt ? new Date(incDraft.updatedAt).getTime() : 0;
+    const incIsNewer = incDraftTime >= curDraftTime;
 
-    const curPSet = new Set((curDraft?.presentIds || []).map(String));
-    const incPSet = new Set((incDraft?.presentIds || []).map(String));
-    const curASet = new Set((curDraft?.absentIds || []).map(String));
-    const incASet = new Set((incDraft?.absentIds || []).map(String));
-
-    const incIsNewer = Boolean(
-      incDraft?.updatedAt && curDraft?.updatedAt && incDraft.updatedAt >= curDraft.updatedAt
-    );
-
-    const mergedPresent = Array.from(
-      new Set([
-        ...(curDraft?.presentIds || []).filter((id) => !incIsNewer || !incASet.has(String(id))),
-        ...(incDraft?.presentIds || []).filter((id) => incIsNewer || !curASet.has(String(id))),
-      ])
-    ).filter((id) => activeRiderStrSet.has(String(id)));
-
-    const mergedAbsent = Array.from(
-      new Set([
-        ...(curDraft?.absentIds || []).filter((id) => !incIsNewer || !incPSet.has(String(id))),
-        ...(incDraft?.absentIds || []).filter((id) => incIsNewer || !curPSet.has(String(id))),
-      ])
-    ).filter((id) => activeRiderStrSet.has(String(id)));
-
-    const mergedSponsored = Array.from(
-      new Set([...(curDraft?.sponsoredIds || []), ...(incDraft?.sponsoredIds || [])])
-    ).filter((id) => activeRiderStrSet.has(String(id)));
-
-    const mergedUnpaid = Array.from(
-      new Set([...(curDraft?.unpaidIds || []), ...(incDraft?.unpaidIds || [])])
-    ).filter((id) => activeRiderStrSet.has(String(id)));
-
-    const mergedAbsentPaid = Array.from(
-      new Set([...(curDraft?.absentPaidIds || []), ...(incDraft?.absentPaidIds || [])])
-    ).filter((id) => activeRiderStrSet.has(String(id)));
-
-    const mergedNotes = Object.fromEntries(
-      Object.entries({ ...(curDraft?.notes || {}), ...(incDraft?.notes || {}) }).filter(([k]) =>
-        activeRiderStrSet.has(String(k))
-      )
-    );
+    const cleanDraftState = mergeVehicleDraftStates(curDraft, incDraft, activeRiderStrSet);
 
     const finalRepName =
-      (incIsNewer ? incDraft?.repName : curDraft?.repName) ||
-      curDraft?.repName ||
-      incDraft?.repName ||
+      cleanDraftState.repName ||
       currentActiveVehicle.repName ||
       incV.repName;
 
     const finalPlate =
-      (incIsNewer ? incDraft?.licensePlate : curDraft?.licensePlate) ||
-      curDraft?.licensePlate ||
-      incDraft?.licensePlate ||
+      cleanDraftState.licensePlate ||
       currentActiveVehicle.licensePlate ||
       incV.licensePlate;
 
     const finalGeneralNotes =
-      (incIsNewer ? incDraft?.generalNotes : curDraft?.generalNotes) ||
-      curDraft?.generalNotes ||
-      incDraft?.generalNotes ||
-      currentActiveVehicle.generalNotes ||
+      cleanDraftState.generalNotes ??
+      currentActiveVehicle.generalNotes ??
       incV.generalNotes;
 
-    const isSubmitted = Boolean(
-      incV.submitted ||
-        currentActiveVehicle.submitted ||
-        incDraft?.submitted ||
-        curDraft?.submitted
-    );
+    const incExplicitlyReopened =
+      !incV.submitted &&
+      incDraft?.submitted === false &&
+      (incDraftTime >= curDraftTime || curDraftTime === 0);
+    const curExplicitlyReopened =
+      !currentActiveVehicle.submitted &&
+      curDraft?.submitted === false &&
+      curDraftTime > incDraftTime;
 
-    const cleanDraftState: VehicleDraftState = {
-      ...(curDraft || {}),
-      ...(incDraft || {}),
-      presentIds: mergedPresent,
-      absentIds: mergedAbsent,
-      sponsoredIds: mergedSponsored,
-      unpaidIds: mergedUnpaid,
-      absentPaidIds: mergedAbsentPaid,
-      notes: mergedNotes,
-      repName: finalRepName,
-      licensePlate: finalPlate,
-      generalNotes: finalGeneralNotes,
-      submitted: isSubmitted,
-      updatedAt: incDraft?.updatedAt || curDraft?.updatedAt || new Date().toISOString(),
-      updatedBy: incDraft?.updatedBy || curDraft?.updatedBy,
-    };
+    const isSubmitted =
+      incExplicitlyReopened || curExplicitlyReopened
+        ? false
+        : incIsNewer && incDraft?.submitted !== undefined
+        ? Boolean(incV.submitted || incDraft.submitted)
+        : !incIsNewer && curDraft?.submitted !== undefined
+        ? Boolean(currentActiveVehicle.submitted || curDraft.submitted)
+        : Boolean(
+            incV.submitted ||
+              currentActiveVehicle.submitted ||
+              incDraft?.submitted ||
+              curDraft?.submitted
+          );
+
+    cleanDraftState.submitted = isSubmitted;
+    if (!isSubmitted) {
+      cleanDraftState.submittedAt = undefined;
+      cleanDraftState.submittedBy = undefined;
+    }
 
     return {
       ...incV,
@@ -221,8 +413,8 @@ export function mergeIncomingManifest(
       riders: activeRiders,
       orderedStops: incV.orderedStops || currentActiveVehicle.orderedStops || [],
       submitted: isSubmitted,
-      submittedAt: incV.submittedAt || currentActiveVehicle.submittedAt,
-      submittedBy: incV.submittedBy || currentActiveVehicle.submittedBy,
+      submittedAt: isSubmitted ? (incV.submittedAt || currentActiveVehicle.submittedAt) : undefined,
+      submittedBy: isSubmitted ? (incV.submittedBy || currentActiveVehicle.submittedBy) : undefined,
       draftState: cleanDraftState,
     };
   });
@@ -410,6 +602,8 @@ export function useManifest(
         return { ...prev, vehicles: updatedVehicles, signups: updatedSignups };
       });
     } else if (action.type === 'vehicle_reopened') {
+      recentlyReopenedVehiclesRef.current.set(String(action.vehicleId), Date.now());
+      recentlySubmittedVehiclesRef.current.delete(String(action.vehicleId));
       setManifest((prev) => {
         if (!prev) return prev;
         const targetVeh = prev.vehicles.find((v) => String(v.id) === String(action.vehicleId));
@@ -422,7 +616,16 @@ export function useManifest(
               submitted: false,
               submittedAt: undefined,
               submittedBy: undefined,
-              draftState: v.draftState ? { ...v.draftState, submitted: false, submittedAt: undefined } : v.draftState,
+              draftState: v.draftState
+                ? {
+                    ...v.draftState,
+                    submitted: false,
+                    submittedAt: undefined,
+                    submittedBy: undefined,
+                    updatedAt: action.timestamp ? new Date(action.timestamp).toISOString() : new Date().toISOString(),
+                    updatedBy: action.clientId || v.draftState.updatedBy,
+                  }
+                : undefined,
             };
           }
           return v;
@@ -686,6 +889,8 @@ export function useManifest(
   const lastSavedUpdatedAtRef = useRef<string | null>(null);
   const lastKnownUpdatedAtRef = useRef<string | null>(null);
   const lastLocalSaveTimeRef = useRef<number>(0);
+  const recentlyReopenedVehiclesRef = useRef<Map<string, number>>(new Map());
+  const recentlySubmittedVehiclesRef = useRef<Map<string, number>>(new Map());
 
   // Manual or automatic fresh reload
   const refresh = async () => {
@@ -695,13 +900,37 @@ export function useManifest(
     try {
       const fresh = await loadManifest(key);
       if (keyRef.current === key && fresh) {
+        const now = Date.now();
         setManifest((prev) => {
           if (!prev) return fresh;
           const curVehMap = new Map(prev.vehicles.map((v) => [String(v.id), v]));
           const safeVehicles = fresh.vehicles.map((fV) => {
-            const curV = curVehMap.get(String(fV.id));
-            const wasSubmitted = Boolean(curV?.submitted || curV?.draftState?.submitted);
-            if (wasSubmitted && !fV.submitted) {
+            const vKey = String(fV.id);
+            const curV = curVehMap.get(vKey);
+            const reopenedAt = recentlyReopenedVehiclesRef.current.get(vKey) ?? 0;
+            const submittedAt = recentlySubmittedVehiclesRef.current.get(vKey) ?? 0;
+
+            // If this device or a co-rep just reopened this vehicle within the last 12s while DB write is settling,
+            // keep it unlocked and don't snap back to submitted:true from a slightly stale read.
+            if (reopenedAt > 0 && now - reopenedAt < 12000 && fV.submitted) {
+              return {
+                ...fV,
+                submitted: false,
+                submittedAt: undefined,
+                submittedBy: undefined,
+                draftState: curV?.draftState
+                  ? { ...curV.draftState, submitted: false, submittedAt: undefined }
+                  : fV.draftState
+                  ? { ...fV.draftState, submitted: false, submittedAt: undefined }
+                  : undefined,
+              };
+            }
+
+            // Only guard against unsubmitted stale DB read if we JUST submitted locally within 12s
+            const wasJustSubmittedLocally = Boolean(
+              submittedAt > 0 && now - submittedAt < 12000 && (curV?.submitted || curV?.draftState?.submitted)
+            );
+            if (wasJustSubmittedLocally && !fV.submitted) {
               return {
                 ...fV,
                 submitted: true,
@@ -927,21 +1156,36 @@ export function useManifest(
 
           if (event.data.type === 'vehicle_draft_delta' && event.data.vehicleId && event.data.draftState) {
             const { vehicleId, draftState, repName, licensePlate } = event.data;
+            if (draftState.submitted === false) {
+              recentlyReopenedVehiclesRef.current.set(String(vehicleId), Date.now());
+              recentlySubmittedVehiclesRef.current.delete(String(vehicleId));
+            } else if (draftState.submitted === true) {
+              recentlySubmittedVehiclesRef.current.set(String(vehicleId), Date.now());
+              recentlyReopenedVehiclesRef.current.delete(String(vehicleId));
+            }
             setManifest((prev) => {
               if (!prev || prev.date !== key) return prev;
-              const isTargetActive = activeVehicleIdRef.current === vehicleId;
+              const isTargetActive = String(activeVehicleIdRef.current) === String(vehicleId);
               const updatedVehicles = prev.vehicles.map((v) => {
                 if (String(v.id) !== String(vehicleId)) return v;
-                if (isTargetActive && v.draftState?.updatedBy === draftState.updatedBy) return v;
-                const isSubmittedDraft = draftState.submitted !== undefined ? Boolean(draftState.submitted) : v.submitted;
+                const sameAuthorOlder =
+                  v.draftState?.updatedBy &&
+                  draftState.updatedBy &&
+                  v.draftState.updatedBy === draftState.updatedBy &&
+                  (!draftState.updatedAt || !v.draftState.updatedAt || draftState.updatedAt <= v.draftState.updatedAt);
+                if (isTargetActive && sameAuthorOlder) return v;
+                const mergedDraft = isTargetActive && v.draftState
+                  ? mergeVehicleDraftStates(v.draftState, draftState, new Set((v.riders || []).map(String)))
+                  : draftState;
+                const isSubmittedDraft = mergedDraft.submitted !== undefined ? Boolean(mergedDraft.submitted) : v.submitted;
                 return {
                   ...v,
-                  draftState,
+                  draftState: mergedDraft,
                   submitted: isSubmittedDraft,
-                  submittedAt: isSubmittedDraft ? (draftState.submittedAt || v.submittedAt || new Date().toISOString()) : undefined,
-                  submittedBy: isSubmittedDraft ? (draftState.repName || repName || v.submittedBy || 'rep') : undefined,
-                  repName: repName?.trim() || draftState.repName?.trim() || v.repName,
-                  licensePlate: licensePlate?.trim() || draftState.licensePlate?.trim() || v.licensePlate,
+                  submittedAt: isSubmittedDraft ? (mergedDraft.submittedAt || v.submittedAt || new Date().toISOString()) : undefined,
+                  submittedBy: isSubmittedDraft ? (mergedDraft.repName || repName || v.submittedBy || 'rep') : undefined,
+                  repName: repName?.trim() || mergedDraft.repName?.trim() || v.repName,
+                  licensePlate: licensePlate?.trim() || mergedDraft.licensePlate?.trim() || v.licensePlate,
                 };
               });
               return { ...prev, vehicles: updatedVehicles };
@@ -1057,23 +1301,37 @@ export function useManifest(
           if (keyRef.current !== key || !msg.payload) return;
           const { vehicleId, draftState, repName, licensePlate } = msg.payload;
           if (!vehicleId || !draftState) return;
+          if (draftState.submitted === false) {
+            recentlyReopenedVehiclesRef.current.set(String(vehicleId), Date.now());
+            recentlySubmittedVehiclesRef.current.delete(String(vehicleId));
+          } else if (draftState.submitted === true) {
+            recentlySubmittedVehiclesRef.current.set(String(vehicleId), Date.now());
+            recentlyReopenedVehiclesRef.current.delete(String(vehicleId));
+          }
 
           setManifest((prev) => {
             if (!prev) return prev;
             const isTargetActive = String(activeVehicleIdRef.current) === String(vehicleId);
             const updatedVehicles = prev.vehicles.map((v) => {
               if (String(v.id) !== String(vehicleId)) return v;
-              // If it's our own active vehicle and same author, don't clobber
-              if (isTargetActive && v.draftState?.updatedBy === draftState.updatedBy) return v;
-              const isSubmittedDraft = draftState.submitted !== undefined ? Boolean(draftState.submitted) : v.submitted;
+              const sameAuthorOlder =
+                v.draftState?.updatedBy &&
+                draftState.updatedBy &&
+                v.draftState.updatedBy === draftState.updatedBy &&
+                (!draftState.updatedAt || !v.draftState.updatedAt || draftState.updatedAt <= v.draftState.updatedAt);
+              if (isTargetActive && sameAuthorOlder) return v;
+              const mergedDraft = isTargetActive && v.draftState
+                ? mergeVehicleDraftStates(v.draftState, draftState, new Set((v.riders || []).map(String)))
+                : draftState;
+              const isSubmittedDraft = mergedDraft.submitted !== undefined ? Boolean(mergedDraft.submitted) : v.submitted;
               return {
                 ...v,
-                draftState,
+                draftState: mergedDraft,
                 submitted: isSubmittedDraft,
-                submittedAt: isSubmittedDraft ? (draftState.submittedAt || v.submittedAt || new Date().toISOString()) : undefined,
-                submittedBy: isSubmittedDraft ? (draftState.repName || repName || v.submittedBy || 'rep') : undefined,
-                repName: repName?.trim() || draftState.repName?.trim() || v.repName,
-                licensePlate: licensePlate?.trim() || draftState.licensePlate?.trim() || v.licensePlate,
+                submittedAt: isSubmittedDraft ? (mergedDraft.submittedAt || v.submittedAt || new Date().toISOString()) : undefined,
+                submittedBy: isSubmittedDraft ? (mergedDraft.repName || repName || v.submittedBy || 'rep') : undefined,
+                repName: repName?.trim() || mergedDraft.repName?.trim() || v.repName,
+                licensePlate: licensePlate?.trim() || mergedDraft.licensePlate?.trim() || v.licensePlate,
               };
             });
             return { ...prev, vehicles: updatedVehicles };
@@ -1284,24 +1542,39 @@ export function useManifest(
       (delta) => {
         if (keyRef.current !== key || !delta || delta.key !== key) return;
         const { vehicleId, draftState, repName, licensePlate } = delta;
+        if (draftState.submitted === false) {
+          recentlyReopenedVehiclesRef.current.set(String(vehicleId), Date.now());
+          recentlySubmittedVehiclesRef.current.delete(String(vehicleId));
+        } else if (draftState.submitted === true) {
+          recentlySubmittedVehiclesRef.current.set(String(vehicleId), Date.now());
+          recentlyReopenedVehiclesRef.current.delete(String(vehicleId));
+        }
         setManifest((prev) => {
           if (!prev || prev.date !== key) return prev;
           const isTargetActive = String(activeVehicleIdRef.current) === String(vehicleId);
-            const updatedVehicles = prev.vehicles.map((v) => {
-              if (String(v.id) !== String(vehicleId)) return v;
-              if (isTargetActive && v.draftState?.updatedBy === draftState.updatedBy) return v;
-              const isSubmittedDraft = draftState.submitted !== undefined ? Boolean(draftState.submitted) : v.submitted;
-              return {
-                ...v,
-                draftState,
-                submitted: isSubmittedDraft,
-                submittedAt: isSubmittedDraft ? (draftState.submittedAt || v.submittedAt || new Date().toISOString()) : undefined,
-                submittedBy: isSubmittedDraft ? (draftState.repName || repName || v.submittedBy || 'rep') : undefined,
-                repName: repName?.trim() || draftState.repName?.trim() || v.repName,
-                licensePlate: licensePlate?.trim() || draftState.licensePlate?.trim() || v.licensePlate,
-              };
-            });
-            return { ...prev, vehicles: updatedVehicles };
+          const updatedVehicles = prev.vehicles.map((v) => {
+            if (String(v.id) !== String(vehicleId)) return v;
+            const sameAuthorOlder =
+              v.draftState?.updatedBy &&
+              draftState.updatedBy &&
+              v.draftState.updatedBy === draftState.updatedBy &&
+              (!draftState.updatedAt || !v.draftState.updatedAt || draftState.updatedAt <= v.draftState.updatedAt);
+            if (isTargetActive && sameAuthorOlder) return v;
+            const mergedDraft = isTargetActive && v.draftState
+              ? mergeVehicleDraftStates(v.draftState, draftState, new Set((v.riders || []).map(String)))
+              : draftState;
+            const isSubmittedDraft = mergedDraft.submitted !== undefined ? Boolean(mergedDraft.submitted) : v.submitted;
+            return {
+              ...v,
+              draftState: mergedDraft,
+              submitted: isSubmittedDraft,
+              submittedAt: isSubmittedDraft ? (mergedDraft.submittedAt || v.submittedAt || new Date().toISOString()) : undefined,
+              submittedBy: isSubmittedDraft ? (mergedDraft.repName || repName || v.submittedBy || 'rep') : undefined,
+              repName: repName?.trim() || mergedDraft.repName?.trim() || v.repName,
+              licensePlate: licensePlate?.trim() || mergedDraft.licensePlate?.trim() || v.licensePlate,
+            };
+          });
+          return { ...prev, vehicles: updatedVehicles };
         });
         setLastSyncedAt(Date.now());
         setSyncStatus('synced');
@@ -1482,64 +1755,22 @@ export function useManifest(
     const localAbsentIds = absentIds ?? draftState?.absentIds ?? [];
     let mergedDraft = draftState ? { ...draftState, presentIds: localPresentIds, absentIds: localAbsentIds } : draftState;
 
+    if (draftState?.submitted === false) {
+      recentlyReopenedVehiclesRef.current.set(String(vehicleId), Date.now());
+      recentlySubmittedVehiclesRef.current.delete(String(vehicleId));
+    } else if (draftState?.submitted === true) {
+      recentlySubmittedVehiclesRef.current.set(String(vehicleId), Date.now());
+      recentlyReopenedVehiclesRef.current.delete(String(vehicleId));
+    }
+
     if (existingDraft && draftState && existingDraft.updatedBy !== draftState.updatedBy) {
-      const now = Date.now();
-      const localEditedMap = draftState.recentlyEditedRiders || {};
-
-      const combinedPresent = new Set(localPresentIds);
-      const combinedAbsent = new Set(localAbsentIds);
-
-      (existingDraft.presentIds ?? []).forEach((id) => {
-        const lastEdit = localEditedMap[id] ?? 0;
-        // If local rep did not edit this rider in the last 15s, preserve remote present mark
-        if (now - lastEdit > 15000 && !combinedAbsent.has(id)) {
-          combinedPresent.add(id);
-        }
-      });
-      (existingDraft.absentIds ?? []).forEach((id) => {
-        const lastEdit = localEditedMap[id] ?? 0;
-        // If local rep did not edit this rider in the last 15s, preserve remote absent mark
-        if (now - lastEdit > 15000 && !combinedPresent.has(id)) {
-          combinedAbsent.add(id);
-        }
-      });
-
-      // Direct sponsorship and unpaid status from the user's latest draftState
-      const mergedSponsored = new Set(draftState.sponsoredIds ?? []);
-      const mergedUnpaid = new Set(draftState.unpaidIds ?? []);
-      const mergedAbsentPaid = new Set(draftState.absentPaidIds ?? []);
-
-      // Merge manual cancellations by ID
-      const manualMap = new Map<string, { id: string; passengerName: string; structure?: string; amount: number; note?: string }>();
-      (existingDraft.manualCancellations ?? []).forEach((c) => manualMap.set(c.id, c));
-      (draftState.manualCancellations ?? []).forEach((c) => manualMap.set(c.id, c));
-
-      // Merge external sponsees by ID
-      const sponseeMap = new Map<string, { id: string; sponseeName: string; taxiName: string; amount: number }>();
-      (existingDraft.externalSponsees ?? []).forEach((s) => sponseeMap.set(s.id, s));
-      (draftState.externalSponsees ?? []).forEach((s) => sponseeMap.set(s.id, s));
-
-      mergedDraft = {
-        ...existingDraft,
+      mergedDraft = mergeVehicleDraftStates(existingDraft, {
         ...draftState,
-        presentIds: Array.from(combinedPresent),
-        absentIds: Array.from(combinedAbsent),
-        sponsoredIds: Array.from(mergedSponsored),
-        unpaidIds: Array.from(mergedUnpaid),
-        absentPaidIds: Array.from(mergedAbsentPaid),
-        notes: { ...(existingDraft.notes ?? {}), ...(draftState.notes ?? {}) },
+        presentIds: localPresentIds,
+        absentIds: localAbsentIds,
         repName: draftState.repName?.trim() || existingDraft.repName || targetVehicle?.repName,
         licensePlate: draftState.licensePlate?.trim() || existingDraft.licensePlate || targetVehicle?.licensePlate,
-        coReps: Array.from(new Set([...(existingDraft.coReps ?? []), ...(draftState.coReps ?? [])])).filter(Boolean),
-        settledLedgerIds: Array.from(new Set([...(existingDraft.settledLedgerIds ?? []), ...(draftState.settledLedgerIds ?? [])])),
-        manualCancellations: Array.from(manualMap.values()),
-        externalSponsees: Array.from(sponseeMap.values()),
-        submitted: draftState.submitted !== undefined ? Boolean(draftState.submitted) : existingDraft.submitted,
-        submittedAt: draftState.submittedAt || existingDraft.submittedAt,
-        submittedBy: draftState.submittedBy || existingDraft.submittedBy,
-        updatedAt: draftState.updatedAt || new Date().toISOString(),
-        updatedBy: draftState.updatedBy,
-      };
+      });
     }
 
     // 3. Update passenger present, sponsored, and unpaid statuses using the merged draft

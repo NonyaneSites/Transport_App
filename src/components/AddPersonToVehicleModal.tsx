@@ -3,7 +3,7 @@ import {
   X, UserPlus, Search, Users, MapPin, Check, Plus, AlertCircle, Phone
 } from 'lucide-react';
 import type { Passenger, Vehicle, ServiceType } from '@/lib/types';
-import { isDreamWeekDate, DREAMWEEK_FARE } from '@/lib/types';
+import { isDreamWeekDate, isNov18Date, DREAMWEEK_FARE, NOV_18_FARE } from '@/lib/types';
 import { naturalCompare } from '@/lib/sort';
 
 const CANONICAL_REHEARSAL_STOPS = ['Braam', 'DFC', 'Auckland Park / SABC', 'Soweto', 'West'];
@@ -44,6 +44,7 @@ export function AddPersonToVehicleModal({
   onAddNewPassenger,
 }: Props) {
   const isRehearsal = service === 'Rehearsal';
+  const isNov18 = date ? isNov18Date(date) : false;
   const isDW = date ? isDreamWeekDate(date) : false;
 
   const [activeTab, setActiveTab] = useState<'existing' | 'new'>('existing');
@@ -519,13 +520,13 @@ export function AddPersonToVehicleModal({
                       className="input-field w-full text-xs py-2 bg-card-2"
                     >
                       <option value="both">
-                        Going & Return (Both Legs) — {isDW ? `R${DREAMWEEK_FARE} (DreamWeek)` : 'R70'}
+                        Going & Return (Both Legs) — {isNov18 ? `R${NOV_18_FARE} (18 Nov)` : isDW ? `R${DREAMWEEK_FARE} (DreamWeek)` : 'R70'}
                       </option>
                       <option value="going">
-                        Going Only — {isDW ? `R${DREAMWEEK_FARE} (DreamWeek)` : 'R40'}
+                        Going Only — {isNov18 ? `R${NOV_18_FARE} (18 Nov)` : isDW ? `R${DREAMWEEK_FARE} (DreamWeek)` : 'R40'}
                       </option>
                       <option value="return">
-                        Return Only — {isDW ? `R${DREAMWEEK_FARE} (DreamWeek)` : 'R40'}
+                        Return Only — {isNov18 ? `R${NOV_18_FARE} (18 Nov)` : isDW ? `R${DREAMWEEK_FARE} (DreamWeek)` : 'R40'}
                       </option>
                     </select>
                   </div>

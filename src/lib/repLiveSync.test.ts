@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeIncomingManifest } from './useManifest';
+import { mergeIncomingManifest, mergeVehicleDraftStates } from './useManifest';
 import { reconcileManifestForSave, applyWalkInToManifest } from './manifest';
 import { supabase, MANIFESTS_TABLE, mockStorage } from './supabase';
 import type { Manifest, Vehicle, Passenger } from './types';
@@ -876,5 +876,111 @@ test('Prompt 01D Revocation: Revoking vehicle access credential immediately reje
     p_auth_token: token,
   });
   assert.ok(updateRes.error);
+});
+
+test('Rep Sync: Reopening a submitted vehicle immediately unlocks submitted=false on another device', () => {
+  const initial = makeTestManifest();
+
+  const deviceALocked: Manifest = {
+    ...initial,
+    vehicles: initial.vehicles.map((v) =>
+      v.id === 'taxi-1'
+        ? {
+            ...v,
+            submitted: true,
+            submittedAt: '2026-10-25T06:10:00.000Z',
+            submittedBy: 'Rep Alice',
+            draftState: {
+              presentIds: ['p1'],
+              absentIds: ['p2'],
+              submitted: true,
+              updatedAt: '2026-10-25T06:10:00.000Z',
+              updatedBy: 'client-rep-a',
+            },
+          }
+        : v
+    ),
+  };
+
+  const deviceBReopened: Manifest = {
+    ...initial,
+    vehicles: initial.vehicles.map((v) =>
+      v.id === 'taxi-1'
+        ? {
+            ...v,
+            submitted: false,
+            submittedAt: undefined,
+            submittedBy: undefined,
+            draftState: {
+              presentIds: ['p1'],
+              absentIds: ['p2'],
+              submitted: false,
+              updatedAt: '2026-10-25T06:11:00.000Z',
+              updatedBy: 'client-rep-b',
+            },
+          }
+        : v
+    ),
+  };
+
+  const mergedForDeviceA = mergeIncomingManifest(deviceALocked, deviceBReopened, 'taxi-1');
+  assert.ok(mergedForDeviceA);
+  const t1 = mergedForDeviceA.vehicles.find((v) => v.id === 'taxi-1');
+  assert.equal(t1?.submitted, false, 'Reopened vehicle must unlock on other devices immediately');
+  assert.equal(t1?.draftState?.submitted, false, 'Reopened draftState must unlock without page refresh');
+});
+
+test('Rep Sync: Turning sponsored or unpaid OFF in a newer draft is not resurrected by an older draft', () => {
+  const curDraft = {
+    presentIds: ['p1', 'p2'],
+    absentIds: [],
+    sponsoredIds: ['p1'],
+    unpaidIds: ['p2'],
+    updatedAt: '2026-10-25T06:10:00.000Z',
+    updatedBy: 'client-a',
+    recentlyEditedRiders: { p1: 1000, p2: 1000 },
+  };
+
+  const incDraftTurnedOff = {
+    presentIds: ['p1', 'p2'],
+    absentIds: [],
+    sponsoredIds: [],
+    unpaidIds: [],
+    updatedAt: '2026-10-25T06:10:05.000Z',
+    updatedBy: 'client-b',
+    recentlyEditedRiders: { p1: 2000, p2: 2000 },
+  };
+
+  const merged = mergeVehicleDraftStates(curDraft, incDraftTurnedOff, new Set(['p1', 'p2']));
+  assert.deepEqual(merged.sponsoredIds, []);
+  assert.deepEqual(merged.unpaidIds, []);
+});
+
+test('Rep Sync: Concurrent button taps on different riders across two devices preserve both changes', () => {
+  const localDraft = {
+    presentIds: ['p1'],
+    absentIds: [],
+    sponsoredIds: ['p1'],
+    unpaidIds: [],
+    updatedAt: '2026-10-25T06:12:00.000Z',
+    updatedBy: 'client-a',
+    recentlyEditedRiders: { p1: 5000, p2: 1000 },
+  };
+
+  const remoteDraft = {
+    presentIds: ['p2'],
+    absentIds: [],
+    sponsoredIds: [],
+    unpaidIds: ['p2'],
+    updatedAt: '2026-10-25T06:12:01.000Z',
+    updatedBy: 'client-b',
+    recentlyEditedRiders: { p1: 1000, p2: 6000 },
+  };
+
+  const merged = mergeVehicleDraftStates(localDraft, remoteDraft, new Set(['p1', 'p2']));
+  assert.ok(merged.presentIds?.includes('p1'), 'Local p1 present click preserved');
+  assert.ok(merged.presentIds?.includes('p2'), 'Remote p2 present click preserved');
+  assert.ok(merged.sponsoredIds?.includes('p1'), 'Local p1 sponsored flag preserved');
+  assert.ok(merged.unpaidIds?.includes('p2'), 'Remote p2 unpaid flag preserved');
 });
 

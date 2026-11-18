@@ -971,6 +971,7 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
   const isReheKey = (serviceLabel || '').toLowerCase().includes('rehe') || (key || '').toLowerCase().includes('rehe');
   const normalizedSvcLabel = isReheKey ? 'Rehe' : (serviceLabel || 'Service');
   const isDW = isDreamWeekDate(parsedDate || key);
+  const isNov18 = isNov18Date(parsedDate || key);
   const effectiveDebt = getFareForDate(parsedDate || key);
 
   if (Array.isArray(absentees) && absentees.length > 0) {
@@ -1008,7 +1009,7 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
         }
       }
       let absenteeDebt = effectiveDebt;
-      if (!isDW) {
+      if (!isDW && !isNov18) {
         if (aLegs === 'both') absenteeDebt = 70;
         else if (aLegs === 'going' || aLegs === 'return') absenteeDebt = 40;
         else if (isReheKey) absenteeDebt = 70;
@@ -1061,7 +1062,7 @@ app.post('/api/manifests/:key/submit-vehicle', (req, res) => {
       const cleanName = sanitizePassengerDisplayName(u.fullName);
       const uLegs = (u as { legs?: 'both' | 'going' | 'return' }).legs;
       let unpaidDebt = effectiveDebt;
-      if (!isDW) {
+      if (!isDW && !isNov18) {
         if (uLegs === 'both') unpaidDebt = 70;
         else if (uLegs === 'going' || uLegs === 'return') unpaidDebt = 40;
         else if (isReheKey) unpaidDebt = 70;
@@ -1583,6 +1584,11 @@ function normalizeStructureCode(raw: string | null | undefined): string {
 const DREAMWEEK_START = '2026-09-29';
 const DREAMWEEK_END = '2026-10-02';
 
+function isNov18Date(dateStr?: string | null): boolean {
+  if (!dateStr || typeof dateStr !== 'string') return false;
+  return /^\d{4}-11-18(?:$|[^0-9])/.test(dateStr.trim());
+}
+
 function isDreamWeekDate(dateStr?: string | null): boolean {
   if (!dateStr || typeof dateStr !== 'string') return false;
   const match = dateStr.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -1592,6 +1598,7 @@ function isDreamWeekDate(dateStr?: string | null): boolean {
 }
 
 function getFareForDate(dateStr?: string | null): number {
+  if (isNov18Date(dateStr)) return 75;
   return isDreamWeekDate(dateStr) ? 45 : 40;
 }
 

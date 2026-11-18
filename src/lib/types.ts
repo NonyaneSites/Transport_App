@@ -359,10 +359,19 @@ export const SERVICE_TYPES: { value: ServiceType; label: string; period: 'AM' | 
 
 export const CANCELLATION_FEE = 40;
 export const DREAMWEEK_FARE = 45;
+export const NOV_18_FARE = 75;
 
 /** DreamWeek date bounds: ONLY Tue 29 Sep 2026 to Fri 2 Oct 2026 inclusive (R45 per trip) */
 export const DREAMWEEK_START = '2026-09-29';
 export const DREAMWEEK_END = '2026-10-02';
+
+/**
+ * Returns true if a 'YYYY-MM-DD' date string falls on 18 November (R75 per person).
+ */
+export function isNov18Date(dateStr?: string | null): boolean {
+  if (!dateStr || typeof dateStr !== 'string') return false;
+  return /^\d{4}-11-18(?:$|[^0-9])/.test(dateStr.trim());
+}
 
 /**
  * Returns true if a 'YYYY-MM-DD' date string falls on DreamWeek:
@@ -378,21 +387,26 @@ export function isDreamWeekDate(dateStr?: string | null): boolean {
 
 /**
  * Returns the appropriate fare for a given date.
+ * For 18 November specifically, the price is R75 per person.
  * For DreamWeek specifically (29 Sep – 2 Oct 2026), the price is R45.
  * For standard Sunday services and other dates, the price is R40.
  */
 export function getFareForDate(dateStr?: string | null): number {
+  if (isNov18Date(dateStr)) return NOV_18_FARE;
   return isDreamWeekDate(dateStr) ? DREAMWEEK_FARE : CANCELLATION_FEE;
 }
 
 /**
- * Returns the fare for a passenger, respecting Rehearsal legs (R40 going/return, R70 both)
- * and DreamWeek priority (DreamWeek rules win and fare is R45).
+ * Returns the fare for a passenger, respecting 18 November (R75 flat per person),
+ * DreamWeek (R45 flat), and Rehearsal legs (R40 going/return, R70 both).
  */
 export function getPassengerFare(
   p?: { legs?: 'both' | 'going' | 'return' | string | null; service?: string | null } | null,
   dateStr?: string | null
 ): number {
+  if (isNov18Date(dateStr)) {
+    return NOV_18_FARE;
+  }
   if (isDreamWeekDate(dateStr)) {
     return DREAMWEEK_FARE;
   }

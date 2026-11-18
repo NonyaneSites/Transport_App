@@ -3569,6 +3569,15 @@ export function LedgerPage() {
                             R45 (DreamWeek)
                           </button>
                         )}
+                        {paymentTarget.amount >= 75 && (
+                          <button
+                            type="button"
+                            onClick={() => setPaymentAmount('75')}
+                            className="rounded-md bg-card-2 px-2.5 py-1 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60 active:bg-card"
+                          >
+                            R75
+                          </button>
+                        )}
                         {paymentTarget.amount >= 80 && (
                           <button
                             type="button"
@@ -3773,6 +3782,14 @@ export function LedgerPage() {
                           <span className="text-[10px] text-muted">·</span>
                           <button
                             type="button"
+                            onClick={() => setAddAmount('75')}
+                            className="text-[10px] text-muted hover:text-ink underline"
+                          >
+                            R75 (18 Nov)
+                          </button>
+                          <span className="text-[10px] text-muted">·</span>
+                          <button
+                            type="button"
                             onClick={() => setAddAmount('45')}
                             className="text-[10px] text-muted hover:text-ink underline"
                           >
@@ -3807,7 +3824,7 @@ export function LedgerPage() {
                           onChange={(e) => {
                             const newDate = e.target.value;
                             setAddDate(newDate);
-                            if (addAmount === '40' || addAmount === '45') {
+                            if (addAmount === '40' || addAmount === '45' || addAmount === '75') {
                               setAddAmount(String(getFareForDate(newDate)));
                             }
                           }}
@@ -4018,7 +4035,7 @@ export function LedgerPage() {
                       <div className="space-y-2 pt-2 border-t border-line/60">
                         <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
                           <div className="grid grid-cols-3 sm:flex sm:flex-wrap items-center gap-1.5">
-                            {[0, 20, 40, 45, 60, 80, 120].map((preset) => (
+                            {[0, 20, 40, 45, 75, 80, 120].map((preset) => (
                               <button
                                 key={preset}
                                 type="button"
@@ -4034,7 +4051,7 @@ export function LedgerPage() {
                             ))}
                           </div>
 
-                          <div className="grid grid-cols-4 sm:flex items-center gap-1.5">
+                          <div className="grid grid-cols-5 sm:flex items-center gap-1.5">
                             <button
                               type="button"
                               onClick={() => handleTotalDebtChange(String(Math.max(0, (Number(editDebt) || 0) - 20)))}
@@ -4066,6 +4083,14 @@ export function LedgerPage() {
                               title="Add R45"
                             >
                               +R45
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleTotalDebtChange(String((Number(editDebt) || 0) + 75))}
+                              className="rounded-md border border-line bg-card py-1.5 px-2 text-xs font-semibold text-emerald-400 hover:bg-card-2 active:bg-card-2 transition-colors text-center"
+                              title="Add R75"
+                            >
+                              +R75
                             </button>
                           </div>
                         </div>
@@ -4550,6 +4575,13 @@ export function LedgerPage() {
                       className="rounded-md bg-card-2 px-2.5 py-1 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60 active:bg-card"
                     >
                       R45
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPaySponAmount('75')}
+                      className="rounded-md bg-card-2 px-2.5 py-1 text-xs text-muted hover:bg-card-2/80 hover:text-ink border border-line/60 active:bg-card"
+                    >
+                      R75
                     </button>
                     <button
                       type="button"

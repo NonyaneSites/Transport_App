@@ -1,7 +1,7 @@
 import type { Passenger, Vehicle } from './types';
 import { normalizePassengerText } from './importer';
 import { naturalCompare } from './sort';
-import { isDreamWeekDate, DREAMWEEK_FARE } from './types';
+import { isDreamWeekDate, isNov18Date, DREAMWEEK_FARE, NOV_18_FARE } from './types';
 import { supabase } from './supabase';
 import { isServerOnline } from './serverApi';
 
@@ -160,11 +160,12 @@ export function evaluateRehearsalTransportAnswer(
     ans.includes('intercession') &&
     (ans.includes('returning with rehearsal') || ans.includes('return with rehearsal') || (ans.includes('going with intercession') && ans.includes('rehearsal')))
   ) {
+    const isNov18 = isNov18Date(dateStr);
     const isDW = isDreamWeekDate(dateStr);
     return {
       status: 'included',
       legs: 'return',
-      fare: isDW ? DREAMWEEK_FARE : 40,
+      fare: isNov18 ? NOV_18_FARE : isDW ? DREAMWEEK_FARE : 40,
       note: 'Intercession going',
       matchedRuleId: 'intercession_going_rehearsal_return',
     };
@@ -181,44 +182,48 @@ export function evaluateRehearsalTransportAnswer(
 
   // Check going and return (both)
   if (ans.includes('going and return') || ans.includes('both')) {
+    const isNov18 = isNov18Date(dateStr);
     const isDW = isDreamWeekDate(dateStr);
     return {
       status: 'included',
       legs: 'both',
-      fare: isDW ? DREAMWEEK_FARE : 70,
+      fare: isNov18 ? NOV_18_FARE : isDW ? DREAMWEEK_FARE : 70,
       matchedRuleId: 'rehearsal_both',
     };
   }
 
   // Check going only
   if (ans.includes('going')) {
+    const isNov18 = isNov18Date(dateStr);
     const isDW = isDreamWeekDate(dateStr);
     return {
       status: 'included',
       legs: 'going',
-      fare: isDW ? DREAMWEEK_FARE : 40,
+      fare: isNov18 ? NOV_18_FARE : isDW ? DREAMWEEK_FARE : 40,
       matchedRuleId: 'rehearsal_going',
     };
   }
 
   // Check return only
   if (ans.includes('return') || ans.includes('returning')) {
+    const isNov18 = isNov18Date(dateStr);
     const isDW = isDreamWeekDate(dateStr);
     return {
       status: 'included',
       legs: 'return',
-      fare: isDW ? DREAMWEEK_FARE : 40,
+      fare: isNov18 ? NOV_18_FARE : isDW ? DREAMWEEK_FARE : 40,
       matchedRuleId: 'rehearsal_return',
     };
   }
 
   // Default fallback: assume both legs if they said "yes" or filled transport
   if (ans.includes('yes') || ans.length > 0) {
+    const isNov18 = isNov18Date(dateStr);
     const isDW = isDreamWeekDate(dateStr);
     return {
       status: 'included',
       legs: 'both',
-      fare: isDW ? DREAMWEEK_FARE : 70,
+      fare: isNov18 ? NOV_18_FARE : isDW ? DREAMWEEK_FARE : 70,
       matchedRuleId: 'fallback_yes_both',
     };
   }

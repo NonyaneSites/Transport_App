@@ -15,6 +15,8 @@ import {
   getFareForDate,
   getPassengerFare,
   isDreamWeekDate,
+  isNov18Date,
+  NOV_18_FARE,
   sortByRouteSequence,
   type ServiceType,
   type Passenger,
@@ -193,10 +195,20 @@ export function RepPage() {
   const repNameFocusedRef = useRef(false);
   const licensePlateFocusedRef = useRef(false);
   const generalNotesFocusedRef = useRef(false);
+  const repNameRef = useRef(repName);
+  const licensePlateRef = useRef(licensePlate);
+  const generalNotesRef = useRef(generalNotes);
+  repNameRef.current = repName;
+  licensePlateRef.current = licensePlate;
+  generalNotesRef.current = generalNotes;
+  const ridersRef = useRef<Passenger[]>([]);
+  const keyRef = useRef(key);
+  keyRef.current = key;
   const clientIdRef = useRef<string>(makeClientId());
   const recentlyEditedRidersRef = useRef<Map<string, number>>(new Map());
   const recentlyToggledSponsoredRef = useRef<Map<string, boolean>>(new Map());
   const recentlyToggledUnpaidRef = useRef<Map<string, boolean>>(new Map());
+  const recentlyToggledAbsentPaidRef = useRef<Map<string, boolean>>(new Map());
   const refreshRef = useRef<() => Promise<void> | void>();
   const setManifestRef = useRef<React.Dispatch<React.SetStateAction<Manifest | null>>>();
   const pendingSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -214,6 +226,20 @@ export function RepPage() {
       const isSub = action.type === 'vehicle_submitted';
       const subTime = action.timestamp ? new Date(action.timestamp).toISOString() : new Date().toISOString();
 
+      // Update local draft cache so a refresh never restores the old locked/unlocked state
+      try {
+        const draftStorageKey = `crc_rep_draft_${keyRef.current}_${action.vehicleId}`;
+        const rawDraft = localStorage.getItem(draftStorageKey);
+        if (rawDraft) {
+          const parsedDraft = JSON.parse(rawDraft);
+          parsedDraft.submitted = isSub;
+          parsedDraft.submittedAt = isSub ? subTime : undefined;
+          localStorage.setItem(draftStorageKey, JSON.stringify(parsedDraft));
+        }
+      } catch {
+        // ignore storage errors
+      }
+
       // If the action is for the vehicle this device is viewing/repping
       if (String(action.vehicleId) === String(selectedVehicleId)) {
         if (pendingSyncTimerRef.current) {
@@ -221,6 +247,12 @@ export function RepPage() {
           pendingSyncTimerRef.current = null;
         }
         isUserDirtyRef.current = false;
+        isApplyingDraftRef.current = true;
+        if (action.draftState?.updatedAt) {
+          lastAppliedDraftAtRef.current = action.draftState.updatedAt;
+        } else {
+          lastAppliedDraftAtRef.current = subTime;
+        }
 
         if (action.draftState) {
           const ds = action.draftState;
@@ -232,7 +264,7 @@ export function RepPage() {
           if (ds.notes) setNotes(ds.notes);
           if (ds.repName) setRepName(ds.repName);
           if (ds.licensePlate) setLicensePlate(ds.licensePlate);
-          if (ds.generalNotes) setGeneralNotes(ds.generalNotes);
+          if (ds.generalNotes !== undefined) setGeneralNotes(ds.generalNotes);
           if (Array.isArray(ds.coReps)) setCoReps(ds.coReps);
         } else {
           if (action.repName) setRepName(action.repName);
@@ -243,7 +275,7 @@ export function RepPage() {
           const submitter = action.repName?.trim() || 'A co-rep';
           setSubmitMsg(`Attendance submitted by ${submitter}! Vehicle is locked and synced.`);
         } else {
-          setSubmitMsg(null);
+          setSubmitMsg('Attendance reopened for editing. You can continue making changes.');
         }
       }
 
@@ -254,15 +286,24 @@ export function RepPage() {
 
         const updatedVehicles = prev.vehicles.map((v) => {
           if (String(v.id) === String(action.vehicleId)) {
-            const nextDraft = action.draftState || (v.draftState
+            const nextDraft = action.draftState
+              ? {
+                  ...action.draftState,
+                  submitted: isSub,
+                  submittedAt: isSub ? subTime : undefined,
+                  submittedBy: isSub ? (action.repName?.trim() || action.draftState.submittedBy) : undefined,
+                }
+              : v.draftState
               ? {
                   ...v.draftState,
                   submitted: isSub,
                   submittedAt: isSub ? subTime : undefined,
                   repName: isSub ? (action.repName?.trim() || v.draftState.repName) : v.draftState.repName,
                   licensePlate: action.licensePlate?.trim() || v.draftState.licensePlate,
+                  updatedAt: subTime,
+                  updatedBy: action.clientId || v.draftState.updatedBy,
                 }
-              : undefined);
+              : undefined;
 
             return {
               ...v,
@@ -288,160 +329,223 @@ export function RepPage() {
 
         return { ...prev, vehicles: updatedVehicles, signups: updatedSignups };
       });
-      refreshRef.current?.();
+      // For vehicle_submitted, confirm from DB; for vehicle_reopened, rely on instant broadcast +
+      // incoming vehicle_draft_delta / postgres_changes / manifest_updated so we don't race the DB write and re-lock!
+      if (isSub) {
+        refreshRef.current?.();
+      }
       return;
     }
 
     if (String(action.vehicleId) === String(selectedVehicleId)) {
+      const now = Date.now();
       if (action.type === 'batch_attendance') {
         const { riderIds, status } = action;
-        if (status === 'present') {
-          setPresentIds((prev) => {
-            const next = new Set(prev);
-            riderIds.forEach((id) => next.add(String(id)));
-            return next;
-          });
-          setAbsentIds((prev) => {
-            const next = new Set(prev);
-            riderIds.forEach((id) => next.delete(String(id)));
-            return next;
-          });
-        } else if (status === 'absent') {
-          setAbsentIds((prev) => {
-            const next = new Set(prev);
-            riderIds.forEach((id) => next.add(String(id)));
-            return next;
-          });
-          setPresentIds((prev) => {
-            const next = new Set(prev);
-            riderIds.forEach((id) => next.delete(String(id)));
-            return next;
-          });
+        const eligibleIds = riderIds
+          .map(String)
+          .filter((sId) => now - (recentlyEditedRidersRef.current.get(sId) ?? 0) > 4000);
+        if (eligibleIds.length > 0) {
+          isApplyingDraftRef.current = true;
+          if (status === 'present') {
+            setPresentIds((prev) => {
+              let changed = false;
+              const next = new Set(prev);
+              for (const sId of eligibleIds) {
+                if (!next.has(sId)) {
+                  next.add(sId);
+                  changed = true;
+                }
+              }
+              return changed ? next : prev;
+            });
+            setAbsentIds((prev) => {
+              let changed = false;
+              const next = new Set(prev);
+              for (const sId of eligibleIds) {
+                if (next.delete(sId)) changed = true;
+              }
+              return changed ? next : prev;
+            });
+          } else if (status === 'absent') {
+            setAbsentIds((prev) => {
+              let changed = false;
+              const next = new Set(prev);
+              for (const sId of eligibleIds) {
+                if (!next.has(sId)) {
+                  next.add(sId);
+                  changed = true;
+                }
+              }
+              return changed ? next : prev;
+            });
+            setPresentIds((prev) => {
+              let changed = false;
+              const next = new Set(prev);
+              for (const sId of eligibleIds) {
+                if (next.delete(sId)) changed = true;
+              }
+              return changed ? next : prev;
+            });
+          }
         }
       } else if (action.type === 'rider_attendance') {
-        const { riderId, status } = action;
-        const now = Date.now();
-        const lastEdit = recentlyEditedRidersRef.current.get(riderId) ?? 0;
-        if (now - lastEdit > 1500) {
+        const sId = String(action.riderId);
+        const { status } = action;
+        const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? 0;
+        if (now - lastEdit > 4000) {
+          isApplyingDraftRef.current = true;
           if (status === 'present') {
-            setPresentIds((prev) => new Set(prev).add(riderId));
+            setPresentIds((prev) => (prev.has(sId) ? prev : new Set(prev).add(sId)));
             setAbsentIds((prev) => {
+              if (!prev.has(sId)) return prev;
               const next = new Set(prev);
-              next.delete(riderId);
+              next.delete(sId);
               return next;
             });
           } else if (status === 'absent') {
-            setAbsentIds((prev) => new Set(prev).add(riderId));
+            setAbsentIds((prev) => (prev.has(sId) ? prev : new Set(prev).add(sId)));
             setPresentIds((prev) => {
+              if (!prev.has(sId)) return prev;
               const next = new Set(prev);
-              next.delete(riderId);
+              next.delete(sId);
               return next;
             });
           } else {
             setPresentIds((prev) => {
+              if (!prev.has(sId)) return prev;
               const next = new Set(prev);
-              next.delete(riderId);
+              next.delete(sId);
               return next;
             });
             setAbsentIds((prev) => {
+              if (!prev.has(sId)) return prev;
               const next = new Set(prev);
-              next.delete(riderId);
+              next.delete(sId);
               return next;
             });
           }
+          setManifestRef.current?.((prev) => {
+            if (!prev) return prev;
+            const updatedSignups = prev.signups.map((p) => {
+              if (String(p.id) === sId) {
+                return {
+                  ...p,
+                  present: status === 'present' ? true : status === 'absent' ? false : undefined,
+                };
+              }
+              return p;
+            });
+            return { ...prev, signups: updatedSignups };
+          });
         }
-        setManifestRef.current?.((prev) => {
-          if (!prev) return prev;
-          const updatedSignups = prev.signups.map((p) => {
-            if (String(p.id) === String(riderId)) {
-              return {
-                ...p,
-                present: status === 'present' ? true : status === 'absent' ? false : undefined,
-              };
-            }
-            return p;
-          });
-          return { ...prev, signups: updatedSignups };
-        });
       } else if (action.type === 'rider_sponsored') {
-        const { riderId, sponsored } = action;
-        const sId = String(riderId);
-        setSponsoredIds((prev) => {
-          const next = new Set(prev);
+        const sId = String(action.riderId);
+        const { sponsored } = action;
+        const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? 0;
+        if (now - lastEdit > 4000) {
+          isApplyingDraftRef.current = true;
+          setSponsoredIds((prev) => {
+            const has = prev.has(sId);
+            if (sponsored === has) return prev;
+            const next = new Set(prev);
+            if (sponsored) next.add(sId);
+            else next.delete(sId);
+            return next;
+          });
           if (sponsored) {
-            next.add(sId);
-            next.add(riderId);
-          } else {
-            next.delete(sId);
-            next.delete(riderId);
-            next.delete(String(riderId));
+            setUnpaidIds((prev) => {
+              if (!prev.has(sId)) return prev;
+              const next = new Set(prev);
+              next.delete(sId);
+              return next;
+            });
           }
-          return next;
-        });
-        setManifestRef.current?.((prev) => {
-          if (!prev) return prev;
-          const updatedSignups = prev.signups.map((p) => {
-            if (String(p.id) === sId) {
-              return { ...p, sponsored, sponsorNote: sponsored ? p.sponsorNote : '' };
-            }
-            return p;
+          setManifestRef.current?.((prev) => {
+            if (!prev) return prev;
+            const updatedSignups = prev.signups.map((p) => {
+              if (String(p.id) === sId) {
+                return { ...p, sponsored, sponsorNote: sponsored ? p.sponsorNote : '', didNotPay: sponsored ? false : p.didNotPay };
+              }
+              return p;
+            });
+            return { ...prev, signups: updatedSignups };
           });
-          return { ...prev, signups: updatedSignups };
-        });
+        }
       } else if (action.type === 'rider_unpaid') {
-        const { riderId, unpaid } = action;
-        const sId = String(riderId);
-        setUnpaidIds((prev) => {
-          const next = new Set(prev);
+        const sId = String(action.riderId);
+        const { unpaid } = action;
+        const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? 0;
+        if (now - lastEdit > 4000) {
+          isApplyingDraftRef.current = true;
+          setUnpaidIds((prev) => {
+            const has = prev.has(sId);
+            if (unpaid === has) return prev;
+            const next = new Set(prev);
+            if (unpaid) next.add(sId);
+            else next.delete(sId);
+            return next;
+          });
           if (unpaid) {
-            next.add(sId);
-            next.add(riderId);
-          } else {
-            next.delete(sId);
-            next.delete(riderId);
-            next.delete(String(riderId));
+            setSponsoredIds((prev) => {
+              if (!prev.has(sId)) return prev;
+              const next = new Set(prev);
+              next.delete(sId);
+              return next;
+            });
           }
-          return next;
-        });
-        setManifestRef.current?.((prev) => {
-          if (!prev) return prev;
-          const updatedSignups = prev.signups.map((p) => {
-            if (String(p.id) === sId) {
-              return { ...p, didNotPay: unpaid, unpaidNote: unpaid ? p.unpaidNote : '' };
-            }
-            return p;
+          setManifestRef.current?.((prev) => {
+            if (!prev) return prev;
+            const updatedSignups = prev.signups.map((p) => {
+              if (String(p.id) === sId) {
+                return { ...p, didNotPay: unpaid, unpaidNote: unpaid ? p.unpaidNote : '', sponsored: unpaid ? false : p.sponsored };
+              }
+              return p;
+            });
+            return { ...prev, signups: updatedSignups };
           });
-          return { ...prev, signups: updatedSignups };
-        });
+        }
       } else if (action.type === 'rider_absent_paid') {
-        const { riderId, absentPaid } = action;
-        setAbsentPaidIds((prev) => {
-          const next = new Set(prev);
-          if (absentPaid) next.add(riderId);
-          else next.delete(riderId);
-          return next;
-        });
-      } else if (action.type === 'rider_note') {
-        const { riderId, note } = action;
-        setNotes((prev) => ({ ...prev, [riderId]: note }));
-        setManifestRef.current?.((prev) => {
-          if (!prev) return prev;
-          const updatedSignups = prev.signups.map((p) => {
-            if (String(p.id) === String(riderId)) {
-              return { ...p, sponsorNote: note || p.sponsorNote, unpaidNote: note || p.unpaidNote };
-            }
-            return p;
+        const sId = String(action.riderId);
+        const { absentPaid } = action;
+        const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? 0;
+        if (now - lastEdit > 4000) {
+          isApplyingDraftRef.current = true;
+          setAbsentPaidIds((prev) => {
+            const has = prev.has(sId);
+            if (absentPaid === has) return prev;
+            const next = new Set(prev);
+            if (absentPaid) next.add(sId);
+            else next.delete(sId);
+            return next;
           });
-          return { ...prev, signups: updatedSignups };
-        });
+        }
+      } else if (action.type === 'rider_note') {
+        const sId = String(action.riderId);
+        const { note } = action;
+        const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? 0;
+        if (now - lastEdit > 4000) {
+          isApplyingDraftRef.current = true;
+          setNotes((prev) => (prev[sId] === note ? prev : { ...prev, [sId]: note }));
+          setManifestRef.current?.((prev) => {
+            if (!prev) return prev;
+            const updatedSignups = prev.signups.map((p) => {
+              if (String(p.id) === sId) {
+                return { ...p, sponsorNote: note || p.sponsorNote, unpaidNote: note || p.unpaidNote };
+              }
+              return p;
+            });
+            return { ...prev, signups: updatedSignups };
+          });
+        }
       } else if (action.type === 'metadata_change') {
+        isApplyingDraftRef.current = true;
         if (action.repName && !repNameFocusedRef.current) {
           setRepName(action.repName);
         }
         if (action.licensePlate && !licensePlateFocusedRef.current) {
           setLicensePlate(action.licensePlate);
         }
-        if (action.generalNotes && !generalNotesFocusedRef.current) {
+        if (action.generalNotes !== undefined && !generalNotesFocusedRef.current) {
           setGeneralNotes(action.generalNotes);
         }
       }
@@ -602,6 +706,7 @@ export function RepPage() {
     () => (selectedVehicle ? vehicleRiders(manifest, selectedVehicle) : []),
     [manifest, selectedVehicle]
   );
+  ridersRef.current = riders;
 
   const rehearsalTripCounts = useMemo(() => {
     if (!isRehearsal) return { fullTrip: 0, going: 0, returnTrip: 0 };
@@ -911,91 +1016,88 @@ export function RepPage() {
 
   /**
    * Conflict-free merge of remote draft states from other devices/reps:
-   * 1. Preserves riders that the local rep touched recently (<1500ms).
-   * 2. Seamlessly brings in remote check-ins (present/absent) without overwriting ongoing local work.
-   * 3. Merges notes, sponsorships, unpaid flags, co-reps, and cancellation collections.
+   * 1. Preserves riders that the local rep touched recently (<4000ms) so in-flight debounced saves never bounce.
+   * 2. Only triggers React state updates when Set/Map contents actually differ (prevents UI jitter).
+   * 3. Uses refs for metadata/riders so this callback never churns on keystrokes.
    */
   const mergeRemoteDraftState = useCallback((draft: VehicleDraftState, vehicleRidersList: Passenger[]) => {
     isApplyingDraftRef.current = true;
     const now = Date.now();
+    const PROTECTED_MS = 4000;
 
-    // 1. Merge Present and Absent IDs without overriding riders the local user clicked in the last 3500ms
+    const setsMatch = (a: Set<string>, b: Set<string>) => {
+      if (a.size !== b.size) return false;
+      for (const item of a) {
+        if (!b.has(item)) return false;
+      }
+      return true;
+    };
+
+    const remotePresent = new Set((draft.presentIds ?? []).map(String));
+    const remoteAbsent = new Set((draft.absentIds ?? []).map(String));
+
+    // 1. Merge Present and Absent IDs without overriding riders the local user clicked recently
     setPresentIds((prevPresent) => {
-      const nextPresent = new Set(prevPresent);
-      const remotePresent = new Set(draft.presentIds ?? []);
-      const remoteAbsent = new Set(draft.absentIds ?? []);
-
+      const nextPresent = new Set(Array.from(prevPresent, String));
       for (const rider of vehicleRidersList) {
-        const lastEdit = recentlyEditedRidersRef.current.get(rider.id) ?? 0;
-        if (now - lastEdit < 600) {
-          // Local user explicitly touched this rider within the last 600ms — keep local action in flight
-          continue;
-        }
-        if (remotePresent.has(rider.id)) {
-          nextPresent.add(rider.id);
-        } else if (remoteAbsent.has(rider.id)) {
-          nextPresent.delete(rider.id);
+        const sId = String(rider.id);
+        const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? recentlyEditedRidersRef.current.get(rider.id) ?? 0;
+        if (now - lastEdit < PROTECTED_MS) continue;
+        if (remotePresent.has(sId)) {
+          nextPresent.add(sId);
+        } else if (remoteAbsent.has(sId) || !remotePresent.has(sId)) {
+          // If another rep explicitly cleared attendance via draft delta and local user didn't edit recently, align
+          if (remoteAbsent.has(sId)) nextPresent.delete(sId);
         }
       }
-      return nextPresent;
+      return setsMatch(prevPresent, nextPresent) ? prevPresent : nextPresent;
     });
 
     setAbsentIds((prevAbsent) => {
-      const nextAbsent = new Set(prevAbsent);
-      const remotePresent = new Set(draft.presentIds ?? []);
-      const remoteAbsent = new Set(draft.absentIds ?? []);
-
+      const nextAbsent = new Set(Array.from(prevAbsent, String));
       for (const rider of vehicleRidersList) {
-        const lastEdit = recentlyEditedRidersRef.current.get(rider.id) ?? 0;
-        if (now - lastEdit < 600) {
-          // Local user explicitly touched this rider within the last 600ms — keep local action in flight
-          continue;
-        }
-        if (remoteAbsent.has(rider.id)) {
-          nextAbsent.add(rider.id);
-        } else if (remotePresent.has(rider.id)) {
-          nextAbsent.delete(rider.id);
+        const sId = String(rider.id);
+        const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? recentlyEditedRidersRef.current.get(rider.id) ?? 0;
+        if (now - lastEdit < PROTECTED_MS) continue;
+        if (remoteAbsent.has(sId)) {
+          nextAbsent.add(sId);
+        } else if (remotePresent.has(sId)) {
+          nextAbsent.delete(sId);
         }
       }
-      return nextAbsent;
+      return setsMatch(prevAbsent, nextAbsent) ? prevAbsent : nextAbsent;
     });
 
     // 2. Direct synchronization of sponsored and unpaid statuses across all co-reps (turning on and off)
     if (draft.sponsoredIds !== undefined) {
       const remoteSponsored = new Set(draft.sponsoredIds.map(String));
-      setSponsoredIds(() => {
+      setSponsoredIds((prev) => {
         const next = new Set<string>(remoteSponsored);
-        // Explicit user intent: if locally toggled within the last 5000ms, strictly enforce that intent
-        for (const [rId, isSpon] of recentlyToggledSponsoredRef.current.entries()) {
-          const lastEdit = recentlyEditedRidersRef.current.get(rId) ?? 0;
+        for (const [rawId, isSpon] of recentlyToggledSponsoredRef.current.entries()) {
+          const rId = String(rawId);
+          const lastEdit = recentlyEditedRidersRef.current.get(rId) ?? recentlyEditedRidersRef.current.get(rawId) ?? 0;
           if (now - lastEdit < 5000) {
-            if (isSpon) {
-              next.add(rId);
-            } else {
-              next.delete(rId);
-            }
+            if (isSpon) next.add(rId);
+            else next.delete(rId);
           }
         }
-        return next;
+        return setsMatch(prev, next) ? prev : next;
       });
     }
 
     if (draft.unpaidIds !== undefined) {
       const remoteUnpaid = new Set(draft.unpaidIds.map(String));
-      setUnpaidIds(() => {
+      setUnpaidIds((prev) => {
         const next = new Set<string>(remoteUnpaid);
-        // Explicit user intent: if locally toggled within the last 5000ms, strictly enforce that intent
-        for (const [rId, isUnp] of recentlyToggledUnpaidRef.current.entries()) {
-          const lastEdit = recentlyEditedRidersRef.current.get(rId) ?? 0;
+        for (const [rawId, isUnp] of recentlyToggledUnpaidRef.current.entries()) {
+          const rId = String(rawId);
+          const lastEdit = recentlyEditedRidersRef.current.get(rId) ?? recentlyEditedRidersRef.current.get(rawId) ?? 0;
           if (now - lastEdit < 5000) {
-            if (isUnp) {
-              next.add(rId);
-            } else {
-              next.delete(rId);
-            }
+            if (isUnp) next.add(rId);
+            else next.delete(rId);
           }
         }
-        return next;
+        return setsMatch(prev, next) ? prev : next;
       });
     }
 
@@ -1003,46 +1105,66 @@ export function RepPage() {
       const remoteAbsentPaid = new Set(draft.absentPaidIds.map(String));
       setAbsentPaidIds((prev) => {
         const next = new Set<string>(remoteAbsentPaid);
-        for (const id of prev) {
-          const sId = String(id);
-          const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? recentlyEditedRidersRef.current.get(id) ?? 0;
-          if ((isUserDirtyRef.current || now - lastEdit < 15000) && !remoteAbsentPaid.has(sId)) {
-            next.add(sId);
+        for (const [rawId, isAbsPaid] of recentlyToggledAbsentPaidRef.current.entries()) {
+          const rId = String(rawId);
+          const lastEdit = recentlyEditedRidersRef.current.get(rId) ?? recentlyEditedRidersRef.current.get(rawId) ?? 0;
+          if (now - lastEdit < 5000) {
+            if (isAbsPaid) next.add(rId);
+            else next.delete(rId);
           }
+        }
+        return setsMatch(prev, next) ? prev : next;
+      });
+    }
+
+    if (draft.notes) {
+      setNotes((prev) => {
+        const next: Record<string, string> = { ...draft.notes };
+        for (const [k, val] of Object.entries(prev)) {
+          const sId = String(k);
+          const lastEdit = recentlyEditedRidersRef.current.get(sId) ?? recentlyEditedRidersRef.current.get(k) ?? 0;
+          if (now - lastEdit < PROTECTED_MS) {
+            next[sId] = val;
+          }
+        }
+        const prevKeys = Object.keys(prev);
+        const nextKeys = Object.keys(next);
+        if (prevKeys.length === nextKeys.length && nextKeys.every((k) => prev[k] === next[k])) {
+          return prev;
         }
         return next;
       });
     }
 
-    if (draft.notes) {
-      setNotes((prev) => ({ ...draft.notes, ...prev }));
-    }
-
     // 3. Vehicle metadata fields (repName, licensePlate, generalNotes)
-    if (draft.repName && !repNameFocusedRef.current && (!repName.trim() || draft.updatedBy !== clientIdRef.current)) {
-      setRepName(draft.repName);
+    if (draft.repName && !repNameFocusedRef.current && (!repNameRef.current.trim() || draft.updatedBy !== clientIdRef.current)) {
+      setRepName((prev) => (prev === draft.repName ? prev : draft.repName!));
     }
-    if (draft.licensePlate && !licensePlateFocusedRef.current && (!licensePlate.trim() || draft.updatedBy !== clientIdRef.current)) {
-      setLicensePlate(draft.licensePlate);
+    if (draft.licensePlate && !licensePlateFocusedRef.current && (!licensePlateRef.current.trim() || draft.updatedBy !== clientIdRef.current)) {
+      setLicensePlate((prev) => (prev === draft.licensePlate ? prev : draft.licensePlate!));
     }
-    if (draft.generalNotes !== undefined && !generalNotesFocusedRef.current && (!generalNotes.trim() || draft.updatedBy !== clientIdRef.current)) {
-      setGeneralNotes(draft.generalNotes);
+    if (draft.generalNotes !== undefined && !generalNotesFocusedRef.current && (!generalNotesRef.current.trim() || draft.updatedBy !== clientIdRef.current)) {
+      setGeneralNotes((prev) => (prev === draft.generalNotes ? prev : draft.generalNotes!));
     }
 
     // 4. Co-reps, sponsees, cancellations
     if (draft.coReps && draft.coReps.length > 0) {
-      setCoReps((prev) => Array.from(new Set([...prev, ...(draft.coReps || [])])).filter(Boolean));
+      setCoReps((prev) => {
+        const merged = Array.from(new Set([...prev, ...(draft.coReps || [])])).filter(Boolean);
+        return merged.length === prev.length && merged.every((v, i) => prev[i] === v) ? prev : merged;
+      });
     }
     if (draft.externalSponsees && draft.externalSponsees.length > 0) {
       setExternalSponsees(draft.externalSponsees);
     }
     if (draft.settledLedgerIds) {
-      setCollectedCancellationIds(new Set(draft.settledLedgerIds));
+      const nextSettled = new Set(draft.settledLedgerIds.map(String));
+      setCollectedCancellationIds((prev) => (setsMatch(prev, nextSettled) ? prev : nextSettled));
     }
     if (draft.manualCancellations) {
       setManualCancellations(draft.manualCancellations);
     }
-  }, [repName, licensePlate, generalNotes]);
+  }, []);
 
   // Initialize/restore state when manifest loads or vehicle is selected
   useEffect(() => {
@@ -1220,24 +1342,45 @@ export function RepPage() {
     const draft = selectedVehicle.draftState;
     if (!draft) return;
     if (draft.updatedBy === clientIdRef.current) return;
-    if (draft.updatedAt && draft.updatedAt === lastAppliedDraftAtRef.current) return;
+    if (draft.updatedAt && lastAppliedDraftAtRef.current && draft.updatedAt <= lastAppliedDraftAtRef.current) return;
 
-    mergeRemoteDraftState(draft, riders);
+    mergeRemoteDraftState(draft, ridersRef.current);
     lastAppliedDraftAtRef.current = draft.updatedAt ?? null;
-  }, [selectedVehicle?.draftState, selectedVehicle, riders, mergeRemoteDraftState]);
+  }, [selectedVehicle?.id, selectedVehicle?.draftState?.updatedAt, selectedVehicle?.draftState?.updatedBy, mergeRemoteDraftState]);
 
-  // Sync submission status changes from other devices / admin in real time
+  // Sync submission & reopen status changes from other devices / admin in real time
   useEffect(() => {
     if (!selectedVehicle) return;
-    if (prevVehicleSubmittedRef.current !== undefined && prevVehicleSubmittedRef.current !== selectedVehicle.submitted) {
-      prevVehicleSubmittedRef.current = selectedVehicle.submitted;
-      if (selectedVehicle.submitted && selectedVehicle.draftState) {
-        applyDraftState(selectedVehicle.draftState, riders, selectedVehicle);
+    const curSubmitted = Boolean(selectedVehicle.submitted);
+    if (prevVehicleSubmittedRef.current !== undefined && prevVehicleSubmittedRef.current !== curSubmitted) {
+      prevVehicleSubmittedRef.current = curSubmitted;
+      if (curSubmitted && selectedVehicle.draftState) {
+        applyDraftState(selectedVehicle.draftState, ridersRef.current, selectedVehicle);
+      } else if (!curSubmitted) {
+        // Vehicle was reopened remotely: unlock local UI immediately and sync localStorage cache
+        isUserDirtyRef.current = false;
+        setSubmitMsg((prev) =>
+          prev && (prev.includes('submitted') || prev.includes('locked'))
+            ? 'Attendance reopened for editing. You can continue making changes.'
+            : prev
+        );
+        try {
+          const draftStorageKey = `crc_rep_draft_${key}_${selectedVehicle.id}`;
+          const rawDraft = localStorage.getItem(draftStorageKey);
+          if (rawDraft) {
+            const parsedDraft = JSON.parse(rawDraft);
+            parsedDraft.submitted = false;
+            parsedDraft.submittedAt = undefined;
+            localStorage.setItem(draftStorageKey, JSON.stringify(parsedDraft));
+          }
+        } catch {
+          // ignore
+        }
       }
     } else {
-      prevVehicleSubmittedRef.current = selectedVehicle.submitted;
+      prevVehicleSubmittedRef.current = curSubmitted;
     }
-  }, [selectedVehicle?.submitted, selectedVehicle?.draftState, selectedVehicle, riders, applyDraftState]);
+  }, [selectedVehicle?.id, selectedVehicle?.submitted, selectedVehicle?.draftState?.updatedAt, key, applyDraftState]);
 
   // Load past cancellations so reps have instant live search of church debtors
   const ensurePastCancellationsLoaded = useCallback(async () => {
@@ -1502,6 +1645,8 @@ export function RepPage() {
 
     const defaultSponseeAmount = matchedSignup
       ? getPassengerFare(matchedSignup, date)
+      : isNov18Date(date)
+      ? NOV_18_FARE
       : isRehearsal
       ? (isDreamWeekDate(date) ? 45 : 70)
       : FARE;
@@ -1805,10 +1950,21 @@ export function RepPage() {
   useEffect(() => {
     if (isApplyingDraftRef.current) {
       isApplyingDraftRef.current = false;
-      return;
+      // Only skip if there are NO pending local user edits; if the user already tapped something,
+      // DO NOT let an incoming remote merge cancel the scheduled save of the user's tap!
+      if (!isUserDirtyRef.current) {
+        return;
+      }
     }
     if (!selectedVehicleId || !selectedVehicle || selectedVehicle.submitted || !isUserDirtyRef.current) {
       return;
+    }
+
+    const nowMs = Date.now();
+    for (const [rKey, ts] of recentlyEditedRidersRef.current.entries()) {
+      if (nowMs - ts > 45000) {
+        recentlyEditedRidersRef.current.delete(rKey);
+      }
     }
 
     const pIdsArray = Array.from(presentIds);
@@ -1939,12 +2095,15 @@ export function RepPage() {
 
   // Instant local toggle handlers (Zero lag, pure React state, deterministic single click)
   const handleSetPresent = useCallback((passengerId: string, wantPresent: boolean) => {
-    lastLocalEditTimeRef.current = Date.now();
-    recentlyEditedRidersRef.current.set(passengerId, Date.now());
+    const sId = String(passengerId);
+    const now = Date.now();
+    lastLocalEditTimeRef.current = now;
+    recentlyEditedRidersRef.current.set(sId, now);
+    recentlyEditedRidersRef.current.set(passengerId, now);
     isUserDirtyRef.current = true;
 
-    const isCurrentlyPresent = presentIds.has(passengerId);
-    const isCurrentlyAbsent = absentIds.has(passengerId);
+    const isCurrentlyPresent = presentIds.has(sId) || presentIds.has(passengerId);
+    const isCurrentlyAbsent = absentIds.has(sId) || absentIds.has(passengerId);
     let finalStatus: 'present' | 'absent' | 'unmarked' = 'unmarked';
 
     if (wantPresent) {
@@ -1953,24 +2112,26 @@ export function RepPage() {
         finalStatus = 'unmarked';
         setPresentIds((prev) => {
           const next = new Set(prev);
+          next.delete(sId);
           next.delete(passengerId);
           return next;
         });
       } else {
         finalStatus = 'present';
-        setPresentIds((prev) => new Set(prev).add(passengerId));
+        setPresentIds((prev) => new Set(prev).add(sId));
         setAbsentIds((prev) => {
-          if (!prev.has(passengerId)) return prev;
+          if (!prev.has(sId) && !prev.has(passengerId)) return prev;
           const next = new Set(prev);
+          next.delete(sId);
           next.delete(passengerId);
           return next;
         });
         // Clear absent-paid flag if the person is now present
         setAbsentPaidIds((prev) => {
-          if (!prev.has(passengerId) && !prev.has(String(passengerId))) return prev;
+          if (!prev.has(sId) && !prev.has(passengerId)) return prev;
           const next = new Set(prev);
+          next.delete(sId);
           next.delete(passengerId);
-          next.delete(String(passengerId));
           return next;
         });
       }
@@ -1980,22 +2141,24 @@ export function RepPage() {
         finalStatus = 'unmarked';
         setAbsentIds((prev) => {
           const next = new Set(prev);
+          next.delete(sId);
           next.delete(passengerId);
           return next;
         });
         setAbsentPaidIds((prev) => {
-          if (!prev.has(passengerId) && !prev.has(String(passengerId))) return prev;
+          if (!prev.has(sId) && !prev.has(passengerId)) return prev;
           const next = new Set(prev);
+          next.delete(sId);
           next.delete(passengerId);
-          next.delete(String(passengerId));
           return next;
         });
       } else {
         finalStatus = 'absent';
-        setAbsentIds((prev) => new Set(prev).add(passengerId));
+        setAbsentIds((prev) => new Set(prev).add(sId));
         setPresentIds((prev) => {
-          if (!prev.has(passengerId)) return prev;
+          if (!prev.has(sId) && !prev.has(passengerId)) return prev;
           const next = new Set(prev);
+          next.delete(sId);
           next.delete(passengerId);
           return next;
         });
@@ -2006,15 +2169,12 @@ export function RepPage() {
       broadcastLiveAction({
         type: 'rider_attendance',
         vehicleId: selectedVehicleId,
-        riderId: passengerId,
+        riderId: sId,
         status: finalStatus,
         repName: repName.trim() || 'Co-rep',
         clientId: clientIdRef.current,
-        timestamp: Date.now(),
+        timestamp: now,
       });
-      // Persistence happens via the debounced updateVehicleDraft sync below (see the effect
-      // watching presentIds/absentIds), which safely merges against the freshest server copy.
-      // This broadcast alone gives co-reps instant visibility without an extra write per click.
     }
   }, [selectedVehicleId, presentIds, absentIds, repName, broadcastLiveAction]);
 
@@ -2218,11 +2378,12 @@ export function RepPage() {
     recentlyEditedRidersRef.current.set(passengerId, now);
     isUserDirtyRef.current = true;
 
-    let nextVal = false;
+    const nextVal = !(absentPaidIds.has(sId) || absentPaidIds.has(passengerId));
+    recentlyToggledAbsentPaidRef.current.set(sId, nextVal);
+    recentlyToggledAbsentPaidRef.current.set(passengerId, nextVal);
+
     setAbsentPaidIds((prev) => {
       const next = new Set(prev);
-      const isCurrentlyAbsentPaid = prev.has(sId) || prev.has(passengerId);
-      nextVal = !isCurrentlyAbsentPaid;
       if (nextVal) {
         next.add(sId);
       } else {
@@ -2243,7 +2404,7 @@ export function RepPage() {
         timestamp: now,
       });
     }
-  }, [selectedVehicleId, repName, broadcastLiveAction]);
+  }, [selectedVehicleId, absentPaidIds, repName, broadcastLiveAction]);
 
   const handleSetNote = useCallback((passengerId: string, text: string) => {
     const sId = String(passengerId);
@@ -2275,8 +2436,8 @@ export function RepPage() {
     isUserDirtyRef.current = true;
 
     const untickedRiderIds = riders
-      .filter((r) => !presentIds.has(r.id) && !absentIds.has(r.id))
-      .map((r) => r.id);
+      .filter((r) => !presentIds.has(r.id) && !presentIds.has(String(r.id)) && !absentIds.has(r.id) && !absentIds.has(String(r.id)))
+      .map((r) => String(r.id));
 
     if (untickedRiderIds.length === 0) return;
 
@@ -2313,8 +2474,8 @@ export function RepPage() {
     isUserDirtyRef.current = true;
 
     const untickedRiderIds = riders
-      .filter((r) => !presentIds.has(r.id) && !absentIds.has(r.id))
-      .map((r) => r.id);
+      .filter((r) => !presentIds.has(r.id) && !presentIds.has(String(r.id)) && !absentIds.has(r.id) && !absentIds.has(String(r.id)))
+      .map((r) => String(r.id));
 
     if (untickedRiderIds.length === 0) return;
 
@@ -2368,7 +2529,11 @@ export function RepPage() {
 
   const addManualCancellation = (initialName?: string) => {
     isUserDirtyRef.current = true;
-    const defaultAmount = isRehearsal ? (isDreamWeekDate(date) ? 45 : 70) : FARE;
+    const defaultAmount = isNov18Date(date)
+      ? NOV_18_FARE
+      : isRehearsal
+      ? (isDreamWeekDate(date) ? 45 : 70)
+      : FARE;
     setManualCancellations((prev) => [
       ...prev,
       {
@@ -3078,8 +3243,35 @@ export function RepPage() {
     setSubmitting(true);
     setSubmitMsg(null);
 
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
     const vehicleRiderNames = riders.map((r) => r.fullName);
     const targetRidersSet = new Set(riders.map((r) => String(r.id)));
+
+    const reopenedDraft: VehicleDraftState = {
+      ...(selectedVehicle.draftState || {}),
+      presentIds: Array.from(presentIds),
+      absentIds: Array.from(absentIds),
+      absentPaidIds: Array.from(absentPaidIds),
+      sponsoredIds: Array.from(sponsoredIds),
+      unpaidIds: Array.from(unpaidIds),
+      notes,
+      repName: repName.trim(),
+      coReps: coReps.filter(Boolean),
+      licensePlate: licensePlate.trim(),
+      generalNotes: generalNotes.trim(),
+      externalSponsees,
+      settledLedgerIds: Array.from(collectedCancellationIds),
+      manualCancellations,
+      submitted: false,
+      submittedAt: undefined,
+      submittedBy: undefined,
+      updatedAt: nowIso,
+      updatedBy: clientIdRef.current,
+    };
+
+    lastAppliedDraftAtRef.current = nowIso;
+    isUserDirtyRef.current = false;
 
     // 1. Instant local optimistic update
     const updatedVehicles = manifest.vehicles.map((v) =>
@@ -3089,7 +3281,7 @@ export function RepPage() {
             submitted: false,
             submittedAt: undefined,
             submittedBy: undefined,
-            draftState: v.draftState ? { ...v.draftState, submitted: false, submittedAt: undefined } : undefined,
+            draftState: reopenedDraft,
           }
         : v
     );
@@ -3105,54 +3297,49 @@ export function RepPage() {
       ...manifest,
       vehicles: updatedVehicles,
       signups: updatedSignups,
+      updated_at: nowIso,
     };
 
     setManifest(nextManifest);
     manifestRef.current = nextManifest;
-    isUserDirtyRef.current = true;
     setSubmitMsg(
       `✓ Attendance reopened for editing. Unconfirmed absentees, stats, and reported sponsorships have been revoked from the system until you submit again.`
     );
 
-    // 2. Instant broadcast to everyone else
+    // 2. Instant broadcast to everyone else (including reopenedDraft with fresh updatedAt & updatedBy)
     broadcastLiveAction({
       type: 'vehicle_reopened',
       vehicleId: selectedVehicle.id,
       repName: repName.trim(),
+      licensePlate: licensePlate.trim(),
+      draftState: reopenedDraft,
       clientId: clientIdRef.current,
-      timestamp: Date.now(),
+      timestamp: nowMs,
     });
 
     // Mark local storage draft as unsubmitted
     const draftStorageKey = `crc_rep_draft_${key}_${selectedVehicle.id}`;
     try {
-      const rawDraft = localStorage.getItem(draftStorageKey);
-      if (rawDraft) {
-        const draftObj = JSON.parse(rawDraft);
-        draftObj.submitted = false;
-        draftObj.submittedAt = undefined;
-        localStorage.setItem(draftStorageKey, JSON.stringify(draftObj));
-      }
+      localStorage.setItem(draftStorageKey, JSON.stringify(reopenedDraft));
     } catch {
       /* ignore */
     }
 
-    // 3. Persist to database & server in background
+    // 3. Persist to database & server
     const reopenedTargetV = updatedVehicles.find((v) => String(v.id) === String(selectedVehicle.id));
-    const reopenedDraft = reopenedTargetV?.draftState || { ...(selectedVehicle.draftState || {}), submitted: false, submittedAt: undefined };
 
     try {
-      if (reopenedTargetV) {
-        await saveVehicleToDb(key, reopenedTargetV).catch(() => {});
-      }
-      await upsertManifest(nextManifest).catch(() => {});
-
       await updateVehicleDraft(
         selectedVehicle.id,
         reopenedDraft,
         repName.trim(),
         licensePlate.trim()
       ).catch(() => {});
+
+      if (reopenedTargetV) {
+        await saveVehicleToDb(key, reopenedTargetV).catch(() => {});
+      }
+      await upsertManifest(nextManifest).catch(() => {});
 
       await reopenVehicleOnServer(key, {
         vehicleId: selectedVehicle.id,
@@ -4901,6 +5088,9 @@ function CashCalculatorCard({
   const [customSponseeName, setCustomSponseeName] = useState('');
   const [customTaxiName, setCustomTaxiName] = useState('');
   const [sponsorAmount, setSponsorAmount] = useState<number>(fare);
+  useEffect(() => {
+    setSponsorAmount(fare);
+  }, [fare]);
   const [sponsorNote, setSponsorNote] = useState('');
   const [isSubmittingSponsorship, setIsSubmittingSponsorship] = useState(false);
 
@@ -5209,7 +5399,7 @@ function CashCalculatorCard({
             className="flex items-center gap-1.5 rounded-lg border border-amber-500/60 bg-amber-500/20 px-2.5 py-1 text-xs font-bold text-amber-200 hover:bg-amber-500/30 hover:border-amber-400 hover:text-white transition-all shadow-xs"
           >
             <HeartHandshake className="h-3.5 w-3.5 text-amber-400" />
-            <span>+ Collect R40 & Sponsor Other Taxi</span>
+            <span>+ Collect R{fare} & Sponsor Other Taxi</span>
           </button>
         </div>
 
@@ -5962,7 +6152,7 @@ const PassengerRow = React.memo(function PassengerRow({
 
   const totalDebtAmount = useMemo(() => {
     if (!outstandingDebts || outstandingDebts.length === 0) return 0;
-    return outstandingDebts.reduce((sum, d) => sum + parseDebtAmount(d.structure_debt), 0);
+    return outstandingDebts.reduce((sum, d) => sum + parseDebtAmount(d.structure_debt, d.date, d.service, d.legs), 0);
   }, [outstandingDebts]);
 
   const settledDebtEntries = useMemo(() => {
@@ -5972,7 +6162,7 @@ const PassengerRow = React.memo(function PassengerRow({
 
   const settledDebtCount = settledDebtEntries.length;
   const settledDebtAmount = useMemo(() => {
-    return settledDebtEntries.reduce((sum, d) => sum + parseDebtAmount(d.structure_debt), 0);
+    return settledDebtEntries.reduce((sum, d) => sum + parseDebtAmount(d.structure_debt, d.date, d.service, d.legs), 0);
   }, [settledDebtEntries]);
 
   function handleSponsoredToggle() {
@@ -6346,7 +6536,7 @@ const PassengerRow = React.memo(function PassengerRow({
           <div className="space-y-1.5">
             {outstandingDebts.map((d) => {
               const isSettled = collectedCancellationIds?.has(d.id);
-              const debtAmount = parseDebtAmount(d.structure_debt);
+              const debtAmount = parseDebtAmount(d.structure_debt, d.date, d.service, d.legs);
               return (
                 <div
                   key={d.id}

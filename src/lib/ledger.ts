@@ -24,16 +24,18 @@ import {
   CANCELLATION_FEE,
   getFareForDate,
   isDreamWeekDate,
+  isNov18Date,
   DREAMWEEK_START,
   DREAMWEEK_END,
   DREAMWEEK_FARE,
+  NOV_18_FARE,
   getPassengerFare,
 } from './types';
 import { naturalCompare } from './sort';
 import { shortDate, prettyDate } from './dates';
 
 export type { ReportedSponsorship, SponsorshipStatus };
-export { isDreamWeekDate, DREAMWEEK_START, DREAMWEEK_END, DREAMWEEK_FARE, getPassengerFare };
+export { isDreamWeekDate, isNov18Date, DREAMWEEK_START, DREAMWEEK_END, DREAMWEEK_FARE, NOV_18_FARE, getPassengerFare };
 
 export {
   diagnoseCancellationLedgerIds,
@@ -67,7 +69,9 @@ export function parseDebtAmount(
     val = entry.structure_debt;
   }
   let fallback = dateStr ? getFareForDate(dateStr) : CANCELLATION_FEE;
-  if (serviceStr && (serviceStr.toLowerCase().includes('rehe') || serviceStr.toLowerCase().includes('rehearsal'))) {
+  if (isNov18Date(dateStr)) {
+    fallback = NOV_18_FARE;
+  } else if (serviceStr && (serviceStr.toLowerCase().includes('rehe') || serviceStr.toLowerCase().includes('rehearsal'))) {
     fallback = isDreamWeekDate(dateStr) ? DREAMWEEK_FARE : (legs === 'going' || legs === 'return' ? 40 : 70);
   }
   if (val === undefined || val === null || val === '') return fallback;

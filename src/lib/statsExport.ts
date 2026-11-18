@@ -205,27 +205,37 @@ export async function downloadTaxiStatsExcel(manifest: Manifest, customFileName?
   const wb = XLSX.utils.book_new();
 
   // 1. Sheet 1: Transport Stats Summary (Matches exact transport stats columns)
-  const summaryRows = statsList.map((s) => ({
-    'Timestamp': s.submittedAt || new Date().toISOString(),
-    'Money Collector Name & Surname': s.repName !== '—' ? s.repName : '',
-    'Date': sessionDate,
-    'Service': sessionService || 'Service',
-    'Vehicle type': s.type as string,
-    'Vehicle Number Plate': s.licensePlate !== '—' ? s.licensePlate : '',
-    'Taxi No./Bus No.': s.name,
-    'Members & Visitors list (Name & Surname - As written when booking)': s.presentListStr,
-    "FTV's List (Name & Surname - As written when booking)": s.ftvListStr,
-    'Headcount': s.presentCount,
-    'Total Money Collected ': s.fareCollected,
-    'Money Outstanding/extra ': s.absentCount > 0 ? -(s.absentCount * 40) : 0,
-    'Cancellations (Full name incl. Structure)': s.cancellationListStr,
-    'Sponsorships (Name, Surname and Structure)': s.sponsoredListStr,
-    'Additional notes (People paying for others, Cancellations being paid etc.)': s.generalNotes,
-  }));
+  const summaryRows = statsList.map((s) => {
+    const absentDebt = s.absentRiders.length > 0
+      ? s.absentRiders.reduce((sum, r) => sum + getPassengerFare(r, sessionDate), 0)
+      : s.absentCount * getFareForDate(sessionDate);
+    return {
+      'Timestamp': s.submittedAt || new Date().toISOString(),
+      'Money Collector Name & Surname': s.repName !== '—' ? s.repName : '',
+      'Date': sessionDate,
+      'Service': sessionService || 'Service',
+      'Vehicle type': s.type as string,
+      'Vehicle Number Plate': s.licensePlate !== '—' ? s.licensePlate : '',
+      'Taxi No./Bus No.': s.name,
+      'Members & Visitors list (Name & Surname - As written when booking)': s.presentListStr,
+      "FTV's List (Name & Surname - As written when booking)": s.ftvListStr,
+      'Headcount': s.presentCount,
+      'Total Money Collected ': s.fareCollected,
+      'Money Outstanding/extra ': absentDebt > 0 ? -absentDebt : 0,
+      'Cancellations (Full name incl. Structure)': s.cancellationListStr,
+      'Sponsorships (Name, Surname and Structure)': s.sponsoredListStr,
+      'Additional notes (People paying for others, Cancellations being paid etc.)': s.generalNotes,
+    };
+  });
 
   const totalHeadcount = statsList.reduce((sum, s) => sum + s.presentCount, 0);
   const totalCollected = statsList.reduce((sum, s) => sum + s.fareCollected, 0);
-  const totalOutstanding = statsList.reduce((sum, s) => sum + (s.absentCount > 0 ? -(s.absentCount * 40) : 0), 0);
+  const totalOutstanding = statsList.reduce((sum, s) => {
+    const absentDebt = s.absentRiders.length > 0
+      ? s.absentRiders.reduce((acc, r) => acc + getPassengerFare(r, sessionDate), 0)
+      : s.absentCount * getFareForDate(sessionDate);
+    return sum + (absentDebt > 0 ? -absentDebt : 0);
+  }, 0);
 
   summaryRows.push({
     'Timestamp': 'GRAND TOTAL',
